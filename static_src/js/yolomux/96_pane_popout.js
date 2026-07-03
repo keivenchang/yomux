@@ -208,7 +208,7 @@ function panePopoutDocumentStyle() {
       position: fixed;
       top: 0;
       inset-inline: 0;
-      z-index: 1000;
+      z-index: var(--z-topbar);
       box-sizing: border-box;
       min-height: 36px;
       padding: 9px 14px 8px;

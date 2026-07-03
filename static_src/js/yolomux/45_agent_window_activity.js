@@ -54,6 +54,28 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
+function agentWindowInfoPane(info, agent) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const paneTarget = String(agent?.pane_target || agent?.pane || '').trim();
+  if (paneTarget) {
+    const exact = panes.find(item => [item?.target, item?.pane_id].some(value => String(value || '').trim() === paneTarget));
+    if (exact) return exact;
+  }
+  const index = agentWindowIndex(agent);
+  if (index === null) return null;
+  const windowPanes = panes.filter(item => tmuxWindowIndexKey(item?.window_index ?? item?.window) === index);
+  return windowPanes.length === 1 ? windowPanes[0] : null;
+}
+
+function agentWindowPhysicalKey(agent, info = null) {
+  const infoPane = agentWindowInfoPane(info, agent);
+  const pane = String(infoPane?.target || infoPane?.pane_id || agent?.pane_target || agent?.pane || '').trim();
+  if (pane) return `pane:${pane}`;
+  const index = agentWindowIndex(agent);
+  if (index === null) return agentWindowPayloadKey(agent);
+  return `window:${index}`;
+}
+
 function agentWindowStateKey(state) {
   return String(state || '').trim();
 }
@@ -184,19 +206,45 @@ function agentWindowPayloadIsPreferred(candidate, current) {
   return true;
 }
 
-function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows) {
+function agentWindowLiveKindFromInfo(info, agent) {
+  const pane = agentWindowInfoPane(info, agent);
+  for (const value of [pane?.process_label, pane?.window_name, pane?.command]) {
+    const kind = agentWindowKind(value);
+    if (kind) return kind;
+  }
+  return '';
+}
+
+function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info = null) {
   const rowsByKey = new Map();
   const looseRows = [];
-  for (const row of [...infoRows, ...activityRows, ...stateRows]) {
-    const key = agentWindowPayloadKey(row);
-    if (!key) {
-      looseRows.push(row);
-      continue;
+  const sources = [
+    {rows: infoRows, priority: 1},
+    {rows: activityRows, priority: 2},
+    {rows: stateRows, priority: 3},
+  ];
+  for (const source of sources) {
+    for (const row of source.rows) {
+      const key = agentWindowPhysicalKey(row, info);
+      if (!key) {
+        looseRows.push(row);
+        continue;
+      }
+      const current = rowsByKey.get(key);
+      const liveKind = agentWindowLiveKindFromInfo(info, row);
+      const rowKind = agentWindowKind(row?.kind);
+      const currentKind = agentWindowKind(current?.row?.kind);
+      const liveKindDecision = liveKind && rowKind !== currentKind
+        ? rowKind === liveKind
+        : null;
+      const preferred = !current
+        || liveKindDecision === true
+        || (liveKindDecision === null && rowKind !== currentKind && source.priority > current.priority)
+        || (rowKind === currentKind && agentWindowPayloadIsPreferred(row, current.row));
+      if (preferred) rowsByKey.set(key, {row, priority: source.priority});
     }
-    const current = rowsByKey.get(key);
-    if (agentWindowPayloadIsPreferred(row, current)) rowsByKey.set(key, row);
   }
-  return [...rowsByKey.values(), ...looseRows];
+  return [...rowsByKey.values()].map(item => item.row).concat(looseRows);
 }
 
 function agentWindowStatusVisualSignature(payload = {}) {
@@ -277,7 +325,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows);
+  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -296,7 +344,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
-    if (agents.some(agent => agentWindowPayloadKey(agent) === agentWindowPayloadKey(visualAgent))) continue;
+    if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
   }
   const hasAttributedWindows = agents.some(agent => agentWindowIndex(agent) !== null);
@@ -337,8 +385,8 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session);
     const tone = agentWindowStatusToneForItem(item);
     if (!item || (tone !== 'acknowledged' && !agentWindowVisibleTone(tone))) continue;
-    const rank = tone === 'acknowledged' ? 8 : agentWindowActivityVisualRank(item.state);
-    const selectedRank = selected ? (selected.item.acknowledging === true ? 8 : agentWindowActivityVisualRank(selected.item.state)) : 99;
+    const rank = agentWindowStatusItemVisualRank(item);
+    const selectedRank = selected ? agentWindowStatusItemVisualRank(selected.item) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
     visibleItems.push({agent, item, tone});
@@ -382,11 +430,28 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
   return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
 }
 
-const agentWindowActivityStates = new Map();
-const agentWindowStoppedTimers = new Map();
-const agentWindowTransitionPulseTimers = new Map();
-const agentWindowAcknowledgedStops = new Map();
-const agentWindowAcknowledgementVisuals = new Map();
+const agentWindowActivityRecords = new Map();
+
+function createAgentWindowActivityRecord() {
+  return {
+    activity: null,
+    stoppedRefresh: null,
+    transitionPulseRefresh: null,
+    acknowledgedStoppedAt: 0,
+    acknowledgementVisual: null,
+  };
+}
+
+function agentWindowActivityRecord(key, create = false) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return null;
+  let record = agentWindowActivityRecords.get(normalizedKey) || null;
+  if (!record && create) {
+    record = createAgentWindowActivityRecord();
+    agentWindowActivityRecords.set(normalizedKey, record);
+  }
+  return record;
+}
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
@@ -444,22 +509,25 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
   if (durationSeconds <= 0) return;
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.transitionPulseRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const timer = setTimeout(() => {
-    const current = agentWindowTransitionPulseTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.transitionPulseRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowTransitionPulseTimers.delete(key);
+    currentRecord.transitionPulseRefresh = null;
     refreshAgentWindowActivityDisplays();
   }, Math.max(0, untilMs - Date.now()));
-  agentWindowTransitionPulseTimers.set(key, {timer, untilMs});
+  record.transitionPulseRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowTransitionPulseRefresh(key) {
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.transitionPulseRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowTransitionPulseTimers.delete(key);
+  if (record) record.transitionPulseRefresh = null;
 }
 
 function mutationTouchesAgentWindowActivity(mutation) {
@@ -569,46 +637,51 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
 
 function scheduleAgentWindowStoppedRefresh(key, untilMs) {
   if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.stoppedRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const delay = Math.max(0, untilMs - Date.now());
   const timer = setTimeout(() => {
-    const current = agentWindowStoppedTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.stoppedRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowStoppedTimers.delete(key);
+    currentRecord.stoppedRefresh = null;
     if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
       renderPanels(activePaneItems());
     }
   }, delay);
-  agentWindowStoppedTimers.set(key, {timer, untilMs});
+  record.stoppedRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowStoppedRefresh(key) {
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.stoppedRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowStoppedTimers.delete(key);
+  if (record) record.stoppedRefresh = null;
 }
 
 function agentWindowStoppedIsAcknowledged(key, stoppedAt) {
   const stoppedAtNumber = Number(stoppedAt || 0);
-  const acknowledged = Number(agentWindowAcknowledgedStops.get(key) || 0);
+  const acknowledged = Number(agentWindowActivityRecord(key)?.acknowledgedStoppedAt || 0);
   return Boolean(key && stoppedAtNumber > 0 && acknowledged > 0 && Math.abs(acknowledged - stoppedAtNumber) < 0.001);
 }
 
 function agentWindowAcknowledgementVisualActive(key, nowMs = Date.now()) {
-  const visual = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
   if (!visual) return false;
   if (visual.untilMs > nowMs) return true;
   if (visual.timer) clearTimeout(visual.timer);
-  agentWindowAcknowledgementVisuals.delete(key);
+  record.acknowledgementVisual = null;
   return false;
 }
 
 function agentWindowAcknowledgementVisualAgents(session) {
   const sessionKey = String(session || '').trim();
   const agents = [];
-  for (const [key, visual] of agentWindowAcknowledgementVisuals.entries()) {
+  for (const [key, record] of agentWindowActivityRecords.entries()) {
+    const visual = record.acknowledgementVisual;
     if (!agentWindowAcknowledgementVisualActive(key) || !visual.agent) continue;
     if (String(visual.agent.session || '') !== sessionKey) continue;
     agents.push(visual.agent);
@@ -617,15 +690,29 @@ function agentWindowAcknowledgementVisualAgents(session) {
 }
 
 function clearAgentWindowAcknowledgementVisual(key) {
-  const visual = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
   if (visual?.timer) clearTimeout(visual.timer);
-  agentWindowAcknowledgementVisuals.delete(key);
+  if (record) record.acknowledgementVisual = null;
+}
+
+function clearAgentWindowActivityRecordsForSession(session) {
+  const prefix = `${String(session || '').trim()}:`;
+  if (prefix === ':') return;
+  for (const key of Array.from(agentWindowActivityRecords.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    clearAgentWindowStoppedRefresh(key);
+    clearAgentWindowTransitionPulseRefresh(key);
+    clearAgentWindowAcknowledgementVisual(key);
+    agentWindowActivityRecords.delete(key);
+  }
 }
 
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
   const acknowledgementKey = String(options.acknowledgementKey || '');
-  const current = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const current = record.acknowledgementVisual;
   if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
     if (options.refresh !== false && current?.refreshed !== true) {
       current.refreshed = true;
@@ -638,9 +725,10 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
   const untilMs = startedAtMs + durationMs;
   clearAgentWindowAcknowledgementVisual(key);
   const timer = setTimeout(() => {
-    const visual = agentWindowAcknowledgementVisuals.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const visual = currentRecord?.acknowledgementVisual;
     if (!visual || visual.untilMs !== untilMs) return;
-    agentWindowAcknowledgementVisuals.delete(key);
+    currentRecord.acknowledgementVisual = null;
     // The browser must retire the gray marker at the promised time even if the acknowledgement
     // request is slow; a later explicit server false still re-arms a genuinely new prompt.
     if (acknowledgementKey && typeof recordAttentionAcknowledgementKey === 'function') recordAttentionAcknowledgementKey(acknowledgementKey);
@@ -654,7 +742,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     state: options.visualState === 'attention' ? (sourceAgent.state || STATE_KEY.needsInput) : (sourceAgent.state || STATE_KEY.idle),
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
-  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent});
+  record.acknowledgementVisual = {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent};
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
   return true;
 }
@@ -707,13 +795,14 @@ function refreshAgentWindowActivityDisplays() {
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
   const key = String(transitionKey || '').trim();
   if (!key) return false;
-  const previous = agentWindowActivityStates.get(key) || {};
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.activity || {};
   const stoppedAtNumber = Number(stoppedAt ?? previous.stoppedAt ?? 0);
   if (!Number.isFinite(stoppedAtNumber) || stoppedAtNumber <= 0) return false;
   const currentStoppedAt = Number(previous.stoppedAt || 0);
   if (!Number.isFinite(currentStoppedAt) || currentStoppedAt <= 0 || Math.abs(currentStoppedAt - stoppedAtNumber) >= 0.001) return false;
   if (agentWindowStoppedIsAcknowledged(key, stoppedAtNumber)) return false;
-  agentWindowAcknowledgedStops.set(key, stoppedAtNumber);
+  record.acknowledgedStoppedAt = stoppedAtNumber;
   clearAgentWindowStoppedRefresh(key);
   clearAgentWindowTransitionPulseRefresh(key);
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
@@ -726,8 +815,8 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const info = transcriptMeta.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
   let summaryIndex = null;
-  if (explicitIndex === null && options.preferSummary === true && typeof sessionStatusAgentWindowSummaryForTab === 'function') {
-    const summary = sessionStatusAgentWindowSummaryForTab(sessionKey, info, autoApproveStates.get(sessionKey));
+  if (explicitIndex === null && options.preferSummary === true) {
+    const summary = sessionAgentWindowStatusSummary(sessionKey, info, autoApproveStates.get(sessionKey));
     if (['attention', 'cooldown'].includes(summary?.item?.state)) {
       summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
     }
@@ -749,7 +838,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   if (item?.acknowledged === true) return null;
   if (!['attention', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
-  const previous = transitionKey ? agentWindowActivityStates.get(transitionKey) : null;
+  const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
   const ackKey = item.state === 'cooldown'
     ? agentWindowActivityAcknowledgementKey(agent.kind, 'cooldown', itemOptions, stoppedAt)
@@ -815,11 +904,12 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
-  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  const record = transitionKey ? agentWindowActivityRecord(transitionKey, true) : null;
+  const previous = record?.activity || {};
   const stateKey = agentWindowStateKey(state);
   const current = options.current === true || options.window_active === true;
   const acknowledgementVisualActive = transitionKey ? agentWindowAcknowledgementVisualActive(transitionKey) : false;
-  const acknowledgementVisual = acknowledgementVisualActive ? agentWindowAcknowledgementVisuals.get(transitionKey) : null;
+  const acknowledgementVisual = acknowledgementVisualActive ? record.acknowledgementVisual : null;
   const acknowledgementTiming = acknowledgementVisual ? {
     acknowledgementDurationMs: acknowledgementVisual.durationMs,
     acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
@@ -848,14 +938,14 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {
+      record.activity = {
         state: stateKey,
         visualTone: 'attention',
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
         transitionStartedAt,
-      });
+      };
       scheduleAgentWindowStatusGlowRefresh(transitionKey, transitionStartedAt, options);
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
@@ -875,8 +965,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, STATE_KEY.working, nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowAcknowledgedStops.delete(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt});
+      record.acknowledgedStoppedAt = 0;
+      record.activity = {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt};
       scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
     }
     return {
@@ -893,7 +983,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
   if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
   const cooldownTransitionStartedAt = agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt});
+  if (transitionKey) record.activity = {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt};
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
     const recordedAcknowledgement = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
@@ -953,6 +1043,12 @@ function agentWindowStatusToneForItem(item) {
   if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   return agentWindowVisibleTone(tone) ? tone : '';
+}
+
+function agentWindowStatusItemVisualRank(item) {
+  const tone = agentWindowStatusToneForItem(item);
+  if (tone === 'acknowledged') return 8;
+  return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
 function agentWindowActivityToneWrapperClass(tone) {

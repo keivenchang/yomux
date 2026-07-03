@@ -779,6 +779,10 @@ function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
   return width > 1 && height > 1;
 }
 
+function dockviewLayoutAdoptionAllowed() {
+  return !shareViewMode || shareWriteMode;
+}
+
 function dockviewInstallHostResizeObserver(host, api) {
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(() => dockviewScheduleLayoutToHost(api, host));
@@ -1204,6 +1208,7 @@ function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
 }
 
 function queueDockviewLayoutAdoption() {
+  if (!dockviewLayoutAdoptionAllowed()) return;
   if (dockviewLayoutState.applyingFromLayout || dockviewLayoutState.adoptingFromDockview) return;
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
@@ -1214,6 +1219,7 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
+  if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
   let next = layoutSlotsFromDockviewJson(api.toJSON());
   const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);

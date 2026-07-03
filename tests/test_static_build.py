@@ -1,5 +1,8 @@
+import re
+
 import pytest
 
+from tools import static_build as sb
 from tools.static_build import ASSETS
 from tools.static_build import BuildError
 from tools.static_build import build_asset
@@ -17,8 +20,18 @@ from tools.static_build import locale_key_errors
 from tools.static_build import plural_family_bases
 from tools.static_build import source_catalogs
 from tools.static_build import lint_duplicate_functions
+from tools.static_build import lint_identical_theme_restatements
 from tools.static_build import lint_css_structure
+from tools.static_build import lint_code_syntax_color_ownership
+from tools.static_build import lint_raw_standard_border_radii
+from tools.static_build import lint_raw_standard_font_sizes
+from tools.static_build import lint_raw_standard_motion_durations
+from tools.static_build import lint_repeated_raw_box_shadows
 from tools.static_build import lint_repeated_raw_component_literals
+from tools.static_build import lint_repeated_semantic_declaration_sets
+from tools.static_build import lint_source_control_characters
+from tools.static_build import lint_unowned_z_indexes
+from tools.static_build import lint_undefined_css_vars
 from tools.static_build import lint_raw_window_viewport_reads
 from tools.static_build import lint_raw_literal_equals_token
 from tools.static_build import pseudo_value
@@ -364,7 +377,6 @@ def test_i18n_untranslated_report_cited_zh_key_before_and_after_backfill():
         "pref.uploads.custom_actions.help",
         "pref.uploads.custom_actions.label",
     ]
-    import tools.static_build as sb
     current = sb.source_catalogs()
     current_zh = i18n_untranslated_entries(current)["zh-Hant"]
     assert "pref.uploads.custom_actions.help" not in current_zh
@@ -383,7 +395,6 @@ def test_duplicate_function_lint_tree_is_clean():
 
 
 def test_duplicate_function_lint_flags_cross_file_duplicates(monkeypatch, tmp_path):
-    import tools.static_build as sb
     first = tmp_path / "first.js"
     second = tmp_path / "second.js"
     first.write_text("function shared() {}\nfunction uniqueOne() {}\n", encoding="utf-8")
@@ -395,7 +406,6 @@ def test_duplicate_function_lint_flags_cross_file_duplicates(monkeypatch, tmp_pa
 
 def test_duplicate_declaration_lint_also_catches_top_level_const(monkeypatch, tmp_path):
     # a duplicate top-level const across concatenated partials silently shadows too.
-    import tools.static_build as sb
     first = tmp_path / "first.js"
     second = tmp_path / "second.js"
     first.write_text("const DUP = 1;\nfunction onlyHere() {}\n", encoding="utf-8")
@@ -405,12 +415,26 @@ def test_duplicate_declaration_lint_also_catches_top_level_const(monkeypatch, tm
     assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'DUP' in: first.js, second.js"]
 
 
+def test_source_control_character_lint_tree_is_clean():
+    assert lint_source_control_characters() == []
+
+
+def test_source_control_character_lint_rejects_binary_bytes(monkeypatch, tmp_path):
+    source = tmp_path / "first.js"
+    source.write_bytes(b"ok\nbad\x00x\x01\n")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_source_control_characters() == [
+        "first.js:2:4: source control character U+0000; use a textual escape or structured signature",
+        "first.js:2:6: source control character U+0001; use a textual escape or structured signature",
+    ]
+
+
 def test_css_structure_lint_tree_is_clean():
     assert lint_css_structure() == []
 
 
 def test_css_structure_lint_flags_duplicate_property_selector_and_empty_rule(monkeypatch, tmp_path):
-    import tools.static_build as sb
     first = tmp_path / "first.css"
     second = tmp_path / "second.css"
     first.write_text(
@@ -420,19 +444,255 @@ def test_css_structure_lint_flags_duplicate_property_selector_and_empty_rule(mon
         "@media (width < 10px) { .shared { color: blue; } }\n",
         encoding="utf-8",
     )
-    second.write_text(".shared { background: black; }\n", encoding="utf-8")
+    second.write_text(".shared { background: black; }\n6\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["first.css", "second.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_css_structure() == [
         "first.css:1: CSS rule ':root' declares '--tone' more than once",
         "first.css:2: empty CSS rule '.empty'",
+        "second.css:2: orphan CSS text after final rule: '6'",
         "duplicate CSS selector '.shared' in top level: first.css:3, second.css:1; merge it into one owner",
+    ]
+
+
+def test_identical_theme_restatement_lint_tree_is_clean():
+    assert lint_identical_theme_restatements() == []
+
+
+def test_identical_theme_restatement_lint_catches_separate_and_grouped_copies(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".control { color: var(--text); background: black; }\n"
+        "body.theme-light .control { color: var(--text); background: white; }\n"
+        ".state, body.editor-theme-light .state { border-color: var(--line); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_identical_theme_restatements() == [
+        "component.css:2: theme selector 'body.theme-light .control' restates 'color: var(--text)' from component.css:1 base selector '.control'; remove the copy or lower fallback specificity",
+        "component.css:3: theme selector 'body.editor-theme-light .state' restates 'border-color: var(--line)' from component.css:3 base selector '.state'; remove the copy or lower fallback specificity",
+    ]
+
+
+def test_repeated_semantic_declaration_set_lint_tree_is_clean():
+    assert lint_repeated_semantic_declaration_sets() == []
+
+
+def test_tokenized_component_base_rules_have_no_identical_light_restatements():
+    tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    popovers_css = repo_path("static_src/css/yolomux/20_sessions_popovers.css").read_text(encoding="utf-8")
+    preferences_css = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    layout_css = repo_path("static_src/css/yolomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+
+    assert not re.search(r"body\.theme-light \.topbar\s*\{\s*background:\s*var\(--panel2\)", topbar_css)
+    assert not re.search(r"body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{\s*background:\s*var\(--pane-tab-strip-bg\)", topbar_css)
+    assert not re.search(r"body\.theme-light \.command-palette-view-chip\s*\{[^}]*var\(--active-control-soft-bg\)", preferences_css)
+    assert not re.search(r"body\.theme-light \.preferences-inline-action\s*\{\s*color:\s*var\(--active-control-bg\)", preferences_css)
+    assert "body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .file-explorer-tree-col)" in tokens_css
+    assert ":where(body.theme-light) .changes-comparison-head" not in tokens_css
+    assert ":where(body.theme-light) .changes-refresh," in preferences_css
+    assert not re.search(r"body\.theme-light \.preferences-setting-control input\[type=\"number\"\],[\s\S]*?body\.theme-light \.diff-ref-suggestion-popover\s*\{[^}]*color:", preferences_css)
+    assert "body.theme-light .ci-indicator:not(.branch-indicator):not(.pr-number-chip)" in popovers_css
+    assert not re.search(r"body\.theme-light \.ci-indicator\.pr-number-chip\s*\{[^}]*(?:background|border-color):", popovers_css)
+    assert "color: var(--pr-link-merged);" in popovers_css
+    assert "color: var(--pr-link-merged-hover);" in popovers_css
+    assert not re.search(r"body\.theme-light \.(?:meta|summary-context) a(?::hover)?\s*\{", layout_css)
+    assert not re.search(r"\.pr-status-merged:hover", preferences_css)
+    assert not re.search(r"body\.theme-light \.changes-repo-head\s*\{", preferences_css)
+    assert not re.search(r"body\.theme-light \.changes-repo-title\s*\{", preferences_css)
+    assert not re.search(r"body\.theme-light \.changes-diff-add-neutral\s*\{", preferences_css)
+    assert not re.search(r"body\.theme-light \.keyboard-shortcuts-section h3\s*\{", preferences_css)
+    assert not re.search(r"body\.theme-light :is\([^)]*\.changes-comparison-head", tokens_css)
+    assert not re.search(r"body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{", panels_css)
+    assert not re.search(r"body\.theme-light \.file-explorer-(?:changes-panel|date-reload-cluster) \.changes-refresh(?:,|\s*\{)", panels_css)
+    assert not re.search(r"body\.theme-light \.yoagent-backend-pill-dot\s*\{[^}]*background:", file_tree_css)
+    assert not re.search(r"body\.theme-light \.yoagent-composer-pill-backend[^\{]*\{[^}]*background:", file_tree_css)
+    assert not re.search(r"body\.theme-light \.info-tree\s*\{[^}]*(?:--info-tree-ai-color:|--info-tree-path-color:|--info-tree-branch-color:|--info-tree-pr-color:)", file_tree_css)
+    assert not re.search(r"body\.theme-light \.file-explorer-path(?:,|:focus)[^\{]*\{[^}]*color:\s*var\(--text\)", file_tree_css)
+    assert not re.search(r"body\.theme-light \.file-tree-row\.current-directory:not\(\.selected\)\s*\{", file_tree_css)
+    assert not re.search(r"body\.theme-light \.file-tree-row\.kind-dir(?:\.expanded|\[aria-expanded| >)[^\{]*\{[^}]*color:\s*var\(--disclosure-triangle-", file_tree_css)
+    assert not re.search(r"body\.theme-light \.file-tree-row\.tabber-row\s*\{[^}]*(?:--tabber-path-color|--tabber-detail-color)", panels_css)
+    assert not re.search(r"body\.theme-light \.yoagent-chat,\s*body\.theme-light \.yoagent-message\s*\{[^}]*(?:background|border-color):", file_tree_css)
+    assert not re.search(r"body\.theme-light \.yoagent-message\.assistant\s*\{[^}]*border-color:", file_tree_css)
+    assert not re.search(r"body\.theme-light \.yoagent-message\.assistant\.yoagent-agent-result\s*\{[^}]*border-inline-start-color:", file_tree_css)
+    assert not re.search(r"body\.theme-light \.yoagent-message\.user\s*\{", file_tree_css)
+    assert not re.search(r"body\.theme-light \.file-explorer-pane,\s*body\.theme-light \.file-explorer-tree-panel\s*\{[^}]*background:", panels_css)
+    assert not re.search(r"body\.editor-theme-light \.file-editor-codemirror \.cm-search \.cm-dialog-close,[\s\S]*?body\.editor-theme-light \.file-editor-codemirror-panel \.cm-search \.cm-dialog-close\s*\{[^}]*background:\s*transparent", panels_css)
+
+
+def test_compact_overflow_strips_have_one_shared_layout_owner():
+    tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    assert re.search(r"\.app-menu-bar,\s*\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible", tokens_css)
+    assert not re.search(r"\.app-menu-bar\s*\{", topbar_css)
+    assert not re.search(r"\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{", file_tree_css)
+
+
+def test_code_syntax_color_ownership_tree_is_clean():
+    assert lint_code_syntax_color_ownership() == []
+
+
+def test_code_syntax_color_ownership_requires_one_grouped_renderer_rule(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".markdown-body .code-string { color: var(--code-string) !important; }\n"
+        ".cm-content .code-string { color: var(--code-string) !important; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "CODE_SYNTAX_COLOR_TOKENS", frozenset({"--code-string"}))
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+
+    assert lint_code_syntax_color_ownership() == [
+        "syntax color '--code-string' repeats in component.css:1, component.css:2; merge renderer selectors into one rule"
+    ]
+
+    component.write_text(
+        ".markdown-body .code-string, .cm-content .code-string { color: var(--code-string) !important; }\n",
+        encoding="utf-8",
+    )
+    assert lint_code_syntax_color_ownership() == []
+
+
+@pytest.mark.parametrize(
+    ("name", "declarations"),
+    [
+        ("active-control paint", ("color: var(--active-control-text)", "background: var(--active-control-bg)", "border-color: var(--active-control-border)")),
+        ("disabled-control state", ("opacity: 0.42", "cursor: default")),
+        ("inactive-agent-marker paint", ("color: var(--agent-inactive-marker-text)", "background: var(--agent-inactive-marker-bg)", "border-color: var(--agent-inactive-marker-border)")),
+        ("pane pressed-control paint", ("color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text))", "background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg))", "border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border))")),
+        ("YO!info text-action reset", ("padding: 0", "border: 0", "background: transparent", "text-align: left", "font: inherit", "cursor: pointer")),
+        ("agent identity-cluster layout", ("display: inline-flex", "align-items: center", "gap: 2px", "flex: 0 0 auto", "vertical-align: middle")),
+        ("editor toolbar hover paint", ("color: var(--editor-toolbar-control-hover-fg)", "border-color: var(--editor-toolbar-control-hover-border)", "background: var(--editor-toolbar-control-hover-bg)")),
+        ("branch-indicator paint", ("color: var(--branch-indicator-text)", "background: var(--branch-indicator-bg)", "border-color: var(--branch-indicator-border)")),
+        ("server-update reload rest paint", ("background: var(--danger-strong)", "color: var(--paint-white)")),
+        ("server-update reload hover paint", ("border-color: var(--danger-strong-border)", "background: var(--danger-strong-hover)", "color: var(--paint-white)")),
+        ("three-row content scaffold", ("height: 100%", "min-height: 0", "background: var(--bg)", "display: grid", "grid-template-rows: auto auto minmax(0, 1fr)")),
+        ("two-row debug-view layout", ("display: grid", "grid-template-rows: auto minmax(0, 1fr)", "gap: 8px")),
+        ("search-input focus ring", ("outline: 0", "border-color: var(--active-control-border)", "box-shadow: var(--active-control-focus-shadow)")),
+        ("danger-status paint", ("color: var(--danger-text)", "background: var(--danger-bg)", "border-color: var(--danger-border)")),
+        ("compact agent SVG geometry", ("flex-basis: 14px", "width: 14px", "height: 14px")),
+        ("light panel-surface paint", ("color: var(--text)", "background: var(--panel)", "border-color: var(--line)")),
+        ("single-line ellipsis", ("min-width: 0", "overflow: hidden", "text-overflow: ellipsis", "white-space: nowrap")),
+        ("vanilla-preview code surface", ("color: var(--markdown-html-light-text)", "background: var(--lt-panel)", "border-color: var(--lt-line)")),
+        ("inline-code paint", ("color: var(--code-inline)", "background: var(--code-inline-bg)", "border: 1px solid var(--code-inline-border)", "border-radius: var(--radius-sm)")),
+        ("light code-block paint", ("color: var(--lt-code-block-text)", "background: var(--lt-code-block-bg)", "border-color: var(--lt-code-block-border)")),
+        ("vanilla nested-code reset", ("color: inherit !important", "background: transparent !important", "border-color: transparent")),
+        ("flexible tab text", ("flex: 1 1 auto", "min-width: 0", "max-width: none")),
+        ("shared link rest paint", ("color: var(--link-soft)", "text-decoration: none")),
+        ("shared link hover paint", ("color: var(--link-soft-hover)", "text-decoration: underline")),
+        ("path-drag outline", ("outline: 2px dashed var(--pane-resizer-hover-bg)", "outline-offset: -5px")),
+        ("file explorer chrome hover paint", ("color: var(--text)", "border-color: var(--text)")),
+        ("YO!agent action hover paint", ("border-color: var(--active-control-focus-ring)", "color: var(--text)", "outline: 0")),
+        ("topbar status surface shell", ("flex: 0 0 auto", "display: inline-flex", "align-items: center", "height: var(--compact-control-height)", "font-size: var(--ui-font-size-2xs)", "cursor: pointer", "white-space: nowrap")),
+        ("compact overflow strip layout", ("flex: 0 0 auto", "min-width: 0", "display: inline-flex", "align-items: center", "gap: 1px", "overflow: visible")),
+    ],
+)
+def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properties(monkeypatch, tmp_path, name, declarations):
+    first = tmp_path / "first.css"
+    second = tmp_path / "second.css"
+    first.write_text(
+        f".first {{ {'; '.join(declarations)}; }}\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        f".second {{ {'; '.join(reversed(declarations))}; padding: 2px; }}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["first.css", "second.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+    assert lint_repeated_semantic_declaration_sets() == [
+        f"semantic CSS declaration set {name!r} repeats in first.css:1, second.css:1; merge it into one grouped selector"
+    ]
+
+
+def test_standard_border_radius_lint_tree_is_clean():
+    assert lint_raw_standard_border_radii() == []
+
+
+def test_standard_border_radius_lint_rejects_single_compound_and_logical_copies(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".card { border-radius: 6px; }\n"
+        ".segment { border-radius: 8px 0 0 8px; }\n"
+        ".leaf { border-start-start-radius: 8px; }\n"
+        ".custom { border-radius: 14px; }\n"
+        ".multiline { border-radius:\n  4px; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert lint_raw_standard_border_radii() == [
+        "component.css:1: raw standard border radius 6px; use var(--radius-md)",
+        "component.css:2: raw standard border radius 8px; use var(--radius-lg)",
+        "component.css:3: raw standard border radius 8px; use var(--radius-lg)",
+        "component.css:5: raw standard border radius 4px; use var(--radius-control)",
+    ]
+
+
+def test_standard_motion_duration_lint_tree_is_clean():
+    assert lint_raw_standard_motion_durations() == []
+
+
+def test_standard_motion_duration_lint_rejects_equivalent_component_cadences(monkeypatch, tmp_path):
+    tokens = tmp_path / "00_tokens_base.css"
+    component = tmp_path / "component.css"
+    tokens.write_text(":root { --motion-interaction-fast: 90ms; --motion-activity-duration: 900ms; }\n", encoding="utf-8")
+    component.write_text(
+        ".fast { transition: opacity 90ms ease, transform 90ms ease; }\n"
+        ".standard { transition-duration: 100ms; }\n"
+        ".disclosure { transition: color 120ms ease; }\n"
+        ".spinner { animation: spin 0.7s linear infinite; }\n"
+        ".thinking { animation-duration: 900ms; }\n"
+        ".owned { transition: opacity var(--motion-interaction-fast); }\n"
+        ".fallback { transition: opacity var(--local-duration, 100ms); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert lint_raw_standard_motion_durations() == [
+        "component.css:1: raw standard motion duration 90ms; use var(--motion-interaction-fast)",
+        "component.css:2: raw standard motion duration 100ms; use var(--motion-interaction-standard)",
+        "component.css:3: raw standard motion duration 120ms; use var(--motion-disclosure)",
+        "component.css:4: raw standard motion duration 0.7s; use var(--motion-activity-duration)",
+        "component.css:5: raw standard motion duration 900ms; use var(--motion-activity-duration)",
+    ]
+
+
+def test_standard_component_font_size_lint_tree_is_clean():
+    assert lint_raw_standard_font_sizes() == []
+
+
+def test_standard_component_font_size_lint_rejects_fixed_text_but_ignores_fallbacks_and_minimums(monkeypatch, tmp_path):
+    tokens = tmp_path / "00_tokens_base.css"
+    component = tmp_path / "component.css"
+    tokens.write_text(":root { --ui-font-size-2xs: 10px; --ui-font-size-xs: 11px; --ui-font-size-sm: 12px; }\n", encoding="utf-8")
+    component.write_text(
+        ".ten { font: 700 10px/1 var(--mono-font); }\n"
+        ".eleven { font-size: 11px; }\n"
+        ".twelve { font: 12px/1.4 sans-serif; }\n"
+        ".line-height { font: 700 var(--ui-font-size-3xs)/12px sans-serif; }\n"
+        ".fallback { font-size: var(--label-size, 12px); }\n"
+        ".minimum { font: 700 max(10px, calc(var(--ui-font-size) - 2px))/1 sans-serif; }\n"
+        ".icon { width: 10px; height: 12px; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert lint_raw_standard_font_sizes() == [
+        "component.css:1: raw standard component font size 10px; use var(--ui-font-size-2xs)",
+        "component.css:2: raw standard component font size 11px; use var(--ui-font-size-xs)",
+        "component.css:3: raw standard component font size 12px; use var(--ui-font-size-sm)",
     ]
 
 
 def test_undefined_css_var_lint_is_clean():
     # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
-    from tools.static_build import lint_undefined_css_vars
     assert lint_undefined_css_vars() == []
 
 
@@ -442,21 +702,139 @@ def test_raw_window_viewport_lint_tree_is_clean():
 
 def test_repeated_raw_component_literal_lint_tree_is_clean():
     assert lint_repeated_raw_component_literals() == []
+    assert sb.RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST == {}
+
+
+def test_opaque_white_has_one_css_paint_owner():
+    occurrences = []
+    for part in ASSETS["yolomux.css"]:
+        text = repo_path(part).read_text(encoding="utf-8")
+        occurrences.extend(part for _match in re.finditer(r"(?i)#fff(?:fff)?\b", text))
+    assert occurrences == ["static_src/css/yolomux/00_tokens_base.css"]
+    assert "--paint-white: #fff;" in repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+
+
+def test_repeated_raw_box_shadow_lint_tree_is_clean():
+    assert lint_repeated_raw_box_shadows() == []
+
+
+def test_z_index_ownership_lint_tree_is_clean():
+    assert lint_unowned_z_indexes() == []
+
+
+def test_tree_row_hover_and_selection_paint_have_one_base_owner():
+    tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    editor_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+    selection_shadow = "box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);"
+    hover_shadow = "box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);"
+    assert ".file-tree-row.selected,\n.file-tree-row.current-file:not(.selected) {" in tree_css
+    assert tree_css.count(selection_shadow) == 1
+    assert "body.theme-light .file-tree-row.selected {" not in tree_css
+    assert "body.theme-light .file-tree-row.current-file:not(.selected) {" not in tree_css
+    assert (tree_css + editor_css).count(hover_shadow) == 1
+    assert ".file-tree-row.tabber-row:not(.selected):hover" not in editor_css
+
+
+def test_repeated_raw_box_shadow_lint_normalizes_whitespace_and_ignores_owned_values(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".first { box-shadow: 0 0 0 2px var(--ring); }\n"
+        ".second { box-shadow:\n  0   0 0 2px   var(--ring); }\n"
+        ".none { box-shadow: none; }\n"
+        ".important-none { box-shadow: none !important; }\n"
+        ".owned { box-shadow: var(--shared-shadow); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_repeated_raw_box_shadows() == [
+        "raw box-shadow '0 0 0 2px var(--ring)' repeats in component.css:1, component.css:2; move it to a CSS token or grouped selector"
+    ]
+
+
+def test_z_index_ownership_lint_checks_css_and_inline_js_styles(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    inline = tmp_path / "inline.js"
+    component.write_text(
+        ".owned { z-index: var(--z-dialog); }\n"
+        ".important { z-index: var(--z-dialog) !important; }\n"
+        ".automatic { z-index: auto; }\n"
+        ".raw { z-index: 7; }\n"
+        ".calculated { z-index: calc(var(--z-dialog) + 1); }\n"
+        ".generic { z-index: var(--layer); }\n"
+        ".local { --z-local: 9; z-index: var(--z-local); }\n"
+        ".local-calculated { --z-local-calculated: calc(var(--z-dialog) + 2); }\n",
+        encoding="utf-8",
+    )
+    inline.write_text("const css = `.inline { z-index: 1000; }`;\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["inline.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_unowned_z_indexes() == [
+        "component.css:7: local z-index token --z-local owns '9'; move numeric/arithmetic ownership to 00_tokens_base.css",
+        "component.css:8: local z-index token --z-local-calculated owns 'calc(var(--z-dialog) + 2)'; move numeric/arithmetic ownership to 00_tokens_base.css",
+        "component.css:4: z-index '7' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
+        "component.css:5: z-index 'calc(var(--z-dialog) + 1)' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
+        "component.css:6: z-index 'var(--layer)' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
+        "inline.js:1: z-index '1000' lacks one named --z-* owner; move literals/arithmetic to 00_tokens_base.css and use var(--z-token)",
+    ]
 
 
 def test_repeated_raw_component_literal_lint_flags_new_repeats(monkeypatch, tmp_path):
-    import tools.static_build as sb
     bad = tmp_path / "bad.css"
     bad.write_text(".a { color: #123456; }\n.b { border-color: #123456; }\n.c { color: #abcdef; }\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
     assert sb.lint_repeated_raw_component_literals() == [
         "raw component color #123456 repeats in bad.css:1, bad.css:2; move it to a CSS token or add a reviewed allowlist reason"
     ]
 
 
+def test_repeated_raw_component_literal_lint_canonicalizes_css_spellings_and_only_masks_var(monkeypatch, tmp_path):
+    bad = tmp_path / "bad.css"
+    bad.write_text(
+        ".alpha-hex { color: #1234; }\n"
+        ".alpha-rgb { color: rgba(17 34 51 / 26.6667%); }\n"
+        ".mixed { box-shadow: 0 0 #102030; color: var(--fallback, var(--nested, #102030)); }\n"
+        ".opaque-rgb { border-color: rgb(16, 32, 48); }\n"
+        ".alpha-percent { background: rgb(0 0 0 / 50%); }\n"
+        ".alpha-decimal { background: rgba(0, 0, 0, 0.5); }\n"
+        ".compound { box-shadow: 0 0 #445566, 0 1px #445566; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
+    assert sb.lint_repeated_raw_component_literals() == [
+        "raw component color rgb(0 0 0 / 0.5) repeats in bad.css:5, bad.css:6; move it to a CSS token or add a reviewed allowlist reason",
+        "raw component color #102030 repeats in bad.css:3, bad.css:4; move it to a CSS token or add a reviewed allowlist reason",
+        "raw component color rgb(17 34 51 / 0.266667) repeats in bad.css:1, bad.css:2; move it to a CSS token or add a reviewed allowlist reason",
+        "raw component color #445566 repeats in bad.css:7, bad.css:7; move it to a CSS token or add a reviewed allowlist reason",
+    ]
+
+
+def test_repeated_raw_component_literal_lint_canonicalizes_allowlist_keys(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(".a { color: #ffffff; }\n.b { color: rgb(255 255 255); }\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {"#fff": "reviewed white"})
+    assert sb.lint_repeated_raw_component_literals() == []
+
+
+def test_repeated_raw_component_literal_lint_flags_stale_allowlist_entries(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(".only { color: #abcdef; }\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {"#abcdef": "reviewed example"})
+    assert sb.lint_repeated_raw_component_literals() == [
+        "stale raw component color allowlist entry #abcdef: found 1 occurrence(s); remove it"
+    ]
+
+
 def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
-    import tools.static_build as sb
     component = tmp_path / "component.css"
     component.write_text(".label { color: rgb(17, 24, 39); }\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
@@ -470,8 +848,37 @@ def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
     ]
 
 
+def test_raw_token_lint_masks_only_var_fallback_not_neighboring_literal(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".label { color: var(--fallback, #111827); border-color: rgb(17 24 39); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#111827": ["--lt-text"]})
+    assert lint_raw_literal_equals_token() == [
+        "component.css:1: raw color rgb(17 24 39) duplicates token value(s) --lt-text; use var(--token)"
+    ]
+
+
+def test_raw_token_lint_rejects_opaque_white_property_and_local_token(monkeypatch, tmp_path):
+    component = tmp_path / "component.css"
+    component.write_text(
+        ".surface { background: #fff; }\n"
+        ".local { --local-white: #ffffff; color: var(--local-white); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#ffffff": ["--paint-white"]})
+    assert lint_raw_literal_equals_token() == [
+        "component.css:1: raw color #fff duplicates token value(s) --paint-white; use var(--token)",
+        "component.css:2: raw color #ffffff duplicates token value(s) --paint-white; use var(--token)",
+    ]
+
+
 def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):
-    import tools.static_build as sb
     bad = tmp_path / "bad.js"
     good = tmp_path / "good.js"
     bad.write_text("const width = window.innerWidth;\n", encoding="utf-8")
@@ -484,7 +891,6 @@ def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):
 
 
 def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):
-    import tools.static_build as sb
     bad = tmp_path / "bad.css"
     bad.write_text(".a { color: red; } .b {\n", encoding="utf-8")  # truncated rule, missing }
     monkeypatch.setitem(sb.ASSETS, "probe.css", ["__bad__.css"])
@@ -494,7 +900,6 @@ def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):
 
 
 def test_expected_locale_outputs_raises_on_parity_failure(monkeypatch):
-    import tools.static_build as sb
     monkeypatch.setattr(sb, "source_catalogs", lambda: {"en": {"a": "A"}, "fr": {}})
     with pytest.raises(BuildError):
         sb.expected_locale_outputs()

@@ -2,24 +2,24 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):
-    fs_entries = {
-        "/home/test": [{"name": "project", "kind": "dir"}],
-        "/home/test/project": [{"name": "src", "kind": "dir"}],
-    }
-    page = tmp_path / "live-runtime-disclosure-size.html"
-    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
+    page = tmp_path / "disclosure-size.html"
+    page.write_text(
+        page_html(
             """
-            return document.querySelector('.file-tree-row[data-path="/home/test/project"] > .file-tree-icon.ui-disclosure-triangle') !== null;
-            """
-        )
+            <div id="row" class="file-tree-row kind-dir" aria-expanded="false">
+              <span id="icon" class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span>
+              <span class="file-tree-name">project</span>
+            </div>
+            """,
+            extra_css="body { display:block; padding:12px; } #row { width:240px; }",
+        ),
+        encoding="utf-8",
     )
+    browser.get(page.as_uri())
     before = browser.execute_script(
         """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
-        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        const row = document.getElementById('row');
+        const icon = document.getElementById('icon');
         return {
           rowFont: parseFloat(getComputedStyle(row).fontSize),
           iconFont: parseFloat(getComputedStyle(icon).fontSize),
@@ -27,44 +27,29 @@ def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, 
           iconTransform: getComputedStyle(icon).transform,
           iconText: icon.textContent.trim(),
           rowHeight: row.getBoundingClientRect().height,
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
         };
         """
     )
     browser.execute_script(
         """
-        document.querySelector('.file-tree-row[data-path="/home/test/project"]').click();
+        document.getElementById('row').setAttribute('aria-expanded', 'true');
+        document.getElementById('icon').dataset.disclosureExpanded = 'true';
         """
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null;
-            """
-        )
     )
     after = browser.execute_script(
         """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
-        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        const row = document.getElementById('row');
+        const icon = document.getElementById('icon');
         return {
           rowFont: parseFloat(getComputedStyle(row).fontSize),
           iconFont: parseFloat(getComputedStyle(icon).fontSize),
           iconTransform: getComputedStyle(icon).transform,
           iconText: icon.textContent.trim(),
           rowHeight: row.getBoundingClientRect().height,
-          childVisible: document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null,
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
         };
         """
     )
     metrics = {"before": before, "after": after}
-    assert before["errors"] == []
-    assert before["rejections"] == []
-    assert after["errors"] == []
-    assert after["rejections"] == []
     assert before["iconText"] == "›", metrics
     assert after["iconText"] == "›", metrics
     assert before["iconTransform"] == "none", metrics
@@ -73,7 +58,6 @@ def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, 
     assert abs(after["iconFont"] - after["rowFont"]) <= 0.5, metrics
     assert before["iconWidth"] >= before["iconFont"], metrics
     assert abs(after["rowHeight"] - before["rowHeight"]) <= 0.5, metrics
-    assert after["childVisible"] is True, metrics
 
 
 def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):

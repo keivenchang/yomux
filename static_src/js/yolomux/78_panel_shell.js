@@ -1149,7 +1149,7 @@ function bindPanelShell(panel, session) {
     if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
-      const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session], ${repoSelectorControlSelector}`);
       if (windowTarget) {
         // Run the original target before polling or focus-side updates can replace it.
         // The marker suppresses the later delegated click if the browser still emits one.
@@ -1436,9 +1436,7 @@ function tmuxWindowNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-const tmuxWindowActiveIndexOverrides = new Map();
-const tmuxWindowSwitchSequences = new Map();
-const tmuxWindowDirectTargetGuards = new Map();
+const tmuxWindowNavigationRecords = new Map();
 const tmuxWindowPendingActiveIndex = '__pending__';
 const tmuxWindowConfirmedOverrideHoldMs = 4000;
 const tmuxWindowDirectTargetGuardMs = 17000;
@@ -1448,8 +1446,33 @@ function tmuxWindowIndexKey(value) {
   return index === null ? null : String(index);
 }
 
+function tmuxWindowNavigationRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = tmuxWindowNavigationRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {activeIndexOverride: undefined, sequence: 0, directTargetGuard: null};
+    tmuxWindowNavigationRecords.set(key, record);
+  }
+  return record;
+}
+
+function pruneTmuxWindowNavigationRecord(session, record = tmuxWindowNavigationRecord(session)) {
+  if (!record) return false;
+  if (record.activeIndexOverride !== undefined || Number(record.sequence || 0) > 0 || record.directTargetGuard) return false;
+  return tmuxWindowNavigationRecords.delete(String(session || ''));
+}
+
 function tmuxWindowActiveIndexOverride(session) {
-  return tmuxWindowActiveIndexOverrides.get(String(session || ''));
+  return tmuxWindowNavigationRecord(session)?.activeIndexOverride;
+}
+
+function tmuxWindowActiveIndexOverrideEntries() {
+  const entries = [];
+  for (const [session, record] of tmuxWindowNavigationRecords.entries()) {
+    if (record.activeIndexOverride !== undefined) entries.push([session, record.activeIndexOverride]);
+  }
+  return entries;
 }
 
 function tmuxWindowDisplayActiveIndex(session) {
@@ -1460,19 +1483,20 @@ function tmuxWindowDisplayActiveIndex(session) {
 
 function tmuxWindowDirectTargetGuard(session) {
   const key = String(session || '');
-  const guard = tmuxWindowDirectTargetGuards.get(key);
+  const record = tmuxWindowNavigationRecord(key);
+  const guard = record?.directTargetGuard || null;
   if (!guard) return null;
   if (Number(guard.guardUntilMs || 0) > Date.now()) return guard;
-  tmuxWindowDirectTargetGuards.delete(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
   return null;
 }
 
 function tmuxWindowDirectTargetGuardEntries() {
   const entries = [];
-  for (const [session, guard] of tmuxWindowDirectTargetGuards.entries()) {
+  for (const [session] of tmuxWindowNavigationRecords.entries()) {
     const active = tmuxWindowDirectTargetGuard(session);
     if (active) entries.push([session, active]);
-    else if (guard) tmuxWindowDirectTargetGuards.delete(session);
   }
   return entries;
 }
@@ -1482,13 +1506,14 @@ function setTmuxWindowDirectTargetGuard(session, windowIndex, sequence) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!key || indexKey === null) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     index: indexKey,
     sequence: Number(sequence) || 0,
     startedAtMs: now,
     confirmedAtMs: 0,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -1501,11 +1526,12 @@ function confirmTmuxWindowDirectTargetGuard(session, windowIndex, options = {}) 
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     ...guard,
     confirmedAtMs: now,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -1514,12 +1540,16 @@ function clearTmuxWindowDirectTargetGuard(session, options = {}) {
   if (!key) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   const guard = tmuxWindowDirectTargetGuard(key);
+  if (!guard) return false;
   if (sequence > 0 && guard && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
-  return tmuxWindowDirectTargetGuards.delete(key);
+  const record = tmuxWindowNavigationRecord(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
+  return true;
 }
 
 function tmuxWindowSwitchSequence(session) {
-  return Number(tmuxWindowSwitchSequences.get(String(session || '')) || 0);
+  return Number(tmuxWindowNavigationRecord(session)?.sequence || 0);
 }
 
 function tmuxWindowSwitchOptionSequence(options = {}) {
@@ -1536,7 +1566,7 @@ function nextTmuxWindowSwitchSequence(session) {
   const key = String(session || '');
   if (!key) return 0;
   const next = tmuxWindowSwitchSequence(key) + 1;
-  tmuxWindowSwitchSequences.set(key, next);
+  tmuxWindowNavigationRecord(key, {create: true}).sequence = next;
   return next;
 }
 
@@ -1545,7 +1575,7 @@ function tmuxWindowOverrideSequence(session, options = {}) {
   if (!key) return 0;
   const explicit = tmuxWindowSwitchOptionSequence(options);
   if (explicit > 0) {
-    tmuxWindowSwitchSequences.set(key, explicit);
+    tmuxWindowNavigationRecord(key, {create: true}).sequence = explicit;
     return explicit;
   }
   if (options.bumpSequence === false) return tmuxWindowSwitchSequence(key);
@@ -1673,7 +1703,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   setTmuxWindowDirectTargetGuard(session, indexKey, sequence);
   applyTmuxWindowActiveIndexToTranscriptInfo(String(session), indexKey, {render: true});
   updateTmuxWindowBarActiveButtons(session, indexKey);
@@ -1684,7 +1714,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
 function setTmuxWindowActiveIndexPending(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), tmuxWindowPendingActiveIndex);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = tmuxWindowPendingActiveIndex;
   clearTmuxWindowDirectTargetGuard(session);
   updateTmuxWindowBarActiveButtons(session, null);
   refreshTabberPanelsForTmuxWindowChange();
@@ -1695,8 +1725,11 @@ function clearTmuxWindowActiveIndexOverride(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  const deleted = tmuxWindowActiveIndexOverrides.delete(String(session));
+  const record = tmuxWindowNavigationRecord(session);
+  const deleted = record?.activeIndexOverride !== undefined;
+  if (record) record.activeIndexOverride = undefined;
   if (options.clearDirectTarget === true) clearTmuxWindowDirectTargetGuard(session, {sequence});
+  pruneTmuxWindowNavigationRecord(session, record);
   if (deleted) refreshTabberPanelsForTmuxWindowChange();
   return deleted;
 }
@@ -1706,7 +1739,7 @@ function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   confirmTmuxWindowDirectTargetGuard(session, indexKey, {sequence});
   updateTmuxWindowBarActiveButtons(session, indexKey);
   refreshTabberPanelsForTmuxWindowChange();

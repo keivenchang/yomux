@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
+import threading
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -72,10 +75,6 @@ def parse_args() -> argparse.Namespace:
 def start_dev_backend_watcher() -> None:
     """Dev-velocity #1c: re-exec the server when a backend source file changes, so a Python edit takes
     effect without the manual systemd-run restart dance. Daemon thread; only started under --dev."""
-    import os
-    import threading
-    import time as _time
-
     repo_root = Path(__file__).resolve().parents[1]
     watched = [repo_root / "yolomux.py", repo_root / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
 

@@ -450,6 +450,9 @@ def test_background_owner_required_log_event_names_have_emitters():
     source = (REPO_ROOT / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
 
     assert "on_acquire=self.handle_background_owner_acquired" in source
+    assert "background_refresh_event_log_records" in source
+    assert "background_refresh_event_log_counts" not in source
+    assert "background_refresh_event_log_last_emit_counts" not in source
     for event_type in (
         "background_owner_acquired",
         "background_owner_released",
@@ -494,6 +497,9 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
     assert first_details["sample_count"] == 1
     assert second_details["sample_count"] == 3
     assert second_details["suppressed_since_last"] == 1
+    sample_record = webapp.background_refresh_event_log_records[("background_refresh_started", BACKGROUND_ROLE_SESSION_FILES)]
+    assert sample_record.count == 5
+    assert sample_record.last_emit_count == 3
     assert first_details["cache_key_kind"] == "payload"
     assert "cache_key_hash" in first_details
     assert "cache_key" not in first_details

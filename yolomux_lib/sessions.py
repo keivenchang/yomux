@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import shlex
 import threading
 import time
@@ -210,18 +209,16 @@ def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> tuple[s
 
 
 def classify_agent(command: str) -> str | None:
-    base = command_basename(command)
-    if base in AGENT_COMMANDS:
-        return base
-    lowered = command.lower()
-    if re.search(r"(^|[/\s])claude\.py\s+--mock(\s|$)", lowered):
-        return "claude"
-    if re.search(r"(^|[/\s])codex\.py\s+--mock(\s|$)", lowered):
-        return "codex"
-    if re.search(r"(^|\s)(claude|codex)(\s|$)", lowered):
-        match = re.search(r"(^|\s)(claude|codex)(\s|$)", lowered)
-        if match:
-            return match.group(2)
+    label = process_display_label(command).lower()
+    if label in AGENT_COMMANDS:
+        return label
+    # Pane descendants include every search, test, and shell command launched by the agent. Only
+    # classify an actual mock entry point here; an argument or commit message that merely mentions
+    # "claude" or "codex" must not become a second agent for the same pane.
+    if "--mock" in command_tokens(command):
+        for kind in ("claude", "codex"):
+            if label == f"{kind}.py":
+                return kind
     return None
 
 
@@ -602,6 +599,30 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
     )
 
 
+def select_codex_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+    candidates = [process for process in processes if classify_agent(process.command) == "codex"]
+    if not candidates:
+        return None
+    # The Node launcher and native Codex binary are one interactive client. Prefer the native
+    # process because it owns the rollout file; fall back to the wrapper for mocks/other clients.
+    process = next(
+        (candidate for candidate in candidates if command_basename(candidate.command) == "codex"),
+        candidates[0],
+    )
+    return read_codex_agent(session, pane, process)
+
+
+def select_pane_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+    kinds = [kind for process in processes if (kind := classify_agent(process.command)) in {"claude", "codex"}]
+    if not kinds:
+        return None
+    # `processes` is breadth-first from the tmux pane PID. The first real agent is the interactive
+    # owner; a nested agent command launched as a tool must not replace its parent pane identity.
+    if kinds[0] == "claude":
+        return select_claude_agent(session, pane, processes)
+    return select_codex_agent(session, pane, processes)
+
+
 def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
     if platform.system() == "Darwin":
         paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
@@ -682,16 +703,10 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             process_label, process_label_pid = pane_process_label(raw_pane, candidates)
             pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
-            claude_agent = select_claude_agent(session, pane, candidates)
-            if claude_agent is not None and claude_agent.pid not in seen_pids:
-                seen_pids.add(claude_agent.pid)
-                agents.append(claude_agent)
-            for process in candidates:
-                kind = classify_agent(process.command)
-                if kind != "codex" or process.pid in seen_pids:
-                    continue
-                seen_pids.add(process.pid)
-                agents.append(read_codex_agent(session, pane, process))
+            agent = select_pane_agent(session, pane, candidates)
+            if agent is not None and agent.pid not in seen_pids:
+                seen_pids.add(agent.pid)
+                agents.append(agent)
         result[session] = SessionInfo(
             session=session,
             panes=session_panes,

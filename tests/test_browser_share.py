@@ -2414,10 +2414,18 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   },
                   async tabPopover() {
                     await waitFor(() => Boolean(document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover')), 2000);
-                    await frame();
-                    await frame();
                     const popover = document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover');
                     if (!popover) throw new Error('tab hover popover did not open through the real hover path');
+                    let priorGeometry = '';
+                    let stableFrames = 0;
+                    for (let attempt = 0; attempt < 8 && stableFrames < 2; attempt += 1) {
+                      await frame();
+                      const rect = appSpaceRect(popover);
+                      const geometry = [popover.style.left, popover.style.top, popover.style.height, rect.left, rect.top, rect.width, rect.height].join('|');
+                      stableFrames = geometry === priorGeometry ? stableFrames + 1 : 0;
+                      priorGeometry = geometry;
+                    }
+                    if (stableFrames < 2) throw new Error('tab hover popover geometry did not settle before share publish');
                     const popoverRect = appSpaceRect(popover);
                     return publish('tab-hover-popover', {
                       tabPopoverRect: {left: Math.round(popoverRect.left), top: Math.round(popoverRect.top), width: Math.round(popoverRect.width), height: Math.round(popoverRect.height)},
@@ -2625,7 +2633,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             """
             )
             assert host_tab is not None
-            ActionChains(browser).move_to_element(host_tab).perform()
+            fast_pointer_actions(browser).move_to_element(host_tab).perform()
             host_phase("tabPopover")
             tab = wait_viewer_phase("tab-hover-popover")
             assert tab["tabPopoverText"].strip(), tab

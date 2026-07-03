@@ -14,6 +14,65 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
     assert browser_wait_timeout(5, worker="") == 5
 
 
+def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(monkeypatch, tmp_path):
+    session = f"yt-named-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    runtime = start_isolated_tmux_runtime(
+        monkeypatch,
+        tmp_path,
+        session_commands={session: "printf 'named command ready\\n'; exec sh"},
+        columns=93,
+        rows=27,
+    )
+    socket_dir = runtime.socket_dir
+    try:
+        ready, panes = wait_for_isolated_tmux_panes(
+            runtime,
+            [session],
+            lambda captures: "named command ready" in captures[session],
+            timeout=5,
+            poll_interval=0.05,
+        )
+        dimensions = run_isolated_tmux(
+            runtime,
+            "display-message",
+            "-p",
+            "-t",
+            f"{session}:",
+            "#{window_width}x#{window_height}",
+            timeout=5,
+        )
+        assert ready, panes
+        assert dimensions.returncode == 0, dimensions.stderr or dimensions.stdout
+        assert dimensions.stdout.strip() == "93x27"
+    finally:
+        stop_isolated_tmux_runtime(runtime)
+    assert not socket_dir.exists()
+
+
+def test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner():
+    source = Path(__file__).read_text(encoding="utf-8")
+    function_sources = {}
+    for test_name in (
+        "test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+        "test_real_agent_prompts_render_ask_attention_in_live_server",
+    ):
+        match = re.search(rf"^def {re.escape(test_name)}\(", source, re.MULTILINE)
+        assert match is not None
+        start = match.start()
+        end = source.find("\ndef test_", start + 1)
+        function_source = source[start:end if end >= 0 else len(source)]
+        function_sources[test_name] = function_source
+        assert "start_isolated_tmux_runtime(" in function_source
+        assert "run_isolated_tmux(" in function_source
+        assert "wait_for_isolated_tmux_panes(" in function_source
+        assert "stop_isolated_tmux_runtime(" in function_source
+        assert "subprocess.run(" not in function_source
+        assert "def tmux_cmd(" not in function_source
+    real_source = function_sources["test_real_agent_prompts_render_ask_attention_in_live_server"]
+    assert "getattr(" not in real_source
+    assert "except Exception:" not in real_source
+
+
 def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tmp_path):
     page = tmp_path / "branch-list-title-theme.html"
     page.write_text(page_html('<div class="branch-list-title">Branches</div>'), encoding="utf-8")
@@ -31,18 +90,17 @@ def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tm
 
 
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    page = tmp_path / "tab-metadata-visibility.html"
+    tab_body = '<span class="session-yolo-marker">YO</span><span class="session-button-name">1</span><span class="tab-symbol ci-indicator branch-indicator">MAIN</span><span class="session-button-detail">description</span>'
+    page.write_text(page_html(f"""
+      <button id="regular-tab" class="pane-tab active">{tab_body}</button>
+      <button id="compact-tab" class="tmux-pane-tab-token active">{tab_body}</button>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
-        const makeTab = className => {
-          const tab = document.createElement('button');
-          tab.className = className;
-          tab.innerHTML = '<span class="session-yolo-marker">YO</span><span class="session-button-name">1</span><span class="tab-symbol ci-indicator branch-indicator">MAIN</span><span class="session-button-detail">description</span>';
-          document.body.appendChild(tab);
-          return tab;
-        };
-        const regular = makeTab('pane-tab active');
-        const compact = makeTab('tmux-pane-tab-token active');
+        const regular = document.getElementById('regular-tab');
+        const compact = document.getElementById('compact-tab');
         const read = tab => ({
           symbol: getComputedStyle(tab.querySelector('.tab-symbol')).display,
           symbolText: tab.querySelector('.branch-indicator')?.textContent || '',
@@ -56,8 +114,6 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         const hidden = {regular: read(regular), compact: read(compact)};
         document.body.classList.remove('tab-meta-hidden');
         const visible = {regular: read(regular), compact: read(compact)};
-        regular.remove();
-        compact.remove();
         return {hidden, visible};
         """
     )
@@ -171,7 +227,7 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
         pulsing,
     )
     button = next(node for node in browser.find_elements("css selector", '[data-window-session="1"][data-window-index="2"]') if node.is_displayed())
-    ActionChains(browser).move_to_element(button).click().perform()
+    fast_pointer_actions(browser).move_to_element(button).click().perform()
     WebDriverWait(browser, 4).until(
         lambda driver: driver.execute_script("return window.__subwindowGrayClickSamples?.length === 5")
     )
@@ -598,18 +654,18 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     page.write_text(page_html(f"""
       <section class="js-debug-graph-view">
         <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
           <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {client_perf}
           {chart_shell}
         </div>
         <div id="graph-without-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
           <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {chart_shell}
         </div>
         <div id="graph-empty-with-client-work" class="js-debug-graph js-debug-graph--empty" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
+          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
           <div class="js-debug-graph-meta">waiting for server stats</div>
           {client_perf}
           <div class="js-debug-graph-empty">No data</div>
@@ -1618,10 +1674,22 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
         });
         renderDebugPanels({force: true});
         let panel = document.querySelector('.js-debug-panel');
+        const paint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor};
+        };
+        const activeSubtabPaint = paint(panel?.querySelector('.js-debug-subtab.active'));
+        const activeScalePaint = paint(panel?.querySelector('.js-debug-scale-button.active'));
         const cpuClose = panel?.querySelector('[data-js-debug-chart-close="cpu"]');
+        cpuClose?.focus({focusVisible: true});
+        const closeFocusPaint = paint(cpuClose);
+        const closeUsesSharedParent = cpuClose?.classList.contains('control-active-hover') === true;
         cpuClose?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
         const closed = !panel?.querySelector('[data-js-debug-chart="cpu"]');
         const restore = panel?.querySelector('[data-js-debug-chart-restore="cpu"]');
+        restore?.focus({focusVisible: true});
+        const restoreFocusPaint = paint(restore);
+        const restoreUsesSharedParent = restore?.classList.contains('control-active-hover') === true;
         restore?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
         const restored = Boolean(panel?.querySelector('[data-js-debug-chart="cpu"]'));
         panel?.querySelector('[data-js-debug-subtab="events"]')?.click();
@@ -1632,6 +1700,12 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
           closed,
           restoreVisible: Boolean(restore),
           restored,
+          activeSubtabPaint,
+          activeScalePaint,
+          closeFocusPaint,
+          restoreFocusPaint,
+          closeUsesSharedParent,
+          restoreUsesSharedParent,
           saved: JSON.parse(localStorage.getItem(preferencesKey) || '{}'),
         };
         """
@@ -1639,6 +1713,11 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
     assert metrics["closed"] is True, metrics
     assert metrics["restoreVisible"] is True, metrics
     assert metrics["restored"] is True, metrics
+    assert metrics["activeSubtabPaint"] == metrics["activeScalePaint"], metrics
+    assert metrics["closeFocusPaint"] == metrics["activeSubtabPaint"], metrics
+    assert metrics["restoreFocusPaint"] == metrics["activeSubtabPaint"], metrics
+    assert metrics["closeUsesSharedParent"] is True, metrics
+    assert metrics["restoreUsesSharedParent"] is True, metrics
     assert metrics["saved"] == {
         "subTab": "events",
         "scaleSeconds": 30,
@@ -3649,175 +3728,1377 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert abs(short_meta["metaRight"] - short_meta["zoneRight"]) <= 1
 
 
-@pytest.mark.parametrize(
-    "agent,user_input",
-    [
-        ("codex", "touch /tmp/yolomux-mock-approval"),
-        ("claude", "sleep 10"),
-    ],
-)
-def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path, agent, user_input):
-    tmux_binary = shutil.which("tmux")
-    if not tmux_binary:
-        pytest.skip("tmux is not installed")
+def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
+    page = tmp_path / "pane-control-shared-paint.html"
+    page.write_text(page_html("""
+      <article class="panel active-pane" style="height:auto;">
+        <div class="pane-info-bar panel-detail-row">
+          <button id="status-control" type="button" class="tab tmux-status-toggle">·</button>
+          <div class="tmux-window-bar" data-tmux-window-bar-context="info" data-tmux-window-label-mode="names">
+            <button id="window-control" type="button" class="tab tmux-window-button"><span class="tmux-window-name-label">0:bash</span></button>
+          </div>
+          <div class="tabs">
+            <button id="frame-control" type="button" class="tab pane-minimize"></button>
+            <button id="pane-close" type="button" class="tab pane-close"></button>
+          </div>
+          <button id="detail-close" type="button" class="panel-detail-close"></button>
+        </div>
+      </article>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
 
-    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    sock_base = Path("/tmp") / f"yoask-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
-    session = f"yb-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-
-    def tmux_cmd(*args, timeout=8):
-        return subprocess.run(
-            [tmux_binary, "-S", str(socket_path), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+    def paint(control_id):
+        return browser.execute_script(
+            """
+            const style = getComputedStyle(document.getElementById(arguments[0]));
+            return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+            """,
+            control_id,
         )
 
-    def capture():
-        return tmux_cmd("capture-pane", "-p", "-t", f"{session}:").stdout or ""
+    control_ids = ["status-control", "window-control", "frame-control"]
+    rest = [paint(control_id) for control_id in control_ids]
+    assert rest[0] == rest[1] == rest[2]
 
-    def wait_until(predicate, timeout=20):
-        deadline = time.time() + timeout
-        last = ""
-        while time.time() < deadline:
-            last = capture()
-            if predicate(last):
-                return True, last
-            time.sleep(0.4)
-        return False, last
+    focus_paints = []
+    for control_id in control_ids:
+        browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", control_id)
+        assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", control_id) is True
+        focus_paints.append(paint(control_id))
+    assert focus_paints[0] == focus_paints[1] == focus_paints[2]
+    assert focus_paints[0] != rest[0]
 
+    hover_paints = []
+    for control_id in control_ids:
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+        hover_paints.append(paint(control_id))
+    assert hover_paints[0] == hover_paints[1] == hover_paints[2] == focus_paints[0]
+
+    glyphs = browser.execute_script(
+        """
+        const read = id => {
+          const element = document.getElementById(id);
+          const style = getComputedStyle(element, '::before');
+          return {
+            base: {position: style.position, width: style.width, height: style.height, radius: style.borderRadius},
+            centerX: parseFloat(style.left) / element.clientWidth,
+            centerY: parseFloat(style.top) / element.clientHeight,
+          };
+        };
+        return {detail: read('detail-close'), pane: read('pane-close')};
+        """
+    )
+    assert glyphs["detail"]["base"] == glyphs["pane"]["base"]
+    for glyph in glyphs.values():
+        assert abs(glyph["centerX"] - 0.5) <= 0.01
+        assert abs(glyph["centerY"] - 0.5) <= 0.01
+
+
+def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
+    page = tmp_path / "persistent-active-control-paint.html"
+    page.write_text(page_html("""
+      <button id="tab-meta" class="active"></button>
+      <div class="topbar-language-menu open"><button id="language" class="topbar-language"></button></div>
+      <button id="menu-icon" class="app-menu-ui-icon active"></button>
+      <button id="notify" class="notify-toggle active"></button>
+      <span id="session-state" class="session-state-badge session-state-yolo-approval"></span>
+      <button id="preferences-search" class="preferences-search-button"></button>
+      <div class="tmux-window-bar"><button id="tmux-window" class="tab tmux-window-button active"></button></div>
+      <div class="session-rename-actions"><button id="rename" class="session-rename-submit"></button></div>
+      <button id="info-preset" class="info-tree-preset active"></button>
+      <button id="finder-toggle" class="file-explorer-hidden-toggle active"></button>
+      <div class="file-editor-preview-zoom-toolbar"><button id="preview-zoom" aria-pressed="true"></button></div>
+      <div class="file-editor-codemirror" style="position:static;"><div class="cm-search"><label id="search-toggle"><input type="checkbox" checked></label></div></div>
+      <article id="pane-control-fixture" class="panel file-editor-panel" style="position:static;height:auto;display:block;padding:8px;">
+        <div class="tabs"><button id="pane-tab-pressed" class="tab active"></button></div>
+        <button id="attention-pressed" class="attention-toast-agent-button"></button>
+        <div class="file-editor-mode-control"><button id="legacy-mode-pressed" class="active"></button></div>
+        <button id="blame-pressed" class="file-editor-blame-panel" aria-pressed="true"></button>
+        <button id="diff-expand-pressed" class="file-editor-diff-expand-panel" aria-pressed="true"></button>
+        <div class="file-editor-mode-control-panel"><button id="mode-panel-pressed" class="active"></button></div>
+        <button id="gutter-pressed" class="file-editor-gutter-panel active"></button>
+        <button id="wrap-pressed" class="file-editor-wrap-panel" aria-pressed="true"></button>
+        <button id="find-pressed" class="file-editor-find-panel" aria-pressed="true"></button>
+        <button id="diff-pressed" class="file-editor-diff-panel" aria-pressed="true"></button>
+        <button id="toolbar-hover" class="file-editor-gutter-panel"></button>
+        <div class="file-editor-preview-find-panel" style="position:static;"><button id="preview-find-hover"></button></div>
+      </article>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const ids = ['tab-meta', 'language', 'menu-icon', 'notify', 'session-state', 'preferences-search', 'tmux-window', 'rename', 'info-preset', 'finder-toggle', 'preview-zoom', 'search-toggle'];
+        const paneIds = ['pane-tab-pressed', 'attention-pressed', 'legacy-mode-pressed', 'blame-pressed', 'diff-expand-pressed', 'mode-panel-pressed', 'gutter-pressed', 'wrap-pressed', 'find-pressed', 'diff-pressed'];
+        document.getElementById('tab-meta').id = 'tabMetaToggle';
+        const readPaint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const readTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          const probe = document.createElement('div');
+          probe.style.cssText = 'color:var(--active-control-text);background:var(--active-control-bg);border:1px solid var(--active-control-border)';
+          document.body.appendChild(probe);
+          const expected = readPaint(probe);
+          probe.remove();
+          const pane = document.getElementById('pane-control-fixture');
+          const paneProbe = document.createElement('button');
+          paneProbe.style.cssText = 'color:var(--pane-ctl-pressed-fg,var(--pane-tab-active-text));background:var(--pane-ctl-pressed-bg,var(--pane-tab-active-bg));border:1px solid var(--pane-ctl-pressed-border,var(--pane-tab-active-border))';
+          pane.appendChild(paneProbe);
+          const paneExpected = readPaint(paneProbe);
+          paneProbe.remove();
+          return {
+            expected,
+            paneExpected,
+            controls: Object.fromEntries(ids.map(id => {
+              const resolvedId = id === 'tab-meta' ? 'tabMetaToggle' : id;
+              return [id, readPaint(document.getElementById(resolvedId))];
+            })),
+            paneControls: Object.fromEntries(paneIds.map(id => [id, readPaint(document.getElementById(id))])),
+          };
+        };
+        return {dark: readTheme(false), light: readTheme(true)};
+        """
+    )
+    for theme in ("dark", "light"):
+        expected = metrics[theme]["expected"]
+        for control, paint in metrics[theme]["controls"].items():
+            assert paint == expected, {"theme": theme, "control": control, "paint": paint, "expected": expected}
+        for control, paint in metrics[theme]["paneControls"].items():
+            assert paint == metrics[theme]["paneExpected"], {"theme": theme, "control": control, "paint": paint, "expected": metrics[theme]["paneExpected"]}
+
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]); document.body.classList.toggle('editor-theme-light', arguments[0]);",
+            light,
+        )
+        hover_paints = {}
+        for control_id in ("toolbar-hover", "preview-find-hover"):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+            hover_paints[control_id] = browser.execute_script(
+                """
+                const control = document.getElementById(arguments[0]);
+                const pane = document.getElementById('pane-control-fixture');
+                const read = element => {
+                  const style = getComputedStyle(element);
+                  return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+                };
+                const probe = document.createElement('button');
+                probe.style.cssText = 'color:var(--editor-toolbar-control-hover-fg);background:var(--editor-toolbar-control-hover-bg);border:1px solid var(--editor-toolbar-control-hover-border)';
+                pane.appendChild(probe);
+                const expected = read(probe);
+                probe.remove();
+                return {actual: read(control), expected};
+                """,
+                control_id,
+            )
+        for control, paint in hover_paints.items():
+            assert paint["actual"] == paint["expected"], {"theme": theme, "control": control, **paint}
+
+
+def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(browser, tmp_path):
+    page = tmp_path / "shared-css-state-layout-owners.html"
+    page.write_text(page_html("""
+      <button id="hover-away" type="button">away</button>
+      <button id="server-reload" type="button" class="server-update-banner-reload">Reload</button>
+      <article class="panel" style="position:static;height:auto;width:320px;">
+        <button class="pane-tab"><span id="branch-inactive" class="ci-indicator branch-indicator">MAIN</span></button>
+      </article>
+      <article class="panel active-pane" style="position:static;height:auto;width:320px;">
+        <button class="pane-tab active"><span id="branch-active" class="ci-indicator branch-indicator">MAIN</span></button>
+      </article>
+      <div style="height:90px;"><section id="transcript-shell" class="transcript"><i></i><i></i><i></i></section></div>
+      <div style="height:90px;"><section id="summary-shell" class="summary"><i></i><i></i><i></i></section></div>
+      <section id="debug-scroll" class="js-debug-scroll" style="height:90px;"><i></i><i></i></section>
+      <section id="debug-events" class="js-debug-events-view" style="height:90px;"><i></i><i></i></section>
+      <label class="info-tree-search-control"><input id="info-search" value="info"></label>
+      <input id="history-search" class="search-history-input" value="history">
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+
+    metrics = browser.execute_script(
+        """
+        const paint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const expectedBranchPaint = element => {
+          const probe = document.createElement('span');
+          probe.style.cssText = 'color:var(--branch-indicator-text);background:var(--branch-indicator-bg);border:1px solid var(--branch-indicator-border)';
+          element.appendChild(probe);
+          const result = paint(probe);
+          probe.remove();
+          return result;
+        };
+        const layout = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {display: style.display, rows: style.gridTemplateRows, gap: style.gap, height: style.height, minHeight: style.minHeight, background: style.backgroundColor};
+        };
+        const readTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          const inactive = document.getElementById('branch-inactive');
+          const active = document.getElementById('branch-active');
+          return {
+            inactive: paint(inactive),
+            active: paint(active),
+            inactiveExpected: expectedBranchPaint(inactive),
+            activeExpected: expectedBranchPaint(active),
+          };
+        };
+        return {
+          dark: readTheme(false),
+          light: readTheme(true),
+          transcript: layout('transcript-shell'),
+          summary: layout('summary-shell'),
+          debugScroll: layout('debug-scroll'),
+          debugEvents: layout('debug-events'),
+        };
+        """
+    )
+    for theme in ("dark", "light"):
+        assert metrics[theme]["inactive"] == metrics[theme]["inactiveExpected"], metrics[theme]
+        assert metrics[theme]["active"] == metrics[theme]["activeExpected"], metrics[theme]
+        assert metrics[theme]["active"] == metrics[theme]["inactive"], metrics[theme]
+    assert metrics["dark"]["inactive"] != metrics["light"]["inactive"]
+    assert metrics["transcript"] == metrics["summary"]
+    assert metrics["debugScroll"] == metrics["debugEvents"]
+
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]);",
+            light,
+        )
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "hover-away")).perform()
+        rest = browser.execute_script(
+            """
+            const button = document.getElementById('server-reload');
+            const style = getComputedStyle(button);
+            const probe = document.createElement('button');
+            probe.style.cssText = 'color:var(--paint-white);background:var(--danger-strong);border:1px solid var(--danger-strong-hover)';
+            document.body.appendChild(probe);
+            const expected = getComputedStyle(probe);
+            const result = {
+              actual: {color: style.color, background: style.backgroundColor, border: style.borderTopColor},
+              expected: {color: expected.color, background: expected.backgroundColor, border: expected.borderTopColor},
+            };
+            probe.remove();
+            return result;
+            """
+        )
+        assert rest["actual"] == rest["expected"], {"theme": theme, **rest}
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "server-reload")).perform()
+        hover = browser.execute_script(
+            """
+            const button = document.getElementById('server-reload');
+            const style = getComputedStyle(button);
+            const probe = document.createElement('button');
+            probe.style.cssText = 'color:var(--paint-white);background:var(--danger-strong-hover);border:1px solid var(--danger-strong-border)';
+            document.body.appendChild(probe);
+            const expected = getComputedStyle(probe);
+            const result = {
+              actual: {color: style.color, background: style.backgroundColor, border: style.borderTopColor},
+              expected: {color: expected.color, background: expected.backgroundColor, border: expected.borderTopColor},
+              hovered: button.matches(':hover'),
+            };
+            probe.remove();
+            return result;
+            """
+        )
+        assert hover["hovered"] is True
+        assert hover["actual"] == hover["expected"], {"theme": theme, **hover}
+
+        focus_paints = []
+        for control_id in ("info-search", "history-search"):
+            browser.execute_script("document.getElementById(arguments[0]).focus()", control_id)
+            focus_paints.append(
+                browser.execute_script(
+                    """
+                    const control = document.getElementById(arguments[0]);
+                    const style = getComputedStyle(control);
+                    return {border: style.borderTopColor, shadow: style.boxShadow, outline: style.outlineStyle};
+                    """,
+                    control_id,
+                )
+            )
+        assert focus_paints[0] == focus_paints[1], {"theme": theme, "focus": focus_paints}
+
+
+def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tmp_path):
+    page = tmp_path / "shared-ellipsis-disabled-state.html"
+    page.write_text(page_html("""
+      <span id="share-banner" class="share-viewer-banner-text"></span>
+      <span id="menu-setting" class="app-menu-setting-label"></span>
+      <span id="status-label" class="status-indicator--label"></span>
+      <span id="diff-description" class="diff-ref-suggestion-description"></span>
+      <span id="preferences-title" class="preferences-section-title"></span>
+      <div id="client-perf" class="js-debug-client-perf-row"></div>
+      <span id="chart-summary" class="js-debug-chart-summary"></span>
+      <div class="js-debug-x-axis"><span id="x-axis"></span></div>
+      <div id="search-title" class="search-history-row-title"></div>
+      <div id="search-meta" class="search-history-row-meta"></div>
+      <div id="recent-paths" class="yoagent-recent-agent-paths"></div>
+      <div id="transcript-value" class="yoagent-transcript-value"></div>
+      <div id="compact-label" class="yoagent-compact-label"></div>
+      <div id="job-meta" class="yoagent-job-meta"></div>
+      <div id="job-text" class="yoagent-job-text"></div>
+      <div id="info-label-line" class="info-tree-group-label-line"></div>
+      <div id="info-label" class="info-tree-group-label"></div>
+      <button class="tmux-window-button"><span id="tmux-window-text" class="tmux-window-name-text"></span></button>
+      <span id="editor-title" class="file-editor-title-name"></span>
+      <div class="file-tree-row tabber-row"><span id="tabber-window-text" class="tabber-window-text"></span></div>
+      <div class="share-entry-heading"><strong id="share-heading"></strong></div>
+      <div class="share-url-primary-head"><span id="share-url"></span></div>
+      <div class="share-users-row"><span id="share-user"></span></div>
+      <div id="terminal-drop-row" class="terminal-drop-suggestion" style="width:130px;"><span class="terminal-drop-suggestion-combo">1</span><span id="terminal-drop-label" class="terminal-drop-suggestion-label">Insert this deliberately long terminal drop action label</span></div>
+      <div class="terminal-context-menu"><button id="context-disabled" disabled></button></div>
+      <div class="file-editor-preview-zoom-toolbar"><button id="zoom-disabled" disabled></button></div>
+      <button id="find-disabled" class="file-editor-find" disabled></button>
+      <div class="file-editor-preview-font-panel"><button id="font-disabled" disabled></button></div>
+      <button id="find-panel-disabled" class="file-editor-find-panel" disabled></button>
+      <button id="info-group-action" class="info-tree-group-label-action"></button>
+      <button id="info-leaf-action" class="info-tree-action-link"></button>
+      <span id="session-agent-cluster" class="agent-window-activity agent-window-activity--subwindow"><span class="agent-icon"><svg id="subwindow-agent-svg"></svg></span></span>
+      <span id="changes-agent-cluster" class="changes-file-agent"><span class="agent-icon"><svg id="changes-agent-svg"></svg></span></span>
+      <span id="file-agent-cluster" class="file-tree-agent"></span>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const ellipsisIds = ['share-banner', 'menu-setting', 'status-label', 'diff-description', 'preferences-title', 'client-perf', 'chart-summary', 'x-axis', 'tmux-window-text', 'search-title', 'search-meta', 'recent-paths', 'transcript-value', 'compact-label', 'job-meta', 'job-text', 'info-label-line', 'info-label', 'editor-title', 'tabber-window-text', 'share-heading', 'share-url', 'share-user', 'terminal-drop-label'];
+        const disabledIds = ['context-disabled', 'zoom-disabled', 'find-disabled', 'font-disabled', 'find-panel-disabled'];
+        return {
+          ellipsis: Object.fromEntries(ellipsisIds.map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {minWidth: style.minWidth, overflow: style.overflow, textOverflow: style.textOverflow, whiteSpace: style.whiteSpace}];
+          })),
+          disabled: Object.fromEntries(disabledIds.map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {opacity: style.opacity, cursor: style.cursor}];
+          })),
+          textActions: Object.fromEntries(['info-group-action', 'info-leaf-action'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {padding: style.padding, borderWidth: style.borderTopWidth, borderStyle: style.borderTopStyle, background: style.backgroundColor, textAlign: style.textAlign, fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight, cursor: style.cursor}];
+          })),
+          agentClusters: Object.fromEntries(['session-agent-cluster', 'changes-agent-cluster', 'file-agent-cluster'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {display: style.display, alignItems: style.alignItems, gap: style.gap, flexGrow: style.flexGrow, flexShrink: style.flexShrink, flexBasis: style.flexBasis, verticalAlign: style.verticalAlign}];
+          })),
+          agentSvgGeometry: Object.fromEntries(['subwindow-agent-svg', 'changes-agent-svg'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {width: style.width, height: style.height, flexBasis: style.flexBasis}];
+          })),
+          terminalDropGeometry: (() => {
+            const row = document.getElementById('terminal-drop-row').getBoundingClientRect();
+            const label = document.getElementById('terminal-drop-label');
+            const rect = label.getBoundingClientRect();
+            return {rowRight: row.right, labelRight: rect.right, clientWidth: label.clientWidth, scrollWidth: label.scrollWidth};
+          })(),
+        };
+        """
+    )
+    expected_ellipsis = {"minWidth": "0px", "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap"}
+    expected_disabled = {"opacity": "0.42", "cursor": "default"}
+    for control, state in metrics["ellipsis"].items():
+        assert state == expected_ellipsis, {"control": control, "state": state}
+    for control, state in metrics["disabled"].items():
+        assert state == expected_disabled, {"control": control, "state": state}
+    expected_text_action = {"padding": "0px", "borderWidth": "0px", "borderStyle": "none", "background": "rgba(0, 0, 0, 0)", "textAlign": "left", "fontFamily": metrics["textActions"]["info-group-action"]["fontFamily"], "fontSize": metrics["textActions"]["info-group-action"]["fontSize"], "fontWeight": metrics["textActions"]["info-group-action"]["fontWeight"], "lineHeight": metrics["textActions"]["info-group-action"]["lineHeight"], "cursor": "pointer"}
+    for control, state in metrics["textActions"].items():
+        assert state == expected_text_action, {"control": control, "state": state}
+    expected_agent_cluster = {"display": "inline-flex", "alignItems": "center", "gap": "2px", "flexGrow": "0", "flexShrink": "0", "flexBasis": "auto", "verticalAlign": "middle"}
+    for cluster, state in metrics["agentClusters"].items():
+        assert state == expected_agent_cluster, {"cluster": cluster, "state": state}
+    expected_agent_svg = {"width": "14px", "height": "14px", "flexBasis": "14px"}
+    for icon, geometry in metrics["agentSvgGeometry"].items():
+        assert geometry == expected_agent_svg, {"icon": icon, "geometry": geometry}
+    assert metrics["terminalDropGeometry"]["labelRight"] <= metrics["terminalDropGeometry"]["rowRight"] + 1
+    assert metrics["terminalDropGeometry"]["scrollWidth"] > metrics["terminalDropGeometry"]["clientWidth"]
+
+
+def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners(browser, tmp_path):
+    page = tmp_path / "danger-status-light-panel-paint.html"
+    page.write_text(page_html("""
+      <span id="approval" class="session-state-badge session-state-needs-approval"></span>
+      <span id="input" class="session-state-badge session-state-needs-input"></span>
+      <span id="failing" class="ci-indicator pr-status-failing"></span>
+      <span id="changes" class="ci-indicator pr-review-changes"></span>
+      <span id="pr-number" class="ci-indicator pr-number-chip">#86</span>
+      <section id="changes-toolbar" class="changes-toolbar"></section>
+      <section id="changes-repo" class="changes-repo-group"></section>
+      <section id="comparison" class="changes-comparison-head"></section>
+      <button id="standalone-refresh" class="changes-refresh">refresh</button>
+      <section id="file-explorer" class="file-explorer"></section>
+      <section id="file-tree-col" class="file-explorer-tree-col"></section>
+      <section id="finder-pane" class="file-explorer-pane"></section>
+      <section id="finder-tree" class="file-explorer-tree-panel"></section>
+      <section id="yoagent-chat" class="yoagent-chat"></section>
+      <article id="yoagent-message" class="yoagent-message"></article>
+      <article id="yoagent-assistant" class="yoagent-message assistant"></article>
+      <article id="yoagent-result" class="yoagent-message assistant yoagent-agent-result"></article>
+      <article id="yoagent-user" class="yoagent-message user"></article>
+      <div class="file-editor-codemirror"><div class="cm-search"><button id="cm-close" class="cm-dialog-close">×</button></div></div>
+      <section class="file-explorer-changes-panel">
+        <section id="embedded-comparison" class="changes-comparison-head"></section>
+        <button id="embedded-refresh" class="changes-refresh">refresh</button>
+      </section>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const paint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const probePaint = cssText => {
+          const probe = document.createElement('div');
+          probe.style.cssText = cssText;
+          document.body.appendChild(probe);
+          const result = {color: getComputedStyle(probe).color, background: getComputedStyle(probe).backgroundColor, border: getComputedStyle(probe).borderTopColor};
+          probe.remove();
+          return result;
+        };
+        const statusIds = ['approval', 'input', 'failing', 'changes'];
+        document.documentElement.classList.add('status-pulse-disabled');
+        document.body.classList.add('theme-dark');
+        document.body.classList.remove('editor-theme-light');
+        const darkStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
+        const expectedDangerDark = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const darkOwnedPaint = {
+          finder: ['finder-pane', 'finder-tree'].map(paint),
+          yoagent: ['yoagent-chat', 'yoagent-message', 'yoagent-assistant', 'yoagent-result', 'yoagent-user'].map(paint),
+        };
+        document.body.classList.remove('theme-dark');
+        document.body.classList.add('theme-light');
+        document.body.classList.add('editor-theme-light');
+        const lightStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
+        const expectedDangerLight = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const surfaceIds = ['changes-toolbar', 'changes-repo', 'comparison', 'file-explorer', 'file-tree-col'];
+        const lightSurfaces = Object.fromEntries(surfaceIds.map(id => [id, paint(id)]));
+        const expectedSurface = probePaint('color:var(--text);background:var(--panel);border:1px solid var(--line)');
+        const refreshes = {standalone: paint('standalone-refresh'), embedded: paint('embedded-refresh')};
+        const expectedRefreshes = {
+          standalone: probePaint('color:var(--text);background:var(--paint-white);border:1px solid var(--line)'),
+          embedded: probePaint('color:var(--muted);background:transparent;border:1px solid var(--line)'),
+        };
+        const lightOwnedPaint = {
+          prNumber: paint('pr-number'),
+          expectedPrNumber: probePaint('color:var(--paint-white);background:var(--pr-number-chip-bg);border:1px solid var(--pr-number-chip-bg)'),
+          finder: ['finder-pane', 'finder-tree'].map(paint),
+          expectedFinder: probePaint('color:var(--text);background:var(--panel);border:1px solid var(--line)'),
+          yoagent: ['yoagent-chat', 'yoagent-message'].map(paint),
+          expectedYoagent: probePaint('color:var(--pc-control-hover-fg);background:var(--panel);border:1px solid var(--line)'),
+          assistant: paint('yoagent-assistant'),
+          expectedAssistant: probePaint('color:var(--pc-control-hover-fg);background:color-mix(in srgb,var(--active-control-soft-bg) 78%,var(--paint-white));border:1px solid var(--active-control-border)'),
+          result: paint('yoagent-result'),
+          expectedResult: probePaint('color:var(--pc-control-hover-fg);background:color-mix(in srgb,var(--accent-gold) 10%,var(--paint-white));border:1px solid var(--active-control-border)'),
+          resultStartBorder: getComputedStyle(document.getElementById('yoagent-result')).borderInlineStartColor,
+          expectedResultStartBorder: probePaint('border:1px solid var(--accent-gold)').border,
+          user: paint('yoagent-user'),
+          expectedUser: probePaint('color:var(--pc-control-hover-fg);background:var(--panel);border:1px solid var(--link-soft)'),
+          userEndBorder: getComputedStyle(document.getElementById('yoagent-user')).borderInlineEndColor,
+          expectedUserEndBorder: probePaint('border:1px solid var(--link-soft)').border,
+          close: {color: getComputedStyle(document.getElementById('cm-close')).color, background: getComputedStyle(document.getElementById('cm-close')).backgroundColor},
+          expectedClose: {color: probePaint('color:var(--lt-text)').color, background: 'rgba(0, 0, 0, 0)'},
+        };
+        return {
+          darkStatuses,
+          darkOwnedPaint,
+          lightStatuses,
+          expectedDangerDark,
+          expectedDangerLight,
+          lightSurfaces,
+          expectedSurface,
+          embeddedComparison: {...paint('embedded-comparison'), borderWidth: getComputedStyle(document.getElementById('embedded-comparison')).borderTopWidth},
+          refreshes,
+          expectedRefreshes,
+          lightOwnedPaint,
+        };
+        """
+    )
+    for status, paint in metrics["darkStatuses"].items():
+        assert paint == metrics["expectedDangerDark"], {"theme": "dark", "status": status, "paint": paint}
+    for status in ("approval", "input"):
+        assert metrics["lightStatuses"][status] == metrics["expectedDangerLight"], {"theme": "light", "status": status, "paint": metrics["lightStatuses"][status]}
+    assert metrics["lightStatuses"]["failing"] == metrics["lightStatuses"]["changes"]
+    assert metrics["lightStatuses"]["failing"] != metrics["expectedDangerLight"]
+    for surface, paint in metrics["lightSurfaces"].items():
+        assert paint == metrics["expectedSurface"], {"surface": surface, "paint": paint, "expected": metrics["expectedSurface"]}
+    assert metrics["embeddedComparison"]["background"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["embeddedComparison"]["borderWidth"] == "0px", metrics
+    assert metrics["refreshes"] == metrics["expectedRefreshes"], metrics
+    assert all(paint["background"] != "rgba(0, 0, 0, 0)" for paint in metrics["darkOwnedPaint"]["yoagent"][:4]), metrics
+    owned = metrics["lightOwnedPaint"]
+    assert owned["prNumber"] == owned["expectedPrNumber"], owned
+    assert all(paint["color"] == owned["expectedFinder"]["color"] and paint["background"] == owned["expectedFinder"]["background"] for paint in owned["finder"]), owned
+    assert all(paint == owned["expectedYoagent"] for paint in owned["yoagent"]), owned
+    assert owned["assistant"] == owned["expectedAssistant"], owned
+    assert owned["result"] == owned["expectedResult"], owned
+    assert owned["resultStartBorder"] == owned["expectedResultStartBorder"], owned
+    assert owned["user"] == owned["expectedUser"], owned
+    assert owned["userEndBorder"] == owned["expectedUserEndBorder"], owned
+    assert owned["close"] == owned["expectedClose"], owned
+
+
+def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser, tmp_path):
+    page = tmp_path / "inactive-marker-vanilla-code-paint.html"
+    page.write_text(page_html("""
+      <span id="session-marker" class="session-yolo-marker inactive"></span>
+      <button class="pane-tab active"><span id="pane-marker" class="session-yolo-marker inactive"></span></button>
+      <div class="file-editor-preview-pane vanilla-preview-body"><code id="pane-code"></code><pre id="pane-pre"></pre></div>
+      <div class="file-editor-preview-pane-panel vanilla-preview-body"><code id="popout-code"></code><pre id="popout-pre"></pre></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><code id="editor-code"></code><pre id="editor-pre"></pre></div></div>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const paint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const probePaint = cssText => {
+          const probe = document.createElement('div');
+          probe.style.cssText = cssText;
+          document.body.appendChild(probe);
+          const value = {color: getComputedStyle(probe).color, background: getComputedStyle(probe).backgroundColor, border: getComputedStyle(probe).borderTopColor};
+          probe.remove();
+          return value;
+        };
+        const markerTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          return {
+            expected: probePaint('color:var(--agent-inactive-marker-text);background:var(--agent-inactive-marker-bg);border:1px solid var(--agent-inactive-marker-border)'),
+            session: paint('session-marker'),
+            pane: paint('pane-marker'),
+          };
+        };
+        const markers = {dark: markerTheme(false), light: markerTheme(true)};
+        document.body.classList.add('editor-theme-light');
+        const vanilla = {
+          expected: probePaint('color:var(--markdown-html-light-text);background:var(--lt-panel);border:1px solid var(--lt-line)'),
+          surfaces: Object.fromEntries(['pane-code', 'pane-pre', 'popout-code', 'popout-pre', 'editor-code', 'editor-pre'].map(id => [id, paint(id)])),
+        };
+        return {markers, vanilla};
+        """
+    )
+    for theme, state in metrics["markers"].items():
+        assert state["session"] == state["expected"], {"theme": theme, **state}
+        assert state["pane"] == state["expected"], {"theme": theme, **state}
+    for surface, paint in metrics["vanilla"]["surfaces"].items():
+        assert paint == metrics["vanilla"]["expected"], {"surface": surface, "paint": paint, "expected": metrics["vanilla"]["expected"]}
+
+
+def test_code_surfaces_headers_and_tab_text_share_computed_owners(browser, tmp_path):
+    page = tmp_path / "code-header-tab-text-owners.html"
+    page.write_text(page_html("""
+      <div class="file-editor-content">
+        <div class="markdown-body">
+          <code id="markdown-inline">inline</code>
+          <blockquote class="markdown-alert markdown-alert-warning"><code id="alert-inline">alert</code></blockquote>
+          <table bgcolor="#ffffff"><tr><td><code id="table-inline">table</code></td></tr></table>
+        </div>
+        <div class="file-editor-raw-panel"><span id="source-inline" class="md-code">source</span></div>
+      </div>
+      <div class="file-editor-preview-pane vanilla-preview-body"><pre><code id="pane-nested-code"><span id="pane-nested-child">pane</span></code></pre></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><pre><code id="editor-nested-code"><span id="editor-nested-child">editor</span></code></pre></div></div>
+      <div id="action-code-block" class="yoagent-action-text">action</div>
+      <div class="yoagent-chat"><div class="markdown-body"><pre id="chat-code-block">chat</pre></div></div>
+      <div id="finder-head" class="file-explorer-head">Finder</div>
+      <div class="file-explorer-changes-panel"><div id="changes-head" class="file-explorer-changes-head">Modified files</div></div>
+      <button class="pane-tab file-editor-item"><span id="file-tab-text" class="session-button-dir">file.py</span></button>
+      <button class="pane-tab"><span id="detail-tab-text" class="session-button-dir tab-inline-detail">detail</span></button>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const codePaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor, radius: style.borderRadius};
+        };
+        const headerPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderBottomColor};
+        };
+        const resetPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const inlineTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          return {
+            markdown: codePaint('markdown-inline'),
+            source: codePaint('source-inline'),
+            alert: codePaint('alert-inline'),
+            table: codePaint('table-inline'),
+            finder: headerPaint('finder-head'),
+            changes: headerPaint('changes-head'),
+          };
+        };
+        const themes = {dark: inlineTheme(false), light: inlineTheme(true)};
+        const nested = Object.fromEntries(['pane-nested-code', 'pane-nested-child', 'editor-nested-code', 'editor-nested-child'].map(id => [id, resetPaint(id)]));
+        const codeBlocks = {action: resetPaint('action-code-block'), chat: resetPaint('chat-code-block')};
+        const flex = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {grow: style.flexGrow, shrink: style.flexShrink, basis: style.flexBasis, minWidth: style.minWidth, maxWidth: style.maxWidth};
+        };
+        return {themes, nested, codeBlocks, flex: {file: flex('file-tab-text'), detail: flex('detail-tab-text')}};
+        """
+    )
+    for theme, state in metrics["themes"].items():
+        assert state["markdown"] == state["source"], {"theme": theme, **state}
+        assert state["alert"] == state["table"], {"theme": theme, **state}
+        assert state["finder"] == state["changes"], {"theme": theme, **state}
+    assert metrics["themes"]["dark"]["markdown"] != metrics["themes"]["light"]["markdown"]
+    assert metrics["codeBlocks"]["action"] == metrics["codeBlocks"]["chat"]
+    nested_values = list(metrics["nested"].values())
+    assert all(value == nested_values[0] for value in nested_values), metrics["nested"]
+    assert nested_values[0]["background"] == "rgba(0, 0, 0, 0)"
+    assert nested_values[0]["border"] == "rgba(0, 0, 0, 0)"
+    assert metrics["flex"]["file"] == metrics["flex"]["detail"] == {"grow": "1", "shrink": "1", "basis": "auto", "minWidth": "0px", "maxWidth": "none"}
+
+
+def test_syntax_token_colors_share_one_owner_across_renderers(browser, tmp_path):
+    cases = [
+        ("keyword", "keyword", "keyword"),
+        ("string", "string", "string"),
+        ("comment", "comment", "comment"),
+        ("number", "number", "number"),
+        ("atom", "meta", "constant"),
+        ("function", "title", "function"),
+        ("type", "type", "type"),
+        ("variable", "variable", "variable"),
+        ("property", "property", "property"),
+        ("tag", "tag", "tag"),
+        ("invalid", "deletion", "invalid"),
+    ]
+    hljs = "".join(f'<span id="hljs-{token}" class="hljs-{hljs_class}">{token}</span>' for token, hljs_class, _code_class in cases)
+    markdown = "".join(f'<span id="markdown-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
+    codemirror = "".join(f'<span id="codemirror-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
+    page = tmp_path / "shared-syntax-token-colors.html"
+    page.write_text(
+        page_html(
+            f'<div class="markdown-body"><pre><code>{hljs}{markdown}<span id="markdown-control" class="code-control">control</span></code></pre></div>'
+            f'<div class="cm-content">{codemirror}<span id="codemirror-control" class="code-control">control</span></div>'
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const tokens = arguments[0];
+        const read = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, weight: style.fontWeight};
+        };
+        return Object.fromEntries(tokens.map(token => [token, {
+          hljs: token === 'control' ? null : read(`hljs-${token}`),
+          markdown: read(`markdown-${token}`),
+          codemirror: read(`codemirror-${token}`),
+        }]));
+        """,
+        [token for token, _hljs_class, _code_class in cases] + ["control"],
+    )
+    for token, renderer_values in metrics.items():
+        colors = {value["color"] for value in renderer_values.values() if value is not None}
+        assert len(colors) == 1, {"token": token, **renderer_values}
+    assert metrics["function"]["markdown"]["weight"] == metrics["function"]["codemirror"]["weight"] == "700"
+    assert metrics["keyword"]["markdown"]["weight"] != metrics["keyword"]["codemirror"]["weight"]
+    assert metrics["control"]["markdown"]["weight"] != metrics["control"]["codemirror"]["weight"]
+
+
+def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser, tmp_path):
+    page = tmp_path / "shared-link-drag-action-owners.html"
+    page.write_text(page_html("""
+      <button id="checked-menu" class="app-menu-command" data-checked="true">checked</button>
+      <div id="changes-panel" class="file-explorer-changes-panel"><div id="changes-toolbar" class="changes-toolbar"><button id="changes-focus">focus</button><button id="changes-refresh" class="changes-refresh">refresh</button></div></div>
+      <div class="file-editor-preview-pane vanilla-preview-body" style="position:static;"><h2 id="pane-heading">Pane heading</h2><strong id="pane-strong">Pane strong</strong></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><h2 id="editor-heading">Editor heading</h2><strong id="editor-strong">Editor strong</strong></div></div>
+      <div class="popover-value"><a id="popover-link" href="#">popover</a><a id="popover-merged" class="pr-status-merged" href="#">merged</a></div>
+      <a id="branch-link" class="branch-link" href="#">branch</a>
+      <div class="branch-meta"><a id="branch-merged" class="pr-status-merged" href="#">merged</a></div>
+      <div class="meta"><a id="meta-link" href="#">meta</a><a id="meta-merged" class="pr-status-merged" href="#">merged</a></div>
+      <div class="summary-context"><a id="summary-link" href="#">summary</a><a id="summary-merged" class="pr-status-merged" href="#">merged</a></div>
+      <button id="info-link" class="info-tree-group-label-action">info</button>
+      <div id="terminal-drag" class="terminal path-drag-over" style="position:static;width:40px;height:20px;"></div><div id="panel-drag" class="panel path-drag-over" style="position:static;width:40px;height:20px;"></div>
+      <select id="sort-action" class="file-explorer-sort-select"><option>A-Z</option></select>
+      <button id="hidden-action" class="file-explorer-hidden-toggle">hidden</button>
+      <button id="header-action" class="file-explorer-header-action">header</button>
+      <button id="compact-action" class="yoagent-compact-action">compact</button>
+      <button id="confirm-action" class="yoagent-job-confirm">confirm</button>
+      <button id="cancel-action" class="yoagent-job-cancel">cancel</button>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const paint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const outline = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, offset: style.outlineOffset};
+        };
+        const linkPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, decoration: style.textDecorationLine};
+        };
+        const focusLinkPaint = id => {
+          const node = document.getElementById(id);
+          node.focus({focusVisible: true});
+          return {...linkPaint(id), focusVisible: node.matches(':focus-visible')};
+        };
+        const themed = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          document.getElementById('changes-focus').focus({focusVisible: true});
+          const genericLinkIds = ['popover-link', 'meta-link', 'summary-link'];
+          const mergedLinkIds = ['popover-merged', 'branch-merged', 'meta-merged', 'summary-merged'];
+          const value = {
+            menu: paint('checked-menu'),
+            toolbar: paint('changes-toolbar'),
+            headings: [paint('pane-heading'), paint('editor-heading')],
+            strong: [paint('pane-strong'), paint('editor-strong')],
+            genericLinks: genericLinkIds.map(linkPaint),
+            mergedLinks: mergedLinkIds.map(linkPaint),
+          };
+          value.focusedGenericLinks = genericLinkIds.map(focusLinkPaint);
+          value.focusedMergedLinks = mergedLinkIds.map(focusLinkPaint);
+          return value;
+        };
+        const themes = {dark: themed(false), light: themed(true)};
+        const focus = id => {
+          const node = document.getElementById(id);
+          node.focus({focusVisible: true});
+          const style = getComputedStyle(node);
+          return {...paint(id), outline: style.outlineStyle, decoration: style.textDecorationLine, focusVisible: node.matches(':focus-visible')};
+        };
+        return {
+          themes,
+          branchRest: linkPaint('branch-link'),
+          infoLink: focus('info-link'),
+          drag: [outline('terminal-drag'), outline('panel-drag')],
+          finderActions: ['sort-action', 'hidden-action', 'header-action', 'changes-refresh'].map(focus),
+          yoagentActions: ['compact-action', 'confirm-action', 'cancel-action'].map(focus),
+        };
+        """
+    )
+    assert metrics["themes"]["light"]["headings"][0] == metrics["themes"]["light"]["headings"][1], metrics["themes"]["light"]
+    assert metrics["themes"]["light"]["strong"][0] == metrics["themes"]["light"]["strong"][1], metrics["themes"]["light"]
+    assert metrics["themes"]["dark"]["menu"] != metrics["themes"]["light"]["menu"]
+    assert metrics["themes"]["dark"]["toolbar"] != metrics["themes"]["light"]["toolbar"]
+    for theme, values in metrics["themes"].items():
+        assert all(value == values["genericLinks"][0] for value in values["genericLinks"]), {theme: values["genericLinks"]}
+        assert all(value["color"] == values["mergedLinks"][0]["color"] for value in values["mergedLinks"]), {theme: values["mergedLinks"]}
+        assert values["mergedLinks"][0]["color"] != values["genericLinks"][0]["color"], {theme: values}
+        assert all(value["focusVisible"] and value["color"] == values["focusedGenericLinks"][0]["color"] for value in values["focusedGenericLinks"]), {theme: values["focusedGenericLinks"]}
+        assert all(value["focusVisible"] and value["color"] == values["focusedMergedLinks"][0]["color"] for value in values["focusedMergedLinks"]), {theme: values["focusedMergedLinks"]}
+        assert values["focusedMergedLinks"][0]["color"] != values["focusedGenericLinks"][0]["color"], {theme: values}
+    assert metrics["branchRest"]["color"] != metrics["themes"]["light"]["genericLinks"][0]["color"]
+    assert metrics["drag"][0] == metrics["drag"][1]
+    assert all(value["focusVisible"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
+    assert all(value["color"] == metrics["finderActions"][0]["color"] and value["border"] == metrics["finderActions"][0]["border"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
+    assert all(value["focusVisible"] for value in metrics["yoagentActions"]), metrics["yoagentActions"]
+    assert all(value["color"] == metrics["yoagentActions"][0]["color"] and value["border"] == metrics["yoagentActions"][0]["border"] and value["outline"] == metrics["yoagentActions"][0]["outline"] for value in metrics["yoagentActions"]), metrics["yoagentActions"]
+    hover_paints = {}
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]);",
+            light,
+        )
+        hover_paints[theme] = {}
+        for family, link_id in (("generic", "popover-link"), ("merged", "popover-merged")):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", link_id)).perform()
+            hover_paints[theme][family] = browser.execute_script("const s=getComputedStyle(document.getElementById(arguments[0])); return {color:s.color, decoration:s.textDecorationLine};", link_id)
+    info_hover = {"color": metrics["infoLink"]["color"], "decoration": metrics["infoLink"]["decoration"]}
+    for theme, families in hover_paints.items():
+        assert families["generic"]["color"] == metrics["themes"][theme]["focusedGenericLinks"][0]["color"], json.dumps({theme: families}, indent=2)
+        assert families["merged"]["color"] == metrics["themes"][theme]["focusedMergedLinks"][0]["color"], json.dumps({theme: families}, indent=2)
+        assert families["merged"]["color"] != families["generic"]["color"], json.dumps({theme: families}, indent=2)
+    assert info_hover == hover_paints["light"]["generic"]
+
+
+def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(browser, tmp_path):
+    page = tmp_path / "tab-interaction-shared-paint.html"
+    page.write_text(page_html("""
+      <article class="panel active-pane" style="position:static;height:auto;width:760px;">
+        <button id="regular" type="button" class="pane-tab"><span class="session-button-name">regular</span></button>
+        <button id="compact" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action"><span class="session-button-name">compact</span></button>
+        <button id="regular-active" type="button" class="pane-tab active"><span class="session-button-name">regular active</span></button>
+        <button id="compact-active" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action active"><span class="session-button-name">compact active</span></button>
+        <button id="missing-active" type="button" class="pane-tab file-missing active"><span class="session-button-name">missing active</span></button>
+      </article>
+      <div class="yolomux-dockview">
+        <div class="dv-tab dv-active-tab"><button id="dock-active" type="button" class="pane-tab dockview-pane-tab"><span class="session-button-name">dock active</span></button></div>
+      </div>
+      <article class="panel" style="position:static;height:auto;width:760px;"><button id="plain-inactive" type="button" class="pane-tab">plain</button></article>
+      <article class="panel typing-ready-pane" style="position:static;height:auto;width:760px;"><button id="typing-inactive" type="button" class="pane-tab">typing</button></article>
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
+
+    def paint(control_id):
+        return browser.execute_script(
+            """
+            const style = getComputedStyle(document.getElementById(arguments[0]));
+            return {background: style.backgroundColor, border: style.borderTopColor};
+            """,
+            control_id,
+        )
+
+    def assert_interaction_parity():
+        hover = []
+        for control_id in ("regular", "compact"):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+            hover.append(paint(control_id))
+        assert hover[0] == hover[1]
+
+        focus = []
+        for control_id in ("regular", "compact"):
+            browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", control_id)
+            assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", control_id) is True
+            focus.append(paint(control_id))
+        assert focus[0] == focus[1] == hover[0]
+
+    assert_interaction_parity()
+    browser.execute_script("document.body.classList.add('theme-light')")
+    assert_interaction_parity()
+
+    active = browser.execute_script(
+        """
+        const read = id => {
+          const tab = document.getElementById(id);
+          return {tab: getComputedStyle(tab).color, child: getComputedStyle(tab.querySelector('.session-button-name')).color};
+        };
+        return ['regular-active', 'compact-active', 'dock-active', 'missing-active'].map(read);
+        """
+    )
+    assert all(item["child"] == item["tab"] for item in active)
+    assert active[0]["tab"] == active[1]["tab"] == active[2]["tab"]
+    assert active[3]["tab"] != active[0]["tab"]
+
+    inactive_backgrounds = browser.execute_script(
+        """
+        return ['regular', 'plain-inactive', 'typing-inactive'].map(id => {
+          const tab = document.getElementById(id);
+          const probe = document.createElement('span');
+          probe.style.background = 'var(--pane-bar-bg)';
+          tab.parentElement.appendChild(probe);
+          const expected = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return {actual: getComputedStyle(tab).backgroundColor, expected};
+        });
+        """
+    )
+    assert all(item["actual"] == item["expected"] for item in inactive_backgrounds)
+
+
+def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,__prefs__&layout=row@50(left,right)&tabs=left:1;right:__prefs__",
+        sessions=["1"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof updatePanelHeader === 'function'
+              && typeof cycleSessionRepoDisplay === 'function'
+              && document.getElementById('panel-1') !== null;
+            """
+        )
+    )
+    initial = browser.execute_script(
+        """
+        const repos = [1, 2, 3, 4].map(index => ({
+          root: `/home/test/repo-${index}`,
+          cwd: `/home/test/repo-${index}`,
+          branch: `branch-${index}`,
+          dirty_count: index,
+          primary: index === 1,
+        }));
+        const info = {
+          session: '1',
+          selected_pane: {current_path: repos[0].root},
+          panes: [],
+          project: {git: {...repos[0]}, repos},
+        };
+        transcriptMeta.sessions['1'] = info;
+        cycleSessionRepoDisplay('1', info, 1);
+        updatePanelHeader('1', info);
+        return document.querySelector('[data-repo-chip="1"]')?.textContent.trim() || '';
+        """
+    )
+    assert initial == "2/4"
+
+    assert browser.execute_script(
+        "setFocusedPanelItem('__prefs__', {userInitiated: true}); return document.getElementById('panel-1').classList.contains('focused-pane');"
+    ) is False
+    browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]').click()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "1/4"
+    assert browser.execute_script("return document.getElementById('panel-1').classList.contains('focused-pane')") is True
+
+    browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]').click()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "2/4"
+
+    browser.find_element("css selector", '[data-repo-chip="1"]').click()
+    rows = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_elements("css selector", ".repo-chip-menu [data-repo-chip-open]")
+    )
+    assert len(rows) == 4
+    browser.find_element("css selector", '[data-repo-chip-open="/home/test/repo-3"]').click()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "3/4"
+
+
+def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmux(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return typeof sessionPaneIsAlternateScreen === 'function'
+              && document.querySelector('#term-1 .xterm') !== null
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const container = document.getElementById('term-1');
+        const screen = container.querySelector('.xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const forwarded = [];
+        screen.addEventListener('wheel', event => {
+          if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+            forwarded.push({deltaY: event.deltaY, deltaMode: event.deltaMode});
+          }
+        });
+        const signalState = alternateOn => ({
+          ok: true,
+          sessions: {'1': {}},
+          windows: [{
+            key: '1:0', session: '1', window_index: '0', active: true,
+            panes: [{
+              window_key: '1:0', session: '1', window_index: '0', pane_index: '0',
+              target: '%11', pane_id: '%11', current_command: alternateOn ? 'claude' : 'bash',
+              active: true, alternate_on: alternateOn, pid: 1234, dead: false,
+            }],
+          }],
+        });
+
+        tmuxSignalState = signalState(true);
+        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
+        const mouseForwarded = forwarded.slice();
+        for (let index = 0; index < 5; index += 1) {
+          screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 7, deltaMode: 0, bubbles: true, cancelable: true}));
+        }
+        const touchpadForwarded = forwarded.slice(mouseForwarded.length);
+
+        tmuxSignalState = signalState(false);
+        const beforeNormal = forwarded.length;
+        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
+        setTimeout(() => {
+          const tmuxScrollFrames = socket.sent
+            .map(message => {
+              try { return JSON.parse(message); } catch (_error) { return null; }
+            })
+            .filter(message => message?.type === 'tmux-scroll');
+          done({
+            mouseForwarded,
+            touchpadForwarded,
+            normalForwarded: forwarded.slice(beforeNormal),
+            tmuxScrollFrames,
+            alternateAfterSwitch: sessionPaneIsAlternateScreen('1'),
+            errors: window.__bootErrors || [],
+            rejections: window.__bootRejections || [],
+          });
+        }, 60);
+        """
+    )
+    assert metrics["mouseForwarded"] == [{"deltaY": 1, "deltaMode": 1}] * 3, metrics
+    assert metrics["touchpadForwarded"] == [{"deltaY": 1, "deltaMode": 1}], metrics
+    assert metrics["normalForwarded"] == [], metrics
+    assert metrics["tmuxScrollFrames"] == [{"type": "tmux-scroll", "direction": "down", "lines": 3}], metrics
+    assert metrics["alternateAfterSwitch"] is False, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_path):
+    page = tmp_path / "shared-activity-cadence.html"
+    page.write_text(
+        page_html(
+            f"""
+            <button id="info-refresh" class="info-refresh loading">Refresh</button>
+            <div class="actions"><button id="refreshMeta" class="loading">Refresh all</button></div>
+            <span id="info-spinner" class="info-loading-spinner"></span>
+            <div class="file-tree-row kind-dir loading-children"><span id="finder-spinner" class="file-tree-icon"></span></div>
+            <div id="command-thinking" class="command-palette-status">Thinking</div>
+            <div class="yoagent-message assistant streaming"><span id="agent-thinking" class="yoagent-message-role">Agent</span></div>
+            """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const animation = (selector, pseudo) => {
+          const style = getComputedStyle(document.querySelector(selector), pseudo);
+          return {name: style.animationName, duration: style.animationDuration};
+        };
+        return {
+          token: getComputedStyle(document.documentElement).getPropertyValue('--motion-activity-duration').trim(),
+          infoRefresh: animation('#info-refresh', '::before'),
+          globalRefresh: animation('#refreshMeta', '::before'),
+          infoSpinner: animation('#info-spinner'),
+          finderSpinner: animation('#finder-spinner', '::before'),
+          commandThinking: animation('#command-thinking', '::before'),
+          agentThinking: animation('#agent-thinking', '::after'),
+        };
+        """
+    )
+    assert metrics["token"] == "900ms", metrics
+    for key in ("infoRefresh", "globalRefresh", "infoSpinner", "finderSpinner"):
+        assert metrics[key] == {"name": "metadata-refresh-spin", "duration": "0.9s"}, metrics
+    for key in ("commandThinking", "agentThinking"):
+        assert metrics[key] == {"name": "command-palette-thinking", "duration": "0.9s"}, metrics
+
+
+def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_path):
+    page = tmp_path / "responsive-ui-type-scale.html"
+    page.write_text(
+        page_html(
+            """
+            <div id="axis" class="js-debug-y-axis">10</div>
+            <textarea id="debug-log" class="js-debug-log">11</textarea>
+            <div id="drag-title" class="pane-drag-image-title">12</div>
+            <div id="agent-state" class="yoagent-message-state">11</div>
+            <span id="popout-icon" class="file-editor-icon file-editor-icon-popout-preview"></span>
+            <div class="drop-action-result"><pre id="drop-result">12</pre></div>
+            """
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const read = () => ({
+          axis: getComputedStyle(document.getElementById('axis')).fontSize,
+          debugLog: getComputedStyle(document.getElementById('debug-log')).fontSize,
+          dragTitle: getComputedStyle(document.getElementById('drag-title')).fontSize,
+          agentState: getComputedStyle(document.getElementById('agent-state')).fontSize,
+          popoutIcon: getComputedStyle(document.getElementById('popout-icon'), '::after').fontSize,
+          dropResult: getComputedStyle(document.getElementById('drop-result')).fontSize,
+        });
+        const defaults = read();
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        return {defaults, scaled: read()};
+        """
+    )
+    assert metrics["defaults"] == {
+        "axis": "10px",
+        "debugLog": "11px",
+        "dragTitle": "12px",
+        "agentState": "11px",
+        "popoutIcon": "10px",
+        "dropResult": "12px",
+    }, metrics
+    assert metrics["scaled"] == {
+        "axis": "15px",
+        "debugLog": "16px",
+        "dragTitle": "17px",
+        "agentState": "16px",
+        "popoutIcon": "15px",
+        "dropResult": "17px",
+    }, metrics
+
+
+def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path):
+    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
+    specs = {
+        "codex": {
+            "session": f"yb-codex-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+            "user_input": "touch /tmp/yolomux-mock-approval",
+            "prompt_glyph": "›",
+            "question": "Would you like to run the following command?",
+            "expected_command": "touch /tmp/yolomux-mock-approval",
+        },
+        "claude": {
+            "session": f"yb-claude-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+            "user_input": "sleep 10",
+            "prompt_glyph": "❯",
+            "question": "Do you want to proceed?",
+            "expected_command": None,
+        },
+    }
+    sessions = [spec["session"] for spec in specs.values()]
+    tmux_runtime = None
     app = None
     try:
-        created = tmux_cmd(
-            "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+        tmux_runtime = start_isolated_tmux_runtime(
+            monkeypatch,
+            tmp_path,
+            session_commands={
+                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock"
+                for agent, spec in specs.items()
+            },
+            columns=120,
+            rows=40,
         )
-        assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
-        booted, pane = wait_until(lambda text: "❯" in text or "›" in text)
-        assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
-        tmux_cmd("send-keys", "-t", f"{session}:", user_input, "Enter")
-        prompted, pane = wait_until(lambda text: user_input in text and ("Would you like to run the following command?" in text or "Do you want to proceed?" in text))
-        assert prompted, f"{agent}.py --mock did not render an approval prompt after `{user_input}`:\n{pane}"
+        booted, panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            sessions,
+            lambda captures: all(spec["prompt_glyph"] in captures[spec["session"]] for spec in specs.values()),
+        )
+        assert booted, f"mock agents did not boot to their input prompts:\n{panes}"
 
-        app = TmuxWebtermApp([session], dangerously_yolo=False)
-        payload = app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
-        assert payload["prompt"]["visible"] is True
-        assert payload["screen"]["key"] == "approval"
-        assert payload["prompt"]["agent"] == agent
-        if agent == "codex":
-            assert payload["prompt"]["command"] == user_input
-        assert payload["prompt"]["signature"]
+        for spec in specs.values():
+            run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{spec['session']}:", spec["user_input"], "Enter")
+        prompted, panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            sessions,
+            lambda captures: all(
+                spec["user_input"] in captures[spec["session"]]
+                and ("Would you like to run the following command?" in captures[spec["session"]] or "Do you want to proceed?" in captures[spec["session"]])
+                for spec in specs.values()
+            ),
+        )
+        assert prompted, f"mock agents did not render approval prompts:\n{panes}"
+
+        app = TmuxWebtermApp(sessions, dangerously_yolo=False)
+        payloads = {}
+        for agent, spec in specs.items():
+            payload = app.auto_approve_session_status(spec["session"], capture_bare_session_when_roster=True)
+            payloads[spec["session"]] = payload
+            assert payload["prompt"]["visible"] is True
+            assert payload["screen"]["key"] == "approval"
+            assert payload["prompt"]["agent"] == agent
+            assert payload["prompt"]["text"] == spec["question"]
+            assert payload["prompt"]["command"] == spec["expected_command"]
+            assert payload["prompt"]["signature"]
 
         auto_approve_payload = {
-            "session_order": [session],
-            "sessions": {session: payload},
+            "session_order": sessions,
+            "sessions": payloads,
             "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
         }
         load_live_runtime_boot_fixture(
             browser,
             tmp_path,
-            sessions=[session],
-            transcript_sessions={session: {"agents": [{"kind": agent}], "panes": []}},
+            sessions=sessions,
+            transcript_sessions={spec["session"]: {"agents": [{"kind": agent}], "panes": []} for agent, spec in specs.items()},
             auto_approve_payload=auto_approve_payload,
         )
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const session = arguments[0];
-                return document.getElementById(`panel-${session}`)
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '1'
+                const sessions = arguments[0];
+                return sessions.every(session => document.getElementById(`panel-${session}`))
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '2'
                   && document.querySelector('#topbarActivity .topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention');
                 """,
-                session,
+                sessions,
             )
         )
         metrics = browser.execute_script(
             """
-            const session = arguments[0];
-            const panel = document.getElementById(`panel-${session}`);
-            const tab = document.getElementById(`panel-tab-${session}`);
+            const sessions = arguments[0];
             const topbar = document.getElementById('topbarActivity');
+            const sessionState = session => {
+              const panel = document.getElementById(`panel-${session}`);
+              const tab = document.getElementById(`panel-tab-${session}`);
+              const badge = tab?.querySelector('[data-prompt-attention-clear]');
+              return {
+                badgeText: badge?.textContent || '',
+                badgePresent: !!badge,
+                tabAttention: tab?.classList.contains('needs-attention') || false,
+                panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              };
+            };
             const beforeSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
-            const badge = tab?.querySelector('[data-prompt-attention-clear]');
             const before = {
               statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
-              badgeText: badge?.textContent || '',
-              badgePresent: !!badge,
-              tabAttention: tab?.classList.contains('needs-attention') || false,
-              panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
               topbarText: topbar?.textContent || '',
               topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
               topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator') || false,
               topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention') || false,
               topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('attention-pulse') || false,
             };
-            acknowledgeTerminalAttentionFromUserAction(session, 0, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
+            sessions.forEach(session => acknowledgeTerminalAttentionFromUserAction(session, 0, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true}));
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
             const immediate = {
-              badgeText: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
-              tabAttention: tab?.classList.contains('needs-attention') || false,
-              panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
               topbarText: topbar?.textContent || '',
               topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
-              acknowledgedStatusPresent: !!document.querySelector('.agent-window-status-dot.agent-window-status-dot--acknowledging.status-indicator--acknowledged'),
-              acknowledgedStatusPulse: document.querySelector('.agent-window-status-dot.agent-window-status-dot--acknowledging')?.classList.contains('attention-pulse') || false,
+              acknowledgedStatusCount: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.status-indicator--acknowledged').length,
+              acknowledgedStatusPulses: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.attention-pulse').length,
               newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
             };
             return {before, immediate};
             """,
-            session,
+            sessions,
         )
         assert metrics["before"]["statusPulseDisabled"] is True
-        assert metrics["before"]["badgeText"] == ""
-        assert metrics["before"]["badgePresent"] is False
-        assert metrics["before"]["tabAttention"] is True
-        assert metrics["before"]["panelNeedsApproval"] is True
-        assert metrics["before"]["topbarAskCount"] == "1"
+        for session in sessions:
+            assert metrics["before"]["sessions"][session] == {
+                "badgeText": "",
+                "badgePresent": False,
+                "tabAttention": True,
+                "panelNeedsApproval": True,
+            }
+        assert metrics["before"]["topbarAskCount"] == "2"
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is False
-        assert metrics["immediate"]["badgeText"] == ""
-        assert metrics["immediate"]["tabAttention"] is False
-        assert metrics["immediate"]["panelNeedsApproval"] is False
-        assert metrics["immediate"]["topbarAskCount"] == "1"
-        assert metrics["immediate"]["acknowledgedStatusPresent"] is True
-        assert metrics["immediate"]["acknowledgedStatusPulse"] is False
+        for session in sessions:
+            assert metrics["immediate"]["sessions"][session] == {
+                "badgeText": "",
+                "badgePresent": False,
+                "tabAttention": False,
+                "panelNeedsApproval": False,
+            }
+        assert metrics["immediate"]["topbarAskCount"] == "2"
+        assert metrics["immediate"]["acknowledgedStatusCount"] >= 2
+        assert metrics["immediate"]["acknowledgedStatusPulses"] == 0
         assert metrics["immediate"]["newInputFrames"] == 0
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const session = arguments[0];
-                const tab = document.getElementById(`panel-tab-${session}`);
-                const panel = document.getElementById(`panel-${session}`);
-                return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
-                  && !tab?.classList.contains('needs-attention')
-                  && !panel?.classList.contains('needs-exec-pane')
+                const sessions = arguments[0];
+                return sessions.every(session => {
+                  const tab = document.getElementById(`panel-tab-${session}`);
+                  const panel = document.getElementById(`panel-${session}`);
+                  return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
+                    && !tab?.classList.contains('needs-attention')
+                    && !panel?.classList.contains('needs-exec-pane');
+                })
                   && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0';
                 """,
-                session,
+                sessions,
             )
         )
     finally:
         if app is not None:
-            stop = getattr(getattr(app, "control_server", None), "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception:
-                    pass
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-        shutil.rmtree(sock_base, ignore_errors=True)
+            app.control_server.stop()
+        stop_isolated_tmux_runtime(tmux_runtime)
         cleanup_isolated_browser_runtime_paths(paths)
+
+
+def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, tmp_path):
+    page = tmp_path / "topbar-status-actions.html"
+    page.write_text(page_html("""
+      <div id="token-topbar" class="topbar"></div>
+      <button id="owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
+      <button id="activity" class="topbar-activity topbar-status-surface">1 running</button>
+      <button id="attention" class="topbar-activity topbar-status-surface has-attention">1 attention</button>
+      <div id="latency" class="latency-meter topbar-status-surface">10 ms</div>
+      <span id="view-chip" class="command-palette-view-chip">preview</span>
+      <button id="normal-action" class="preferences-inline-action">normal</button>
+      <div class="preferences-setting-advisory"><button id="advisory-action" class="preferences-inline-action">advisory</button></div>
+      <div id="neutral" style="width:20px;height:20px"></div>
+    """, extra_css="#token-topbar { transition: none; }"), encoding="utf-8")
+    browser.get(page.as_uri())
+
+    def read(element_id):
+        return browser.execute_script(
+            """
+            const node = document.getElementById(arguments[0]);
+            const style = getComputedStyle(node);
+            return {
+              display: style.display,
+              flex: style.flex,
+              alignItems: style.alignItems,
+              height: style.height,
+              fontSize: style.fontSize,
+              cursor: style.cursor,
+              whiteSpace: style.whiteSpace,
+              color: style.color,
+              background: style.backgroundColor,
+              border: style.border,
+            };
+            """,
+            element_id,
+        )
+
+    def hover(element_id):
+        browser.execute_script("document.activeElement?.blur()")
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", element_id)).perform()
+        return read(element_id)
+
+    def focus(element_id):
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+        browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", element_id)
+        assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", element_id) is True
+        return read(element_id)
+
+    for theme in ("theme-dark", "theme-light"):
+        browser.execute_script("document.body.className = arguments[0]", theme)
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+        owner = read("owner")
+        activity = read("activity")
+        for property_name in ("display", "flex", "alignItems", "height", "fontSize", "cursor", "whiteSpace"):
+            assert owner[property_name] == activity[property_name], (theme, property_name, owner, activity)
+        assert owner["display"] == "inline-flex"
+        latency = read("latency")
+        assert latency["display"] == "inline-grid"
+        assert latency["cursor"] == "auto"
+        for property_name in ("background", "border"):
+            assert len({owner[property_name], activity[property_name], latency[property_name]}) == 1, (theme, property_name, owner, activity, latency)
+        token_metrics = browser.execute_script(
+            """
+            const paint = id => {
+              const style = getComputedStyle(document.getElementById(id));
+              return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+            };
+            const probe = document.createElement('div');
+            document.body.appendChild(probe);
+            const value = (property, token) => {
+              probe.style.cssText = '';
+              probe.style.setProperty(property, `var(${token})`);
+              const style = getComputedStyle(probe);
+              return property === 'background' ? style.backgroundColor : property === 'border-color' ? style.borderTopColor : style.color;
+            };
+            const metrics = {
+              topbar: paint('token-topbar'),
+              chip: paint('view-chip'),
+              normalAction: paint('normal-action'),
+              advisoryAction: paint('advisory-action'),
+              panel2: value('background', '--panel2'),
+              strip: value('background', '--pane-tab-strip-bg'),
+              text: value('color', '--text'),
+              softBg: value('background', '--active-control-soft-bg'),
+              softBorder: value('border-color', '--active-control-soft-border'),
+              active: value('color', '--active-control-bg'),
+              good: value('color', '--good'),
+              panel: value('background', '--panel'),
+            };
+            probe.remove();
+            return metrics;
+            """
+        )
+        assert token_metrics["topbar"]["background"] == token_metrics["panel2"], (theme, token_metrics)
+        assert token_metrics["chip"] == {"color": token_metrics["text"], "background": token_metrics["softBg"], "border": token_metrics["softBorder"]}, (theme, token_metrics)
+        assert token_metrics["normalAction"]["color"] == token_metrics["active"], (theme, token_metrics)
+        if theme == "theme-light":
+            assert token_metrics["advisoryAction"]["color"] == token_metrics["good"], token_metrics
+            assert token_metrics["advisoryAction"]["background"] == token_metrics["panel"], token_metrics
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "token-topbar")).perform()
+        assert read("token-topbar")["background"] == token_metrics["strip"], (theme, token_metrics, read("token-topbar"))
+        assert hover("owner") == focus("owner")
+        assert hover("activity") == focus("activity")
+        assert hover("attention") == focus("attention")
+
+    hidden_display = browser.execute_script(
+        "const node = document.getElementById('owner'); node.hidden = true; return getComputedStyle(node).display;"
+    )
+    assert hidden_display == "none"
 
 
 def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
@@ -3883,96 +5164,51 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     assert "STATS leader: devhost:8002" in metrics["title"]
     assert "SESS leader: devhost:8002" in metrics["title"]
 
-    surface_metrics = browser.execute_script(
-        """
-        document.body.classList.remove('theme-dark');
-        document.body.classList.add('theme-light');
-        const read = id => {
-          const node = document.getElementById(id);
-          const style = getComputedStyle(node);
-          return {classes: node.className, background: style.backgroundColor, border: style.border};
-        };
-        return {owner: read('topbarOwnerStatus'), activity: read('topbarActivity'), latency: read('latencyMeter')};
-        """
-    )
-    assert all("topbar-status-surface" in surface["classes"] for surface in surface_metrics.values()), surface_metrics
-    assert len({surface["background"] for surface in surface_metrics.values()}) == 1, surface_metrics
-    assert len({surface["border"] for surface in surface_metrics.values()}) == 1, surface_metrics
-
-
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
     if os.environ.get("YOLOMUX_REAL_AGENT_SMOKE") != "1":
         pytest.skip("set YOLOMUX_REAL_AGENT_SMOKE=1 to run real Claude/Codex prompt smoke")
-    tmux_binary = shutil.which("tmux")
     codex_binary = shutil.which("codex")
     claude_binary = shutil.which("claude")
-    if not tmux_binary:
-        pytest.skip("tmux is not installed")
     if not codex_binary:
         pytest.skip("codex is not installed")
     if not claude_binary:
         pytest.skip("claude is not installed")
 
     paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    sock_base = Path("/tmp") / f"yoask-real-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
     sessions = {
         "codex": f"yr-codex-{os.getpid()}-{uuid.uuid4().hex[:6]}",
         "claude": f"yr-claude-{os.getpid()}-{uuid.uuid4().hex[:6]}",
     }
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-
-    def tmux_cmd(*args, timeout=8):
-        return subprocess.run(
-            [tmux_binary, "-S", str(socket_path), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-
-    def capture(session):
-        return tmux_cmd("capture-pane", "-p", "-t", f"{session}:").stdout or ""
-
-    def wait_until(session, predicate, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
-        while time.time() < deadline:
-            last = capture(session)
-            if predicate(last):
-                return True, last
-            time.sleep(0.4)
-        return False, last
+    tmux_runtime = None
 
     def wait_for_codex_sleep_prompt(session, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
         extra_submit_sent = False
-        while time.time() < deadline:
-            last = capture(session)
-            if "Would you like to run the following" in last and "sleep 10" in last:
-                return True, last
-            if not extra_submit_sent and "› Run sleep 10" in last:
-                tmux_cmd("send-keys", "-t", f"{session}:", "C-m")
+        def prompted(panes):
+            nonlocal extra_submit_sent
+            text = panes[session]
+            if "Would you like to run the following" in text and "sleep 10" in text:
+                return True
+            if not extra_submit_sent and "› Run sleep 10" in text:
+                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
                 extra_submit_sent = True
-            time.sleep(0.4)
-        return False, last
+            return False
+        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
+        return ready, panes.get(session, "")
 
     def wait_for_claude_plan_prompt(session, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
         extra_submit_sent = False
-        while time.time() < deadline:
-            last = capture(session)
-            if "Claude has written up a plan" in last and "Would you like to proceed?" in last:
-                return True, last
-            if not extra_submit_sent and "Add a temporary line to README.md" in last:
-                tmux_cmd("send-keys", "-t", f"{session}:", "C-m")
+        def prompted(panes):
+            nonlocal extra_submit_sent
+            text = panes[session]
+            if "Claude has written up a plan" in text and "Would you like to proceed?" in text:
+                return True
+            if not extra_submit_sent and "Add a temporary line to README.md" in text:
+                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
                 extra_submit_sent = True
-            time.sleep(0.4)
-        return False, last
+            return False
+        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
+        return ready, panes.get(session, "")
 
     app = None
     server = None
@@ -3983,13 +5219,28 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             f"--ask-for-approval untrusted --sandbox read-only -C {REPO_ROOT}"
         )
         claude_command = f"cd {REPO_ROOT} && exec claude --permission-mode plan --safe-mode"
-        for session, command in ((sessions["codex"], codex_command), (sessions["claude"], claude_command)):
-            created = tmux_cmd("new-session", "-d", "-s", session, "-x", "120", "-y", "40", command, timeout=10)
-            assert created.returncode == 0, f"tmux new-session failed for {session}: {created.stderr or created.stdout}"
-
-        codex_ready, codex_pane = wait_until(sessions["codex"], lambda text: "›" in text or "Codex" in text, timeout=45)
+        tmux_runtime = start_isolated_tmux_runtime(
+            monkeypatch,
+            tmp_path,
+            session_commands={sessions["codex"]: codex_command, sessions["claude"]: claude_command},
+            columns=120,
+            rows=40,
+        )
+        codex_ready, codex_panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            [sessions["codex"]],
+            lambda panes: "›" in panes[sessions["codex"]] or "Codex" in panes[sessions["codex"]],
+            timeout=45,
+        )
+        codex_pane = codex_panes.get(sessions["codex"], "")
         assert codex_ready, f"Codex did not reach an input prompt:\n{codex_pane}"
-        claude_ready, claude_pane = wait_until(sessions["claude"], lambda text: "❯" in text or "Claude Code" in text, timeout=45)
+        claude_ready, claude_panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            [sessions["claude"]],
+            lambda panes: "❯" in panes[sessions["claude"]] or "Claude Code" in panes[sessions["claude"]],
+            timeout=45,
+        )
+        claude_pane = claude_panes.get(sessions["claude"], "")
         assert claude_ready, f"Claude did not reach an input prompt:\n{claude_pane}"
 
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
@@ -4029,11 +5280,11 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         assert initial_ui["ask"] == 0, initial_ui
         assert initial_ui["badges"] == ["", ""], initial_ui
 
-        tmux_cmd("send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
+        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
         codex_prompted, codex_pane = wait_for_codex_sleep_prompt(sessions["codex"])
         assert codex_prompted, f"Codex did not render the real sleep approval prompt:\n{codex_pane}"
 
-        tmux_cmd("send-keys", "-t", f"{sessions['claude']}:", "Add a temporary line to README.md, then wait for approval before editing", "Enter")
+        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['claude']}:", "Add a temporary line to README.md, then wait for approval before editing", "Enter")
         claude_prompted, claude_pane = wait_for_claude_plan_prompt(sessions["claude"])
         assert claude_prompted, f"Claude did not render the real plan approval prompt:\n{claude_pane}"
 
@@ -4172,20 +5423,8 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         if server is not None and thread is not None:
             stop_browser_share_server(server, thread)
         elif app is not None:
-            stop = getattr(getattr(app, "control_server", None), "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception:
-                    pass
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-        shutil.rmtree(sock_base, ignore_errors=True)
+            app.control_server.stop()
+        stop_isolated_tmux_runtime(tmux_runtime)
         cleanup_isolated_browser_runtime_paths(paths)
 
 
@@ -4950,11 +6189,11 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
     page = tmp_path / "yoinfo-badges-and-trailing-metadata.html"
     page.write_text(
         page_html(
-            """
+            f"""
             <script>document.body.className = 'theme-dark';</script>
             <div class="info-tree-record" style="width: 760px"><div class="info-tree-record-main">
               <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span id="tab-value" class="info-tree-field-value">8001</span></div>
-              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span id="window-value" class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button id="window-button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">0:claude</span></span></button><span id="window-pid" class="info-tree-ai-pid">(pid=1234)</span><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span id="window-value" class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button id="window-button" class="tab tmux-window-button"><span class="tmux-window-name-label">{_working_agent_glyph_html("claude", "yoinfo-agent", subwindow=True)}<span class="tmux-window-name-text">0:claude</span></span></button><span id="window-pid" class="info-tree-ai-pid">(pid=1234)</span><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span></span></span></div>
               <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span id="branch-value" class="info-tree-field-value"><span class="info-tree-value-text">master</span><span id="branch-time" class="info-tree-meta-updated">Git commit 3 hours ago</span></span></div>
               <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><span>#80 parser work</span> <span id="draft-badge" class="ci-indicator tab-symbol pr-status-draft">DRAFT</span></span></div>
             </div></div>
@@ -4973,6 +6212,9 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
         };
         const badge = document.getElementById('draft-badge');
         const style = getComputedStyle(badge);
+        const agentIcon = document.getElementById('yoinfo-agent');
+        const agentIconStyle = getComputedStyle(agentIcon);
+        const agentWrapStyle = getComputedStyle(agentIcon.closest('.agent-window-activity'));
         return {
           tabTop: document.getElementById('tab-value').getBoundingClientRect().top,
           windowTop: document.getElementById('window-value').getBoundingClientRect().top,
@@ -4983,6 +6225,10 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
           badgeClasses: badge.className,
           badgeBackground: style.backgroundColor,
           badgeBorder: style.borderTopColor,
+          agentIconSizeToken: agentWrapStyle.getPropertyValue('--agent-window-icon-size').trim(),
+          agentIconWidth: agentIconStyle.width,
+          agentIconMinWidth: agentIconStyle.minWidth,
+          agentIconHeight: agentIconStyle.height,
         };
         """
     )
@@ -4991,6 +6237,8 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
     assert metrics["branchRightInset"] <= 1, metrics
     assert metrics["windowRightInset"] <= 1, metrics
     assert 0 <= metrics["windowPidOffset"] <= 8, metrics
+    assert metrics["agentIconSizeToken"] == "14px", metrics
+    assert metrics["agentIconWidth"] == metrics["agentIconMinWidth"] == metrics["agentIconHeight"] == "14px", metrics
     assert "ci-indicator" in metrics["badgeClasses"] and "tab-symbol" in metrics["badgeClasses"], metrics
     assert metrics["badgeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
@@ -5889,14 +7137,14 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         assert metrics["rejections"] == [], metrics
 
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
-        ActionChains(browser).move_to_element(first_command).perform()
+        fast_pointer_actions(browser).move_to_element(first_command).perform()
         hover = WebDriverWait(browser, 5).until(
             lambda _driver: (state if (state := menu_metrics(menu_id))["activeCommandCount"] >= 1 else False)
         )
         assert hover["activeCommandCount"] >= 1, hover
 
     browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
-    ActionChains(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
     switched = WebDriverWait(browser, 5).until(
         lambda _driver: (state if (state := menu_metrics("view"))["visible"] else False)
     )
@@ -6511,22 +7759,21 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
 
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):
-    load_live_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=__info__,__prefs__,1&layout=row@34(left,row@50(mid,right))&tabs=left:__info__;mid:__prefs__;right:1",
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            "return document.querySelector('.info-list') !== null && document.querySelector('.preferences-scroll') !== null"
-        )
-    )
+    page = tmp_path / "info-preferences-scrollbars.html"
+    page.write_text(page_html("""
+      <article id="info-panel" class="panel fixture-panel"><div class="info-list fixture-scroll"><div class="fixture-tall"></div></div></article>
+      <article id="preferences-panel" class="panel fixture-panel"><div class="preferences-scroll fixture-scroll"><div class="fixture-tall"></div></div></article>
+      <div id="neutral" style="width:20px;height:20px"></div>
+    """, extra_css="""
+      .fixture-panel { display: block; width: 240px; height: 120px; }
+      .fixture-scroll { height: 100%; overflow: auto; }
+      .fixture-tall { height: 900px; }
+    """), encoding="utf-8")
+    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const info = document.querySelector('.info-list');
         const prefs = document.querySelector('.preferences-scroll');
-        info.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
-        prefs.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
         const probe = document.createElement('div');
         probe.style.background = 'var(--pane-scrollbar-thumb)';
         document.body.appendChild(probe);
@@ -6558,26 +7805,28 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
     def wait_thumb(selector, expected):
         WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
 
-    browser.execute_script("document.querySelector('.info-list')?.closest('.panel')?.classList.add('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
+    browser.execute_script("document.getElementById('info-panel').classList.add('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
     wait_thumb(".info-list", metrics["accent"])
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
     browser.execute_script(
         """
-        document.querySelector('.info-list')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane');
-        document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.add('active-pane', 'focused-pane');
+        document.getElementById('info-panel').classList.remove('active-pane', 'focused-pane');
+        document.getElementById('preferences-panel').classList.add('active-pane', 'focused-pane');
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     wait_thumb(".preferences-scroll", metrics["accent"])
     wait_thumb(".info-list", metrics["neutral"])
 
-    browser.execute_script("document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    browser.execute_script("document.getElementById('preferences-panel').classList.remove('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+    wait_thumb(".preferences-scroll", metrics["neutral"])
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
     wait_thumb(".info-list", metrics["neutral"])
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
@@ -6798,6 +8047,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
             maskHeight: maskStyle.height,
             maskBg: maskStyle.backgroundColor,
             maskPointerEvents: maskStyle.pointerEvents,
+            maskZ: Number.parseInt(maskStyle.zIndex, 10),
             actionsPosition: actionsStyle.position,
             actionsZ: Number.parseInt(actionsStyle.zIndex, 10),
             actionElementId: actionElement ? actionElement.id : '',
@@ -6857,10 +8107,10 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["maskHeight"] == "27px", metrics
     assert metrics["maskBg"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["maskPointerEvents"] == "none", metrics
+    assert metrics["maskZ"] == 2, metrics
     assert metrics["actionsZ"] > metrics["prZ"], metrics
     assert metrics["actionElementId"] == "info-tree-actions" or "YO!info controls" in metrics["actionText"], metrics
-    assert metrics["branchZ"] > metrics["rootZ"], metrics
-    assert metrics["prZ"] > metrics["branchZ"], metrics
+    assert [metrics["rootZ"], metrics["branchZ"], metrics["prZ"]] == [4, 5, 6], metrics
     assert 0 <= metrics["treeTopDelta"] <= 6, metrics
     assert metrics["recordBorderWidth"] == "1px", metrics
     assert metrics["recordBorderColor"] != "rgba(0, 0, 0, 0)", metrics
@@ -7544,7 +8794,7 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
     )
     assert "error" not in setup, setup
     content = browser.find_element("css selector", ".file-editor-panel .cm-content")
-    ActionChains(browser).context_click(content).perform()
+    fast_pointer_actions(browser).context_click(content).perform()
     after = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -7775,7 +9025,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab("__prefs__")).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab("__prefs__")).click().perform()
     after_prefs = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -7795,7 +9045,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
     assert after_prefs["capturedSnapshot"] is True, after_prefs
     assert abs(after_prefs["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
@@ -7904,7 +9154,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
     after_other = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -7921,7 +9171,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
     )
     assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
@@ -8055,7 +9305,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
     after_other = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -8072,7 +9322,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
     )
     assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
@@ -8160,7 +9410,7 @@ def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path
 
     def click_external_link(selector, expected_path):
         handles_before = set(browser.window_handles)
-        ActionChains(browser).move_to_element(browser.find_element("css selector", selector)).click().perform()
+        fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", selector)).click().perform()
         WebDriverWait(browser, 3).until(lambda driver: len(set(driver.window_handles) - handles_before) == 1)
         new_handle = next(iter(set(browser.window_handles) - handles_before))
         browser.switch_to.window(new_handle)
@@ -8208,20 +9458,20 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
         WebDriverWait(browser, 2).until(lambda _driver: background(selector) == expected)
 
     load_topbar_font_fixture(browser, tmp_path)
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     tokens = theme_tokens()
     wait_background("#topbar-fixture", tokens["neutral"])
-    ActionChains(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
     wait_background("#topbar-fixture", tokens["accent"])
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     wait_background("#topbar-fixture", tokens["neutral"])
 
     load_finder_click_toolbar_fixture(browser, tmp_path)
     tokens = theme_tokens()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    ActionChains(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["accent"])
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
 
     activate_finder_diff_fixture(browser)
@@ -8244,7 +9494,7 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
     assert abs(repo_caret_metrics["caretFontSize"] - repo_caret_metrics["titleFontSize"]) <= 0.5, repo_caret_metrics
     assert repo_caret_metrics["caretWidth"] <= repo_caret_metrics["titleFontSize"] * 1.4, repo_caret_metrics
     assert repo_caret_metrics["titleHeight"] > 0, repo_caret_metrics
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
     wait_background("#modified-files-panel .changes-toolbar", tokens["accent"])
     wait_background("#modified-files-repo-head", tokens["accent"])
@@ -8290,12 +9540,12 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     assert overflow["tree"]
 
     wait_thumb(".file-explorer-tree-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", accent)
     browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
 
     activate_finder_diff_fixture(browser)
@@ -8314,12 +9564,12 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     assert overflow["differ"]
     wait_thumb("#modified-files-panel", neutral)
     browser.execute_script("document.getElementById('finder-panel')?.classList.add('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", accent)
     browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
 
 
@@ -8371,7 +9621,7 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         return {hoverBg, hoverBorder};
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
     row_metrics = browser.execute_script(
         """
         const row = document.getElementById('collapsed-dir');
@@ -8421,6 +9671,43 @@ def test_finder_sync_current_file_reuses_selected_row_colors(browser, tmp_path):
         assert metrics[theme]["currentNameColor"] == metrics[theme]["selectedNameColor"], metrics
         assert metrics[theme]["currentBg"] == metrics[theme]["selectedBg"], metrics
         assert metrics[theme]["currentShadow"] == metrics[theme]["selectedShadow"], metrics
+
+    browser.execute_script(
+        """
+        const row = document.createElement('div');
+        row.id = 'tabber-hover-row';
+        row.className = 'file-tree-row tabber-row kind-file';
+        row.innerHTML = '<span class="file-tree-icon">T</span><span class="file-tree-name">Tabber row</span>';
+        document.querySelector('.file-explorer-tree-panel').appendChild(row);
+        """
+    )
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "tabber-hover-row")).perform()
+    hover_metrics = browser.execute_script(
+        """
+        const read = theme => {
+          document.body.classList.remove('theme-dark', 'theme-light');
+          document.body.classList.add(theme);
+          const row = getComputedStyle(document.getElementById('tabber-hover-row'));
+          const probe = document.createElement('div');
+          probe.style.background = 'var(--file-hover-bg)';
+          probe.style.borderColor = 'var(--file-hover-border)';
+          document.body.appendChild(probe);
+          const expected = getComputedStyle(probe);
+          const result = {
+            background: row.backgroundColor,
+            shadow: row.boxShadow,
+            expectedBackground: expected.backgroundColor,
+            expectedBorder: expected.borderColor,
+          };
+          probe.remove();
+          return result;
+        };
+        return {dark: read('theme-dark'), light: read('theme-light')};
+        """
+    )
+    for theme in ("dark", "light"):
+        assert hover_metrics[theme]["background"] == hover_metrics[theme]["expectedBackground"], hover_metrics
+        assert hover_metrics[theme]["expectedBorder"] in hover_metrics[theme]["shadow"], hover_metrics
 
 
 def test_finder_differ_status_badges_share_one_column(browser, tmp_path):
@@ -9146,16 +10433,16 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert z_indexes["contextMenu"] > z_indexes["imagePreview"]
     assert z_indexes["contextMenu"] > z_indexes["tabPopover"]
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize')).opacity") == "1"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom')).backgroundColor") != "rgba(0, 0, 0, 0)"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close')).opacity") == "1"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close')).opacity") == "1"
 
     tree_metrics = browser.execute_script(

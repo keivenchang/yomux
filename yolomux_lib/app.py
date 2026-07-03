@@ -239,6 +239,14 @@ ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
+
+
+@dataclass
+class MetadataBadgeRecord:
+    signature: dict[str, str]
+    pulse_until: dict[str, float]
+
+
 ATTENTION_ACK_MAX_KEYS = 4096
 ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
 ATTENTION_INSTANCE_MAX_ENTRIES = 2048
@@ -984,6 +992,12 @@ class PendingInputHeartbeat:
     ts: float
 
 
+@dataclass
+class BackgroundRefreshEventLogRecord:
+    count: int = 0
+    last_emit_count: int = 0
+
+
 def session_files_batch_worker_count(count: int) -> int:
     return max(1, min(SESSION_FILES_BATCH_MAX_WORKERS, count))
 
@@ -1577,8 +1591,7 @@ class TmuxWebtermApp:
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_running = False
         self.metadata_badge_lock = threading.Lock()
-        self.metadata_badge_signatures: dict[str, dict[str, str]] = {}
-        self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
+        self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
         self.stats_sample_lock = threading.Lock()
         self.stats_sample_last_monotonic: float | None = None
         self.stats_sample_last_process_time: float | None = None
@@ -1618,8 +1631,7 @@ class TmuxWebtermApp:
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
         self.background_refresh_event_log_lock = threading.Lock()
-        self.background_refresh_event_log_counts: dict[tuple[str, str], int] = {}
-        self.background_refresh_event_log_last_emit_counts: dict[tuple[str, str], int] = {}
+        self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -1702,6 +1714,8 @@ class TmuxWebtermApp:
         self.yoagent_summary_worker_lock = threading.Lock()
         self.yoagent_summary_worker_running = False
         self.yoagent_summary_first_launch_started = False
+        self.update_check_thread: threading.Thread | None = None
+        self._update_last_target: str | None = None
         self.load_metadata_badge_state()
         self.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
@@ -5469,10 +5483,33 @@ class TmuxWebtermApp:
                 **user_message_payload("update.result.assetsUnavailable", assets_error),
             }
         try:
-            subprocess.run(["python3", "tools/static_build.py"], cwd=root,
-                           capture_output=True, text=True, timeout=120, check=False)
-        except Exception:
-            pass
+            static_build = subprocess.run(
+                ["python3", "tools/static_build.py"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            diagnostic = f"static build failed: {exc}"[:400]
+            return {
+                "ok": False,
+                "dryrun": False,
+                "restarting": False,
+                "plan": plan,
+                **user_message_payload("update.result.blocked", diagnostic),
+            }
+        if static_build.returncode != 0:
+            build_error = (static_build.stderr or static_build.stdout or "static build failed").strip()[:360]
+            diagnostic = f"static build failed: {build_error}"[:400]
+            return {
+                "ok": False,
+                "dryrun": False,
+                "restarting": False,
+                "plan": plan,
+                **user_message_payload("update.result.blocked", diagnostic),
+            }
         restarting = self._spawn_self_restart()
         diagnostic = "updated; restarting now" if restarting else "updated; restart spawn failed; restart the server manually"
         key = "update.result.restarting" if restarting else "update.result.restartFailed"
@@ -5555,6 +5592,13 @@ class TmuxWebtermApp:
             logging.warning("self-update restart spawn failed: %s", exc)
             return False
 
+    def publish_update_notification_if_available(self) -> None:
+        status = self.update_status_payload(dryrun=False)
+        target = status.get("target")
+        if status.get("available") and status.get("notify") and target and target != self._update_last_target:
+            self._update_last_target = target
+            self.publish_client_event("update_available", status, trigger="update-check")
+
     def update_check_loop(self) -> None:
         # Re-reads settings every iteration so the notification threshold takes effect without a
         # restart. When disabled, idles cheaply. Publishes update_available only when the available
@@ -5565,13 +5609,9 @@ class TmuxWebtermApp:
                 time.sleep(60)
                 continue
             try:
-                status = self.update_status_payload(dryrun=False)
-                target = status.get("target")
-                if status.get("available") and status.get("notify") and target and target != getattr(self, "_update_last_target", None):
-                    self._update_last_target = target
-                    self.publish_client_event("update_available", status, trigger="update-check")
-            except Exception:
-                pass
+                self.publish_update_notification_if_available()
+            except Exception as exc:
+                logging.exception("update check failed: %s", exc)
             interval_minutes = section.get("check_interval_minutes", 60)
             try:
                 interval = max(1.0, float(interval_minutes)) * 60.0
@@ -5580,7 +5620,7 @@ class TmuxWebtermApp:
             time.sleep(interval)
 
     def start_update_check_thread(self) -> bool:
-        if getattr(self, "update_check_thread", None) is not None:
+        if self.update_check_thread is not None:
             return False
         worker = threading.Thread(target=self.update_check_loop, name="update-check", daemon=True)
         self.update_check_thread = worker
@@ -8236,13 +8276,14 @@ class TmuxWebtermApp:
     ) -> dict[str, Any] | None:
         key = (event_type, role)
         with self.background_refresh_event_log_lock:
-            count = self.background_refresh_event_log_counts.get(key, 0) + 1
-            self.background_refresh_event_log_counts[key] = count
+            record = self.background_refresh_event_log_records.setdefault(key, BackgroundRefreshEventLogRecord())
+            record.count += 1
+            count = record.count
             should_emit = count == 1 or count % BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY == 0
             if not should_emit:
                 return None
-            previous_emit_count = self.background_refresh_event_log_last_emit_counts.get(key, 0)
-            self.background_refresh_event_log_last_emit_counts[key] = count
+            previous_emit_count = record.last_emit_count
+            record.last_emit_count = count
         event_details = dict(details)
         event_details["sample_count"] = count
         suppressed = max(0, count - previous_emit_count - 1)
@@ -9746,33 +9787,33 @@ class TmuxWebtermApp:
             for session, payload in session_payloads.items()
         }
         with self.metadata_badge_lock:
-            signatures_changed = False
+            previous_signatures = self.metadata_badge_signature_snapshot_locked()
             for session, next_signature in list(next_signatures.items()):
-                previous_signature = self.metadata_badge_signatures.get(session)
+                previous_signature = self.metadata_badge_records.get(session)
+                previous_signature = previous_signature.signature if previous_signature else None
                 if previous_signature and self.metadata_badge_change_is_cold_cache_degradation(previous_signature, next_signature):
                     next_signatures[session] = previous_signature
 
-            for session, badge_times in list(self.metadata_badge_pulse_until.items()):
-                current = {badge: until for badge, until in badge_times.items() if until > now}
-                if current:
-                    self.metadata_badge_pulse_until[session] = current
-                else:
-                    self.metadata_badge_pulse_until.pop(session, None)
+            for session in list(self.metadata_badge_records):
+                if session not in next_signatures:
+                    self.metadata_badge_records.pop(session, None)
+                    continue
+                record = self.metadata_badge_records[session]
+                record.pulse_until = {badge: until for badge, until in record.pulse_until.items() if until > now}
 
             for session, next_signature in next_signatures.items():
-                previous_signature = self.metadata_badge_signatures.get(session)
-                if previous_signature is None:
+                record = self.metadata_badge_records.get(session)
+                if record is None:
+                    self.metadata_badge_records[session] = MetadataBadgeRecord(signature=next_signature, pulse_until={})
                     continue
+                previous_signature = record.signature
                 for badge in METADATA_BADGES:
                     if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
-                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.notification_transition_seconds()
-
-            if self.metadata_badge_signatures != next_signatures:
-                self.metadata_badge_signatures = next_signatures
-                signatures_changed = True
+                        record.pulse_until[badge] = now + self.notification_transition_seconds()
+                record.signature = next_signature
 
             for session, payload in session_payloads.items():
-                badge_times = self.metadata_badge_pulse_until.get(session, {})
+                badge_times = self.metadata_badge_records[session].pulse_until
                 remaining = {
                     badge: max(1, int((until - now) * 1000))
                     for badge, until in badge_times.items()
@@ -9781,21 +9822,25 @@ class TmuxWebtermApp:
                 if remaining:
                     payload["metadata_badge_pulse_remaining_ms"] = remaining
 
-            if signatures_changed:
+            if self.metadata_badge_signature_snapshot_locked() != previous_signatures:
                 self.persist_metadata_badge_state_locked()
 
     def load_metadata_badge_state(self) -> None:
         state = read_yolomux_state()
         with self.metadata_badge_lock:
-            self.metadata_badge_signatures = self.sanitized_metadata_badge_signatures(
-                state.get(METADATA_BADGE_SIGNATURES_STATE_KEY)
-            )
-            self.metadata_badge_pulse_until = {}
+            signatures = self.sanitized_metadata_badge_signatures(state.get(METADATA_BADGE_SIGNATURES_STATE_KEY))
+            self.metadata_badge_records = {
+                session: MetadataBadgeRecord(signature=signature, pulse_until={})
+                for session, signature in signatures.items()
+            }
+
+    def metadata_badge_signature_snapshot_locked(self) -> dict[str, dict[str, str]]:
+        return {session: dict(record.signature) for session, record in self.metadata_badge_records.items()}
 
     def persist_metadata_badge_state_locked(self) -> None:
         update_yolomux_state(
             {
-                METADATA_BADGE_SIGNATURES_STATE_KEY: self.metadata_badge_signatures,
+                METADATA_BADGE_SIGNATURES_STATE_KEY: self.metadata_badge_signature_snapshot_locked(),
                 METADATA_BADGE_PULSE_UNTIL_STATE_KEY: {},
             }
         )
@@ -9808,23 +9853,6 @@ class TmuxWebtermApp:
             if not isinstance(session, str) or not isinstance(badges, dict):
                 continue
             clean[session] = {badge: str(badges.get(badge) or "") for badge in METADATA_BADGES}
-        return clean
-
-    def sanitized_metadata_badge_pulse_until(self, value: Any) -> dict[str, dict[str, float]]:
-        if not isinstance(value, dict):
-            return {}
-        clean: dict[str, dict[str, float]] = {}
-        for session, badges in value.items():
-            if not isinstance(session, str) or not isinstance(badges, dict):
-                continue
-            clean_badges: dict[str, float] = {}
-            for badge, pulse_until in badges.items():
-                if badge not in METADATA_BADGES or not isinstance(pulse_until, (int, float)):
-                    continue
-                if pulse_until > 0:
-                    clean_badges[badge] = float(pulse_until)
-            if clean_badges:
-                clean[session] = clean_badges
         return clean
 
     def metadata_badge_signatures_for_session(self, payload: dict[str, Any]) -> dict[str, str]:

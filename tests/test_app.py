@@ -1273,8 +1273,7 @@ def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
 def test_sampled_background_event_forwards_one_shared_descriptor_parent():
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.background_refresh_event_log_lock = threading.Lock()
-    webapp.background_refresh_event_log_counts = {}
-    webapp.background_refresh_event_log_last_emit_counts = {}
+    webapp.background_refresh_event_log_records = {}
     calls = []
     webapp.log_event = lambda *args, **kwargs: calls.append((args, kwargs)) or {"time": "event-1"}
     target = {
@@ -4314,8 +4313,9 @@ def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
     monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
     monkeypatch.setattr(webapp, "metadata_badge_signatures_for_session", lambda _payload: signature)
     monkeypatch.setattr(webapp, "persist_metadata_badge_state_locked", lambda: persist_calls.append("persist"))
-    webapp.metadata_badge_signatures = {"6": dict(signature)}
-    webapp.metadata_badge_pulse_until = {"6": {"ci": 99.0}}
+    webapp.metadata_badge_records = {
+        "6": app_module.MetadataBadgeRecord(signature=dict(signature), pulse_until={"ci": 99.0})
+    }
     try:
         payloads = {"6": {}}
         webapp.apply_metadata_badge_pulses(payloads)
@@ -4323,7 +4323,7 @@ def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
         webapp.control_server.stop()
 
     assert persist_calls == []
-    assert webapp.metadata_badge_pulse_until == {}
+    assert webapp.metadata_badge_records["6"].pulse_until == {}
     assert "metadata_badge_pulse_remaining_ms" not in payloads["6"]
 
 
@@ -4334,14 +4334,19 @@ def test_metadata_badge_signature_change_persists(monkeypatch):
     monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
     monkeypatch.setattr(webapp, "metadata_badge_signatures_for_session", lambda _payload: next_signature)
     monkeypatch.setattr(webapp, "persist_metadata_badge_state_locked", lambda: persist_calls.append("persist"))
-    webapp.metadata_badge_signatures = {"6": {"main": "", "pr": "123", "status": "open", "ci": "pending"}}
+    webapp.metadata_badge_records = {
+        "6": app_module.MetadataBadgeRecord(
+            signature={"main": "", "pr": "123", "status": "open", "ci": "pending"},
+            pulse_until={},
+        )
+    }
     try:
         webapp.apply_metadata_badge_pulses({"6": {}})
     finally:
         webapp.control_server.stop()
 
     assert persist_calls == ["persist"]
-    assert webapp.metadata_badge_signatures == {"6": next_signature}
+    assert webapp.metadata_badge_records["6"].signature == next_signature
 
 
 def test_prompt_and_screen_status_uses_transcript_activity_when_visible_pane_is_idle(monkeypatch, tmp_path):
@@ -5167,9 +5172,10 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     info6 = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
     discover_calls = []
     payload_calls = []
+    test_thread_id = threading.get_ident()
 
     def fake_discover(sessions):
-        discover_calls.append(tuple(sessions))
+        discover_calls.append((threading.get_ident(), tuple(sessions)))
         infos = {"5": info5, "6": info6}
         return {session: infos[session] for session in sessions if session in infos}, []
 
@@ -5191,7 +5197,7 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
 
     assert first_status == HTTPStatus.OK
     assert second_status == HTTPStatus.OK
-    assert discover_calls == [("5", "6"), ("5", "6")]
+    assert [sessions for thread_id, sessions in discover_calls if thread_id == test_thread_id] == [("5", "6"), ("5", "6")]
     assert sorted(payload_calls) == [
         ("5", ("5",), 24.0, None, None, None),
         ("6", ("6",), 24.0, None, None, None),
@@ -10183,6 +10189,67 @@ def test_self_update_restarts_after_xterm_assets_are_ready(monkeypatch, tmp_path
     assert result["error"] == "updated; restarting now"
     assert result["user_message"]["key"] == "update.result.restarting"
     assert calls == [str(tmp_path)]
+
+
+def test_self_update_static_build_failure_stops_before_restart(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(app_module.common, "git", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda _root: (True, ""))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="bundle generation failed"))
+    monkeypatch.setattr(webapp, "_spawn_self_restart", lambda: (_ for _ in ()).throw(AssertionError("must not restart after a failed static build")))
+
+    result = webapp.perform_self_update()
+
+    assert result["ok"] is False
+    assert result["restarting"] is False
+    assert result["error"] == "static build failed: bundle generation failed"
+    assert result["user_message"]["key"] == "update.result.blocked"
+    assert result["user_message"]["fallback"] == result["error"]
+
+
+def test_self_update_static_build_timeout_stops_before_restart(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module.common, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(app_module.common, "git", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda _root: (True, ""))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(app_module.subprocess.TimeoutExpired(args[0], 120)))
+    monkeypatch.setattr(webapp, "_spawn_self_restart", lambda: (_ for _ in ()).throw(AssertionError("must not restart after a timed-out static build")))
+
+    result = webapp.perform_self_update()
+
+    assert result["ok"] is False
+    assert result["restarting"] is False
+    assert result["error"].startswith("static build failed:")
+    assert "timed out" in result["error"]
+
+
+def test_update_notification_iteration_deduplicates_initialized_target():
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    webapp.update_status_payload = lambda dryrun=False: {"available": True, "notify": True, "target": "0.4.0", "dryrun": dryrun}
+    webapp.publish_client_event = lambda event, payload, **details: events.append((event, payload, details))
+
+    assert webapp.update_check_thread is None
+    assert webapp._update_last_target is None
+    webapp.publish_update_notification_if_available()
+    webapp.publish_update_notification_if_available()
+
+    assert webapp._update_last_target == "0.4.0"
+    assert events == [("update_available", {"available": True, "notify": True, "target": "0.4.0", "dryrun": False}, {"trigger": "update-check"})]
+
+
+def test_update_check_loop_logs_iteration_failure(monkeypatch, caplog):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    webapp.updates_settings = lambda: {"notify_level": "patch", "check_interval_minutes": 1}
+    webapp.update_notify_level = lambda _section: "patch"
+    webapp.publish_update_notification_if_available = lambda: (_ for _ in ()).throw(RuntimeError("update probe exploded"))
+    monkeypatch.setattr(app_module.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopIteration))
+
+    with caplog.at_level("ERROR"), pytest.raises(StopIteration):
+        webapp.update_check_loop()
+
+    assert any("update check failed: update probe exploded" in record.message for record in caplog.records)
 
 
 def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(monkeypatch):

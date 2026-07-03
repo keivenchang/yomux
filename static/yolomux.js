@@ -178,10 +178,7 @@ let shareGeometryResyncInFlight = false;
 let shareGeometryResyncLastStartedAt = 0;
 let shareGeometryRepairInFlight = false;
 const shareAppliedTextWrapMetricsByKey = new Map();
-let sharePointerGhost = null;
-let sharePointerGhosts = new Map();
-let sharePointerHideTimer = null;
-let sharePointerHideTimers = new Map();
+const sharePointerRecords = new Map();
 let applyingShareRemoteScroll = false;
 let applyingShareRemoteUiState = 0;
 let sharePopupLayerNode = null;
@@ -540,9 +537,6 @@ for (const renderer of PREVIEW_RENDERERS) {
     }
   }
 }
-const IMAGE_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'image')?.extensions || []);
-const PDF_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'pdf')?.extensions || []);
-const MERMAID_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'mermaid')?.extensions || []);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
@@ -763,14 +757,12 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
-const promptAttentionClears = new Map();
-const attentionAcknowledgementTimers = new Map();
-const attentionAcknowledgementPendingKeys = new Set();
+const attentionAcknowledgementRecords = new Map();
+const attentionAcknowledgementRecordLimit = 1024;
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
-const uploadResultsBySession = new Map();
-const uploadCleanupTimers = new Map();
+const uploadResultRecords = new Map();
 let uploadResultSequence = 0;
 const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
@@ -1395,11 +1387,9 @@ let runHistoryError = null;
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
-const sessionStateKeys = new Map();
-const notificationLastSent = new Map();
-const workingAgentNotificationTones = new Map();
-const attentionAlertTimers = new Map();
-const metadataBadgePulseUntil = new Map();
+const sessionStatusRecords = new Map();
+const watchedPrNotificationLastSent = new Map();
+const toastRecords = new Map();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
@@ -1411,6 +1401,32 @@ function setLimitedMapEntry(map, key, value, limit) {
     if (oldest === undefined) break;
     map.delete(oldest);
   }
+}
+
+function sessionStatusRecord(session, create = false) {
+  const key = String(session || '').trim();
+  if (!key) return null;
+  let record = sessionStatusRecords.get(key) || null;
+  if (!record && create) {
+    record = {
+      state: null,
+      notificationLastSent: new Map(),
+      workingAgentNotificationTones: new Map(),
+      metadataBadgePulseUntil: new Map(),
+    };
+    sessionStatusRecords.set(key, record);
+  }
+  return record;
+}
+
+function sessionNotificationLastSentAt(session, key) {
+  return Number(sessionStatusRecord(session)?.notificationLastSent.get(key) || 0);
+}
+
+function recordSessionNotificationSent(session, key, sentAt) {
+  const record = sessionStatusRecord(session, true);
+  if (!record) return;
+  setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);
 }
 
 let shareInfoBranchRowsOverride = null;
@@ -6980,6 +6996,55 @@ function attentionAcknowledgementKey(parts = []) {
   return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
 }
 
+function attentionAcknowledgementKeySession(key) {
+  try {
+    const parts = JSON.parse(String(key || ''));
+    return Array.isArray(parts) && parts.length > 1 ? String(parts[1] || '') : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function attentionAcknowledgementRecord(key, create = false) {
+  const value = String(key || '');
+  if (!value) return null;
+  let record = attentionAcknowledgementRecords.get(value) || null;
+  if (!record && create) {
+    record = {recordedAt: null, timer: null, pending: false};
+    attentionAcknowledgementRecords.set(value, record);
+  }
+  return record;
+}
+
+function pruneAttentionAcknowledgementRecords() {
+  while (attentionAcknowledgementRecords.size > attentionAcknowledgementRecordLimit) {
+    let removed = false;
+    for (const [key, record] of attentionAcknowledgementRecords) {
+      if (record?.timer !== null || record?.pending === true) continue;
+      attentionAcknowledgementRecords.delete(key);
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+}
+
+function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  attentionAcknowledgementRecords.delete(String(key || ''));
+  return true;
+}
+
+function clearSessionAttentionAcknowledgementRecords(session) {
+  const value = String(session || '');
+  if (!value) return;
+  for (const [key, record] of attentionAcknowledgementRecords) {
+    if (attentionAcknowledgementKeySession(key) !== value) continue;
+    if (record?.timer !== null) clearTimeout(record.timer);
+    attentionAcknowledgementRecords.delete(key);
+  }
+}
+
 function attentionAcknowledgementKeysFromPayload(payload = {}) {
   const keys = payload?.attention_acks?.keys;
   return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
@@ -6991,7 +7056,8 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
   // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
   if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
-  if (promptAttentionClears.has(value)) return true;
+  const record = attentionAcknowledgementRecord(value);
+  if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
 }
@@ -6999,12 +7065,16 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
 function recordAttentionAcknowledgementKey(key) {
   const value = String(key || '');
   if (!value) return false;
-  setLimitedMapEntry(promptAttentionClears, value, Date.now(), 1024);
+  const record = attentionAcknowledgementRecord(value, true);
+  record.recordedAt = Date.now();
+  attentionAcknowledgementRecords.delete(value);
+  attentionAcknowledgementRecords.set(value, record);
+  pruneAttentionAcknowledgementRecords();
   return true;
 }
 
 function applyAttentionAcknowledgementResponse(payload = {}) {
-  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
+  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged.map(key => String(key || '')).filter(Boolean) : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
   const changedSessions = new Set();
   for (const [session, current] of autoApproveStates) {
@@ -7053,11 +7123,20 @@ async function submitAttentionAcknowledgementKeys(keys) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({keys}),
     });
-    applyAttentionAcknowledgementResponse(payload);
+    const acknowledged = (Array.isArray(payload?.acknowledged) ? payload.acknowledged : [])
+      .map(key => String(key || ''))
+      .filter(key => attentionAcknowledgementRecord(key)?.pending === true);
+    applyAttentionAcknowledgementResponse({...payload, acknowledged});
   } catch (error) {
     console.warn('attention acknowledgement failed', error);
   } finally {
-    for (const key of keys) attentionAcknowledgementPendingKeys.delete(key);
+    for (const key of keys) {
+      const record = attentionAcknowledgementRecord(key);
+      if (!record) continue;
+      record.pending = false;
+      releaseIdleAttentionAcknowledgementRecord(key, record);
+    }
+    pruneAttentionAcknowledgementRecords();
   }
 }
 
@@ -7068,9 +7147,10 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  const pending = unique.filter(key => !attentionAcknowledgementPendingKeys.has(key) && !attentionAcknowledgementKeyIsRecorded(key));
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
   if (!pending.length) return true;
-  for (const key of pending) attentionAcknowledgementPendingKeys.add(key);
+  for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
+  pruneAttentionAcknowledgementRecords();
   submitAttentionAcknowledgementKeys(pending);
   return true;
 }
@@ -7081,14 +7161,18 @@ function acknowledgeAttentionKeys(keys, options = {}) {
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   if (delayMs > 0) {
     for (const key of unique) {
-      const existing = attentionAcknowledgementTimers.get(key);
-      if (existing) continue;
+      const record = attentionAcknowledgementRecord(key, true);
+      if (record.timer !== null) continue;
       const timer = setTimeout(() => {
-        attentionAcknowledgementTimers.delete(key);
+        const current = attentionAcknowledgementRecord(key);
+        if (!current || current.timer !== timer) return;
+        current.timer = null;
         postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
+        releaseIdleAttentionAcknowledgementRecord(key, current);
       }, delayMs);
-      attentionAcknowledgementTimers.set(key, timer);
+      record.timer = timer;
     }
+    pruneAttentionAcknowledgementRecords();
     return true;
   }
   return postAttentionAcknowledgementKeys(unique, options);
@@ -9748,17 +9832,25 @@ function toastTextLines(text) {
 }
 
 function clearToastRemovalTimer(id) {
-  if (!attentionAlertTimers.has(id)) return;
-  clearTimeout(attentionAlertTimers.get(id));
-  attentionAlertTimers.delete(id);
+  const record = toastRecords.get(id);
+  if (!record?.timer) return;
+  clearTimeout(record.timer);
+  record.timer = null;
 }
 
 function scheduleToastRemoval(id, node, remainingMs) {
   const delay = Math.max(1, Number(remainingMs) || 1);
+  let record = toastRecords.get(id);
+  if (!record) {
+    record = {node, timer: null};
+    toastRecords.set(id, record);
+  } else {
+    record.node = node;
+  }
   clearToastRemovalTimer(id);
   node.dataset.toastRemainingMs = String(delay);
   node.dataset.toastRemovalStartedAt = String(Date.now());
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), delay));
+  record.timer = window.setTimeout(() => removeAttentionAlert(id), delay);
 }
 
 function pauseToastRemoval(id, node, reason) {
@@ -10106,11 +10198,17 @@ function showAttentionAlert(session, state) {
   }
 }
 
-function dismissAttentionAlertsForSession(session) {
-  for (const node of document.querySelectorAll('.toast[data-toast-kind="attention"]')) {
+function dismissSessionToasts(session, options = {}) {
+  const kind = String(options.kind || '');
+  for (const [id, record] of toastRecords.entries()) {
+    const node = record.node;
     if (node.dataset.toastSession !== session) continue;
-    removeAttentionAlert(Number(node.dataset.alertId || 0));
+    if (!kind || node.dataset.toastKind === kind) removeAttentionAlert(id);
   }
+}
+
+function dismissAttentionAlertsForSession(session) {
+  dismissSessionToasts(session, {kind: 'attention'});
 }
 
 function attentionAlreadyVisible(session) {
@@ -10122,8 +10220,10 @@ function attentionAlreadyVisible(session) {
 }
 
 function removeAttentionAlert(id) {
+  const node = toastRecords.get(id)?.node || null;
   clearToastRemovalTimer(id);
-  document.querySelector(`[data-alert-id="${id}"]`)?.remove();
+  node?.remove();
+  toastRecords.delete(id);
 }
 
 function sendTestNotification(options = {}) {
@@ -10161,9 +10261,10 @@ function stateSignature(state) {
 function trackSessionStateChanges() {
   for (const session of sessions.filter(isTmuxSession)) {
     const state = sessionState(session, transcriptMeta.sessions?.[session]);
-    const previous = sessionStateKeys.get(session);
+    const record = sessionStatusRecord(session, true);
+    const previous = record?.state || null;
     const signature = stateSignature(state);
-    sessionStateKeys.set(session, {key: state.key, reason: state.reason, signature});
+    if (record) record.state = {key: state.key, reason: state.reason, signature};
     if (!stateTrackingReady || previous == null || previous.signature === signature) continue;
     postEvent(session, 'state_changed', eventMessageForState(session, state), {
       from: previous.key,
@@ -10183,10 +10284,10 @@ function maybeNotifyState(session, state, options = {}) {
   // Letting the generic session-state path handle it too duplicates the popup and bypasses the
   // user's working-AI attention preference when that preference is off.
   if (workingAgentTransitionOwnsSessionStateNotification(session, state)) return;
-  const key = `${session}:${stateSignature(state)}`;
+  const key = `state:${stateSignature(state)}`;
   const now = Date.now();
   if (attentionAlreadyVisible(session)) {
-    setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+    recordSessionNotificationSent(session, key, now);
     dismissAttentionAlertsForSession(session);
     postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
       state: state.key,
@@ -10194,9 +10295,9 @@ function maybeNotifyState(session, state, options = {}) {
     });
     return;
   }
-  const lastSent = notificationLastSent.get(key) || 0;
+  const lastSent = sessionNotificationLastSentAt(session, key);
   if (options.force !== true && now - lastSent < 60_000) return;
-  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  recordSessionNotificationSent(session, key, now);
   const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
   if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {
@@ -10207,7 +10308,7 @@ function maybeNotifyState(session, state, options = {}) {
   try {
     sendBrowserNotification(sessionNotificationTitle(session, state), {
       body,
-      tag: key,
+      tag: `yolomux:session:${session}:${key}`,
       renotify: true,
       session,
     });
@@ -10245,14 +10346,14 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   if (!marker) return false;
   const target = workingAgentTransitionNotificationTarget(agentKey, tone, options);
   const targetKey = typeof agentWindowActivityTransitionKey === 'function'
-    ? agentWindowActivityTransitionKey(agentKey, {...target, session})
-    : `${session}:${target.window_index ?? target.window ?? ''}:${agentKey}`;
+    ? agentWindowActivityTransitionKey(agentKey, {...target, session: ''})
+    : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
-  const lastSent = notificationLastSent.get(key) || 0;
+  const lastSent = sessionNotificationLastSentAt(session, key);
   if (now - lastSent < throttleMs) return false;
-  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  recordSessionNotificationSent(session, key, now);
   const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
   const agent = kind ? agentLabel(kind) : t('common.agentLabel');
   const title = t(`notify.working.${descriptor.copyKey}.title`);
@@ -10266,7 +10367,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    sendBrowserNotification(title, {body, tag: key, renotify: true, session});
+    sendBrowserNotification(title, {body, tag: `yolomux:session:${session}:${key}`, renotify: true, session});
     postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
@@ -10295,10 +10396,11 @@ function workingAgentTransitionSnapshot(session, agent) {
   const options = typeof agentWindowActivityOptionsForStatus === 'function'
     ? agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false})
     : {...agent, session};
-  const key = agentWindowActivityTransitionKey(kind, options);
+  const key = agentWindowActivityTransitionKey(kind, {...options, session: ''});
   if (!key) return null;
   const tone = workingAgentNotificationTone(agent);
-  return {agent, kind, options, key, tone, previousTone: workingAgentNotificationTones.get(key) || ''};
+  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
+  return {agent, kind, options, key, tone, previousTone: toneMap?.get(key) || ''};
 }
 
 function workingAgentTransitionOwnsSessionStateNotification(session, state) {
@@ -10312,6 +10414,8 @@ function workingAgentTransitionOwnsSessionStateNotification(session, state) {
 // transition notifies the user.
 function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
   if (!session || typeof agentWindowActivityTransitionKey !== 'function') return 0;
+  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
+  if (!toneMap) return 0;
   const rows = typeof sessionAgentWindowStatusPayloads === 'function'
     ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
     : typeof agentWindowPayloadRows === 'function'
@@ -10340,10 +10444,10 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
         stoppedAt: Number(options.working_stopped_ts || 0),
       }));
     }
-    workingAgentNotificationTones.set(key, tone);
+    toneMap.set(key, tone);
   }
-  for (const key of workingAgentNotificationTones.keys()) {
-    if (key.startsWith(`${session}:`) && !nextKeys.has(key)) workingAgentNotificationTones.delete(key);
+  for (const key of toneMap.keys()) {
+    if (!nextKeys.has(key)) toneMap.delete(key);
   }
   return notified;
 }
@@ -10389,16 +10493,16 @@ function notifyWatchedPrTransitions(prs) {
 
 // Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
 // the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
-// throttled by notifications.throttle_seconds via the shared notificationLastSent map.
+// throttled by notifications.throttle_seconds via the bounded watched-PR throttle map.
 function maybeNotifyWatchedPr(ref, key, message, url) {
   if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyTransitionKey(key)) return;
   const signature = `watched-pr:${ref}:${key}`;
   const now = Date.now();
   const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
-  const lastSent = notificationLastSent.get(signature) || 0;
+  const lastSent = watchedPrNotificationLastSent.get(signature) || 0;
   if (now - lastSent < throttleMs) return;
-  setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
+  setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);
   if (notificationDeliveryEnabled('inApp')) showToast(message, [ref], {onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -16659,6 +16763,28 @@ function agentWindowPayloadKey(agent) {
   return index !== null && kind ? `${index}:${kind}` : '';
 }
 
+function agentWindowInfoPane(info, agent) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const paneTarget = String(agent?.pane_target || agent?.pane || '').trim();
+  if (paneTarget) {
+    const exact = panes.find(item => [item?.target, item?.pane_id].some(value => String(value || '').trim() === paneTarget));
+    if (exact) return exact;
+  }
+  const index = agentWindowIndex(agent);
+  if (index === null) return null;
+  const windowPanes = panes.filter(item => tmuxWindowIndexKey(item?.window_index ?? item?.window) === index);
+  return windowPanes.length === 1 ? windowPanes[0] : null;
+}
+
+function agentWindowPhysicalKey(agent, info = null) {
+  const infoPane = agentWindowInfoPane(info, agent);
+  const pane = String(infoPane?.target || infoPane?.pane_id || agent?.pane_target || agent?.pane || '').trim();
+  if (pane) return `pane:${pane}`;
+  const index = agentWindowIndex(agent);
+  if (index === null) return agentWindowPayloadKey(agent);
+  return `window:${index}`;
+}
+
 function agentWindowStateKey(state) {
   return String(state || '').trim();
 }
@@ -16789,19 +16915,45 @@ function agentWindowPayloadIsPreferred(candidate, current) {
   return true;
 }
 
-function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows) {
+function agentWindowLiveKindFromInfo(info, agent) {
+  const pane = agentWindowInfoPane(info, agent);
+  for (const value of [pane?.process_label, pane?.window_name, pane?.command]) {
+    const kind = agentWindowKind(value);
+    if (kind) return kind;
+  }
+  return '';
+}
+
+function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info = null) {
   const rowsByKey = new Map();
   const looseRows = [];
-  for (const row of [...infoRows, ...activityRows, ...stateRows]) {
-    const key = agentWindowPayloadKey(row);
-    if (!key) {
-      looseRows.push(row);
-      continue;
+  const sources = [
+    {rows: infoRows, priority: 1},
+    {rows: activityRows, priority: 2},
+    {rows: stateRows, priority: 3},
+  ];
+  for (const source of sources) {
+    for (const row of source.rows) {
+      const key = agentWindowPhysicalKey(row, info);
+      if (!key) {
+        looseRows.push(row);
+        continue;
+      }
+      const current = rowsByKey.get(key);
+      const liveKind = agentWindowLiveKindFromInfo(info, row);
+      const rowKind = agentWindowKind(row?.kind);
+      const currentKind = agentWindowKind(current?.row?.kind);
+      const liveKindDecision = liveKind && rowKind !== currentKind
+        ? rowKind === liveKind
+        : null;
+      const preferred = !current
+        || liveKindDecision === true
+        || (liveKindDecision === null && rowKind !== currentKind && source.priority > current.priority)
+        || (rowKind === currentKind && agentWindowPayloadIsPreferred(row, current.row));
+      if (preferred) rowsByKey.set(key, {row, priority: source.priority});
     }
-    const current = rowsByKey.get(key);
-    if (agentWindowPayloadIsPreferred(row, current)) rowsByKey.set(key, row);
   }
-  return [...rowsByKey.values(), ...looseRows];
+  return [...rowsByKey.values()].map(item => item.row).concat(looseRows);
 }
 
 function agentWindowStatusVisualSignature(payload = {}) {
@@ -16882,7 +17034,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows);
+  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -16901,7 +17053,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
-    if (agents.some(agent => agentWindowPayloadKey(agent) === agentWindowPayloadKey(visualAgent))) continue;
+    if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
   }
   const hasAttributedWindows = agents.some(agent => agentWindowIndex(agent) !== null);
@@ -16942,8 +17094,8 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session);
     const tone = agentWindowStatusToneForItem(item);
     if (!item || (tone !== 'acknowledged' && !agentWindowVisibleTone(tone))) continue;
-    const rank = tone === 'acknowledged' ? 8 : agentWindowActivityVisualRank(item.state);
-    const selectedRank = selected ? (selected.item.acknowledging === true ? 8 : agentWindowActivityVisualRank(selected.item.state)) : 99;
+    const rank = agentWindowStatusItemVisualRank(item);
+    const selectedRank = selected ? agentWindowStatusItemVisualRank(selected.item) : 99;
     const current = agentWindowPayloadCurrent(agent) === true;
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
     visibleItems.push({agent, item, tone});
@@ -16987,11 +17139,28 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
   return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
 }
 
-const agentWindowActivityStates = new Map();
-const agentWindowStoppedTimers = new Map();
-const agentWindowTransitionPulseTimers = new Map();
-const agentWindowAcknowledgedStops = new Map();
-const agentWindowAcknowledgementVisuals = new Map();
+const agentWindowActivityRecords = new Map();
+
+function createAgentWindowActivityRecord() {
+  return {
+    activity: null,
+    stoppedRefresh: null,
+    transitionPulseRefresh: null,
+    acknowledgedStoppedAt: 0,
+    acknowledgementVisual: null,
+  };
+}
+
+function agentWindowActivityRecord(key, create = false) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return null;
+  let record = agentWindowActivityRecords.get(normalizedKey) || null;
+  if (!record && create) {
+    record = createAgentWindowActivityRecord();
+    agentWindowActivityRecords.set(normalizedKey, record);
+  }
+  return record;
+}
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
@@ -17049,22 +17218,25 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
   if (durationSeconds <= 0) return;
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.transitionPulseRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const timer = setTimeout(() => {
-    const current = agentWindowTransitionPulseTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.transitionPulseRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowTransitionPulseTimers.delete(key);
+    currentRecord.transitionPulseRefresh = null;
     refreshAgentWindowActivityDisplays();
   }, Math.max(0, untilMs - Date.now()));
-  agentWindowTransitionPulseTimers.set(key, {timer, untilMs});
+  record.transitionPulseRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowTransitionPulseRefresh(key) {
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.transitionPulseRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowTransitionPulseTimers.delete(key);
+  if (record) record.transitionPulseRefresh = null;
 }
 
 function mutationTouchesAgentWindowActivity(mutation) {
@@ -17174,46 +17346,51 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
 
 function scheduleAgentWindowStoppedRefresh(key, untilMs) {
   if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.stoppedRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const delay = Math.max(0, untilMs - Date.now());
   const timer = setTimeout(() => {
-    const current = agentWindowStoppedTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.stoppedRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowStoppedTimers.delete(key);
+    currentRecord.stoppedRefresh = null;
     if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
       renderPanels(activePaneItems());
     }
   }, delay);
-  agentWindowStoppedTimers.set(key, {timer, untilMs});
+  record.stoppedRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowStoppedRefresh(key) {
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.stoppedRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowStoppedTimers.delete(key);
+  if (record) record.stoppedRefresh = null;
 }
 
 function agentWindowStoppedIsAcknowledged(key, stoppedAt) {
   const stoppedAtNumber = Number(stoppedAt || 0);
-  const acknowledged = Number(agentWindowAcknowledgedStops.get(key) || 0);
+  const acknowledged = Number(agentWindowActivityRecord(key)?.acknowledgedStoppedAt || 0);
   return Boolean(key && stoppedAtNumber > 0 && acknowledged > 0 && Math.abs(acknowledged - stoppedAtNumber) < 0.001);
 }
 
 function agentWindowAcknowledgementVisualActive(key, nowMs = Date.now()) {
-  const visual = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
   if (!visual) return false;
   if (visual.untilMs > nowMs) return true;
   if (visual.timer) clearTimeout(visual.timer);
-  agentWindowAcknowledgementVisuals.delete(key);
+  record.acknowledgementVisual = null;
   return false;
 }
 
 function agentWindowAcknowledgementVisualAgents(session) {
   const sessionKey = String(session || '').trim();
   const agents = [];
-  for (const [key, visual] of agentWindowAcknowledgementVisuals.entries()) {
+  for (const [key, record] of agentWindowActivityRecords.entries()) {
+    const visual = record.acknowledgementVisual;
     if (!agentWindowAcknowledgementVisualActive(key) || !visual.agent) continue;
     if (String(visual.agent.session || '') !== sessionKey) continue;
     agents.push(visual.agent);
@@ -17222,15 +17399,29 @@ function agentWindowAcknowledgementVisualAgents(session) {
 }
 
 function clearAgentWindowAcknowledgementVisual(key) {
-  const visual = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
   if (visual?.timer) clearTimeout(visual.timer);
-  agentWindowAcknowledgementVisuals.delete(key);
+  if (record) record.acknowledgementVisual = null;
+}
+
+function clearAgentWindowActivityRecordsForSession(session) {
+  const prefix = `${String(session || '').trim()}:`;
+  if (prefix === ':') return;
+  for (const key of Array.from(agentWindowActivityRecords.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    clearAgentWindowStoppedRefresh(key);
+    clearAgentWindowTransitionPulseRefresh(key);
+    clearAgentWindowAcknowledgementVisual(key);
+    agentWindowActivityRecords.delete(key);
+  }
 }
 
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
   const acknowledgementKey = String(options.acknowledgementKey || '');
-  const current = agentWindowAcknowledgementVisuals.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const current = record.acknowledgementVisual;
   if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
     if (options.refresh !== false && current?.refreshed !== true) {
       current.refreshed = true;
@@ -17243,9 +17434,10 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
   const untilMs = startedAtMs + durationMs;
   clearAgentWindowAcknowledgementVisual(key);
   const timer = setTimeout(() => {
-    const visual = agentWindowAcknowledgementVisuals.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const visual = currentRecord?.acknowledgementVisual;
     if (!visual || visual.untilMs !== untilMs) return;
-    agentWindowAcknowledgementVisuals.delete(key);
+    currentRecord.acknowledgementVisual = null;
     // The browser must retire the gray marker at the promised time even if the acknowledgement
     // request is slow; a later explicit server false still re-arms a genuinely new prompt.
     if (acknowledgementKey && typeof recordAttentionAcknowledgementKey === 'function') recordAttentionAcknowledgementKey(acknowledgementKey);
@@ -17259,7 +17451,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     state: options.visualState === 'attention' ? (sourceAgent.state || STATE_KEY.needsInput) : (sourceAgent.state || STATE_KEY.idle),
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
-  agentWindowAcknowledgementVisuals.set(key, {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent});
+  record.acknowledgementVisual = {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent};
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
   return true;
 }
@@ -17312,13 +17504,14 @@ function refreshAgentWindowActivityDisplays() {
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
   const key = String(transitionKey || '').trim();
   if (!key) return false;
-  const previous = agentWindowActivityStates.get(key) || {};
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.activity || {};
   const stoppedAtNumber = Number(stoppedAt ?? previous.stoppedAt ?? 0);
   if (!Number.isFinite(stoppedAtNumber) || stoppedAtNumber <= 0) return false;
   const currentStoppedAt = Number(previous.stoppedAt || 0);
   if (!Number.isFinite(currentStoppedAt) || currentStoppedAt <= 0 || Math.abs(currentStoppedAt - stoppedAtNumber) >= 0.001) return false;
   if (agentWindowStoppedIsAcknowledged(key, stoppedAtNumber)) return false;
-  agentWindowAcknowledgedStops.set(key, stoppedAtNumber);
+  record.acknowledgedStoppedAt = stoppedAtNumber;
   clearAgentWindowStoppedRefresh(key);
   clearAgentWindowTransitionPulseRefresh(key);
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
@@ -17331,8 +17524,8 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const info = transcriptMeta.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
   let summaryIndex = null;
-  if (explicitIndex === null && options.preferSummary === true && typeof sessionStatusAgentWindowSummaryForTab === 'function') {
-    const summary = sessionStatusAgentWindowSummaryForTab(sessionKey, info, autoApproveStates.get(sessionKey));
+  if (explicitIndex === null && options.preferSummary === true) {
+    const summary = sessionAgentWindowStatusSummary(sessionKey, info, autoApproveStates.get(sessionKey));
     if (['attention', 'cooldown'].includes(summary?.item?.state)) {
       summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
     }
@@ -17354,7 +17547,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   if (item?.acknowledged === true) return null;
   if (!['attention', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
-  const previous = transitionKey ? agentWindowActivityStates.get(transitionKey) : null;
+  const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
   const ackKey = item.state === 'cooldown'
     ? agentWindowActivityAcknowledgementKey(agent.kind, 'cooldown', itemOptions, stoppedAt)
@@ -17420,11 +17613,12 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
-  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  const record = transitionKey ? agentWindowActivityRecord(transitionKey, true) : null;
+  const previous = record?.activity || {};
   const stateKey = agentWindowStateKey(state);
   const current = options.current === true || options.window_active === true;
   const acknowledgementVisualActive = transitionKey ? agentWindowAcknowledgementVisualActive(transitionKey) : false;
-  const acknowledgementVisual = acknowledgementVisualActive ? agentWindowAcknowledgementVisuals.get(transitionKey) : null;
+  const acknowledgementVisual = acknowledgementVisualActive ? record.acknowledgementVisual : null;
   const acknowledgementTiming = acknowledgementVisual ? {
     acknowledgementDurationMs: acknowledgementVisual.durationMs,
     acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
@@ -17453,14 +17647,14 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {
+      record.activity = {
         state: stateKey,
         visualTone: 'attention',
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
         transitionStartedAt,
-      });
+      };
       scheduleAgentWindowStatusGlowRefresh(transitionKey, transitionStartedAt, options);
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
@@ -17480,8 +17674,8 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, STATE_KEY.working, nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowAcknowledgedStops.delete(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt});
+      record.acknowledgedStoppedAt = 0;
+      record.activity = {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt};
       scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
     }
     return {
@@ -17498,7 +17692,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
   if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
   const cooldownTransitionStartedAt = agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt});
+  if (transitionKey) record.activity = {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt};
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
     const recordedAcknowledgement = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
@@ -17558,6 +17752,12 @@ function agentWindowStatusToneForItem(item) {
   if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   return agentWindowVisibleTone(tone) ? tone : '';
+}
+
+function agentWindowStatusItemVisualRank(item) {
+  const tone = agentWindowStatusToneForItem(item);
+  if (tone === 'acknowledged') return 8;
+  return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
 function agentWindowActivityToneWrapperClass(tone) {
@@ -23497,17 +23697,6 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
   return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
 }
 
-function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  const summary = typeof sessionAgentWindowStatusSummary === 'function'
-    ? sessionAgentWindowStatusSummary(session, info, payload)
-    : null;
-  return summary?.agent ? summary : null;
-}
-
-function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
-}
-
 function sessionStatusBallPlaceholderHtml() {
   // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
   // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
@@ -23521,7 +23710,7 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
     : '';
-  const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
+  const statusSummary = sessionAgentWindowStatusSummary(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
     const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
@@ -23653,13 +23842,9 @@ function displayPullRequest(info) {
   return displayPullRequestForGit(info, info?.project?.git);
 }
 
-function metadataBadgeKey(session, badge) {
-  return `${session}:${badge}`;
-}
-
 function metadataBadgePulseClass(session, badge) {
   if (!session) return '';
-  const until = metadataBadgePulseUntil.get(metadataBadgeKey(session, badge));
+  const until = sessionStatusRecord(session)?.metadataBadgePulseUntil.get(badge);
   if (!until || until <= Date.now()) return '';
   return ' metadata-pulse';
 }
@@ -23670,15 +23855,19 @@ function metadataBadgeClasses(session, badge, classes) {
 
 function updateMetadataBadgePulses(meta) {
   const now = Date.now();
-  for (const [key, until] of metadataBadgePulseUntil.entries()) {
-    if (until <= now) metadataBadgePulseUntil.delete(key);
+  for (const record of sessionStatusRecords.values()) {
+    for (const [badge, until] of record.metadataBadgePulseUntil.entries()) {
+      if (until <= now) record.metadataBadgePulseUntil.delete(badge);
+    }
   }
   for (const [session, info] of Object.entries(meta?.sessions || {})) {
     const pulses = info?.metadata_badge_pulse_remaining_ms || {};
+    const pulseMap = sessionStatusRecord(session, true)?.metadataBadgePulseUntil;
+    if (!pulseMap) continue;
     for (const badge of ['main', 'pr', 'status', 'ci']) {
       const remaining = Number(pulses[badge] || 0);
       if (remaining > 0) {
-        metadataBadgePulseUntil.set(metadataBadgeKey(session, badge), now + remaining);
+        pulseMap.set(badge, now + remaining);
       }
     }
   }
@@ -23850,14 +24039,6 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
-function sessionPopoverAgentStateRank(state) {
-  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
-}
-
-function agentStatusIsAttentionState(state) {
-  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
-}
-
 function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   let timestamp = Number.isFinite(lastActive) && lastActive > 0 ? lastActive : nowSeconds;
@@ -23936,7 +24117,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
-    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+    .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
 }
@@ -25988,6 +26169,28 @@ function paneInfoBarMetaHtml(session, info) {
   return paneInfoBarMetaParts(session, info).metadataHtml;
 }
 
+const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';
+
+function refreshSessionRepoDisplay(session) {
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  renderSessionButtons();
+  renderPaneTabStrips();
+}
+
+function activateRepoSelectorControl(event, button, panelSession) {
+  event.preventDefault();
+  event.stopPropagation();
+  const cycleSession = button.dataset.repoCycle;
+  if (cycleSession !== undefined) {
+    const session = cycleSession || panelSession;
+    cycleSessionRepoDisplay(session, transcriptMeta.sessions?.[session], button.dataset.repoCycleDir || 1);
+    refreshSessionRepoDisplay(session);
+    return;
+  }
+  const session = button.dataset.repoChip || panelSession;
+  showRepoChipMenu(session, event.clientX, event.clientY);
+}
+
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
 // ahead/behind. Clicking a row scopes the Finder to that repo. Reuses the shared context-menu controller.
 function repoChipMenuRowHtml(repo) {
@@ -26019,9 +26222,7 @@ function showRepoChipMenu(session, x, y) {
     // Pick this repo as the Info Bar's displayed repo (the <N/M>) and refresh — same effect as
     // cycling with the < / > arrows, but jumps straight to the chosen repo.
     sessionRepoDisplayRoot.set(session, root);
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-    renderSessionButtons();
-    renderPaneTabStrips();
+    refreshSessionRepoDisplay(session);
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -26171,39 +26372,52 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
-function clearSessionUiState(session) {
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
-  autoApproveStates.delete(session);
-  paneViewState.delete(session);
-  pendingPaneViewStateCaptures.delete(session);
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+function clearSessionEphemeralRuntimeState(session) {
+  tmuxWindowNavigationRecords.delete(session);
+  terminalTmuxInputStates.delete(session);
+  altScreenWheelRemainder.delete(session);
+  clearAgentWindowActivityRecordsForSession(session);
+  clearSessionAttentionAcknowledgementRecords(session);
 }
 
-function stopSessionUi(session) {
+function detachSessionUi(session) {
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
   const item = terminals.get(session);
   if (item) closeTerminalItem(session, item);
   terminals.delete(session);
-  clearSessionUiState(session);
+  pendingPaneViewStateCaptures.delete(session);
   const panel = panelNodes.get(session);
   if (panel) panel.remove();
   panelNodes.delete(session);
+  clearSessionEphemeralRuntimeState(session);
+  dismissSessionToasts(session);
+}
+
+function clearSessionUiState(session) {
+  autoApproveStates.delete(session);
+  paneViewState.delete(session);
+  deleteUploadResultRecord(session);
+  sessionStatusRecords.delete(session);
+  sessionRepoDisplayRoot.delete(session);
+  tmuxStatusModes.delete(session);
+  terminalAppClipboardText.delete(session);
+  pasteCounters.delete(session);
+  tabLastActivatedAt.delete(session);
+}
+
+function stopSessionUi(session) {
+  detachSessionUi(session);
+  clearSessionUiState(session);
 }
 
 function replaceSessionMetadata(oldSession, newSession) {
   for (const map of [
     autoApproveStates,
-    sessionStateKeys,
-    notificationLastSent,
-    workingAgentNotificationTones,
-    attentionAlertTimers,
-    metadataBadgePulseUntil,
-    uploadResultsBySession,
-    uploadCleanupTimers,
+    sessionStatusRecords,
+    sessionRepoDisplayRoot,
+    tmuxStatusModes,
+    terminalAppClipboardText,
     pasteCounters,
     paneViewState,
     // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
@@ -26228,13 +26442,15 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
   clearPendingTmuxSession(oldSession);
   markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
-  stopSessionUi(oldSession);
+  moveUploadResultRecord(oldSession, newSession);
+  detachSessionUi(oldSession);
   replaceSessionMetadata(oldSession, newSession);
   setSessionOrder(next);
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
   applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
+  renderUploadResult(newSession);
 }
 
 function closeSessionRenameDialog() {
@@ -26362,7 +26578,6 @@ async function killTmuxSession(session) {
     clearPendingTmuxSession(session);
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
-    autoApproveStates.delete(session);
     updateDocumentTitle();
     renderSessionButtons();
     renderPanels(previousActive);
@@ -27284,10 +27499,7 @@ function closeTerminalItem(session, item) {
 }
 
 function dismissTerminalConnectionToasts(session) {
-  for (const node of document.querySelectorAll('.toast[data-toast-kind="terminal-connection"]')) {
-    if (node.dataset.toastSession !== session) continue;
-    removeAttentionAlert(Number(node.dataset.alertId || 0));
-  }
+  dismissSessionToasts(session, {kind: 'terminal-connection'});
 }
 
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
@@ -27338,7 +27550,6 @@ function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
   stopSessionUi(session);
   completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
-  autoApproveStates.delete(session);
   if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
   updateDocumentTitle();
   renderSessionButtons();
@@ -28689,6 +28900,10 @@ function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
   return width > 1 && height > 1;
 }
 
+function dockviewLayoutAdoptionAllowed() {
+  return !shareViewMode || shareWriteMode;
+}
+
 function dockviewInstallHostResizeObserver(host, api) {
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(() => dockviewScheduleLayoutToHost(api, host));
@@ -29114,6 +29329,7 @@ function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
 }
 
 function queueDockviewLayoutAdoption() {
+  if (!dockviewLayoutAdoptionAllowed()) return;
   if (dockviewLayoutState.applyingFromLayout || dockviewLayoutState.adoptingFromDockview) return;
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
@@ -29124,6 +29340,7 @@ function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
+  if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
   let next = layoutSlotsFromDockviewJson(api.toJSON());
   const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
@@ -31001,7 +31218,7 @@ function bindPanelShell(panel, session) {
     if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
-      const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session], ${repoSelectorControlSelector}`);
       if (windowTarget) {
         // Run the original target before polling or focus-side updates can replace it.
         // The marker suppresses the later delegated click if the browser still emits one.
@@ -31288,9 +31505,7 @@ function tmuxWindowNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-const tmuxWindowActiveIndexOverrides = new Map();
-const tmuxWindowSwitchSequences = new Map();
-const tmuxWindowDirectTargetGuards = new Map();
+const tmuxWindowNavigationRecords = new Map();
 const tmuxWindowPendingActiveIndex = '__pending__';
 const tmuxWindowConfirmedOverrideHoldMs = 4000;
 const tmuxWindowDirectTargetGuardMs = 17000;
@@ -31300,8 +31515,33 @@ function tmuxWindowIndexKey(value) {
   return index === null ? null : String(index);
 }
 
+function tmuxWindowNavigationRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = tmuxWindowNavigationRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {activeIndexOverride: undefined, sequence: 0, directTargetGuard: null};
+    tmuxWindowNavigationRecords.set(key, record);
+  }
+  return record;
+}
+
+function pruneTmuxWindowNavigationRecord(session, record = tmuxWindowNavigationRecord(session)) {
+  if (!record) return false;
+  if (record.activeIndexOverride !== undefined || Number(record.sequence || 0) > 0 || record.directTargetGuard) return false;
+  return tmuxWindowNavigationRecords.delete(String(session || ''));
+}
+
 function tmuxWindowActiveIndexOverride(session) {
-  return tmuxWindowActiveIndexOverrides.get(String(session || ''));
+  return tmuxWindowNavigationRecord(session)?.activeIndexOverride;
+}
+
+function tmuxWindowActiveIndexOverrideEntries() {
+  const entries = [];
+  for (const [session, record] of tmuxWindowNavigationRecords.entries()) {
+    if (record.activeIndexOverride !== undefined) entries.push([session, record.activeIndexOverride]);
+  }
+  return entries;
 }
 
 function tmuxWindowDisplayActiveIndex(session) {
@@ -31312,19 +31552,20 @@ function tmuxWindowDisplayActiveIndex(session) {
 
 function tmuxWindowDirectTargetGuard(session) {
   const key = String(session || '');
-  const guard = tmuxWindowDirectTargetGuards.get(key);
+  const record = tmuxWindowNavigationRecord(key);
+  const guard = record?.directTargetGuard || null;
   if (!guard) return null;
   if (Number(guard.guardUntilMs || 0) > Date.now()) return guard;
-  tmuxWindowDirectTargetGuards.delete(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
   return null;
 }
 
 function tmuxWindowDirectTargetGuardEntries() {
   const entries = [];
-  for (const [session, guard] of tmuxWindowDirectTargetGuards.entries()) {
+  for (const [session] of tmuxWindowNavigationRecords.entries()) {
     const active = tmuxWindowDirectTargetGuard(session);
     if (active) entries.push([session, active]);
-    else if (guard) tmuxWindowDirectTargetGuards.delete(session);
   }
   return entries;
 }
@@ -31334,13 +31575,14 @@ function setTmuxWindowDirectTargetGuard(session, windowIndex, sequence) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!key || indexKey === null) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     index: indexKey,
     sequence: Number(sequence) || 0,
     startedAtMs: now,
     confirmedAtMs: 0,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -31353,11 +31595,12 @@ function confirmTmuxWindowDirectTargetGuard(session, windowIndex, options = {}) 
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     ...guard,
     confirmedAtMs: now,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -31366,12 +31609,16 @@ function clearTmuxWindowDirectTargetGuard(session, options = {}) {
   if (!key) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   const guard = tmuxWindowDirectTargetGuard(key);
+  if (!guard) return false;
   if (sequence > 0 && guard && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
-  return tmuxWindowDirectTargetGuards.delete(key);
+  const record = tmuxWindowNavigationRecord(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
+  return true;
 }
 
 function tmuxWindowSwitchSequence(session) {
-  return Number(tmuxWindowSwitchSequences.get(String(session || '')) || 0);
+  return Number(tmuxWindowNavigationRecord(session)?.sequence || 0);
 }
 
 function tmuxWindowSwitchOptionSequence(options = {}) {
@@ -31388,7 +31635,7 @@ function nextTmuxWindowSwitchSequence(session) {
   const key = String(session || '');
   if (!key) return 0;
   const next = tmuxWindowSwitchSequence(key) + 1;
-  tmuxWindowSwitchSequences.set(key, next);
+  tmuxWindowNavigationRecord(key, {create: true}).sequence = next;
   return next;
 }
 
@@ -31397,7 +31644,7 @@ function tmuxWindowOverrideSequence(session, options = {}) {
   if (!key) return 0;
   const explicit = tmuxWindowSwitchOptionSequence(options);
   if (explicit > 0) {
-    tmuxWindowSwitchSequences.set(key, explicit);
+    tmuxWindowNavigationRecord(key, {create: true}).sequence = explicit;
     return explicit;
   }
   if (options.bumpSequence === false) return tmuxWindowSwitchSequence(key);
@@ -31525,7 +31772,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   setTmuxWindowDirectTargetGuard(session, indexKey, sequence);
   applyTmuxWindowActiveIndexToTranscriptInfo(String(session), indexKey, {render: true});
   updateTmuxWindowBarActiveButtons(session, indexKey);
@@ -31536,7 +31783,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
 function setTmuxWindowActiveIndexPending(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), tmuxWindowPendingActiveIndex);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = tmuxWindowPendingActiveIndex;
   clearTmuxWindowDirectTargetGuard(session);
   updateTmuxWindowBarActiveButtons(session, null);
   refreshTabberPanelsForTmuxWindowChange();
@@ -31547,8 +31794,11 @@ function clearTmuxWindowActiveIndexOverride(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  const deleted = tmuxWindowActiveIndexOverrides.delete(String(session));
+  const record = tmuxWindowNavigationRecord(session);
+  const deleted = record?.activeIndexOverride !== undefined;
+  if (record) record.activeIndexOverride = undefined;
   if (options.clearDirectTarget === true) clearTmuxWindowDirectTargetGuard(session, {sequence});
+  pruneTmuxWindowNavigationRecord(session, record);
   if (deleted) refreshTabberPanelsForTmuxWindowChange();
   return deleted;
 }
@@ -31558,7 +31808,7 @@ function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   confirmTmuxWindowDirectTargetGuard(session, indexKey, {sequence});
   updateTmuxWindowBarActiveButtons(session, indexKey);
   refreshTabberPanelsForTmuxWindowChange();
@@ -35251,6 +35501,21 @@ function bindPreferencesPanel(panel) {
 
 const jsDebugGraphDefaultScaleSeconds = 5;
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
+const jsDebugGraphGeometry = (() => {
+  const width = 600;
+  const height = 120;
+  const plotTop = 8;
+  const plotHeight = 104;
+  const hoverBottomInset = 4;
+  return Object.freeze({
+    width,
+    height,
+    plotTop,
+    plotHeight,
+    plotBottom: plotTop + plotHeight,
+    hoverBottom: height - hoverBottomInset,
+  });
+})();
 const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
 const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
 const jsDebugHistoryOlderOverlayDelayMs = 120;
@@ -36971,10 +37236,9 @@ function debugGraphAllClientMetricBuckets(bucket, metric) {
   if (!bucket || !metric) return [];
   const mappedClients = bucket.clients instanceof Map ? [...bucket.clients.values()] : [];
   // Pre-client-map journals exposed the requesting browser through the top-level fields. Preserve
-  // that retained history as one client while newer buckets use the complete per-client map.
-  const hasLegacyClientData = [bucket.apiCount, bucket.sseCount, bucket.latencyCount, bucket.bandwidthBytes, bucket.disconnectedMs]
-    .some(value => Number(value || 0) > 0);
-  const clientBuckets = mappedClients.length ? mappedClients : (hasLegacyClientData ? [bucket] : []);
+  // that retained history as one client only when this metric supplied data. Newer mapped records
+  // stay explicit even at zero; a disconnect marker alone does not invent traffic for legacy data.
+  const clientBuckets = mappedClients.length ? mappedClients : (metric.hasData(bucket) ? [bucket] : []);
   return metric.aggregate === jsDebugGraphClientAggregateAverage
     ? clientBuckets.filter(clientBucket => metric.hasData(clientBucket))
     : clientBuckets;
@@ -37499,7 +37763,7 @@ function debugGraphHiddenChartsHtml() {
   if (!hiddenGroups.length) return '';
   return `<div class="js-debug-hidden-charts" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     <span class="js-debug-hidden-charts-icon" aria-hidden="true">▣</span>
-    ${hiddenGroups.map(group => `<button type="button" class="js-debug-hidden-chart" data-js-debug-chart-restore="${esc(group.key)}" aria-label="${esc(debugGraphLocalizedLabel(group))}" title="${esc(debugGraphLocalizedLabel(group))}">↗ ${esc(debugGraphLocalizedLabel(group))}</button>`).join('')}
+    ${hiddenGroups.map(group => `<button type="button" class="js-debug-hidden-chart control-active-hover" data-js-debug-chart-restore="${esc(group.key)}" aria-label="${esc(debugGraphLocalizedLabel(group))}" title="${esc(debugGraphLocalizedLabel(group))}">↗ ${esc(debugGraphLocalizedLabel(group))}</button>`).join('')}
   </div>`;
 }
 
@@ -37561,28 +37825,24 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
 }
 
 function debugGraphPointForValue(value, timeMs, chartMax, domain) {
-  const top = 8;
-  const width = 600;
-  const height = 104;
   const max = Math.max(chartMax, 1);
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
   const rawX = Number.isFinite(Number(timeMs)) && Number.isFinite(startMs) && Number.isFinite(endMs)
-    ? ((Number(timeMs) - startMs) / spanMs) * width
-    : width;
-  const x = Math.max(0, Math.min(width, rawX));
-  const y = top + (1 - (Math.max(0, value) / max)) * height;
+    ? ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width
+    : jsDebugGraphGeometry.width;
+  const x = Math.max(0, Math.min(jsDebugGraphGeometry.width, rawX));
+  const y = jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, value) / max)) * jsDebugGraphGeometry.plotHeight;
   return [x.toFixed(1), y.toFixed(1)];
 }
 
 function debugGraphXForTime(timeMs, domain) {
-  const width = 600;
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
   if (!Number.isFinite(Number(timeMs)) || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
-  return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
+  return Math.max(0, Math.min(jsDebugGraphGeometry.width, ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width));
 }
 
 function debugGraphDisconnectedRanges(buckets, domain) {
@@ -37610,7 +37870,7 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
     const title = t('debug.graph.badConnection', {duration: debugGraphTerseTimeText(range.disconnectedMs)});
-    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(title)}</title></rect>`;
+    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(title)}</title></rect>`;
   }).join('');
 }
 
@@ -37690,7 +37950,7 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
   }).join('');
 }
 
@@ -37809,7 +38069,7 @@ function debugGraphAreaPathHtml(series, chartMax, domain) {
     .filter(index => !hasDataValues || hasDataValues[index] === true);
   const upperPoints = pointIndexes.map(index => debugGraphPointForValue(debugGraphSeriesPlotValues(series)[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
   if (!upperPoints.length) return '';
-  const baseline = 112;
+  const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
   const lowerPoints = lowerValues
     ? pointIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
@@ -37864,7 +38124,7 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
 }
 
 function debugGraphInteractionOverlayHtml() {
-  return '<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="8" width="0" height="104"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="8" x2="0" y2="116" vector-effect="non-scaling-stroke"></line>';
+  return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
 function debugGraphLegendHtml(seriesItems) {
@@ -37912,14 +38172,12 @@ function debugGraphIntegerAxisHtml(group, max) {
 }
 
 function debugGraphGridLineY(value, chartMax) {
-  const top = 8;
-  const height = 104;
   const max = Math.max(Number(chartMax) || 0, 1);
-  return top + (1 - (Math.max(0, Number(value) || 0) / max)) * height;
+  return jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, Number(value) || 0) / max)) * jsDebugGraphGeometry.plotHeight;
 }
 
 function debugGraphAxisTickStyle(value, chartMax) {
-  const percent = (debugGraphGridLineY(value, chartMax) / 120) * 100;
+  const percent = (debugGraphGridLineY(value, chartMax) / jsDebugGraphGeometry.height) * 100;
   return ` style="--js-debug-axis-y: ${esc(percent.toFixed(3))}%;"`;
 }
 
@@ -37932,7 +38190,7 @@ function debugGraphGridLinesHtml(group, axisMax) {
   return values.map(value => {
     const y = debugGraphGridLineY(value, max).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
-    return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="600" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
+    return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
 }
 
@@ -38056,14 +38314,14 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
-        <button type="button" class="js-debug-chart-close" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
+        <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${debugGraphLegendHtml(legendSeries)}
     </div>
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
-        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
+        <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
@@ -38700,7 +38958,7 @@ function debugGraphPointerRatioForEvent(event) {
 function debugGraphSetInteractionLines(panel, ratio) {
   const graph = panel?.querySelector?.('[data-js-debug-graph]');
   if (!graph || ratio == null) return;
-  const x = (Math.max(0, Math.min(1, Number(ratio))) * 600).toFixed(1);
+  const x = (Math.max(0, Math.min(1, Number(ratio))) * jsDebugGraphGeometry.width).toFixed(1);
   graph.classList.add('js-debug-graph--hovering');
   graph.querySelectorAll('[data-js-debug-hover-line]').forEach(line => {
     line.setAttribute('x1', x);
@@ -38719,8 +38977,8 @@ function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
   if (!graph) return;
   const start = Math.max(0, Math.min(1, Number(startRatio)));
   const end = Math.max(0, Math.min(1, Number(endRatio)));
-  const x = Math.min(start, end) * 600;
-  const width = Math.abs(end - start) * 600;
+  const x = Math.min(start, end) * jsDebugGraphGeometry.width;
+  const width = Math.abs(end - start) * jsDebugGraphGeometry.width;
   graph.classList.add('js-debug-graph--selecting');
   graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
     rect.setAttribute('x', x.toFixed(1));
@@ -44799,7 +45057,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
     container._previewText = null;
     container._previewDisplayMode = null;
     container._previewContext = null;
-    const mermaidSig = `${path} ${text} ${typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : ''} ${previewContext}`;
+    const mermaidSig = JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', previewContext]);
     if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
       container._mermaidSig = mermaidSig;
       container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
@@ -45031,7 +45289,7 @@ function panePopoutDocumentStyle() {
       position: fixed;
       top: 0;
       inset-inline: 0;
-      z-index: 1000;
+      z-index: var(--z-topbar);
       box-sizing: border-box;
       min-height: 36px;
       padding: 9px 14px 8px;
@@ -45438,19 +45696,8 @@ async function renderedPreviewSnapshotAsync(path, text) {
   return snapshotRenderedPreviewContainer(scratch);
 }
 
-function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
-  const doc = previewWindow?.document;
-  if (!doc) return false;
-  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
-  doc.open();
-  doc.write(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title></title>
-  <link rel="stylesheet" href="${esc(cssHref)}">
-  <style>
+function filePreviewPopoutDocumentStyle() {
+  return `
     html {
       min-height: 100%;
       margin: 0;
@@ -45478,7 +45725,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       position: fixed;
       top: 0;
       left: 50%;
-      z-index: 1000;
+      z-index: var(--z-topbar);
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
@@ -45849,20 +46096,30 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       .file-preview-popout-shell { padding: 64px 14px 28px; }
       .file-preview-popout-title { width: calc(100% - 28px); }
     }
-  </style>
-</head>
-<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
-  <main class="file-preview-popout-shell">
+  `;
+}
+
+function filePreviewPopoutBodyHtml(path, snapshot) {
+  return `<main class="file-preview-popout-shell">
     <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
       <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
       ${previewPopoutToolbarHtml()}
     </header>
     <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
-  </main>
-</body>
-</html>`);
-  doc.close();
-  doc.title = t('preview.popout.title', {name: basenameOf(path)});
+  </main>`;
+}
+
+function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
+  const doc = previewWindow?.document;
+  if (!doc) return false;
+  const written = writePanePopoutDocument(previewWindow, {
+    title: t('preview.popout.title', {name: basenameOf(path)}),
+    bodyClass: previewPopoutBodyClassName(),
+    bodyStyle: previewPopoutVariableStyle(),
+    style: filePreviewPopoutDocumentStyle(),
+    bodyHtml: filePreviewPopoutBodyHtml(path, snapshot),
+  });
+  if (!written) return false;
   doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
@@ -51486,16 +51743,21 @@ function sharePointerSenderColor(sender = '') {
 
 function ensureSharePointerGhost(sender = '') {
   const key = sharePointerSenderKey(sender);
-  const existing = sharePointerGhosts.get(key);
-  if (existing?.isConnected) return existing;
+  let record = sharePointerRecords.get(key) || null;
+  if (record?.ghost?.isConnected) return record.ghost;
+  if (!record) {
+    record = {ghost: null, hideTimer: null};
+    sharePointerRecords.set(key, record);
+  }
+  if (record.hideTimer) clearTimeout(record.hideTimer);
+  record.hideTimer = null;
   const ghost = document.createElement('div');
   ghost.className = 'share-ghost-cursor';
   ghost.dataset.shareSender = key;
   ghost.setAttribute('aria-hidden', 'true');
   ghost.style.setProperty('--share-cursor-color', sharePointerSenderColor(key));
   document.body.appendChild(ghost);
-  sharePointerGhosts.set(key, ghost);
-  sharePointerGhost = ghost;
+  record.ghost = ghost;
   return ghost;
 }
 
@@ -51518,16 +51780,17 @@ function renderSharePointerGhost(payload = {}) {
   if (!point) return;
   const sender = sharePointerSenderKey(payload.sender || '');
   const ghost = ensureSharePointerGhost(sender);
+  const record = sharePointerRecords.get(sender);
   ghost.style.transform = `translate3d(${Math.round(point.x)}px, ${Math.round(point.y)}px, 0)`;
   ghost.classList.add('visible');
-  const existingTimer = sharePointerHideTimers.get(sender);
-  if (existingTimer) clearTimeout(existingTimer);
+  if (record.hideTimer) clearTimeout(record.hideTimer);
   const timer = setTimeout(() => {
-    sharePointerHideTimers.delete(sender);
-    sharePointerGhosts.get(sender)?.classList.remove('visible');
+    const current = sharePointerRecords.get(sender);
+    if (!current || current.hideTimer !== timer) return;
+    current.hideTimer = null;
+    current.ghost?.classList.remove('visible');
   }, 1800);
-  sharePointerHideTimers.set(sender, timer);
-  sharePointerHideTimer = timer;
+  record.hideTimer = timer;
   if (payload.click === true) renderShareClickRipple(point.x, point.y, sender);
 }
 
@@ -55052,27 +55315,13 @@ function infoRecordAgentPayload(record) {
 }
 
 function infoRecordAgentActivityItem(record) {
-  if (!infoRecordHasAi(record) || typeof agentWindowActivityIcon !== 'function') return null;
+  if (!infoRecordHasAi(record)) return null;
   const agent = infoRecordAgentPayload(record);
-  return agentWindowActivityIcon(record.aiKind, agent.state, typeof agentWindowIdleSeconds === 'function' ? agentWindowIdleSeconds(agent) : null, {
-    session: record.tabSession,
-    window: agent.window,
-    window_index: agent.window_index,
-    pane: agent.pane,
-    pane_target: agent.pane_target,
+  return agentWindowActivityIconForStatusItem(agent, record.aiKind, record.tabSession, {
     current: false,
     window_active: false,
-    working_stopped_ts: agent.working_stopped_ts,
     scheduleRefresh: false,
   });
-}
-
-function infoTabGroupStatusRank(state) {
-  const key = String(state || '');
-  if (key === 'attention') return 0;
-  if (key === 'cooldown') return 1;
-  if (key === STATE_KEY.working) return 2;
-  return 9;
 }
 
 function infoTabGroupStatusItem(group = {}) {
@@ -55084,8 +55333,9 @@ function infoTabGroupStatusRecord(group = {}) {
   let best = null;
   for (const record of Array.isArray(group.records) ? group.records : []) {
     const item = infoRecordAgentActivityItem(record);
-    if (!item || infoTabGroupStatusRank(item.state) >= 9) continue;
-    if (!best || infoTabGroupStatusRank(item.state) < infoTabGroupStatusRank(best.item.state)) best = {record, item};
+    const rank = agentWindowStatusItemVisualRank(item);
+    if (!item || rank >= 9) continue;
+    if (!best || rank < best.rank) best = {record, item, rank};
   }
   return best;
 }
@@ -55097,9 +55347,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
   const info = transcriptMeta.sessions?.[session] || {};
-  const summary = typeof sessionStatusAgentWindowSummaryForTab === 'function'
-    ? sessionStatusAgentWindowSummaryForTab(session, info, autoApproveStates.get(session))
-    : null;
+  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
@@ -55978,25 +56226,7 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     toggleAutoApprove(target.dataset.autoSession || session);
   });
-  panel.querySelector('.meta')?.addEventListener('click', event => {
-    event.stopPropagation();
-    const cycle = event.target.closest('[data-repo-cycle]');
-    if (cycle) {
-      event.preventDefault();
-      const targetSession = cycle.dataset.repoCycle || session;
-      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
-      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
-      renderSessionButtons();
-      renderPaneTabStrips();
-      return;
-    }
-    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
-    const chip = event.target.closest('[data-repo-chip]');
-    if (chip) {
-      event.preventDefault();
-      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
-    }
-  });
+  delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
 }
@@ -56509,12 +56739,46 @@ function acknowledgeTerminalAttentionFromTransportInput(session, data, options =
   return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
 }
 
-const terminalTmuxPrefixPendingBySession = new Map();
+const terminalTmuxInputStates = new Map();
 const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
 const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
 const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
-const terminalTmuxWindowRepeatBySession = new Map();
+
+function terminalTmuxInputState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalTmuxInputStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {prefixPending: false, repeatUntilMs: 0};
+    terminalTmuxInputStates.set(key, state);
+  }
+  return state;
+}
+
+function pruneTerminalTmuxInputState(session, now = Date.now()) {
+  const key = String(session || '');
+  const state = terminalTmuxInputState(key);
+  if (!state) return null;
+  if (Number(state.repeatUntilMs || 0) <= now) state.repeatUntilMs = 0;
+  if (state.prefixPending !== true && !state.repeatUntilMs) {
+    terminalTmuxInputStates.delete(key);
+    return null;
+  }
+  return state;
+}
+
+function updateTerminalTmuxInputState(session, updates = {}) {
+  const state = terminalTmuxInputState(session, {create: true});
+  if (!state) return null;
+  if (updates.prefixPending !== undefined) state.prefixPending = updates.prefixPending === true;
+  if (updates.repeatUntilMs !== undefined) state.repeatUntilMs = Math.max(0, Number(updates.repeatUntilMs) || 0);
+  return pruneTerminalTmuxInputState(session);
+}
+
+function pruneTerminalTmuxInputStates(now = Date.now()) {
+  for (const session of terminalTmuxInputStates.keys()) pruneTerminalTmuxInputState(session, now);
+}
 
 const terminalTmuxWindowShortcutDefs = Object.freeze({
   n: {labelKey: 'terminal.window.next', repeatable: true},
@@ -56744,8 +57008,7 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
-  if (shortcut.repeatable) terminalTmuxWindowRepeatBySession.set(session, Date.now() + terminalTmuxWindowRepeatMs);
-  else terminalTmuxWindowRepeatBySession.delete(session);
+  updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
@@ -56759,7 +57022,7 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
 function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   const text = String(data || '');
   if (!text) return false;
-  let pending = terminalTmuxPrefixPendingBySession.get(session) === true;
+  let pending = terminalTmuxInputState(session)?.prefixPending === true;
   let mirrored = false;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
@@ -56771,7 +57034,7 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
         continue;
       }
     }
-    const repeatUntil = Number(terminalTmuxWindowRepeatBySession.get(session) || 0);
+    const repeatUntil = Number(terminalTmuxInputState(session)?.repeatUntilMs || 0);
     const repeatActive = repeatUntil > Date.now();
     const repeatShortcut = repeatActive ? terminalTmuxPrefixWindowShortcut(char) : null;
     if (!pending && repeatShortcut && repeatShortcut.repeatable) {
@@ -56785,11 +57048,8 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
     }
     if (char === '\x02') pending = true;
   }
-  if (pending) terminalTmuxPrefixPendingBySession.set(session, true);
-  else terminalTmuxPrefixPendingBySession.delete(session);
-  for (const [key, expires] of terminalTmuxWindowRepeatBySession.entries()) {
-    if (Number(expires || 0) <= Date.now()) terminalTmuxWindowRepeatBySession.delete(key);
-  }
+  updateTerminalTmuxInputState(session, {prefixPending: pending});
+  pruneTerminalTmuxInputStates();
   return mirrored;
 }
 
@@ -56831,6 +57091,43 @@ function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
+function uploadResultRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = uploadResultRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {entries: [], cleanupTimer: null};
+    uploadResultRecords.set(key, record);
+  }
+  return record;
+}
+
+function clearUploadResultCleanup(session, record = uploadResultRecord(session)) {
+  if (!record || record.cleanupTimer === null) return false;
+  clearTimeout(record.cleanupTimer);
+  record.cleanupTimer = null;
+  return true;
+}
+
+function deleteUploadResultRecord(session) {
+  const key = String(session || '');
+  const record = uploadResultRecord(key);
+  if (!record) return false;
+  clearUploadResultCleanup(key, record);
+  return uploadResultRecords.delete(key);
+}
+
+function moveUploadResultRecord(oldSession, newSession) {
+  const oldKey = String(oldSession || '');
+  const newKey = String(newSession || '');
+  const record = uploadResultRecord(oldKey);
+  if (!record || !newKey || oldKey === newKey) return false;
+  clearUploadResultCleanup(oldKey, record);
+  if (!uploadResultRecords.has(newKey)) uploadResultRecords.set(newKey, record);
+  uploadResultRecords.delete(oldKey);
+  return true;
+}
+
 function showUploadResult(session, payload, inserted) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return null;
@@ -56857,9 +57154,9 @@ function showUploadResult(session, payload, inserted) {
       path: target,
       expiresAt,
     }];
-  const existing = uploadResultsBySession.get(session) || [];
-  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session, {create: true});
+  const active = [...record.entries.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
+  record.entries = active;
   renderUploadResult(session);
   return {expiresAt};
 }
@@ -56875,40 +57172,42 @@ function ensureUploadResultShell(session, node) {
 }
 
 function keepUploadResult(session) {
-  const entries = uploadResultsBySession.get(session) || [];
-  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
-  uploadResultsBySession.set(session, entries);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  const record = uploadResultRecord(session);
+  if (!record) return;
+  for (const entry of record.entries) entry.expiresAt = Number.POSITIVE_INFINITY;
+  clearUploadResultCleanup(session, record);
 }
 
-function scheduleUploadResultCleanup(session, active, now) {
-  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
-  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
-  uploadCleanupTimers.set(session, window.setTimeout(() => {
-    uploadCleanupTimers.delete(session);
+function scheduleUploadResultCleanup(session, record, now) {
+  clearUploadResultCleanup(session, record);
+  const delays = record.entries
+    .map(entry => entry.expiresAt - now)
+    .filter(Number.isFinite);
+  if (!delays.length) return;
+  const delay = Math.max(1, Math.min(...delays));
+  const timer = window.setTimeout(() => {
+    const current = uploadResultRecord(session);
+    if (current !== record || record.cleanupTimer !== timer) return;
+    record.cleanupTimer = null;
     renderUploadResult(session);
-  }, delay));
+  }, delay);
+  record.cleanupTimer = timer;
 }
 
 function renderUploadResult(session) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return;
   const now = Date.now();
-  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session);
+  const active = (record?.entries || []).filter(entry => entry.expiresAt > now).slice(-8);
+  if (record) record.entries = active;
   if (!active.length) {
     node.hidden = true;
     const titleNode = node.querySelector('.toast-title');
     if (titleNode) titleNode.textContent = '';
     const textNode = node.querySelector('.toast-body');
     if (textNode) textNode.replaceChildren();
-    if (uploadCleanupTimers.has(session)) {
-      clearTimeout(uploadCleanupTimers.get(session));
-      uploadCleanupTimers.delete(session);
-    }
+    deleteUploadResultRecord(session);
     return;
   }
   const textNode = ensureUploadResultShell(session, node);
@@ -56920,15 +57219,11 @@ function renderUploadResult(session) {
     text: entry.text,
     countdownMs: entry.expiresAt - now,
   })));
-  scheduleUploadResultCleanup(session, active, now);
+  scheduleUploadResultCleanup(session, record, now);
 }
 
 function hideUploadResult(session) {
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  deleteUploadResultRecord(session);
   const node = document.getElementById(`upload-${session}`);
   if (node) {
     const titleNode = node.querySelector('.toast-title');
@@ -58754,7 +59049,7 @@ function maybeNotifyYoagentJob(notification = {}) {
 function tmuxSignalsPayloadWithWindowOverrides(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.windows)) return data;
   const overrides = new Map();
-  for (const [session, override] of tmuxWindowActiveIndexOverrides.entries()) {
+  for (const [session, override] of tmuxWindowActiveIndexOverrideEntries()) {
     if (override === tmuxWindowPendingActiveIndex) continue;
     const indexKey = tmuxWindowIndexKey(override);
     if (indexKey !== null) overrides.set(String(session), indexKey);

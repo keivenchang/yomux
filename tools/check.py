@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.background_owner import pid_is_alive
+
 DEFAULT_TOOL_LOCK_PATH = Path(tempfile.gettempdir()) / "yolomux-expensive-tools.lock"
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
@@ -197,18 +202,6 @@ def command_text(args: list[str]) -> str:
 
 def state_dir_from_env() -> Path:
     return Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
-
-
-def pid_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def active_yolomux_server_records(

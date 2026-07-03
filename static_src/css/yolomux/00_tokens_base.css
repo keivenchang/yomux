@@ -24,7 +24,9 @@
   --accent-sky-strong: #9fd8ff;
   --surface-ink: #11151d;
   --status-tool: #f59e0b;
+  --warning-border-strong: #ffe27a;
   --danger-border-soft: #d56b7a;
+  --danger-text-soft: #ffd8dc;
   --text-muted-cool: #9ea8b7;
   --text-muted-soft: #667085;
   --subwindow-pid-color: var(--text-muted-soft);
@@ -34,6 +36,13 @@
   --neutral-text-cool: #e2e8f0;
   --overlay-surface: #111820;
   --overlay-surface-strong: rgba(17, 24, 32, 0.98);
+  --overlay-input-bg: #0b1017;
+  --overlay-option-hover-bg: #273140;
+  --neutral-status-bg: #161d29;
+  --neutral-surface-subtle-light: #eef1f5;
+  --yoagent-action-heading-light: #0f4c81;
+  --yoagent-action-code-bg-light: #eef6ff;
+  --yoagent-action-code-border-light: #8ab4f8;
   --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
@@ -53,6 +62,26 @@
   --sep-muted: #5e6878;
   --divider: #384356;
   --overlay-slate-rgb: 15 23 42;
+  /* Literal-paint palette: one numeric owner for repeated fixed shades that are shared by otherwise
+     unrelated components. Semantic tokens stay preferred when one exists; component CSS never
+     restates these channel/alpha combinations. */
+  --paint-black: #000;
+  --paint-white: #fff;
+  --paint-black-34: rgb(0 0 0 / 0.34);
+  --paint-black-42: rgb(0 0 0 / 0.42);
+  --paint-black-45: rgb(0 0 0 / 0.45);
+  --paint-black-58: rgb(0 0 0 / 0.58);
+  --paint-dark-green-16: rgb(8 18 5 / 0.16);
+  --paint-deep-ink-98: rgb(10 14 20 / 0.98);
+  --paint-gold-20: rgb(245 197 66 / 0.20);
+  --paint-warning-transparent: rgb(255 226 122 / 0);
+  --paint-white-04: rgb(255 255 255 / 0.04);
+  --paint-white-06: rgb(255 255 255 / 0.06);
+  --paint-white-08: rgb(255 255 255 / 0.08);
+  --paint-white-10: rgb(255 255 255 / 0.10);
+  --paint-white-28: rgb(255 255 255 / 0.28);
+  --paint-white-85: rgb(255 255 255 / 0.85);
+  --paint-white-92: rgb(255 255 255 / 0.92);
   --accent-lime: #c4f970;
   --radius-pill: 999px;
   --radius-control: 4px;
@@ -82,7 +111,7 @@
   /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
-  --drop-outline: #ffffff;
+  --drop-outline: var(--paint-white);
   --drop-outline-light: #1d4ed8;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
@@ -116,7 +145,7 @@
   --danger-panel-confirming-bg: rgba(122, 25, 20, 0.42);
   --danger-panel-confirming-border: #ff8f6a;
   --danger-panel-confirming-ring: rgba(255, 142, 90, 0.12);
-  --danger-action-text: #ffffff;
+  --danger-action-text: var(--paint-white);
   --danger-action-bg: #d92d20;
   --danger-action-border: #ff8a80;
   --danger-action-hover-bg: #b42318;
@@ -130,6 +159,8 @@
   --pr-status-failing: #ff8a95;
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
+  --pr-link-merged: var(--pr-status-merged);
+  --pr-link-merged-hover: var(--pr-status-merged);
   --pr-status-closed: #aeb8c7;
   --pr-number-chip-bg: #000;
   --git-modified: var(--accent-gold);
@@ -173,6 +204,8 @@
   --active-control-soft-bg: var(--active-accent-soft);
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-focus-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  --active-control-focus-shadow-compact: 0 0 0 1px var(--active-control-focus-ring);
   --active-terminal-cursor-rgb: var(--active-accent-rgb);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
   --disclosure-triangle-expanded-color: var(--active-control-bg);
@@ -230,9 +263,10 @@
   --pane-tab-control-hover-border: #8fa1bc;
   --pane-tab-zoom-bg: var(--active-control-bg);
   --pane-tab-zoom-border: var(--active-control-border);
-  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
-  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
+  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
   --pane-tab-badge-gold: var(--accent-gold);
+  --file-missing-active-bg: #7a2e3d;
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
   --pane-resizer-size: 1px;
@@ -241,7 +275,13 @@
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: rgba(255, 225, 77, 0.72);
+  --pane-resizer-hover-shadow: 0 0 0 1px var(--drop-outline-shadow);
+  --pane-resizer-preview-shadow: 0 0 12px var(--pane-resizer-shadow);
   --tab-insert-preview-width: 24px;
+  --motion-activity-duration: 900ms;
+  --motion-interaction-fast: 90ms;
+  --motion-interaction-standard: 100ms;
+  --motion-disclosure: 120ms;
   --popover-show-delay: 1000ms;
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
@@ -273,11 +313,17 @@
   --z-layer-preview: 4;
   --z-layer-sticky: 6;
   --z-layer-marker: 8;
+  --z-info-tree-summary-base: var(--z-layer-editor);
+  --z-info-tree-summary-depth-0: var(--z-layer-preview);
+  --z-info-tree-summary-depth-1: calc(var(--z-info-tree-summary-depth-0) + 1);
+  --z-info-tree-summary-depth-2: var(--z-layer-sticky);
+  --z-info-tree-summary-depth-3: calc(var(--z-info-tree-summary-depth-2) + 1);
   --z-share-mirror-stage: var(--z-layer-background);
   --z-pane-tab: var(--z-layer-raised);
   --z-inline-control: var(--z-layer-raised);
   --z-panel-resizer-inline: var(--z-layer-control);
   --z-file-editor-layer: var(--z-layer-editor);
+  --z-file-editor-find-overlay: calc(var(--z-file-editor-layer) + 1);
   --z-file-editor-preview-layer: var(--z-layer-preview);
   --z-tabs-row: var(--z-layer-preview);
   --z-sticky-pane-head: var(--z-layer-sticky);
@@ -306,6 +352,8 @@
   --z-file-editor-actions: 220;
   --z-file-editor-dialog: 275;
   --z-share-presence: 320;
+  --z-share-popup-mirror: calc(var(--z-share-presence) + 1);
+  --z-share-viewer-banner: calc(var(--z-share-presence) + 2);
   --z-rename-input: 9000;
   --file-pane-min-inline-size: min(260px, 46vw);
   --file-editor-pane-min-inline-size: min(340px, 52vw);
@@ -391,16 +439,16 @@
   --editor-ui-font-size-sm: max(9px, calc(var(--editor-font-size) - 3px));
   --editor-line-height: 1.2;
   --file-explorer-font-size: var(--ui-font-size);
-  --lt-bg: #ffffff;
+  --lt-bg: var(--paint-white);
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
   --lt-text: var(--markdown-html-light-text);
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
-  --lt-editor-bg: #ffffff;
+  --lt-editor-bg: var(--paint-white);
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
-  --document-preview-bg: #ffffff;
+  --document-preview-bg: var(--paint-white);
   --image-preview-checker-bg: #151a22;
   --image-preview-checker-bg-light: #e9edf2;
   --lt-markdown-heading: var(--active-accent);
@@ -425,6 +473,7 @@
   --markdown-code-block-bg: #2a303b;
   --markdown-html-light-text: #111827;
   --markdown-html-light-link: #075985;
+  --vanilla-preview-link: #0645ad;
   --markdown-html-light-code: #a40e26;
   --markdown-html-light-code-bg: #fff1d6;
   --markdown-html-light-code-border: #d8a657;
@@ -440,6 +489,7 @@
   --lt-code-block-bg: #f3f4f6;
   --lt-code-block-border: #e4e7ec;
   --lt-code-block-text: #1f2328;
+  --editor-search-border-light: #8c959f;
   --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
@@ -452,13 +502,13 @@
   --pc-control-bg: #1b2432;
   --pc-control-fg: #dfe6ef;
   --pc-control-border: #536074;
-  --pc-control-hover-fg: #ffffff;
+  --pc-control-hover-fg: var(--paint-white);
   --pc-control-hover-bg: #263247;
   --pc-control-hover-border: #8fa1bc;
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
-  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
-  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
+  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
   --panel-close-size: 18px;
   --panel-close-radius: 4px;
   --panel-close-glyph-width: 9px;
@@ -579,7 +629,7 @@ body.theme-light {
   --pane-tab-control-hover-border: #6b7788;
   --pane-tab-zoom-bg: var(--active-control-bg);
   --pane-tab-zoom-border: var(--active-control-border);
-  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   --pane-tab-zoom-hover-border: var(--active-control-border);
   /* active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
@@ -595,6 +645,7 @@ body.theme-light {
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-panel-head-text: #1f2937;
   --pane-tab-panel-detail-bg: #dce8d2;
+  --file-missing-active-bg: #f7d2d8;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
@@ -604,7 +655,7 @@ body.theme-light {
   --pane-resizer-hover-bg: rgba(37, 99, 235, 0.96);
   --pane-resizer-shadow: rgba(29, 78, 216, 0.48);
   --bg: #f6f8fb;
-  --panel: #ffffff;
+  --panel: var(--paint-white);
   --panel-inactive: #eef2f7;
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
@@ -615,13 +666,13 @@ body.theme-light {
   --subwindow-recency-color: var(--text-muted-cool);
   --line: #c9d2df;
   --tree-indent-line: rgba(100, 116, 139, 0.12);
-  --info-pane-bg: #ffffff;
+  --info-pane-bg: var(--paint-white);
   --info-tree-border: #8793a3;
   /* Tree connectors and record outlines need to remain visible against the white Info pane. */
   --info-tree-line: rgb(71 85 105 / 0.42);
   --info-tree-record-border: var(--info-tree-line);
   --info-tree-group-bg: #f6f9fd;
-  --info-tree-chip-bg: #ffffff;
+  --info-tree-chip-bg: var(--paint-white);
   --info-tree-pr-neutral: var(--link-soft);
   --info-tree-pr-neutral-hover: var(--link-soft-hover);
   --info-tree-search-match-text: var(--auto-text);
@@ -642,6 +693,8 @@ body.theme-light {
   --icon-archive: #c2410c;
   --link-soft: #075985;
   --link-soft-hover: #0369a1;
+  --pr-link-merged: var(--lt-code-function);
+  --pr-link-merged-hover: #6639ba;
   --git-modified: var(--accent-gold);
   --git-modified-badge: #f5c542;
   --git-untracked-name: #116329;
@@ -715,7 +768,7 @@ body.theme-light {
   --pc-control-hover-border: #6b7788;
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
-  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   --pc-zoom-hover-border: var(--active-control-border);
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
@@ -749,11 +802,90 @@ body.theme-light {
   cursor: pointer;
   font: inherit;
 }
+.app-menu-bar,
+.file-explorer-quick-access,
+.file-explorer-quick-access-panel {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  overflow: visible;
+}
 .control-active-hover:hover,
 .control-active-hover:focus-visible {
   outline: 0;
   color: var(--active-control-text);
   background: var(--active-control-bg);
+}
+#tabMetaToggle.active,
+.topbar-language-menu.open > .topbar-language,
+.app-menu-ui-icon.active,
+.notify-toggle.active,
+.session-state-badge.session-state-yolo-approval,
+.preferences-search-button,
+.tmux-window-bar .tmux-window-button.active,
+.session-rename-actions .session-rename-submit,
+.info-tree-preset.active,
+.info-tree-preset:hover,
+.info-tree-preset:focus-visible,
+.file-explorer-hidden-toggle.active,
+.file-explorer-root-mode-toggle.active,
+.file-explorer-quick-access-button.active,
+.file-explorer-date-toggle.active,
+.file-editor-preview-zoom-toolbar button[aria-pressed="true"],
+.file-editor-codemirror .cm-search label:has(input:checked),
+.file-editor-codemirror-panel .cm-search label:has(input:checked) {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+}
+body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .file-explorer-tree-col) {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+.share-viewer-banner-text,
+.app-menu-setting-label,
+.status-indicator--label,
+.diff-ref-suggestion-description,
+.preferences-section-title,
+.js-debug-client-perf-row,
+.js-debug-chart-summary,
+.js-debug-x-axis span,
+.tmux-window-button .tmux-window-name-text,
+.search-history-row-title,
+.search-history-row-meta,
+.yoagent-recent-agent-paths,
+.yoagent-transcript-value,
+.yoagent-compact-label,
+.yoagent-job-meta,
+.yoagent-job-text,
+.info-tree-group-label-line,
+.info-tree-group-label,
+.file-editor-title-name,
+.file-tree-row.tabber-row .tabber-window-text,
+.share-entry-heading strong,
+.share-url-primary-head > span,
+.share-users-row span,
+.terminal-drop-suggestion-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-yolo-marker.inactive {
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
+}
+.terminal-context-menu button:disabled,
+.file-editor-preview-zoom-toolbar button:disabled,
+.file-editor-find:disabled,
+.file-editor-preview-font-panel button:disabled,
+.file-editor-find-panel:disabled {
+  opacity: 0.42;
+  cursor: default;
 }
 html {
   height: 100%;

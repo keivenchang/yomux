@@ -13,6 +13,7 @@ from yolomux_lib.activity_summary import build_global_activity_summary
 from yolomux_lib.activity_summary import build_session_activity_summary
 from yolomux_lib.activity_summary import build_yoagent_chat_prompt
 from yolomux_lib.activity_summary import build_yoagent_resume_prompt
+from yolomux_lib.activity_summary import changed_file_totals
 from yolomux_lib.activity_summary import deterministic_yoagent_reply
 from yolomux_lib.activity_summary import relative_age_text
 from yolomux_lib.activity_summary import transcript_file_signature
@@ -829,7 +830,6 @@ def test_work_next_ranking_covers_blockers_tests_reviews_local_priorities_and_st
 
 
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():
-    from yolomux_lib.activity_summary import changed_file_totals
     # numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).
     payload = {"files": [
         {"added": "5", "removed": "2"},

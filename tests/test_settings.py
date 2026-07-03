@@ -16,6 +16,12 @@ from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
 from yolomux_lib.settings import write_settings_file
+from yolomux_lib.activity_summary import deterministic_yoagent_reply
+from yolomux_lib.web import current_language_pref
+from yolomux_lib.web import html_lang_dir_attrs
+from yolomux_lib.web import LOGIN_LOCALE_CHOICES
+from yolomux_lib.web import login_html
+from yolomux_lib.web import save_login_locale
 from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
 from yolomux_lib.yoagent.preferences import parse_settings_write
 
@@ -542,11 +548,6 @@ def test_save_settings_reports_coerced_keys(tmp_path):
 def test_login_locale_picker_writes_general_language():
     # Phase 1: the login-screen language picker (entry point #1) renders endonym options and a
     # successful pick is persisted to general.language (the same setting topbar/Preferences write).
-    from yolomux_lib.web import LOGIN_LOCALE_CHOICES
-    from yolomux_lib.web import current_language_pref
-    from yolomux_lib.web import login_html
-    from yolomux_lib.web import save_login_locale
-
     assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr"]
     page = login_html()
     assert 'name="locale"' in page
@@ -557,7 +558,6 @@ def test_login_locale_picker_writes_general_language():
     for label in ["Tiếng Việt", "ไทย", "Türkçe", "Nederlands", "Polski", "Italiano"]:
         assert label in page
     # Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
-    from yolomux_lib.web import html_lang_dir_attrs
     assert html_lang_dir_attrs("en") == 'lang="en" dir="ltr"'
     assert html_lang_dir_attrs("ar") == 'lang="ar" dir="rtl"'
     assert 'dir="rtl"' in login_html(current_locale="ar")
@@ -590,8 +590,6 @@ def test_login_locale_picker_writes_general_language():
 
 def test_deterministic_yoagent_reply_localizes_framing():
     # The no-agent fallback resolves both framing and per-session facts through the active locale.
-    from yolomux_lib.activity_summary import deterministic_yoagent_reply
-
     en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")
     assert "No AI backend is answering" in en_reply
     assert "No AI agent activity is available yet." in en_reply

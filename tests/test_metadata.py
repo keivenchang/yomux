@@ -15,10 +15,13 @@ from yolomux_lib.metadata import MetadataCache
 from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
 from yolomux_lib.metadata import linear_issue_metadata
+from yolomux_lib.metadata import parse_pull_request_ref
 from yolomux_lib.metadata import project_pull_request
 from yolomux_lib.metadata import session_git_inventory
 from yolomux_lib.metadata import session_repo_summaries
 from yolomux_lib.metadata import summarize_github_checks
+from yolomux_lib.metadata import WATCHED_PR_LIMIT
+from yolomux_lib.metadata import watched_pr_metadata
 
 from _git_helpers import git as _git
 
@@ -744,8 +747,6 @@ def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
 
 def test_parse_pull_request_ref_accepts_short_and_url_forms():
     # owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
-    from yolomux_lib.metadata import parse_pull_request_ref
-
     for text in ("ai-dynamo/frontend-crates#18", "ai-dynamo/frontend-crates/18",
                  "https://github.com/ai-dynamo/frontend-crates/pull/18",
                  "  ai-dynamo/frontend-crates#18  ",
@@ -761,8 +762,6 @@ def test_parse_pull_request_ref_accepts_short_and_url_forms():
 
 def test_parse_pull_request_ref_rejects_invalid():
     # non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
-    from yolomux_lib.metadata import parse_pull_request_ref
-
     for text in ("https://gitlab.com/owner/repo/pull/7", "owner/repo", "owner/repo#0",
                  "not a ref", "https://github.com/owner/repo/issues/3", "", None):
         assert parse_pull_request_ref(text) is None, text
@@ -771,8 +770,6 @@ def test_parse_pull_request_ref_rejects_invalid():
 def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
     # dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
     # return the fallback PR shape carrying {ref, url}.
-    from yolomux_lib.metadata import watched_pr_metadata, WATCHED_PR_LIMIT
-
     refs = ["owner/repo#1", "owner/repo#1", "bad ref", "owner/repo#2"]
     result = watched_pr_metadata(refs, MetadataCache(), allow_network=False)
     assert [pr["ref"] for pr in result["watched_prs"]] == ["owner/repo#1", "owner/repo#2"]
@@ -791,8 +788,6 @@ def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
 def test_candidate_session_cwds_prefers_live_pane_cwd_over_default(monkeypatch, tmp_path):
     # the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
     # the project follows the pane instead of staying pinned to dynamoN.
-    from yolomux_lib.common import PaneInfo, SessionInfo
-
     default_dir = tmp_path / "dynamo1"
     live_dir = tmp_path / "frontend-crates"
     default_dir.mkdir()
@@ -817,8 +812,6 @@ def test_candidate_session_cwds_prefers_live_pane_cwd_over_default(monkeypatch, 
 
 def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypatch, tmp_path):
     # A session with no pane/agent cwd still falls back to the session-number default workspace.
-    from yolomux_lib.common import SessionInfo
-
     default_dir = tmp_path / "dynamo1"
     default_dir.mkdir()
     monkeypatch.setattr(metadata, "session_workdir", lambda session: default_dir)
@@ -829,8 +822,6 @@ def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypat
 
 def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
     # S7: a linked worktree resolves to its parent repo; the main checkout returns None.
-    import subprocess
-
     def run(*args, cwd):
         subprocess.run(args, cwd=str(cwd), check=True, capture_output=True)
 

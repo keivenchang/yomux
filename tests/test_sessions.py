@@ -30,6 +30,16 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
     assert processes[10] == ProcessInfo(pid=10, ppid=1, command="python3 yolomux.py")
 
 
+def test_classify_agent_requires_an_agent_entry_point():
+    assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
+    assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
+    assert sessions.classify_agent("python3 tools/claude.py --mock") == "claude"
+    assert sessions.classify_agent("python3 tools/codex.py --mock") == "codex"
+    assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
+    assert sessions.classify_agent("python3 -m pytest -k codex") is None
+    assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
+
+
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
@@ -259,6 +269,44 @@ def test_discover_sessions_emits_one_claude_agent_for_launcher_and_daemon_descen
     discovered, errors = sessions.discover_sessions(["1"])
 
     assert errors == []
+    assert discovered["1"].agents == [selected]
+
+
+def test_discover_sessions_uses_one_canonical_agent_for_pane(monkeypatch):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="node /home/me/.local/bin/codex resume abc"),
+        102: ProcessInfo(pid=102, ppid=101, command="/opt/codex resume abc"),
+        103: ProcessInfo(pid=103, ppid=102, command="rg -n claude yolomux_lib tests"),
+        104: ProcessInfo(pid=104, ppid=102, command="python3 -m pytest -k codex"),
+        105: ProcessInfo(pid=105, ppid=102, command="git commit -m 'fix claude notifications'"),
+    }
+    selected = AgentInfo(
+        session="1",
+        kind="codex",
+        pid=102,
+        pane_target=pane.target,
+        command=processes[102].command,
+        cwd="/repo",
+        status=None,
+        session_id="codex-session",
+        transcript="/repo/rollout.jsonl",
+        error=None,
+    )
+    selected_pids = []
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(
+        sessions,
+        "read_codex_agent",
+        lambda _session, _pane, process: selected_pids.append(process.pid) or selected,
+    )
+
+    discovered, errors = sessions.discover_sessions(["1"])
+
+    assert errors == []
+    assert selected_pids == [102]
     assert discovered["1"].agents == [selected]
 
 

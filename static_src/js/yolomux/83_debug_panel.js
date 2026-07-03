@@ -4,6 +4,21 @@
 
 const jsDebugGraphDefaultScaleSeconds = 5;
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
+const jsDebugGraphGeometry = (() => {
+  const width = 600;
+  const height = 120;
+  const plotTop = 8;
+  const plotHeight = 104;
+  const hoverBottomInset = 4;
+  return Object.freeze({
+    width,
+    height,
+    plotTop,
+    plotHeight,
+    plotBottom: plotTop + plotHeight,
+    hoverBottom: height - hoverBottomInset,
+  });
+})();
 const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
 const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
 const jsDebugHistoryOlderOverlayDelayMs = 120;
@@ -1724,10 +1739,9 @@ function debugGraphAllClientMetricBuckets(bucket, metric) {
   if (!bucket || !metric) return [];
   const mappedClients = bucket.clients instanceof Map ? [...bucket.clients.values()] : [];
   // Pre-client-map journals exposed the requesting browser through the top-level fields. Preserve
-  // that retained history as one client while newer buckets use the complete per-client map.
-  const hasLegacyClientData = [bucket.apiCount, bucket.sseCount, bucket.latencyCount, bucket.bandwidthBytes, bucket.disconnectedMs]
-    .some(value => Number(value || 0) > 0);
-  const clientBuckets = mappedClients.length ? mappedClients : (hasLegacyClientData ? [bucket] : []);
+  // that retained history as one client only when this metric supplied data. Newer mapped records
+  // stay explicit even at zero; a disconnect marker alone does not invent traffic for legacy data.
+  const clientBuckets = mappedClients.length ? mappedClients : (metric.hasData(bucket) ? [bucket] : []);
   return metric.aggregate === jsDebugGraphClientAggregateAverage
     ? clientBuckets.filter(clientBucket => metric.hasData(clientBucket))
     : clientBuckets;
@@ -2252,7 +2266,7 @@ function debugGraphHiddenChartsHtml() {
   if (!hiddenGroups.length) return '';
   return `<div class="js-debug-hidden-charts" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     <span class="js-debug-hidden-charts-icon" aria-hidden="true">▣</span>
-    ${hiddenGroups.map(group => `<button type="button" class="js-debug-hidden-chart" data-js-debug-chart-restore="${esc(group.key)}" aria-label="${esc(debugGraphLocalizedLabel(group))}" title="${esc(debugGraphLocalizedLabel(group))}">↗ ${esc(debugGraphLocalizedLabel(group))}</button>`).join('')}
+    ${hiddenGroups.map(group => `<button type="button" class="js-debug-hidden-chart control-active-hover" data-js-debug-chart-restore="${esc(group.key)}" aria-label="${esc(debugGraphLocalizedLabel(group))}" title="${esc(debugGraphLocalizedLabel(group))}">↗ ${esc(debugGraphLocalizedLabel(group))}</button>`).join('')}
   </div>`;
 }
 
@@ -2314,28 +2328,24 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
 }
 
 function debugGraphPointForValue(value, timeMs, chartMax, domain) {
-  const top = 8;
-  const width = 600;
-  const height = 104;
   const max = Math.max(chartMax, 1);
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
   const rawX = Number.isFinite(Number(timeMs)) && Number.isFinite(startMs) && Number.isFinite(endMs)
-    ? ((Number(timeMs) - startMs) / spanMs) * width
-    : width;
-  const x = Math.max(0, Math.min(width, rawX));
-  const y = top + (1 - (Math.max(0, value) / max)) * height;
+    ? ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width
+    : jsDebugGraphGeometry.width;
+  const x = Math.max(0, Math.min(jsDebugGraphGeometry.width, rawX));
+  const y = jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, value) / max)) * jsDebugGraphGeometry.plotHeight;
   return [x.toFixed(1), y.toFixed(1)];
 }
 
 function debugGraphXForTime(timeMs, domain) {
-  const width = 600;
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
   if (!Number.isFinite(Number(timeMs)) || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
-  return Math.max(0, Math.min(width, ((Number(timeMs) - startMs) / spanMs) * width));
+  return Math.max(0, Math.min(jsDebugGraphGeometry.width, ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width));
 }
 
 function debugGraphDisconnectedRanges(buckets, domain) {
@@ -2363,7 +2373,7 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
     const title = t('debug.graph.badConnection', {duration: debugGraphTerseTimeText(range.disconnectedMs)});
-    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(title)}</title></rect>`;
+    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(title)}</title></rect>`;
   }).join('');
 }
 
@@ -2443,7 +2453,7 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="120"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
+    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
   }).join('');
 }
 
@@ -2562,7 +2572,7 @@ function debugGraphAreaPathHtml(series, chartMax, domain) {
     .filter(index => !hasDataValues || hasDataValues[index] === true);
   const upperPoints = pointIndexes.map(index => debugGraphPointForValue(debugGraphSeriesPlotValues(series)[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
   if (!upperPoints.length) return '';
-  const baseline = 112;
+  const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
   const lowerPoints = lowerValues
     ? pointIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
@@ -2617,7 +2627,7 @@ function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
 }
 
 function debugGraphInteractionOverlayHtml() {
-  return '<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="8" width="0" height="104"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="8" x2="0" y2="116" vector-effect="non-scaling-stroke"></line>';
+  return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
 function debugGraphLegendHtml(seriesItems) {
@@ -2665,14 +2675,12 @@ function debugGraphIntegerAxisHtml(group, max) {
 }
 
 function debugGraphGridLineY(value, chartMax) {
-  const top = 8;
-  const height = 104;
   const max = Math.max(Number(chartMax) || 0, 1);
-  return top + (1 - (Math.max(0, Number(value) || 0) / max)) * height;
+  return jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, Number(value) || 0) / max)) * jsDebugGraphGeometry.plotHeight;
 }
 
 function debugGraphAxisTickStyle(value, chartMax) {
-  const percent = (debugGraphGridLineY(value, chartMax) / 120) * 100;
+  const percent = (debugGraphGridLineY(value, chartMax) / jsDebugGraphGeometry.height) * 100;
   return ` style="--js-debug-axis-y: ${esc(percent.toFixed(3))}%;"`;
 }
 
@@ -2685,7 +2693,7 @@ function debugGraphGridLinesHtml(group, axisMax) {
   return values.map(value => {
     const y = debugGraphGridLineY(value, max).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
-    return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="600" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
+    return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
 }
 
@@ -2809,14 +2817,14 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
-        <button type="button" class="js-debug-chart-close" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
+        <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${debugGraphLegendHtml(legendSeries)}
     </div>
     <div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
-        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
+        <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
@@ -3453,7 +3461,7 @@ function debugGraphPointerRatioForEvent(event) {
 function debugGraphSetInteractionLines(panel, ratio) {
   const graph = panel?.querySelector?.('[data-js-debug-graph]');
   if (!graph || ratio == null) return;
-  const x = (Math.max(0, Math.min(1, Number(ratio))) * 600).toFixed(1);
+  const x = (Math.max(0, Math.min(1, Number(ratio))) * jsDebugGraphGeometry.width).toFixed(1);
   graph.classList.add('js-debug-graph--hovering');
   graph.querySelectorAll('[data-js-debug-hover-line]').forEach(line => {
     line.setAttribute('x1', x);
@@ -3472,8 +3480,8 @@ function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
   if (!graph) return;
   const start = Math.max(0, Math.min(1, Number(startRatio)));
   const end = Math.max(0, Math.min(1, Number(endRatio)));
-  const x = Math.min(start, end) * 600;
-  const width = Math.abs(end - start) * 600;
+  const x = Math.min(start, end) * jsDebugGraphGeometry.width;
+  const width = Math.abs(end - start) * jsDebugGraphGeometry.width;
   graph.classList.add('js-debug-graph--selecting');
   graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
     rect.setAttribute('x', x.toFixed(1));

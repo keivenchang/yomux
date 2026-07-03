@@ -1306,6 +1306,28 @@ function paneInfoBarMetaHtml(session, info) {
   return paneInfoBarMetaParts(session, info).metadataHtml;
 }
 
+const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';
+
+function refreshSessionRepoDisplay(session) {
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  renderSessionButtons();
+  renderPaneTabStrips();
+}
+
+function activateRepoSelectorControl(event, button, panelSession) {
+  event.preventDefault();
+  event.stopPropagation();
+  const cycleSession = button.dataset.repoCycle;
+  if (cycleSession !== undefined) {
+    const session = cycleSession || panelSession;
+    cycleSessionRepoDisplay(session, transcriptMeta.sessions?.[session], button.dataset.repoCycleDir || 1);
+    refreshSessionRepoDisplay(session);
+    return;
+  }
+  const session = button.dataset.repoChip || panelSession;
+  showRepoChipMenu(session, event.clientX, event.clientY);
+}
+
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
 // ahead/behind. Clicking a row scopes the Finder to that repo. Reuses the shared context-menu controller.
 function repoChipMenuRowHtml(repo) {
@@ -1337,9 +1359,7 @@ function showRepoChipMenu(session, x, y) {
     // Pick this repo as the Info Bar's displayed repo (the <N/M>) and refresh — same effect as
     // cycling with the < / > arrows, but jumps straight to the chosen repo.
     sessionRepoDisplayRoot.set(session, root);
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-    renderSessionButtons();
-    renderPaneTabStrips();
+    refreshSessionRepoDisplay(session);
   });
   repoChipContextMenu.open(menu, x, y);
 }
@@ -1489,39 +1509,52 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
-function clearSessionUiState(session) {
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
-  autoApproveStates.delete(session);
-  paneViewState.delete(session);
-  pendingPaneViewStateCaptures.delete(session);
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+function clearSessionEphemeralRuntimeState(session) {
+  tmuxWindowNavigationRecords.delete(session);
+  terminalTmuxInputStates.delete(session);
+  altScreenWheelRemainder.delete(session);
+  clearAgentWindowActivityRecordsForSession(session);
+  clearSessionAttentionAcknowledgementRecords(session);
 }
 
-function stopSessionUi(session) {
+function detachSessionUi(session) {
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
   const item = terminals.get(session);
   if (item) closeTerminalItem(session, item);
   terminals.delete(session);
-  clearSessionUiState(session);
+  pendingPaneViewStateCaptures.delete(session);
   const panel = panelNodes.get(session);
   if (panel) panel.remove();
   panelNodes.delete(session);
+  clearSessionEphemeralRuntimeState(session);
+  dismissSessionToasts(session);
+}
+
+function clearSessionUiState(session) {
+  autoApproveStates.delete(session);
+  paneViewState.delete(session);
+  deleteUploadResultRecord(session);
+  sessionStatusRecords.delete(session);
+  sessionRepoDisplayRoot.delete(session);
+  tmuxStatusModes.delete(session);
+  terminalAppClipboardText.delete(session);
+  pasteCounters.delete(session);
+  tabLastActivatedAt.delete(session);
+}
+
+function stopSessionUi(session) {
+  detachSessionUi(session);
+  clearSessionUiState(session);
 }
 
 function replaceSessionMetadata(oldSession, newSession) {
   for (const map of [
     autoApproveStates,
-    sessionStateKeys,
-    notificationLastSent,
-    workingAgentNotificationTones,
-    attentionAlertTimers,
-    metadataBadgePulseUntil,
-    uploadResultsBySession,
-    uploadCleanupTimers,
+    sessionStatusRecords,
+    sessionRepoDisplayRoot,
+    tmuxStatusModes,
+    terminalAppClipboardText,
     pasteCounters,
     paneViewState,
     // carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
@@ -1546,13 +1579,15 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
   clearPendingTmuxSession(oldSession);
   markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
-  stopSessionUi(oldSession);
+  moveUploadResultRecord(oldSession, newSession);
+  detachSessionUi(oldSession);
   replaceSessionMetadata(oldSession, newSession);
   setSessionOrder(next);
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
   applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
+  renderUploadResult(newSession);
 }
 
 function closeSessionRenameDialog() {
@@ -1680,7 +1715,6 @@ async function killTmuxSession(session) {
     clearPendingTmuxSession(session);
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
-    autoApproveStates.delete(session);
     updateDocumentTitle();
     renderSessionButtons();
     renderPanels(previousActive);
@@ -2602,10 +2636,7 @@ function closeTerminalItem(session, item) {
 }
 
 function dismissTerminalConnectionToasts(session) {
-  for (const node of document.querySelectorAll('.toast[data-toast-kind="terminal-connection"]')) {
-    if (node.dataset.toastSession !== session) continue;
-    removeAttentionAlert(Number(node.dataset.alertId || 0));
-  }
+  dismissSessionToasts(session, {kind: 'terminal-connection'});
 }
 
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
@@ -2656,7 +2687,6 @@ function pruneDeadSession(session) {
   const previousActive = activeSessions.slice();
   stopSessionUi(session);
   completeTerminalRemovalLatency('session', session, {reason: 'prune-dead-session'});
-  autoApproveStates.delete(session);
   if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
   updateDocumentTitle();
   renderSessionButtons();

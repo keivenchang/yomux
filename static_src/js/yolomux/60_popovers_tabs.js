@@ -447,17 +447,6 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
   return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
 }
 
-function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  const summary = typeof sessionAgentWindowStatusSummary === 'function'
-    ? sessionAgentWindowStatusSummary(session, info, payload)
-    : null;
-  return summary?.agent ? summary : null;
-}
-
-function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
-}
-
 function sessionStatusBallPlaceholderHtml() {
   // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
   // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
@@ -471,7 +460,7 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
     : '';
-  const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
+  const statusSummary = sessionAgentWindowStatusSummary(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
     const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
@@ -603,13 +592,9 @@ function displayPullRequest(info) {
   return displayPullRequestForGit(info, info?.project?.git);
 }
 
-function metadataBadgeKey(session, badge) {
-  return `${session}:${badge}`;
-}
-
 function metadataBadgePulseClass(session, badge) {
   if (!session) return '';
-  const until = metadataBadgePulseUntil.get(metadataBadgeKey(session, badge));
+  const until = sessionStatusRecord(session)?.metadataBadgePulseUntil.get(badge);
   if (!until || until <= Date.now()) return '';
   return ' metadata-pulse';
 }
@@ -620,15 +605,19 @@ function metadataBadgeClasses(session, badge, classes) {
 
 function updateMetadataBadgePulses(meta) {
   const now = Date.now();
-  for (const [key, until] of metadataBadgePulseUntil.entries()) {
-    if (until <= now) metadataBadgePulseUntil.delete(key);
+  for (const record of sessionStatusRecords.values()) {
+    for (const [badge, until] of record.metadataBadgePulseUntil.entries()) {
+      if (until <= now) record.metadataBadgePulseUntil.delete(badge);
+    }
   }
   for (const [session, info] of Object.entries(meta?.sessions || {})) {
     const pulses = info?.metadata_badge_pulse_remaining_ms || {};
+    const pulseMap = sessionStatusRecord(session, true)?.metadataBadgePulseUntil;
+    if (!pulseMap) continue;
     for (const badge of ['main', 'pr', 'status', 'ci']) {
       const remaining = Number(pulses[badge] || 0);
       if (remaining > 0) {
-        metadataBadgePulseUntil.set(metadataBadgeKey(session, badge), now + remaining);
+        pulseMap.set(badge, now + remaining);
       }
     }
   }
@@ -800,14 +789,6 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
-function sessionPopoverAgentStateRank(state) {
-  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
-}
-
-function agentStatusIsAttentionState(state) {
-  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
-}
-
 function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   let timestamp = Number.isFinite(lastActive) && lastActive > 0 ? lastActive : nowSeconds;
@@ -886,7 +867,7 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
-    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+    .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
 }

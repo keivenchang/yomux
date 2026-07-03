@@ -53,10 +53,10 @@
 .file-editor-image-panel {
   background-color: var(--image-preview-checker-bg);
   background-image:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%);
+    linear-gradient(45deg, var(--paint-white-10) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--paint-white-10) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--paint-white-10) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--paint-white-10) 75%);
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   background-size: 24px 24px;
 }
@@ -91,7 +91,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-preview-image {
   max-height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 0.5px var(--paint-white-85)) drop-shadow(0 10px 24px var(--paint-black-45));
 }
 .file-editor-preview-fallback,
 .markdown-image-error,
@@ -165,19 +165,10 @@ body.editor-theme-light .file-editor-image-panel {
   min-width: 28px;
   padding: 0 6px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-zoom-toolbar button[aria-pressed="true"] {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
-.file-editor-preview-zoom-toolbar button:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-preview-zoom-value {
   min-width: 4ch;
@@ -435,7 +426,7 @@ body.editor-theme-light .file-editor-image-panel {
   position: absolute;
   top: 0;
   right: 0;
-  font: 800 10px/1 var(--mono-font);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: currentColor;
 }
 .file-editor-icon-theme::before {
@@ -500,7 +491,7 @@ body.editor-theme-light .file-editor-image-panel {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
   color: var(--text);
 }
 .file-editor-dialog-title {
@@ -526,7 +517,7 @@ body.editor-theme-light .file-editor-image-panel {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--mono-font);
-  font-size: 12px;
+  font-size: var(--ui-font-size-sm);
   line-height: 1.45;
 }
 .file-editor-dialog-actions {
@@ -550,11 +541,11 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-action:focus-visible {
   border-color: var(--active-control-border);
   outline: 0;
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
 }
 .file-editor-dialog-action.danger {
   border-color: #9b2d33;
-  color: #ffd8dc;
+  color: var(--danger-text-soft);
 }
 .file-editor-conflict-compare {
   display: grid;
@@ -609,7 +600,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   color: var(--muted);
 }
 .file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::before {
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::after {
   content: "V";
@@ -646,15 +637,11 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   color: var(--code-number);
   background: transparent;
   border-color: #c69a15;
-  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
+  box-shadow: inset 0 0 0 1px var(--paint-gold-20);
 }
 .file-editor-wrap.active,
 .file-editor-gutter.active {
   background: rgba(159, 216, 255, 0.10);
-}
-.file-editor-find:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-codemirror {
   position: absolute;
@@ -673,7 +660,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 /* Light editor: the image backdrop + the transparency checkerboard are tuned dark
    (white-on-dark checker). Repaint as a light backdrop with a dark checker. */
 body.editor-theme-light .file-editor-image {
-  background: #eef1f5;
+  background: var(--neutral-surface-subtle-light);
 }
 .file-editor-status {
   padding: 3px 10px;
@@ -704,7 +691,7 @@ body.editor-theme-light .file-editor-image {
   color: var(--auto-text);
   background: var(--brand-green);
   border: 1px solid #a8e95a;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
   font-weight: 850;
   line-height: 1.1;
@@ -729,7 +716,7 @@ body.editor-theme-light .file-editor-image {
   flex: 0 0 auto;
   height: 20px;
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .file-editor-mode-control[hidden] {
@@ -753,8 +740,7 @@ body.editor-theme-light .file-editor-image {
 .file-editor-mode-control button:last-child {
   border-inline-end: 0;
 }
-.file-editor-mode-control button:hover,
-.file-editor-mode-control button.active {
+.file-editor-mode-control button:hover {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
 }
@@ -793,11 +779,16 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
 .markdown-body em {
   color: var(--markdown-emphasis, var(--text));
 }
-.markdown-body code {
+.markdown-body code,
+.file-editor-raw-panel .md-code,
+.file-editor-code-preview .md-code,
+.cm-content .md-code {
   color: var(--code-inline);
   background: var(--code-inline-bg);
   border: 1px solid var(--code-inline-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
+}
+.markdown-body code {
   padding: 1px 4px;
   font-family: var(--mono-font);
   font-size: 0.9em;
@@ -826,155 +817,112 @@ body.theme-light .summary-preview pre {
   overflow: visible;
   padding: 0;
 }
-.markdown-body pre code .hljs-comment,
-.markdown-body pre code .hljs-quote {
-  color: var(--code-comment) !important;
-}
 .markdown-body pre code .hljs-keyword,
 .markdown-body pre code .hljs-selector-tag,
 .markdown-body pre code .hljs-literal,
 .markdown-body pre code .hljs-section,
-.markdown-body pre code .hljs-doctag {
+.markdown-body pre code .hljs-doctag,
+.markdown-body pre code .code-keyword,
+.cm-content .code-keyword,
+.cm-content .code-keyword * {
   color: var(--code-keyword) !important;
+}
+.markdown-body pre code .code-control,
+.cm-content .code-control,
+.cm-content .code-control * {
+  color: var(--code-control) !important;
 }
 .markdown-body pre code .hljs-string,
 .markdown-body pre code .hljs-regexp,
 .markdown-body pre code .hljs-addition,
-.markdown-body pre code .hljs-template-variable {
-  color: var(--code-string) !important;
-}
-.markdown-body pre code .hljs-number,
-.markdown-body pre code .hljs-symbol,
-.markdown-body pre code .hljs-bullet,
-.markdown-body pre code .hljs-attr {
-  color: var(--code-number) !important;
-}
-.markdown-body pre code .hljs-title,
-.markdown-body pre code .hljs-title.function_,
-.markdown-body pre code .hljs-function .hljs-title {
-  color: var(--code-function) !important;
-}
-.markdown-body pre code .hljs-built_in,
-.markdown-body pre code .hljs-type,
-.markdown-body pre code .hljs-class .hljs-title {
-  color: var(--code-type) !important;
-}
-.markdown-body pre code .hljs-variable,
-.markdown-body pre code .hljs-params,
-.markdown-body pre code .hljs-name {
-  color: var(--code-variable) !important;
-}
-.markdown-body pre code .hljs-property,
-.markdown-body pre code .hljs-attribute {
-  color: var(--code-property) !important;
-}
-.markdown-body pre code .hljs-tag {
-  color: var(--code-tag) !important;
-}
-.markdown-body pre code .hljs-deletion {
-  color: var(--code-invalid) !important;
-}
-.markdown-body pre code .hljs-meta {
-  color: var(--code-atom) !important;
-}
-.markdown-body pre code .code-keyword {
-  color: var(--code-keyword) !important;
-}
-.markdown-body pre code .code-control {
-  color: var(--code-control) !important;
-}
-.markdown-body pre code .code-string {
-  color: var(--code-string) !important;
-}
-.markdown-body pre code .code-comment {
-  color: var(--code-comment) !important;
-}
-.markdown-body pre code .code-number {
-  color: var(--code-number) !important;
-}
-.markdown-body pre code .code-constant {
-  color: var(--code-atom) !important;
-}
-.markdown-body pre code .code-builtin,
-.markdown-body pre code .code-function {
-  color: var(--code-function) !important;
-  font-weight: 700;
-}
-.markdown-body pre code .code-type,
-.markdown-body pre code .code-attr {
-  color: var(--code-type) !important;
-}
-.markdown-body pre code .code-variable {
-  color: var(--code-variable) !important;
-}
-.markdown-body pre code .code-property {
-  color: var(--code-property) !important;
-}
-.markdown-body pre code .code-tag {
-  color: var(--code-tag) !important;
-}
-.markdown-body pre code .code-invalid {
-  color: var(--code-invalid) !important;
-}
-.cm-content .code-keyword,
-.cm-content .code-keyword * {
-  color: var(--code-keyword) !important;
-  font-weight: 700;
-}
-.cm-content .code-control,
-.cm-content .code-control * {
-  color: var(--code-control) !important;
-  font-weight: 700;
-}
+.markdown-body pre code .hljs-template-variable,
+.markdown-body pre code .code-string,
 .cm-content .code-string,
 .cm-content .code-string * {
   color: var(--code-string) !important;
 }
+.markdown-body pre code .hljs-comment,
+.markdown-body pre code .hljs-quote,
+.markdown-body pre code .code-comment,
 .cm-content .code-comment,
 .cm-content .code-comment * {
   color: var(--code-comment) !important;
 }
+.markdown-body pre code .hljs-number,
+.markdown-body pre code .hljs-symbol,
+.markdown-body pre code .hljs-bullet,
+.markdown-body pre code .hljs-attr,
+.markdown-body pre code .code-number,
 .cm-content .code-number,
 .cm-content .code-number * {
   color: var(--code-number) !important;
 }
+.markdown-body pre code .hljs-meta,
+.markdown-body pre code .code-constant,
 .cm-content .code-constant,
 .cm-content .code-constant * {
   color: var(--code-atom) !important;
 }
+.markdown-body pre code .hljs-title,
+.markdown-body pre code .hljs-title.function_,
+.markdown-body pre code .hljs-function .hljs-title,
+.markdown-body pre code .code-builtin,
+.markdown-body pre code .code-function,
 .cm-content .code-builtin,
 .cm-content .code-builtin *,
 .cm-content .code-function,
 .cm-content .code-function * {
   color: var(--code-function) !important;
-  font-weight: 700;
 }
+.markdown-body pre code .hljs-built_in,
+.markdown-body pre code .hljs-type,
+.markdown-body pre code .hljs-class .hljs-title,
+.markdown-body pre code .code-type,
+.markdown-body pre code .code-attr,
 .cm-content .code-type,
 .cm-content .code-type *,
 .cm-content .code-attr,
 .cm-content .code-attr * {
   color: var(--code-type) !important;
 }
+.markdown-body pre code .hljs-variable,
+.markdown-body pre code .hljs-params,
+.markdown-body pre code .hljs-name,
+.markdown-body pre code .code-variable,
 .cm-content .code-variable,
 .cm-content .code-variable * {
   color: var(--code-variable) !important;
 }
+.markdown-body pre code .hljs-property,
+.markdown-body pre code .hljs-attribute,
+.markdown-body pre code .code-property,
 .cm-content .code-property,
 .cm-content .code-property * {
   color: var(--code-property) !important;
 }
+.markdown-body pre code .hljs-tag,
+.markdown-body pre code .code-tag,
 .cm-content .code-tag,
 .cm-content .code-tag * {
   color: var(--code-tag) !important;
 }
+.markdown-body pre code .hljs-deletion,
+.markdown-body pre code .code-invalid,
 .cm-content .code-invalid,
 .cm-content .code-invalid * {
   color: var(--code-invalid) !important;
 }
-body.editor-theme-light .file-editor-content .markdown-body code {
-  color: var(--lt-code-inline);
-  background: var(--lt-code-inline-bg);
-  border-color: var(--lt-code-inline-border);
+.markdown-body pre code .code-builtin,
+.markdown-body pre code .code-function,
+.cm-content .code-keyword,
+.cm-content .code-keyword *,
+.cm-content .code-control,
+.cm-content .code-control *,
+.cm-content .code-builtin,
+.cm-content .code-builtin *,
+.cm-content .code-function,
+.cm-content .code-function * {
+  font-weight: 700;
 }
 body.editor-theme-light .file-editor-content .markdown-body pre code {
   color: inherit;
@@ -1027,11 +975,6 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
 .markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: 2px; }
 .markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
-.markdown-body blockquote.markdown-alert code {
-  color: var(--markdown-html-light-code);
-  background: var(--markdown-html-light-code-bg);
-  border-color: var(--markdown-html-light-code-border);
-}
 .markdown-body blockquote.markdown-alert-caution {
   background: var(--markdown-alert-caution-light-bg);
 }
@@ -1052,11 +995,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.mar
   background: var(--markdown-alert-caution-dark-bg);
 }
 body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
-  color: var(--markdown-html-dark-code);
-  background: var(--markdown-html-dark-code-bg);
-  border-color: var(--markdown-html-dark-code-border);
-}
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
@@ -1087,14 +1025,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(
 .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-light-text);
 }
-.markdown-body .markdown-html-light-bg code,
-.markdown-body table.markdown-html-light-bg code,
-.markdown-body table[bgcolor] code,
-.markdown-body :is(th, td)[bgcolor] code {
-  color: var(--markdown-html-light-code);
-  background: var(--markdown-html-light-code-bg);
-  border-color: var(--markdown-html-light-code-border);
-}
 body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg,
 body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(th, td),
 body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor],
@@ -1117,18 +1047,10 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor]
 body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-dark-text);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] code {
-  color: var(--markdown-html-dark-code);
-  background: var(--markdown-html-dark-code-bg);
-  border-color: var(--markdown-html-dark-code-border);
-}
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
-  background: #ffffff;
+  background: var(--paint-white);
   color: var(--markdown-html-light-text);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
@@ -1144,28 +1066,35 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane-panel.vanilla-preview-body h3,
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
-.file-editor-preview-pane-panel.vanilla-preview-body h6 {
+.file-editor-preview-pane-panel.vanilla-preview-body h6,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
   color: var(--markdown-html-light-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
-.file-editor-preview-pane-panel.vanilla-preview-body a {
-  color: #0645ad;
+.file-editor-preview-pane-panel.vanilla-preview-body a,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
+  color: var(--vanilla-preview-link);
 }
 .file-editor-preview-pane.vanilla-preview-body strong,
 .file-editor-preview-pane.vanilla-preview-body em,
 .file-editor-preview-pane-panel.vanilla-preview-body strong,
-.file-editor-preview-pane-panel.vanilla-preview-body em {
+.file-editor-preview-pane-panel.vanilla-preview-body em,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
   color: inherit;
 }
 .file-editor-preview-pane.vanilla-preview-body code,
-.file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
+.file-editor-preview-pane-panel.vanilla-preview-body code,
 .file-editor-preview-pane.vanilla-preview-body pre,
-.file-editor-preview-pane-panel.vanilla-preview-body pre {
+.file-editor-preview-pane-panel.vanilla-preview-body pre,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
@@ -1173,7 +1102,9 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane.vanilla-preview-body pre code,
 .file-editor-preview-pane-panel.vanilla-preview-body pre code,
 .file-editor-preview-pane.vanilla-preview-body pre code *,
-.file-editor-preview-pane-panel.vanilla-preview-body pre code * {
+.file-editor-preview-pane-panel.vanilla-preview-body pre code *,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
   color: inherit !important;
   background: transparent !important;
   border-color: transparent;
@@ -1253,17 +1184,17 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   color: var(--text);
   font: inherit;
   line-height: 18px;
-  background: rgba(10, 14, 20, 0.98);
+  background: var(--paint-deep-ink-98);
   border: 1px solid var(--active-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   outline: 0;
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 /* Light mode: the rename box hardcodes a near-black fill while its text
    uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
 body.theme-light .file-tree-rename-input {
   color: var(--pc-control-fg);
-  background: #ffffff;
+  background: var(--paint-white);
 }
 .file-explorer-toolbar {
   display: flex;
@@ -1445,7 +1376,7 @@ body.resizing-file-explorer-changes {
   top: calc(50% - (var(--pane-resizer-line-size) / 2));
   height: var(--pane-resizer-line-size);
   background: var(--pane-resizer-bg);
-  transition: background 90ms ease, box-shadow 90ms ease, height 90ms ease, top 90ms ease;
+  transition: background var(--motion-interaction-fast) ease, box-shadow var(--motion-interaction-fast) ease, height var(--motion-interaction-fast) ease, top var(--motion-interaction-fast) ease;
 }
 .file-explorer-changes-resizer:hover::before,
 .file-explorer-changes-resizer:focus-visible::before,
@@ -1453,7 +1384,7 @@ body.resizing-file-explorer-changes {
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   height: var(--pane-resizer-hover-line-size);
   background: var(--pane-resizer-hover-bg);
-  box-shadow: 0 0 0 1px var(--drop-outline-shadow);
+  box-shadow: var(--pane-resizer-hover-shadow);
 }
 .file-explorer-changes-panel {
   --changes-row-hover-bg: var(--active-control-soft-bg);
@@ -1485,6 +1416,8 @@ body.resizing-file-explorer-changes {
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
   color: var(--text);
+}
+body.theme-light .file-explorer-tree-panel {
   background: var(--panel);
 }
 body.theme-light .file-explorer-changes-panel {
@@ -1511,11 +1444,6 @@ body.theme-light .file-explorer-changes-panel {
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
-}
-body.theme-light .file-explorer-changes-head {
-  color: var(--text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border-color: var(--line);
 }
 .file-explorer-changes-head .changes-title {
   min-width: 0;
@@ -1546,12 +1474,6 @@ body.theme-light .file-explorer-changes-head {
   border-radius: 0;
   background: transparent;
   font-size: var(--ui-font-size-xs);
-}
-/* Win over `body.theme-light .changes-comparison-head` (higher specificity) so the caption stays
-   chrome-free in light mode too, not re-boxed with a panel background + border. */
-body.theme-light .file-explorer-changes-panel .changes-comparison-head {
-  background: transparent;
-  border-color: transparent;
 }
 .file-explorer-changes-panel .changes-comparison-title {
   font-weight: 600;
@@ -1628,23 +1550,24 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 .file-explorer-changes-panel .changes-refresh:focus-visible,
 .file-explorer-date-reload-cluster .changes-refresh:hover,
 .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
-}
-body.theme-light .file-explorer-changes-panel .changes-refresh,
-body.theme-light .file-explorer-date-reload-cluster .changes-refresh {
-  background: transparent;
-  color: var(--muted);
-  border-color: var(--line);
 }
 body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
 body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
+}
+body :is(
+  .file-explorer-sort-select,
+  .file-explorer-hidden-toggle,
+  .file-explorer-root-mode-toggle,
+  .file-explorer-header-action,
+  .file-explorer-changes-panel .changes-refresh,
+  .file-explorer-date-reload-cluster .changes-refresh
+):is(:hover, :focus-visible) {
   color: var(--text);
   border-color: var(--text);
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .file-explorer-changes-head .changes-date-toggle,
 .file-explorer-date-reload-cluster .changes-date-toggle {
@@ -1792,52 +1715,6 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   stroke-width: 1.35;
   stroke-linecap: round;
   stroke-linejoin: round;
-  pointer-events: none;
-}
-.file-explorer-mode-switcher {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 1px;
-  flex: 0 0 auto;
-  min-width: 0;
-  height: var(--pane-tab-height);
-}
-.file-explorer-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  flex: 0 0 auto;
-  height: var(--pane-tab-height);
-  min-width: 0;
-  padding: 0 3px;
-  box-sizing: border-box;
-  color: var(--pane-tab-text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: transparent;
-  border-radius: 6px 6px 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size-2xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.file-explorer-mode-toggle:hover,
-.file-explorer-mode-toggle:focus-visible {
-  color: var(--pane-tab-active-text);
-  border-color: var(--pane-tab-active-border);
-  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
-}
-.file-explorer-mode-toggle[aria-pressed="true"] {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
-}
-.file-explorer-mode-label {
   pointer-events: none;
 }
 .file-tree-row.file-tree-row--sync-expanded > .file-tree-name,
@@ -1997,21 +1874,16 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   pointer-events: none;
 }
 body.editor-theme-light .file-editor-diff-codemirror {
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
   --diff-add-line-bg: #bfeac8;
   --diff-remove-line-bg: #f3b7b7;
   --diff-search-match-bg: #ffcc00;
   --diff-search-match-fg: var(--lt-text);
   --diff-search-match-ring: #7c2d12;
-  --diff-search-selected-bg: #ff9f1c;
-  --diff-search-selected-ring: #7c2d12;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
-  color: #3b0a0a;
-}
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine *,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk *,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine * {
@@ -2027,13 +1899,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   color: var(--success-text-strong);
   background: #b9e7c2;
   text-decoration-color: var(--success-text-strong);
-}
-/* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
-   scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
-   inline editor used the dark mix in editor-light. Re-map at the content scope. */
-body.editor-theme-light .file-editor-content {
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
@@ -2060,11 +1925,6 @@ body.editor-theme-light .file-editor-content {
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
-}
-.file-editor-title-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .file-editor-panel-actions {
   position: relative;
@@ -2212,14 +2072,10 @@ body.editor-theme-light .file-editor-content {
   min-width: 24px;
   padding: 0 4px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-font-panel button:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-preview-font-value {
   min-width: 2.2ch;
@@ -2241,7 +2097,7 @@ body.editor-theme-light .file-editor-content {
   flex: 0 0 auto;
   padding: 0 3px;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font-size: var(--ui-font-size-xs);
@@ -2294,14 +2150,8 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   line-height: 1;
 }
-/* blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
-   is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
-   (theme-aware, the same gray common in Popular IDEs), never selectable/copied as code. */
-.file-editor-blame-panel[aria-pressed="true"] {
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
-}
+/* The blame toggle uses the shared pressed-control owner below. Its inline annotation is a dim
+   ::after on the cursor's current line, colored by the editor scheme's comment token. */
 .cm-line[data-blame]::after {
   content: " " attr(data-blame);
   color: var(--code-comment);
@@ -2311,12 +2161,6 @@ body.editor-theme-light .file-editor-content {
   white-space: pre;
   user-select: none;
   pointer-events: none;
-}
-/* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
-.file-editor-diff-expand-panel[aria-pressed="true"] {
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -2332,11 +2176,20 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-popout-preview-panel:hover,
 .file-editor-theme-panel:hover,
-.file-editor-reload-panel:hover {
+.file-editor-reload-panel:hover,
+.file-editor-preview-find-panel button:not(:disabled):hover {
   color: var(--editor-toolbar-control-hover-fg);
   border-color: var(--editor-toolbar-control-hover-border);
   background: var(--editor-toolbar-control-hover-bg);
 }
+/* This final grouped state owner intentionally follows every component hover rule: pressed controls
+   stay pressed while hovered, and all pane/editor surfaces consume the same theme-aware paint. */
+.tabs .tab.active:not(.auto-toggle),
+.tabs .tab[aria-pressed="true"]:not(.auto-toggle),
+.attention-toast-agent-button,
+.file-editor-mode-control button.active,
+.file-editor-blame-panel[aria-pressed="true"],
+.file-editor-diff-expand-panel[aria-pressed="true"],
 .file-editor-mode-control-panel button.active,
 .file-editor-gutter-panel.active,
 .file-editor-gutter-panel[aria-pressed="true"],
@@ -2348,7 +2201,6 @@ body.editor-theme-light .file-editor-content {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
   border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
-  font-weight: 700;
 }
 .file-editor-theme-panel.theme-dark,
 .file-editor-theme-panel.theme-light,
@@ -2359,18 +2211,11 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel.theme-dark {
   box-shadow: inset 0 0 0 1px rgba(159, 216, 255, 0.14);
 }
-.file-editor-theme-panel.theme-light {
-  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
-}
 .file-editor-theme-panel.theme-vanilla {
   color: var(--lt-text);
   background: var(--lt-editor-bg);
   border-color: var(--lt-line);
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
-}
-.file-editor-find-panel:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-save-panel:not(:disabled):hover {
   background: var(--success-soft-bg);
@@ -2435,6 +2280,9 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-emphasis: var(--lt-markdown-emphasis);
 }
 body.editor-theme-light {
+  /* One light-editor owner feeds both merge and inline diff surfaces; local remaps previously drifted. */
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
   --drop-outline: var(--drop-outline-light);
   --drop-outline-text: #0f2d69;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -2452,40 +2300,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
-  background: #ffffff;
+  background: var(--paint-white);
   color: var(--markdown-html-light-text);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: var(--markdown-html-light-text);
-  background: transparent;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
-  color: #0645ad;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
-  color: inherit;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
-  color: inherit !important;
-  background: transparent !important;
-  border-color: transparent;
 }
 body.editor-theme-light .file-editor-raw-panel .md-heading,
 body.editor-theme-light .file-editor-code-preview .md-heading {
@@ -2511,10 +2327,8 @@ body.editor-theme-light .file-editor-raw-panel .code-control,
 body.editor-theme-light .file-editor-code-preview .code-control {
   color: var(--lt-code-control);
 }
-body.editor-theme-light .file-editor-raw-panel .md-code,
 body.editor-theme-light .file-editor-raw-panel .md-codeblock,
 body.editor-theme-light .file-editor-raw-panel .md-fence,
-body.editor-theme-light .file-editor-code-preview .md-code,
 body.editor-theme-light .file-editor-code-preview .md-codeblock,
 body.editor-theme-light .file-editor-code-preview .md-fence,
 body.editor-theme-light .file-editor-raw-panel .code-string,
@@ -2580,7 +2394,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-panel {
   position: absolute;
-  z-index: calc(var(--z-file-editor-layer) + 1);
+  z-index: var(--z-file-editor-find-overlay);
   top: 8px;
   inset-inline-end: 10px;
   display: inline-flex;
@@ -2589,7 +2403,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   max-width: calc(100% - 20px);
   padding: 4px;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   box-shadow: 0 3px 12px rgb(0 0 0 / 0.24);
@@ -2599,7 +2413,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-find-overview {
   position: absolute;
-  z-index: calc(var(--z-file-editor-layer) + 1);
+  z-index: var(--z-file-editor-find-overlay);
   inset-block: 3px;
   inset-inline-end: 3px;
   width: 4px;
@@ -2624,7 +2438,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   width: clamp(12ch, 22vw, 28ch);
   min-width: 0;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 2px 5px;
   color: var(--text);
   background: var(--panel);
@@ -2641,15 +2455,10 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   height: 20px;
   padding: 0;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-find-panel button:not(:disabled):hover {
-  color: var(--editor-toolbar-control-hover-fg);
-  border-color: var(--editor-toolbar-control-hover-border);
-  background: var(--editor-toolbar-control-hover-bg);
 }
 .file-editor-preview-find-panel button:disabled {
   opacity: 0.42;
@@ -2727,9 +2536,9 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   /* CodeMirror uses the shared pane scrollbar behavior. Only gutter geometry is local because the diff
      overview rail is positioned next to this native scrollbar. */
   --pane-scrollbar-size: 12px;
-  --pane-scrollbar-track: rgba(255, 255, 255, 0.10);
-  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.10);
-  --pane-scrollbar-corner: rgba(255, 255, 255, 0.04);
+  --pane-scrollbar-track: var(--paint-white-10);
+  --pane-scrollbar-track-active: var(--paint-white-10);
+  --pane-scrollbar-corner: var(--paint-white-04);
   --pane-scrollbar-border: 2px solid rgba(7, 10, 14, 0.95);
   --pane-scrollbar-radius: 6px;
 }
@@ -2779,7 +2588,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
   --pane-scrollbar-track: rgb(var(--overlay-slate-rgb) / 0.16);
   --pane-scrollbar-track-active: rgb(var(--overlay-slate-rgb) / 0.16);
   --pane-scrollbar-corner: rgb(var(--overlay-slate-rgb) / 0.10);
-  --pane-scrollbar-border: 2px solid rgba(255, 255, 255, 0.92);
+  --pane-scrollbar-border: 2px solid var(--paint-white-92);
 }
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {
@@ -2813,7 +2622,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
      like the others, so it INHERITS --pane-bar-bg rather than pinning a static --panel2. */
   background: var(--pane-bar-bg);
   border-color: var(--line);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: 0 1px 0 var(--paint-white-04);
 }
 .file-editor-codemirror .cm-search,
 .file-editor-codemirror-panel .cm-search {
@@ -2958,7 +2767,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search .cm-button:hover,
 .file-editor-codemirror-panel .cm-search .cm-button:hover {
-  color: #ffffff;
+  color: var(--paint-white);
   border-color: var(--accent-sky-strong);
   background: rgba(159, 216, 255, 0.12);
 }
@@ -3027,12 +2836,6 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   content: attr(data-search-label);
   font-size: var(--ui-font-size-3xs);
 }
-.file-editor-codemirror .cm-search label:has(input:checked),
-.file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: var(--active-control-text);
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-}
 .file-editor-codemirror .cm-search input[type="checkbox"],
 .file-editor-codemirror-panel .cm-search input[type="checkbox"] {
   position: absolute;
@@ -3067,35 +2870,28 @@ body.editor-theme-light .file-editor-codemirror .cm-search .cm-textfield,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-textfield {
   color: var(--lt-text);
   background: var(--lt-editor-bg);
-  border-color: #8c959f;
+  border-color: var(--editor-search-border-light);
   box-shadow: inset 0 0 0 1px rgba(9, 105, 218, 0.04);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button,
-body.editor-theme-light .file-editor-codemirror .cm-search label,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label {
+:where(body.editor-theme-light) .file-editor-codemirror .cm-search label,
+:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label {
   color: var(--lt-markdown-link);
   background: var(--lt-panel);
-  border-color: #8c959f;
+  border-color: var(--editor-search-border-light);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover,
-body.editor-theme-light .file-editor-codemirror .cm-search label:hover,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
+:where(body.editor-theme-light) .file-editor-codemirror .cm-search label:hover,
+:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label:hover {
   color: var(--lt-code-atom);
   background: var(--lt-code-inline-bg);
   border-color: var(--lt-markdown-link);
 }
-body.editor-theme-light .file-editor-codemirror .cm-search label:has(input:checked),
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close {
   color: var(--lt-text);
-  background: transparent;
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
@@ -3206,13 +3002,10 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--markdown-emphasis);
   font-style: italic;
 }
-.file-editor-raw-panel .md-code,
 .file-editor-raw-panel .md-codeblock,
 .file-editor-raw-panel .md-fence,
-.file-editor-code-preview .md-code,
 .file-editor-code-preview .md-codeblock,
 .file-editor-code-preview .md-fence,
-.cm-content .md-code,
 .cm-content .md-codeblock,
 .cm-content .md-fence {
   color: var(--code-inline);
@@ -3225,18 +3018,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-raw-panel .md-code,
 .file-editor-code-preview .md-code,
 .cm-content .md-code {
-  color: var(--code-inline);
-  background: var(--code-inline-bg);
-  border: 1px solid var(--code-inline-border);
-  border-radius: 3px;
   padding: 0 2px;
-}
-body.editor-theme-light .file-editor-raw-panel .md-code,
-body.editor-theme-light .file-editor-code-preview .md-code,
-body.editor-theme-light .cm-content .md-code {
-  color: var(--lt-code-inline);
-  background: var(--lt-code-inline-bg);
-  border-color: var(--lt-code-inline-border);
 }
 .file-editor-raw-panel .md-html,
 .file-editor-code-preview .md-html,
@@ -3394,7 +3176,7 @@ body.editor-theme-light .cm-content .md-code {
   max-height: none;
   object-fit: contain;
   cursor: zoom-in;
-  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 0.5px var(--paint-white-85)) drop-shadow(0 10px 24px var(--paint-black-45));
 }
 .file-editor-image-panel[data-preview-zoom-mode="actual"] .file-editor-image,
 .file-editor-image-panel[data-preview-zoom-mode="manual"] .file-editor-image {
@@ -3465,11 +3247,6 @@ body.editor-theme-light .cm-content .md-code {
   flex-basis: min(160px, 100%);
   min-width: min(120px, 100%);
 }
-.pane-tab.file-editor-item .session-button-dir {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-}
 .pane-tab.file-editor-item {
   flex-basis: min(220px, 100%);
   min-width: min(120px, 100%);
@@ -3539,12 +3316,6 @@ body.editor-theme-light .cm-content .md-code {
 body.theme-light .file-tree-row.tabber-row {
   --tabber-level0-color: var(--text);
   --tabber-level1-color: var(--text);
-  --tabber-path-color: var(--text);
-  --tabber-detail-color: var(--muted);
-}
-.file-tree-row.tabber-row:not(.selected):hover {
-  background: var(--file-hover-bg);
-  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
 .file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
   display: inline-flex;
@@ -3563,7 +3334,7 @@ body.theme-light .file-tree-row.tabber-row {
   --agent-window-activity-block-size: var(--agent-window-icon-size);
 }
 .file-tree-row.tabber-row.selected .tabber-session-tab {
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
 }
 .file-tree-row.tabber-row .tabber-window-token {
   display: inline-flex;
@@ -3608,11 +3379,6 @@ body.theme-light .file-tree-row.tabber-row {
   margin: 0;
   padding: 0;
   vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);

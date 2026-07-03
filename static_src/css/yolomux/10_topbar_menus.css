@@ -12,7 +12,7 @@
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
-  transition: background 100ms ease;
+  transition: background var(--motion-interaction-standard) ease;
   overflow: visible;
   white-space: nowrap;
 }
@@ -47,7 +47,7 @@
   margin-inline-start: 8px;
   padding: 1px 7px;
   border: 1px solid var(--active-control-border, var(--line));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
@@ -89,7 +89,7 @@
   z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
   padding: 8px 10px;
-  color: #ffd8dc;
+  color: var(--danger-text-soft);
   background: rgba(42, 14, 18, 0.98);
   border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
@@ -99,7 +99,7 @@
   opacity: 0;
   pointer-events: none;
   transform: translateY(-2px);
-  transition: opacity 100ms ease, transform 100ms ease;
+  transition: opacity var(--motion-interaction-standard) ease, transform var(--motion-interaction-standard) ease;
 }
 .transport-warning:hover::after,
 .transport-warning:focus-visible::after {
@@ -140,11 +140,6 @@
 }
 #tabMetaToggle {
   --action-icon: var(--icon-tab-meta);
-}
-#tabMetaToggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
@@ -236,7 +231,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-popup-mirror-layer {
   position: absolute;
   inset: 0;
-  z-index: calc(var(--z-share-presence) + 1);
+  z-index: var(--z-share-popup-mirror);
   overflow: hidden;
   pointer-events: none;
   font: inherit;
@@ -282,7 +277,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   position: fixed;
   left: 50%;
   bottom: 8px;
-  z-index: calc(var(--z-share-presence) + 2);
+  z-index: var(--z-share-viewer-banner);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -298,12 +293,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
   transform: translateX(-50%);
   pointer-events: auto;
-}
-.share-viewer-banner-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .share-viewer-mirror-status {
   flex: 0 0 auto;
@@ -350,7 +339,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   pointer-events: none;
   opacity: 0;
   transform: translate3d(-9999px, -9999px, 0);
-  transition: transform 45ms linear, opacity 100ms ease;
+  transition: transform 45ms linear, opacity var(--motion-interaction-standard) ease;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
@@ -412,10 +401,28 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 }
 .topbar-status-surface {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
   color: var(--muted);
   font: inherit;
+}
+button.topbar-status-surface {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: var(--compact-control-height);
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-status-surface[hidden] {
+  display: none;
+}
+button.topbar-status-surface:hover,
+button.topbar-status-surface:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
 }
 .latency-meter {
   height: 24px;
@@ -473,7 +480,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   place-items: center;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: inherit;
@@ -503,7 +510,7 @@ body.theme-light .topbar-nav-button {
   height: var(--compact-control-height);
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--muted);
   cursor: text;
@@ -528,7 +535,7 @@ body.theme-light .topbar-search {
   height: var(--compact-control-height);
   max-width: 140px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: inherit;
@@ -538,11 +545,6 @@ body.theme-light .topbar-search {
 }
 .topbar-language-menu > .topbar-language {
   min-width: 72px;
-}
-.topbar-language-menu.open > .topbar-language {
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-  color: var(--active-control-text);
 }
 body.theme-light .topbar-language {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
@@ -566,7 +568,7 @@ body.theme-light .topbar-language {
   font: inherit;
   font-size: var(--ui-font-size-3xs, 10px);
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 0 4px;
   color: var(--muted);
   background: transparent;
@@ -580,22 +582,8 @@ body.app-vw-lte-1100 .topbar-search {
   padding: 0 6px;
 }
 .topbar-owner-status {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-  height: var(--compact-control-height);
   padding: 0 8px;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-owner-status[hidden] {
-  display: none;
-}
-.topbar-owner-status:hover {
-  border-color: var(--accent);
-  color: var(--text);
 }
 .topbar-owner-status-key {
   color: var(--text-muted-cool);
@@ -613,29 +601,16 @@ body.app-vw-lte-1100 .topbar-search {
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
   gap: 4px;
-  height: var(--compact-control-height);
   padding: 0 6px;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-activity[hidden] {
-  display: none;
-}
-.topbar-activity:hover {
-  border-color: var(--accent);
-  color: var(--text);
 }
 .topbar-activity.has-attention {
   border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
   background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
   color: var(--text);
 }
-.topbar-activity.has-attention:hover {
+.topbar-activity.has-attention:hover,
+.topbar-activity.has-attention:focus-visible {
   border-color: var(--danger-strong);
   background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
 }
@@ -674,14 +649,6 @@ body.app-vw-lte-760 .topbar-search {
   outline-offset: 2px;
   border-radius: 7px;
 }
-.app-menu-bar {
-  flex: 0 0 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  overflow: visible;
-}
 .app-menu {
   position: relative;
   flex: 0 0 auto;
@@ -695,7 +662,7 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: 600 var(--ui-font-size)/1 var(--ui-font);
   white-space: nowrap;
 }
@@ -747,15 +714,15 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--chrome-text-strong);
   background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow:
     0 -3px 12px rgba(0, 0, 0, 0.30),
     var(--shadow-popover);
   transform: translate(var(--app-menu-fit-offset, 0), -2px);
   transition:
-    opacity 90ms ease,
-    transform 90ms ease,
-    visibility 0s linear 90ms;
+    opacity var(--motion-interaction-fast) ease,
+    transform var(--motion-interaction-fast) ease,
+    visibility 0s linear var(--motion-interaction-fast);
   top: 100%;
   left: 0;
 }
@@ -827,7 +794,7 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   text-align: start;
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
@@ -858,7 +825,7 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
   color: var(--pane-tab-panel-head-text);
-  background: #273140;
+  background: var(--overlay-option-hover-bg);
   border-color: var(--accent-gold);
   outline: 0;
 }
@@ -879,10 +846,6 @@ body.app-vw-lte-760 .topbar-search {
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-setting-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 600;
 }
 .app-menu-setting-control {
@@ -896,7 +859,7 @@ body.app-vw-lte-760 .topbar-search {
   height: var(--compact-control-height);
   padding: 0 5px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: var(--ui-font-size-sm)/1 var(--mono-font);
@@ -945,7 +908,7 @@ body.app-vw-lte-760 .topbar-search {
   color: #c8d2df;
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .app-menu-ui-icon::before {
   content: "";
@@ -954,11 +917,6 @@ body.app-vw-lte-760 .topbar-search {
   background: currentColor;
   -webkit-mask: var(--app-menu-ui-icon) center / contain no-repeat;
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
-}
-.app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -1086,7 +1044,7 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command .session-state-badge {
   min-width: 20px;
   padding: 0 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
 }
 .app-menu-tab-command .ci-indicator {
@@ -1117,19 +1075,8 @@ body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
 .app-menu-submenu-wrap.open > .app-menu-command .app-menu-submenu-arrow {
   transform: rotate(90deg);
 }
-body.theme-light .topbar {
-  background: var(--panel2);
-}
-body.theme-light .topbar:hover,
-body.theme-light .topbar:focus-within {
-  background: var(--pane-tab-strip-bg);
-}
 /* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
-body.theme-light #tabMetaToggle.active {
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
 body.theme-light .app-menu-button-badge {
   border-color: var(--active-control-border);
 }
@@ -1146,14 +1093,16 @@ body.theme-light .app-menu-button {
 }
 body.theme-light .app-menu-button:hover,
 body.theme-light .app-menu-button:focus-visible,
-body.theme-light .app-menu.open > .app-menu-button {
+body.theme-light .app-menu.open > .app-menu-button,
+body.theme-light .app-menu-ui-icon:hover,
+body.theme-light .app-menu-ui-icon:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #dfe7f2;
   border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-popover {
   color: var(--text);
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: var(--pc-control-border);
   box-shadow:
     0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
@@ -1181,17 +1130,15 @@ body.theme-light .app-menu-setting-row {
   color: var(--text);
 }
 body.theme-light .app-menu-setting-control input[type="number"] {
-  background: #ffffff;
-}
-body.theme-light .app-menu-command[data-checked="true"] {
-  background: var(--active-control-soft-bg);
-  border-color: transparent;
+  background: var(--paint-white);
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
 body.theme-light .app-menu-command:focus-visible,
 body.theme-light .app-menu-command.share-mirror-active:not(:disabled),
 body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
-body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
+body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled),
+body.theme-light .app-menu-tab-command:hover:not(:disabled),
+body.theme-light .app-menu-tab-command:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #e8f0fb;
   border-color: var(--menu-accent);
@@ -1199,28 +1146,15 @@ body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) 
 body.theme-light .app-menu-command:disabled {
   color: var(--text-muted-strong);
 }
-body.theme-light .app-menu-ui-icon {
+:where(body.theme-light) .app-menu-ui-icon {
   color: var(--text);
   background: var(--pane-tab-control-bg);
   border-color: var(--line);
 }
-/* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
-   default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
-   still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
-body.theme-light .app-menu-ui-icon:hover,
-body.theme-light .app-menu-ui-icon:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #dfe7f2;
-  border-color: var(--pc-control-border);
-}
-body.theme-light .app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
+/* Active paint is owned by the shared base selector; light mode only varies its hover paint. */
 body.theme-light .app-menu-ui-icon.active:hover,
 body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  background: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   border-color: var(--active-control-border);
 }
 /* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
@@ -1233,18 +1167,4 @@ body.theme-light .app-menu-tab-command .session-button-text,
 body.theme-light .app-menu-tab-command .session-button-prefix,
 body.theme-light .app-menu-tab-command .session-button-dir {
   color: var(--text);
-}
-body.theme-light .app-menu-tab-command:hover:not(:disabled),
-body.theme-light .app-menu-tab-command:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #e8f0fb;
-  border-color: var(--menu-accent);
-}
-/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
-   concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
-   toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
-.notify-toggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }

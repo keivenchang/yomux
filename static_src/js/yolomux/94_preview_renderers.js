@@ -1014,7 +1014,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
     container._previewText = null;
     container._previewDisplayMode = null;
     container._previewContext = null;
-    const mermaidSig = `${path} ${text} ${typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : ''} ${previewContext}`;
+    const mermaidSig = JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', previewContext]);
     if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
       container._mermaidSig = mermaidSig;
       container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});

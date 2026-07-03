@@ -30,48 +30,202 @@ LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
 LOCALES_OUT = REPO_ROOT / "static" / "locales"
 SOURCE_LOCALE = FALLBACK_LOCALE
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
-RAW_TOKEN_LITERAL_IGNORED_VALUES = {"#ffffff"}
-RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {
-    "#ffffff": "shared white paint in fixed light documents, text, and light-theme mixes",
-    "#ffe7a3": "paired YO!agent tool-call warning colors",
-    "#ffe27a": "paired warning/status accent colors",
-    "#ffd8dc": "paired danger text colors",
-    "#ff9f1c": "paired warning/orange component colors",
-    "#f7d2d8": "paired disconnected-share colors",
-    "#f4f7fb": "paired light tree surface colors",
-    "#ef4444": "paired about-brand / error accent colors",
-    "#eef6ff": "paired YO!agent light action-code surfaces",
-    "#eef1f5": "paired muted editor surface colors",
-    "#e8f0fb": "paired info-card surface colors",
-    "#e7ebf1": "paired muted popover/button text colors",
-    "#dfe7f2": "paired topbar popover text colors",
-    "#d81f32": "paired diff/compare removed colors",
-    "#c8941e": "paired warning borders",
-    "#b98c24": "paired file-hover warning borders",
-    "#aab4c4": "paired muted popover border colors",
-    "#9fb0c4": "paired preferences preview muted text colors",
-    "#8ff2a7": "paired green status sample colors",
-    "#8c959f": "paired markdown quote border colors",
-    "#8ab4f8": "paired YO!agent action-code borders",
-    "#7c2d12": "paired conflict prompt warning colors",
-    "#7a2e3d": "paired disconnected-share dark text colors",
-    "#586072": "paired muted tree/popover text colors",
-    "#3b0a0a": "paired conflict compare removed text colors",
-    "#3a2b00": "paired warning dark text colors",
-    "#2b3242": "paired status label dark surface colors",
-    "#2a1e00": "paired warning dark surface colors",
-    "#273140": "paired preferences/topbar dark preview colors",
-    "#263044": "paired tree/popover dark surface colors",
-    "#166534": "paired light success text colors",
-    "#161d29": "paired popover dark surface colors",
-    "#14171d": "paired file-tree warning dark surface colors",
-    "#10151d": "paired topbar dark surface colors",
-    "#0f4c81": "paired YO!agent action heading colors",
-    "#0b1017": "paired preferences dark preview colors",
-    "#0645ad": "paired editor vanilla link colors",
-    "#051408": "paired green status dark surface colors",
-    "#00a152": "paired diff/compare added colors",
+RAW_TOKEN_LITERAL_IGNORED_VALUES: set[str] = set()
+RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
+CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
+CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
+STANDARD_BORDER_RADIUS_TOKENS = {
+    "3px": "--radius-sm",
+    "4px": "--radius-control",
+    "6px": "--radius-md",
+    "8px": "--radius-lg",
+    "999px": "--radius-pill",
 }
+STANDARD_COMPONENT_FONT_SIZE_TOKENS = {
+    "10px": "--ui-font-size-2xs",
+    "11px": "--ui-font-size-xs",
+    "12px": "--ui-font-size-sm",
+}
+STANDARD_MOTION_DURATION_TOKENS = {
+    "90ms": "--motion-interaction-fast",
+    "100ms": "--motion-interaction-standard",
+    "120ms": "--motion-disclosure",
+    "700ms": "--motion-activity-duration",
+    "900ms": "--motion-activity-duration",
+    "0.7s": "--motion-activity-duration",
+    "0.9s": "--motion-activity-duration",
+}
+SHARED_CSS_DECLARATION_SETS = {
+    "active-control paint": frozenset({
+        ("color", "var(--active-control-text)"),
+        ("background", "var(--active-control-bg)"),
+        ("border-color", "var(--active-control-border)"),
+    }),
+    "disabled-control state": frozenset({
+        ("opacity", "0.42"),
+        ("cursor", "default"),
+    }),
+    "inactive-agent-marker paint": frozenset({
+        ("color", "var(--agent-inactive-marker-text)"),
+        ("background", "var(--agent-inactive-marker-bg)"),
+        ("border-color", "var(--agent-inactive-marker-border)"),
+    }),
+    "pane pressed-control paint": frozenset({
+        ("color", "var(--pane-ctl-pressed-fg, var(--pane-tab-active-text))"),
+        ("background", "var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg))"),
+        ("border-color", "var(--pane-ctl-pressed-border, var(--pane-tab-active-border))"),
+    }),
+    "YO!info text-action reset": frozenset({
+        ("padding", "0"),
+        ("border", "0"),
+        ("background", "transparent"),
+        ("text-align", "left"),
+        ("font", "inherit"),
+        ("cursor", "pointer"),
+    }),
+    "agent identity-cluster layout": frozenset({
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("gap", "2px"),
+        ("flex", "0 0 auto"),
+        ("vertical-align", "middle"),
+    }),
+    "editor toolbar hover paint": frozenset({
+        ("color", "var(--editor-toolbar-control-hover-fg)"),
+        ("border-color", "var(--editor-toolbar-control-hover-border)"),
+        ("background", "var(--editor-toolbar-control-hover-bg)"),
+    }),
+    "branch-indicator paint": frozenset({
+        ("color", "var(--branch-indicator-text)"),
+        ("background", "var(--branch-indicator-bg)"),
+        ("border-color", "var(--branch-indicator-border)"),
+    }),
+    "server-update reload rest paint": frozenset({
+        ("background", "var(--danger-strong)"),
+        ("color", "var(--paint-white)"),
+    }),
+    "server-update reload hover paint": frozenset({
+        ("border-color", "var(--danger-strong-border)"),
+        ("background", "var(--danger-strong-hover)"),
+        ("color", "var(--paint-white)"),
+    }),
+    "three-row content scaffold": frozenset({
+        ("height", "100%"),
+        ("min-height", "0"),
+        ("background", "var(--bg)"),
+        ("display", "grid"),
+        ("grid-template-rows", "auto auto minmax(0, 1fr)"),
+    }),
+    "two-row debug-view layout": frozenset({
+        ("display", "grid"),
+        ("grid-template-rows", "auto minmax(0, 1fr)"),
+        ("gap", "8px"),
+    }),
+    "search-input focus ring": frozenset({
+        ("outline", "0"),
+        ("border-color", "var(--active-control-border)"),
+        ("box-shadow", "var(--active-control-focus-shadow)"),
+    }),
+    "danger-status paint": frozenset({
+        ("color", "var(--danger-text)"),
+        ("background", "var(--danger-bg)"),
+        ("border-color", "var(--danger-border)"),
+    }),
+    "compact agent SVG geometry": frozenset({
+        ("flex-basis", "14px"),
+        ("width", "14px"),
+        ("height", "14px"),
+    }),
+    "light panel-surface paint": frozenset({
+        ("color", "var(--text)"),
+        ("background", "var(--panel)"),
+        ("border-color", "var(--line)"),
+    }),
+    "single-line ellipsis": frozenset({
+        ("min-width", "0"),
+        ("overflow", "hidden"),
+        ("text-overflow", "ellipsis"),
+        ("white-space", "nowrap"),
+    }),
+    "vanilla-preview code surface": frozenset({
+        ("color", "var(--markdown-html-light-text)"),
+        ("background", "var(--lt-panel)"),
+        ("border-color", "var(--lt-line)"),
+    }),
+    "inline-code paint": frozenset({
+        ("color", "var(--code-inline)"),
+        ("background", "var(--code-inline-bg)"),
+        ("border", "1px solid var(--code-inline-border)"),
+        ("border-radius", "var(--radius-sm)"),
+    }),
+    "light code-block paint": frozenset({
+        ("color", "var(--lt-code-block-text)"),
+        ("background", "var(--lt-code-block-bg)"),
+        ("border-color", "var(--lt-code-block-border)"),
+    }),
+    "vanilla nested-code reset": frozenset({
+        ("color", "inherit !important"),
+        ("background", "transparent !important"),
+        ("border-color", "transparent"),
+    }),
+    "flexible tab text": frozenset({
+        ("flex", "1 1 auto"),
+        ("min-width", "0"),
+        ("max-width", "none"),
+    }),
+    "shared link rest paint": frozenset({
+        ("color", "var(--link-soft)"),
+        ("text-decoration", "none"),
+    }),
+    "shared link hover paint": frozenset({
+        ("color", "var(--link-soft-hover)"),
+        ("text-decoration", "underline"),
+    }),
+    "path-drag outline": frozenset({
+        ("outline", "2px dashed var(--pane-resizer-hover-bg)"),
+        ("outline-offset", "-5px"),
+    }),
+    "file explorer chrome hover paint": frozenset({
+        ("color", "var(--text)"),
+        ("border-color", "var(--text)"),
+    }),
+    "YO!agent action hover paint": frozenset({
+        ("border-color", "var(--active-control-focus-ring)"),
+        ("color", "var(--text)"),
+        ("outline", "0"),
+    }),
+    "topbar status surface shell": frozenset({
+        ("flex", "0 0 auto"),
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("height", "var(--compact-control-height)"),
+        ("font-size", "var(--ui-font-size-2xs)"),
+        ("cursor", "pointer"),
+        ("white-space", "nowrap"),
+    }),
+    "compact overflow strip layout": frozenset({
+        ("flex", "0 0 auto"),
+        ("min-width", "0"),
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("gap", "1px"),
+        ("overflow", "visible"),
+    }),
+}
+CODE_SYNTAX_COLOR_TOKENS = frozenset({
+    "--code-atom",
+    "--code-comment",
+    "--code-control",
+    "--code-function",
+    "--code-invalid",
+    "--code-keyword",
+    "--code-number",
+    "--code-property",
+    "--code-string",
+    "--code-tag",
+    "--code-type",
+    "--code-variable",
+})
 I18N_UNTRANSLATED_REPORT_SAMPLE_LIMIT = 10
 I18N_ALLOWED_IDENTICAL_TERMS = {
     "aa", "ai", "apache", "api", "ci", "claude", "cli", "codex", "cpu", "css", "csv", "geojson", "git", "github", "gitlab", "head", "html", "http",
@@ -383,6 +537,44 @@ def _css_without_comments(css: str) -> str:
     )
 
 
+def _css_without_functions(css: str, function_names: set[str]) -> str:
+    """Mask selected CSS functions while preserving line numbers and unrelated literals."""
+    masked = list(css)
+    offset = 0
+    function_re = re.compile(rf"\b(?:{'|'.join(re.escape(name) for name in sorted(function_names))})\s*\(")
+    while match := function_re.search(css, offset):
+        start = match.start()
+        index = match.end()
+        depth = 1
+        quote = ""
+        while index < len(css) and depth:
+            char = css[index]
+            if quote:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+            elif char in {'"', "'"}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        index = min(index, len(css))
+        for position in range(start, index):
+            if masked[position] != "\n":
+                masked[position] = " "
+        offset = index
+    return "".join(masked)
+
+
+def _css_without_var_functions(css: str) -> str:
+    """Mask var(...) calls while preserving line numbers and every unrelated declaration literal."""
+    return _css_without_functions(css, {"var"})
+
+
 def _iter_located_css_rules(
     css: str,
     *,
@@ -456,12 +648,36 @@ def _iter_located_css_rules(
         head_start = i
 
 
+def _split_css_selector_list(selector: str) -> list[str]:
+    """Split one selector list without treating commas inside :is(), :not(), or attributes as separators."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote = ""
+    for index, char in enumerate(selector):
+        if quote:
+            if char == quote and (index == 0 or selector[index - 1] != "\\"):
+                quote = ""
+        elif char in {'"', "'"}:
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(selector[start:index].strip())
+            start = index + 1
+    parts.append(selector[start:].strip())
+    return [part for part in parts if part]
+
+
 def lint_css_structure() -> list[str]:
     """Reject CSS cascade ownership that would otherwise depend on source order.
 
     A property repeated in one rule silently discards its first value, the same selector repeated in
-    one context splits ownership across arbitrary locations, and an empty rule is dead migration
-    debris. Conditional copies in different @media/@supports contexts remain valid.
+    one context splits ownership across arbitrary locations, an empty rule is dead migration debris,
+    and orphan text after the final rule is silently discarded by browsers. Conditional copies in
+    different @media/@supports contexts remain valid.
     """
     errors: list[str] = []
     selector_locations: dict[tuple[tuple[str, ...], str], list[str]] = defaultdict(list)
@@ -472,6 +688,16 @@ def lint_css_structure() -> list[str]:
             css = _css_without_comments(read_text(path))
         except FileNotFoundError:
             continue
+        last_rule_end = css.rfind("}")
+        trailing = css[last_rule_end + 1:] if last_rule_end >= 0 else ""
+        orphan = re.search(r"\S+", trailing)
+        if orphan:
+            orphan_index = last_rule_end + 1 + orphan.start()
+            orphan_line = 1 + css.count("\n", 0, orphan_index)
+            orphan_text = " ".join(trailing[orphan.start():].split())
+            if len(orphan_text) > 60:
+                orphan_text = f"{orphan_text[:57]}..."
+            errors.append(f"{part}:{orphan_line}: orphan CSS text after final rule: {orphan_text!r}")
         for context, selector, body, line_no in _iter_located_css_rules(css):
             location = f"{part}:{line_no}"
             declarations = declaration_re.findall(body)
@@ -488,6 +714,195 @@ def lint_css_structure() -> list[str]:
         errors.append(
             f"duplicate CSS selector '{selector}' in {context_text}: {', '.join(locations)}; merge it into one owner"
         )
+    return errors
+
+
+def _theme_base_selector(selector: str) -> str | None:
+    for prefix in (
+        "body.theme-light",
+        "body.editor-theme-light",
+        ":where(body.theme-light)",
+        ":where(body.editor-theme-light)",
+    ):
+        if selector.startswith(prefix + " "):
+            return selector[len(prefix):].strip()
+    return None
+
+
+def lint_identical_theme_restatements() -> list[str]:
+    """Reject light-theme declarations that repeat the same value already owned by the base selector."""
+    declaration_re = re.compile(r"(?:^|;)\s*(--[\w-]+|[\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
+    base_declarations: dict[tuple[tuple[str, ...], str, str], list[tuple[str, str]]] = defaultdict(list)
+    light_rules: list[tuple[tuple[str, ...], str, str, dict[str, str], str]] = []
+    for part in ASSETS.get("yolomux.css", []):
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for context, selector_list, body, line_no in _iter_located_css_rules(css):
+            declarations = {
+                match.group(1).lower(): " ".join(match.group(2).split())
+                for match in declaration_re.finditer(body)
+            }
+            location = f"{part}:{line_no}"
+            for selector in _split_css_selector_list(selector_list):
+                base_selector = _theme_base_selector(selector)
+                if base_selector is not None:
+                    light_rules.append((context, selector, base_selector, declarations, location))
+                    continue
+                for name, value in declarations.items():
+                    base_declarations[(context, selector, name)].append((value, location))
+    errors: list[str] = []
+    for context, selector, base_selector, declarations, location in light_rules:
+        for name, value in declarations.items():
+            owners = [
+                owner_location
+                for owner_value, owner_location in base_declarations.get((context, base_selector, name), [])
+                if owner_value == value
+            ]
+            if owners:
+                errors.append(
+                    f"{location}: theme selector '{selector}' restates '{name}: {value}' from "
+                    f"{', '.join(owners)} base selector '{base_selector}'; remove the copy or lower fallback specificity"
+                )
+    return sorted(errors)
+
+
+def lint_repeated_semantic_declaration_sets() -> list[str]:
+    """Semantic paint sets belong to one grouped selector, independent of declaration order."""
+    declaration_re = re.compile(r"(?:^|;)\s*([\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
+    occurrences: dict[str, list[str]] = defaultdict(list)
+    for part in ASSETS.get("yolomux.css", []):
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for _context, _selector, body, rule_line in _iter_located_css_rules(css):
+            declarations = frozenset(
+                (match.group(1).lower(), " ".join(match.group(2).split()))
+                for match in declaration_re.finditer(body)
+            )
+            for name, required in SHARED_CSS_DECLARATION_SETS.items():
+                if required <= declarations:
+                    occurrences[name].append(f"{part}:{rule_line}")
+    return [
+        f"semantic CSS declaration set {name!r} repeats in {', '.join(locations)}; merge it into one grouped selector"
+        for name, locations in sorted(occurrences.items())
+        if len(locations) > 1
+    ]
+
+
+def lint_code_syntax_color_ownership() -> list[str]:
+    """Each semantic syntax color has one rule shared by every renderer."""
+    color_re = re.compile(r"(?:^|;)\s*color\s*:\s*var\((--code-[\w-]+)\)\s*!important", re.IGNORECASE)
+    occurrences: dict[str, list[str]] = defaultdict(list)
+    for part in ASSETS.get("yolomux.css", []):
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for _context, selector, body, rule_line in _iter_located_css_rules(css):
+            if not re.search(r"\.(?:hljs|code)-", selector):
+                continue
+            for match in color_re.finditer(body):
+                token = match.group(1).lower()
+                if token in CODE_SYNTAX_COLOR_TOKENS:
+                    occurrences[token].append(f"{part}:{rule_line}")
+    errors = []
+    for token in sorted(CODE_SYNTAX_COLOR_TOKENS):
+        locations = occurrences.get(token, [])
+        if not locations:
+            errors.append(f"syntax color {token!r} has no shared .hljs-/.code- owner")
+        elif len(locations) > 1:
+            errors.append(f"syntax color {token!r} repeats in {', '.join(locations)}; merge renderer selectors into one rule")
+    return errors
+
+
+def lint_raw_standard_border_radii() -> list[str]:
+    """Standard component corners must reference the existing radius design tokens.
+
+    The token partial is the only literal owner. Component copies make a global radius change require
+    edits across every CSS partial and let otherwise-identical controls drift by a pixel.
+    """
+    errors: list[str] = []
+    property_re = re.compile(r"\bborder(?:-[a-z-]+)?-radius\s*:\s*([^;}]+)")
+    literals = "|".join(re.escape(value) for value in STANDARD_BORDER_RADIUS_TOKENS)
+    literal_re = re.compile(rf"(?<![\w.])({literals})(?![\w-])")
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for declaration in property_re.finditer(css):
+            line_no = 1 + css.count("\n", 0, declaration.start())
+            raw_values = dict.fromkeys(literal_re.findall(declaration.group(1)))
+            for value in raw_values:
+                token = STANDARD_BORDER_RADIUS_TOKENS[value]
+                errors.append(f"{part}:{line_no}: raw standard border radius {value}; use var({token})")
+    return errors
+
+
+def lint_raw_standard_motion_durations() -> list[str]:
+    """Shared UI cadence literals belong to the motion tokens in the base partial."""
+    errors: list[str] = []
+    literal_pattern = "|".join(
+        re.escape(value) for value in sorted(STANDARD_MOTION_DURATION_TOKENS, key=len, reverse=True)
+    )
+    literal_re = re.compile(rf"(?<![\w.])({literal_pattern})(?![\w.])", re.IGNORECASE)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_var_functions(_css_without_comments(read_text(path)))
+        except FileNotFoundError:
+            continue
+        seen: set[tuple[int, str]] = set()
+        for match in literal_re.finditer(css):
+            value = match.group(1).lower()
+            line_no = 1 + css.count("\n", 0, match.start())
+            if (line_no, value) in seen:
+                continue
+            seen.add((line_no, value))
+            token = STANDARD_MOTION_DURATION_TOKENS[value]
+            errors.append(f"{part}:{line_no}: raw standard motion duration {value}; use var({token})")
+    return errors
+
+
+def lint_raw_standard_font_sizes() -> list[str]:
+    """Standard component text sizes must follow the responsive UI type scale."""
+    errors: list[str] = []
+    property_re = re.compile(r"\b(font-size|font)\s*:\s*([^;}]+)", re.IGNORECASE)
+    literal_pattern = "|".join(re.escape(value) for value in STANDARD_COMPONENT_FONT_SIZE_TOKENS)
+    shorthand_re = re.compile(rf"(?<![/\w.-])({literal_pattern})(?=\s*(?:/|\s|$))", re.IGNORECASE)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for declaration in property_re.finditer(css):
+            property_name = declaration.group(1).lower()
+            raw_value = re.sub(r"\s*!important\s*$", "", declaration.group(2), flags=re.IGNORECASE).strip()
+            if property_name == "font-size":
+                value = raw_value.lower() if raw_value.lower() in STANDARD_COMPONENT_FONT_SIZE_TOKENS else ""
+            else:
+                masked = _css_without_functions(raw_value, {"var", "calc", "min", "max", "clamp"})
+                match = shorthand_re.search(masked)
+                value = match.group(1).lower() if match else ""
+            if not value:
+                continue
+            line_no = 1 + css.count("\n", 0, declaration.start())
+            token = STANDARD_COMPONENT_FONT_SIZE_TOKENS[value]
+            errors.append(f"{part}:{line_no}: raw standard component font size {value}; use var({token})")
     return errors
 
 
@@ -536,6 +951,21 @@ def _canonical_opaque_color(color: str) -> str | None:
     if not math.isclose(alpha, 1.0):
         return None
     return "#" + "".join(f"{value:02x}" for value in channels)
+
+
+def _color_identity(color: str) -> tuple[int, int, int, float] | None:
+    measured = _color_rgba(color)
+    if measured is None:
+        return None
+    channels, alpha = measured
+    return (*channels, round(alpha, 6))
+
+
+def _color_identity_label(identity: tuple[int, int, int, float]) -> str:
+    red, green, blue, alpha = identity
+    if math.isclose(alpha, 1.0):
+        return f"#{red:02x}{green:02x}{blue:02x}"
+    return f"rgb({red} {green} {blue} / {alpha:g})"
 
 
 def _color_luminance_alpha(color: str) -> tuple[float, float] | None:
@@ -1091,6 +1521,30 @@ def lint_duplicate_functions() -> list[str]:
     return errors
 
 
+def lint_source_control_characters() -> list[str]:
+    """Static source partials must remain normal UTF-8 text that grep, editors, and linters can inspect."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    for parts in ASSETS.values():
+        for part in parts:
+            if part in seen:
+                continue
+            seen.add(part)
+            path = repo_path(part)
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            for offset, value in enumerate(data):
+                if value >= 32 or value in (9, 10, 13):
+                    continue
+                line = data.count(b"\n", 0, offset) + 1
+                line_start = data.rfind(b"\n", 0, offset) + 1
+                column = offset - line_start + 1
+                errors.append(f"{part}:{line}:{column}: source control character U+{value:04X}; use a textual escape or structured signature")
+    return errors
+
+
 def lint_undefined_css_vars() -> list[str]:
     """Every `var(--x)` in the CSS bundle must resolve to a `--x:` definition (CSS) or a JS
     `setProperty('--x', …)` / inline `style="--x:…"`. a typo'd or removed token name otherwise
@@ -1110,7 +1564,7 @@ def _token_opaque_color_values() -> dict[str, list[str]]:
     token_file = repo_path("static_src/css/yolomux/00_tokens_base.css")
     css = re.sub(r"/\*.*?\*/", "", read_text(token_file), flags=re.DOTALL)
     values: dict[str, list[str]] = defaultdict(list)
-    literal_re = re.compile(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\))")
+    literal_re = re.compile(rf"(--[\w-]+)\s*:\s*({CSS_COLOR_LITERAL_PATTERN})")
     for match in literal_re.finditer(css):
         canonical = _canonical_opaque_color(match.group(2))
         if canonical:
@@ -1121,32 +1575,30 @@ def _token_opaque_color_values() -> dict[str, list[str]]:
 def lint_raw_literal_equals_token() -> list[str]:
     """Semantic token colors should be referenced through `var(--token)`, not copied as raw hex.
 
-    White and `var(--x, #fallback)` literals are intentionally left alone: white is used as real paint in
-    shadows/surfaces, and fallback literals are part of the token reference rather than a parallel copy.
+    `var(--x, #fallback)` literals are intentionally left alone because the fallback belongs to the token
+    reference. Opaque white has an explicit paint owner and is checked even inside local custom properties.
     """
     token_values = _token_opaque_color_values()
     ignored_values = {_canonical_opaque_color(value) for value in RAW_TOKEN_LITERAL_IGNORED_VALUES}
     errors: list[str] = []
-    literal_re = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)")
     for part in ASSETS.get("yolomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
         try:
-            text = _css_without_comments(read_text(path))
+            text = _css_without_var_functions(_css_without_comments(read_text(path)))
         except FileNotFoundError:
             continue
         for line_no, line in enumerate(text.splitlines(), start=1):
-            if re.match(r"^\s*--[\w-]+\s*:", line):
-                continue
-            for match in literal_re.finditer(line):
+            local_custom_property = re.match(r"^\s*--[\w-]+\s*:", line) is not None
+            for match in CSS_COLOR_LITERAL_RE.finditer(line):
                 literal = match.group(0)
                 canonical = _canonical_opaque_color(literal)
+                if local_custom_property and canonical != "#ffffff":
+                    continue
                 if canonical not in token_values:
                     continue
                 if canonical in ignored_values:
-                    continue
-                if "var(" in line:
                     continue
                 tokens = ", ".join(sorted(set(token_values[canonical])))
                 errors.append(f"{part}:{line_no}: raw color {literal.lower()} duplicates token value(s) {tokens}; use var(--token)")
@@ -1154,31 +1606,114 @@ def lint_raw_literal_equals_token() -> list[str]:
 
 
 def lint_repeated_raw_component_literals() -> list[str]:
-    """New repeated component hex colors must become tokens or get a reviewed allowlist reason."""
-    occurrences: dict[str, list[str]] = defaultdict(list)
+    """Equivalent repeated component color literals need one owner, regardless of CSS spelling."""
+    occurrences: dict[tuple[int, int, int, float], list[str]] = defaultdict(list)
     for part in ASSETS.get("yolomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
         try:
-            text = read_text(path)
+            text = _css_without_var_functions(_css_without_comments(read_text(path)))
         except FileNotFoundError:
             continue
-        for line_no, line in enumerate(text.splitlines(), start=1):
-            if "var(" in line:
+        for match in CSS_COLOR_LITERAL_RE.finditer(text):
+            identity = _color_identity(match.group(0))
+            if identity is None:
                 continue
-            for match in re.finditer(r"#[0-9a-fA-F]{6}\b", line):
-                literal = match.group(0).lower()
-                occurrences[literal].append(f"{part}:{line_no}")
+            line_no = 1 + text.count("\n", 0, match.start())
+            occurrences[identity].append(f"{part}:{line_no}")
     errors: list[str] = []
-    for literal, locations in sorted(occurrences.items()):
+    allowlist: dict[tuple[int, int, int, float], str] = {}
+    for literal in sorted(RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST):
+        identity = _color_identity(literal)
+        if identity is None:
+            errors.append(f"invalid raw component color allowlist entry {literal}")
+            continue
+        allowlist[identity] = literal
+        count = len(occurrences.get(identity, []))
+        if count < 2:
+            errors.append(f"stale raw component color allowlist entry {literal}: found {count} occurrence(s); remove it")
+    for identity, locations in sorted(occurrences.items()):
         if len(locations) < 2:
             continue
-        if literal in RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST:
+        if identity in allowlist:
             continue
+        literal = _color_identity_label(identity)
         shown = ", ".join(locations[:4])
         suffix = "" if len(locations) <= 4 else f" (+{len(locations) - 4} more)"
         errors.append(f"raw component color {literal} repeats in {shown}{suffix}; move it to a CSS token or add a reviewed allowlist reason")
+    return errors
+
+
+def lint_repeated_raw_box_shadows() -> list[str]:
+    """Repeated shadow geometry belongs in one token or grouped selector."""
+    occurrences: dict[str, list[str]] = defaultdict(list)
+    declaration_re = re.compile(r"(?:^|;)\s*box-shadow\s*:\s*([^;}]+)", re.IGNORECASE)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for _context, _selector, body, rule_line in _iter_located_css_rules(css):
+            for declaration in declaration_re.finditer(body):
+                value = " ".join(declaration.group(1).split())
+                unimportant = re.sub(r"\s*!important\s*$", "", value, flags=re.IGNORECASE)
+                if unimportant == "none" or re.fullmatch(r"var\(\s*--[\w-]+\s*\)", unimportant):
+                    continue
+                line_no = rule_line + body.count("\n", 0, declaration.start())
+                occurrences[value].append(f"{part}:{line_no}")
+    errors: list[str] = []
+    for value, locations in sorted(occurrences.items()):
+        if len(locations) < 2:
+            continue
+        errors.append(
+            f"raw box-shadow {value!r} repeats in {', '.join(locations)}; "
+            "move it to a CSS token or grouped selector"
+        )
+    return errors
+
+
+def lint_unowned_z_indexes() -> list[str]:
+    """Every stacking declaration must consume one named z-index token.
+
+    Component-side literals and arithmetic split the layer graph across CSS and inline JS styles.
+    Keep numeric ownership and relationships in the token partial; consumers use a direct --z-* var.
+    """
+    errors: list[str] = []
+    declaration_re = re.compile(r"\bz-index\s*:\s*([^;}]+)", re.IGNORECASE)
+    token_definition_re = re.compile(r"(--z-[\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
+    owned_re = re.compile(r"var\(\s*--z-[\w-]+\s*\)(?:\s*!important)?", re.IGNORECASE)
+    css_wide_re = re.compile(r"(?:auto|inherit|initial|revert|revert-layer|unset)(?:\s*!important)?", re.IGNORECASE)
+    for asset in ("yolomux.css", "yolomux.js"):
+        for part in ASSETS.get(asset, []):
+            path = repo_path(part)
+            try:
+                source = _css_without_comments(read_text(path))
+            except FileNotFoundError:
+                continue
+            if not part.endswith("00_tokens_base.css"):
+                for definition in token_definition_re.finditer(source):
+                    name = definition.group(1)
+                    value = " ".join(definition.group(2).split())
+                    if owned_re.fullmatch(value):
+                        continue
+                    line_no = 1 + source.count("\n", 0, definition.start())
+                    errors.append(
+                        f"{part}:{line_no}: local z-index token {name} owns {value!r}; "
+                        "move numeric/arithmetic ownership to 00_tokens_base.css"
+                    )
+            for declaration in declaration_re.finditer(source):
+                value = " ".join(declaration.group(1).split())
+                if owned_re.fullmatch(value) or css_wide_re.fullmatch(value):
+                    continue
+                line_no = 1 + source.count("\n", 0, declaration.start())
+                errors.append(
+                    f"{part}:{line_no}: z-index {value!r} lacks one named --z-* owner; "
+                    "move literals/arithmetic to 00_tokens_base.css and use var(--z-token)"
+                )
     return errors
 
 
@@ -1307,10 +1842,19 @@ def main(argv: list[str] | None = None) -> int:
             # --lint-light, so it was absent from --check / the CPS check list).
             lint_errors = (
                 lint_duplicate_functions()
+                + lint_source_control_characters()
                 + lint_css_structure()
+                + lint_identical_theme_restatements()
+                + lint_repeated_semantic_declaration_sets()
+                + lint_code_syntax_color_ownership()
+                + lint_raw_standard_border_radii()
+                + lint_raw_standard_motion_durations()
+                + lint_raw_standard_font_sizes()
                 + lint_undefined_css_vars()
                 + lint_raw_literal_equals_token()
                 + lint_repeated_raw_component_literals()
+                + lint_repeated_raw_box_shadows()
+                + lint_unowned_z_indexes()
                 + lint_raw_window_viewport_reads()
                 + lint_light_mode_pairs()
             )

@@ -78,7 +78,6 @@ Borrow from other tools only when the feature improves the local control loop: k
 ## Internationalization
 
 - [ ] [M] Finish structured localization for the auxiliary tmux-wall shell and remaining browser-visible share/upload/filesystem/search/run-history/transcript/API errors while retaining raw OS/git/tmux/model text only as diagnostic detail.
-- [ ] [L] Collapse duplicate catalog concepts through neutral `common.*`, `brand.*`, and `state.*` parents; the audit found 77 same-semantic groups containing 97 excess keys, including 60 groups whose translations have already drifted across locales.
 
 ## Product Guardrails
 

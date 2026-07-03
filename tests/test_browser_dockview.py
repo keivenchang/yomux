@@ -334,7 +334,7 @@ def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
         popoverHideDelayMs = 1000;
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
     metrics = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -393,7 +393,7 @@ def test_dockview_tab_hover_popover_survives_tab_refresh_without_pointer_move(br
         popoverHideDelayMs = 120;
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -485,8 +485,8 @@ def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser
     assert metrics["previewBorderColor"] == metrics["separatorHover"]
     assert metrics["sashBg"]
     assert metrics["sashBeforeWidth"] <= metrics["separatorLineSize"] + 0.1
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".dv-sash")).perform()
-    hover_metrics = WebDriverWait(browser, 5).until(
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".dv-sash")).perform()
+    hover_metrics = WebDriverWait(browser, 5, poll_frequency=0.05).until(
         lambda driver: driver.execute_script(
             """
             const sashStyle = getComputedStyle(document.querySelector('.dv-sash'), '::before');
@@ -799,7 +799,7 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
             assert sash["beforeHeight"] <= metrics["lineSize"] + 0.1
 
     first_sash = browser.find_element("css selector", ".dv-sash")
-    ActionChains(browser).move_to_element(first_sash).perform()
+    fast_pointer_actions(browser).move_to_element(first_sash).perform()
     hover_metrics = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -811,6 +811,7 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
             const hoverBg = docStyle.getPropertyValue('--pane-resizer-hover-bg').trim();
             const hoverLineSize = parseFloat(docStyle.getPropertyValue('--pane-resizer-hover-line-size')) || 0;
             const split = sash.closest('.dv-split-view-container')?.className || '';
+            if (before.backgroundColor !== hoverBg) return false;
             return {
               bg: style.backgroundColor,
               beforeBg: before.backgroundColor,

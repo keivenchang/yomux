@@ -22,7 +22,8 @@
   overflow: auto;
   padding: 10px;
 }
-.js-debug-scroll {
+.js-debug-scroll,
+.js-debug-events-view {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
@@ -34,7 +35,7 @@
   min-width: 0;
   height: var(--pane-tab-height);
   border: 1px solid var(--line);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   overflow: hidden;
   background: var(--pane-bar-bg, var(--panel2));
 }
@@ -55,14 +56,6 @@
 .js-debug-subtab:last-child {
   border-inline-end: 0;
 }
-.js-debug-subtab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-}
-.js-debug-subtab:not(.active):hover {
-  color: var(--text);
-  background: var(--pane-inactive-tab-bg-hover);
-}
 .js-debug-subtab .session-button-dir {
   color: inherit;
 }
@@ -72,11 +65,6 @@
 }
 .js-debug-subview[hidden] {
   display: none;
-}
-.js-debug-events-view {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
 }
 .ui-disclosure-triangle,
 .info-tree-group summary::before,
@@ -96,7 +84,7 @@
   line-height: 1;
   text-align: center;
   transform-origin: center;
-  transition: color 120ms ease, opacity 120ms ease, transform 120ms ease;
+  transition: color var(--motion-disclosure) ease, opacity var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
 }
 .ui-disclosure-triangle[data-disclosure-expanded="true"],
 .file-tree-row.kind-dir[aria-expanded="true"] > .ui-disclosure-triangle,
@@ -124,7 +112,7 @@
   --js-debug-agent-token-rose: #ff4f70;
   --js-debug-agent-token-violet: #9b6cff;
   --js-debug-agent-token-total: #ffe1a3;
-  --js-debug-agent-token-pattern-ink: #fff;
+  --js-debug-agent-token-pattern-ink: var(--paint-white);
   --js-debug-agent-token-pattern-ink-rgb: 255 255 255;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
@@ -143,7 +131,7 @@ body.theme-light .js-debug-graph-view {
   --js-debug-agent-token-rose: #c21f45;
   --js-debug-agent-token-violet: #5b21d1;
   --js-debug-agent-token-total: #8a5a20;
-  --js-debug-agent-token-pattern-ink: #000;
+  --js-debug-agent-token-pattern-ink: var(--paint-black);
   --js-debug-agent-token-pattern-ink-rgb: 0 0 0;
 }
 .js-debug-toolbar {
@@ -167,7 +155,7 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   padding: 4px 7px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .js-debug-stat span {
@@ -191,10 +179,10 @@ body.theme-light .js-debug-graph-view {
   resize: none;
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--text);
   background: var(--panel);
-  font: 11px/1.35 var(--mono-font);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
   white-space: pre;
 }
 .js-debug-graph {
@@ -205,7 +193,7 @@ body.theme-light .js-debug-graph-view {
   min-height: 180px;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .js-debug-graph--empty {
@@ -225,12 +213,11 @@ body.theme-light .js-debug-graph-view {
   align-items: center;
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--panel2);
 }
-.js-debug-scale-button,
-.js-debug-range-button {
+.js-debug-scale-button {
   min-width: 54px;
   height: 24px;
   padding: 0 8px;
@@ -241,20 +228,13 @@ body.theme-light .js-debug-graph-view {
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
-.js-debug-range-button {
-  min-width: 66px;
-}
-.js-debug-scale-button:last-child,
-.js-debug-range-button:last-child {
+.js-debug-scale-button:last-child {
   border-inline-end: 0;
 }
-.js-debug-scale-button.active,
-.js-debug-range-button.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-}
+.js-debug-subtab:not(.active):hover,
+.js-debug-subtab:not(.active):focus-visible,
 .js-debug-scale-button:not(.active):hover,
-.js-debug-range-button:not(.active):hover {
+.js-debug-scale-button:not(.active):focus-visible {
   color: var(--text);
   background: var(--pane-inactive-tab-bg-hover);
 }
@@ -282,16 +262,11 @@ body.theme-light .js-debug-graph-view {
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--muted);
   background: var(--panel2);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
-}
-.js-debug-hidden-chart:hover,
-.js-debug-chart-close:hover {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
 }
 .js-debug-chart-close {
   flex: 0 0 auto;
@@ -300,7 +275,7 @@ body.theme-light .js-debug-graph-view {
   margin-inline-start: auto;
   padding: 0;
   border-color: transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--muted);
   background: transparent;
   font-size: 16px;
@@ -336,10 +311,14 @@ body.theme-light .js-debug-graph-view {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
+}
+.js-debug-subtab.active,
+.js-debug-scale-button.active,
+.js-debug-zoom-reset {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .js-debug-graph-meta {
   flex: 0 0 auto;
@@ -368,12 +347,6 @@ body.theme-light .js-debug-graph-view {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 2px 10px;
   min-width: 0;
-}
-.js-debug-client-perf-row {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .js-debug-chart-shell {
   position: relative;
@@ -428,7 +401,7 @@ body.theme-light .js-debug-graph-view {
   min-height: 150px;
   padding: 7px 8px 8px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--panel2) 54%, transparent);
 }
 .js-debug-chart-head {
@@ -451,13 +424,9 @@ body.theme-light .js-debug-graph-view {
   white-space: normal;
 }
 .js-debug-chart-summary {
-  min-width: 0;
   margin-inline-start: auto;
   color: var(--active-accent-bright);
   font: 700 var(--ui-font-size-xs)/1.15 var(--ui-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .js-debug-chart-body {
   display: grid;
@@ -475,7 +444,7 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   min-height: 104px;
   color: var(--muted);
-  font: 700 10px/1 var(--mono-font);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
   text-align: end;
   white-space: nowrap;
 }
@@ -507,13 +476,7 @@ body.theme-light .js-debug-graph-view {
   gap: 8px;
   min-width: 0;
   color: var(--muted);
-  font: 600 10px/1 var(--mono-font);
-}
-.js-debug-x-axis span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font: 600 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .js-debug-x-axis span[data-js-debug-x-tick="mid"] {
   text-align: center;
@@ -788,10 +751,12 @@ body.theme-light .js-debug-graph-view {
   border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
   border-top-color: currentColor;
   border-radius: 50%;
-  animation: metadata-refresh-spin 0.9s linear infinite;
 }
-#refreshMeta.loading::before {
-  animation: metadata-refresh-spin 0.9s linear infinite;
+.info-refresh.loading::before,
+#refreshMeta.loading::before,
+.info-loading-spinner,
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  animation: metadata-refresh-spin var(--motion-activity-duration) linear infinite;
 }
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
@@ -804,7 +769,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 10px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--muted);
   font-family: var(--ui-font);
@@ -892,7 +857,7 @@ body.theme-light .js-debug-graph-view {
   overflow: auto;
   padding: 4px 12px 4px 4px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel2);
   color: var(--text);
   box-shadow: var(--shadow-elevated);
@@ -951,11 +916,6 @@ body.theme-light .js-debug-graph-view {
   color: var(--muted);
   white-space: nowrap;
 }
-.diff-ref-suggestion-description {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .diff-ref-suggestion-pr {
   flex: 0 0 auto;
   font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
@@ -995,7 +955,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 8px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--text);
   font-family: var(--ui-font);
@@ -1037,7 +997,7 @@ body.theme-light .js-debug-graph-view {
 .changes-empty {
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: #ff8a8a;
   font-size: var(--ui-font-size-sm);
@@ -1053,7 +1013,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 10px;
   min-inline-size: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--panel);
 }
@@ -1156,12 +1116,6 @@ body.theme-light .js-debug-graph-view {
 .changes-tree {
   padding: 2px 0;
 }
-.changes-file-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;  /* C5: space multiple agent icons when a file was touched by both Claude and Codex */
-  flex: 0 0 auto;
-}
 .changes-file-agent .agent-icon {
   width: 16px;
   min-width: 16px;
@@ -1169,11 +1123,6 @@ body.theme-light .js-debug-graph-view {
   margin: 0;
   padding: 0;
   vertical-align: 0;
-}
-.changes-file-agent .agent-icon svg {
-  flex-basis: 14px;
-  width: 14px;
-  height: 14px;
 }
 .changes-meta-separator {
   color: rgba(174, 184, 199, 0.62);
@@ -1204,7 +1153,7 @@ body.theme-light .js-debug-graph-view {
   gap: 8px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--muted);
   font-family: var(--mono-font);
@@ -1237,7 +1186,7 @@ body.theme-light .js-debug-graph-view {
 .preferences-section {
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .preferences-section-toggle {
@@ -1250,7 +1199,7 @@ body.theme-light .js-debug-graph-view {
   padding: 8px 10px;
   border: 0;
   border-bottom: 1px solid var(--line);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg, var(--panel2));
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
@@ -1259,15 +1208,10 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-section.collapsed .preferences-section-toggle {
   border-bottom: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .preferences-section-caret {
   margin-inline-end: 2px;
-}
-.preferences-section-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .preferences-section-count {
   color: currentColor;
@@ -1339,7 +1283,7 @@ body.theme-light .js-debug-graph-view {
   border: 1px solid var(--line);
   border-radius: 2px;
   background: var(--preferences-radio-swatch);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  box-shadow: inset 0 0 0 1px var(--paint-white-28);
 }
 .preferences-radio-swatches.joined .preferences-radio-swatch {
   border-radius: 0;
@@ -1401,7 +1345,7 @@ body.theme-light .js-debug-graph-view {
   color: var(--preferences-advisory-code-text);
   background: var(--preferences-advisory-code-bg);
   border: 1px solid var(--preferences-advisory-code-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .preferences-setting-label {
@@ -1438,7 +1382,7 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-search:focus {
   border-color: var(--active-control-border);
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 .preferences-search-button,
 .preferences-reset-all {
@@ -1450,15 +1394,12 @@ body.theme-light .js-debug-graph-view {
   font: 700 var(--ui-font-size-xs)/1 var(--control-font);
 }
 .preferences-search-button {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
   font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-search-button:hover,
 .preferences-search-button:focus-visible {
-  background: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  background: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
   border-color: var(--active-control-border);
 }
 .preferences-global-reset {
@@ -1471,7 +1412,7 @@ body.theme-light .js-debug-graph-view {
   color: var(--danger-panel-text);
   background: var(--danger-panel-bg);
   border: 1px solid var(--danger-panel-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .preferences-global-reset.confirming {
   background: var(--danger-panel-confirming-bg);
@@ -1519,7 +1460,7 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-reset-cancel {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--paint-white-06);
   border-color: rgba(255, 255, 255, 0.22);
 }
 
@@ -1541,9 +1482,9 @@ body.theme-light .js-debug-graph-view {
   color: var(--text);
   background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow:
-    0 -4px 14px rgba(0, 0, 0, 0.34),
+    0 -4px 14px var(--paint-black-34),
     0 24px 70px rgba(0, 0, 0, 0.62);
 }
 .command-palette-input {
@@ -1551,7 +1492,7 @@ body.theme-light .js-debug-graph-view {
   height: 38px;
   padding: 7px 10px;
   color: var(--text);
-  background: #0b1017;
+  background: var(--overlay-input-bg);
   border: 0;
   border-bottom: 1px solid var(--line);
   outline: 0;
@@ -1570,10 +1511,13 @@ body.theme-light .js-debug-graph-view {
   width: 6px;
   height: 6px;
   margin-inline-end: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent-gold);
-  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
   vertical-align: 1px;
+}
+.command-palette-status::before,
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  animation: command-palette-thinking var(--motion-activity-duration) ease-in-out infinite alternate;
 }
 @keyframes command-palette-thinking {
   from { opacity: 0.35; }
@@ -1603,12 +1547,15 @@ body.theme-light .js-debug-graph-view {
 .command-palette-row.active,
 .command-palette-row:hover {
   color: var(--pane-tab-panel-head-text);
-  background: #273140;
+  background: var(--overlay-option-hover-bg);
   border-color: var(--accent-gold);
 }
-.command-palette-group {
+.command-palette-group,
+.command-palette-keybinding {
   color: #9fb0c4;
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-group {
   text-transform: uppercase;
 }
 .command-palette-main {
@@ -1656,11 +1603,6 @@ body.theme-light .js-debug-graph-view {
   border-color: var(--active-control-border);
   color: var(--text);
 }
-body.theme-light .command-palette-view-chip {
-  border-color: var(--active-control-soft-border);
-  color: var(--text);
-  background: var(--active-control-soft-bg);
-}
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
   padding: 0;
@@ -1675,8 +1617,6 @@ body.theme-light .command-palette-view-chip {
 }
 .command-palette-keybinding {
   justify-self: end;
-  color: #9fb0c4;
-  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
 }
 .command-palette-empty {
@@ -1702,7 +1642,7 @@ body.theme-light .command-palette-view-chip {
   color: var(--text);
   background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
 .keyboard-shortcuts-head {
@@ -1730,7 +1670,7 @@ body.theme-light .command-palette-view-chip {
 .keyboard-shortcuts-close:hover,
 .keyboard-shortcuts-close:focus-visible {
   border-color: var(--accent-gold);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--paint-white-08);
 }
 .keyboard-shortcuts-body {
   min-height: 0;
@@ -1766,13 +1706,13 @@ body.theme-light .command-palette-view-chip {
   gap: 6px;
   align-items: center;
   padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--paint-white-06);
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-shortcut-row kbd {
   padding: 1px 4px;
   color: var(--pane-tab-text);
-  background: #0b1017;
+  background: var(--overlay-input-bg);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
@@ -1784,7 +1724,7 @@ body.theme-light .command-palette-view-chip {
   gap: 6px;
   align-items: center;
   padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--paint-white-06);
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-legend-sample {
@@ -1812,9 +1752,9 @@ body.theme-light .command-palette-view-chip {
   width: 14px;
   height: 14px;
   display: inline-flex;
-  border-radius: 999px;
-  border: 1px solid rgb(255 255 255 / 0.28);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.34);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--paint-white-28);
+  box-shadow: 0 0 0 1px var(--paint-black-34);
 }
 .keyboard-legend-swatch-merged {
   background: var(--pr-status-merged);
@@ -1869,12 +1809,11 @@ body.theme-light .preferences-setting-control input[type="text"],
 body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
-body.theme-light .changes-refresh,
+:where(body.theme-light) .changes-refresh,
 body.theme-light .diff-ref-input,
 body.theme-light .diff-ref-control input,
 body.theme-light .diff-ref-suggestion-popover {
-  background: #ffffff;
-  color: var(--text);
+  background: var(--paint-white);
 }
 body.theme-light .info-refresh:hover,
 body.theme-light .info-refresh:focus-visible {
@@ -1902,39 +1841,11 @@ body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: var(--lt-panel);
   --changes-indent-line: var(--tree-indent-line);
-  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
-  --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--lt-muted);
   --changes-icon-text: var(--menu-accent);
 }
-body.theme-light .changes-toolbar,
-body.theme-light .changes-repo-group {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--line);
-}
-body.theme-light .file-explorer-changes-panel:hover > .changes-toolbar,
-body.theme-light .file-explorer-changes-panel:focus-within > .changes-toolbar {
-  background: var(--pane-tab-strip-bg);
-  color: var(--text);
-}
-body.theme-light .changes-comparison-head {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--line);
-}
-body.theme-light .changes-repo-head {
-  color: var(--text);
-  background: var(--changes-repo-head-bg);
-}
-body.theme-light .changes-repo-title {
-  color: var(--accent-gold);
-}
 body.theme-light .changes-diff-add {
-  color: #166534;
-}
-body.theme-light .changes-diff-add-neutral {
-  color: var(--muted);
+  color: var(--success-text-strong);
 }
 body.theme-light .changes-diff-remove {
   color: var(--danger-strong-hover);
@@ -2063,20 +1974,6 @@ body.theme-light .changes-diff-remove {
   border-color: var(--active-control-soft-border);
   color: var(--active-control-bg);
 }
-body.theme-light .preferences-inline-action {
-  color: var(--active-control-bg);
-}
-.popover-value a:hover,
-.branch-link:hover {
-  color: var(--link-soft-hover);
-  text-decoration: underline;
-}
-.popover-value a.pr-status-merged:hover,
-.meta a.pr-status-merged:hover,
-.summary-context a.pr-status-merged:hover,
-.branch-meta a.pr-status-merged:hover {
-  color: var(--pr-status-merged);
-}
 .branch-list {
   margin-top: 8px;
   padding-top: 8px;
@@ -2130,14 +2027,14 @@ body.theme-light .preferences-inline-action {
   display: block;
 }
 .agent-icon.codex {
-  color: #ffffff;
+  color: var(--paint-white);
 }
 .agent-icon.codex svg {
   transform: scale(1.16);
   transform-origin: center;
 }
 .agent-icon.claude {
-  color: #ffffff;
+  color: var(--paint-white);
 }
 /* ============================================================================
    Light mode: dialogs and warning chrome hardcode dark fills + light
@@ -2167,9 +2064,6 @@ body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,
 body.theme-light .command-palette-keybinding {
   color: var(--muted);
-}
-body.theme-light .keyboard-shortcuts-section h3 {
-  color: var(--active-accent-bright);
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {
@@ -2206,7 +2100,6 @@ body.theme-light .preferences-global-reset-warning {
   color: var(--danger-light-text);
 }
 body.theme-light .preferences-global-reset .preferences-reset-all {
-  color: var(--danger-action-text);
   background: var(--danger-strong);
   border-color: var(--danger-action-light-border);
 }
@@ -2226,7 +2119,7 @@ body.theme-light .agent-icon.claude {
 button {
   min-width: 34px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel2);
   color: var(--text);
   padding: 6px 9px;
@@ -2239,4 +2132,3 @@ button:disabled {
   opacity: 0.55;
 }
 button:disabled:hover { border-color: var(--line); }
-6

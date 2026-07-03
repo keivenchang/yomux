@@ -100,15 +100,11 @@
   text-transform: uppercase;
 }
 .status-indicator--label {
-  min-width: 0;
   max-width: 100%;
   padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .status-indicator--dot {
   width: 1em;
@@ -117,7 +113,7 @@
   font-size: 0.9em;
   line-height: 1;
   text-align: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 1;
 }
 .status-indicator--dot.heartbeat-pulse {
@@ -225,21 +221,25 @@
   --agent-status-acknowledgement-delay: var(--attention-animation-delay, 0s);
   --agent-status-acknowledgement-iteration-count: infinite;
 }
+.agent-window-activity,
+.changes-file-agent,
+.file-tree-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
 .agent-window-activity {
   --agent-window-icon-size: 18px;
   /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
      two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
   --agent-status-ball-size-base: 14px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
-  --agent-status-ball-border: #000;
+  --agent-status-ball-border: var(--paint-black);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
   margin-inline-start: 2px;
-  vertical-align: middle;
 }
 .agent-window-activity .agent-icon {
   width: var(--agent-window-icon-size);
@@ -250,6 +250,12 @@
 .agent-window-activity .agent-icon svg {
   width: var(--agent-window-icon-size);
   height: var(--agent-window-icon-size);
+}
+.changes-file-agent .agent-icon svg,
+.agent-window-activity--subwindow .agent-icon svg {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
 }
 .agent-window-status-dot {
   margin-inline-start: 0;
@@ -340,18 +346,7 @@
 }
 .session-state-badge {
   color: var(--pr-status-closed);
-  background: #161d29;
-}
-.session-state-needs-approval,
-.session-state-needs-input {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-}
-.session-state-yolo-approval {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  background: var(--neutral-status-bg);
 }
 .session-state-blocked,
 .session-state-disconnected {
@@ -422,7 +417,7 @@
     transform: scale(0.97);
   }
   45%, 55% {
-    color: #ffffff;
+    color: var(--paint-white);
     background-color: #ff304a;
     filter: saturate(1.45) brightness(1.12);
     transform: scale(1.08);
@@ -490,7 +485,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
+  box-shadow: 0 0 0 1px var(--paint-black-42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
@@ -520,28 +515,17 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
-.session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
-}
 .session-yolo-marker.locked {
   color: #ffd75d;
   background: #3a3524;
   border-color: #f0b85d;
 }
-/* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
-   status colors — red/blue/green — already read on white and are left alone).
-   Repaint the neutral chips as light gray with dark text. */
-body.theme-light .session-state-badge {
+/* Light mode repaints only neutral state badges. Specialized states keep their own shared paint; a
+   generic higher-specificity theme rule previously turned danger/review/test badges neutral. */
+body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .session-state-needs-input, .session-state-blocked, .session-state-disconnected, .session-state-tests-running, .session-state-ready-review, .session-state-yolo-approval)) {
   color: var(--neutral-text-strong);
-  background: #eef1f5;
+  background: var(--neutral-surface-subtle-light);
   border-color: #cdd5e0;
-}
-body.theme-light .session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
 }
 /* The session YO marker no longer rotates to signal "working" — the pulsing green ball beside the
    agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
@@ -574,7 +558,7 @@ body.theme-light .session-yolo-marker.inactive {
   border-radius: 0;
   border: 1px solid var(--divider);
   color: var(--pr-status-closed);
-  background: #161d29;
+  background: var(--neutral-status-bg);
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
 body.tab-meta-hidden .pane-tab .tab-symbol,
@@ -597,19 +581,25 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .popover-chip-link:hover {
   text-decoration: none;
 }
-.ci-indicator.pr-status-failing {
+.session-state-needs-approval,
+.session-state-needs-input,
+.ci-indicator.pr-status-failing,
+.ci-indicator.pr-review-changes {
   color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
+}
+.ci-indicator.pr-status-failing {
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
 .ci-indicator.pr-status-draft {
   color: #161000;
   background: var(--pane-tab-badge-gold);
-  border-color: #ffe27a;
+  border-color: var(--warning-border-strong);
 }
-.ci-indicator.pr-status-passing {
+.ci-indicator.pr-status-passing,
+.ci-indicator.pr-review-approved {
   color: #051408;
   background: var(--pr-status-passing);
   border-color: #8ff2a7;
@@ -623,16 +613,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .ci-indicator.pr-review-chip {
   padding: 0 5px;
   font-weight: 700;
-}
-.ci-indicator.pr-review-approved {
-  color: #051408;
-  background: var(--pr-status-passing);
-  border-color: #8ff2a7;
-}
-.ci-indicator.pr-review-changes {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
 }
 .ci-indicator.pr-review-required {
   color: #172033;
@@ -652,15 +632,13 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
    are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
    theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
-body.theme-light .ci-indicator {
+body.theme-light .ci-indicator:not(.branch-indicator):not(.pr-number-chip) {
   color: #1c2430;
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: #b9c2d0;
 }
 body.theme-light .ci-indicator.pr-number-chip {
-  color: #ffffff;
-  background: var(--pr-number-chip-bg);
-  border-color: var(--pr-number-chip-bg);
+  color: var(--paint-white);
 }
 body.theme-light .ci-indicator.pr-status-passing,
 body.theme-light .ci-indicator.pr-review-approved {
@@ -670,7 +648,7 @@ body.theme-light .ci-indicator.pr-review-approved {
 }
 body.theme-light .ci-indicator.pr-status-failing,
 body.theme-light .ci-indicator.pr-review-changes {
-  color: #ffffff;
+  color: var(--paint-white);
   background: #d83048;
   border-color: #b21f34;
 }
@@ -687,16 +665,11 @@ body.theme-light .ci-indicator.pr-status-merged {
 }
 body.theme-light .ci-indicator.pr-review-required {
   color: #41506a;
-  background: #e7ebf1;
-  border-color: #aab4c4;
 }
 body.theme-light .ci-indicator.branch-indicator {
   --branch-indicator-text: #07314f;
   --branch-indicator-bg: #bfe3ff;
   --branch-indicator-border: #7fb8e0;
-  color: var(--branch-indicator-text);
-  background: var(--branch-indicator-bg);
-  border-color: var(--branch-indicator-border);
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
@@ -707,8 +680,8 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
-    outline: 0 solid rgba(255, 226, 122, 0);
-    box-shadow: 0 0 0 0 rgba(255, 226, 122, 0);
+    outline: 0 solid var(--paint-warning-transparent);
+    box-shadow: 0 0 0 0 var(--paint-warning-transparent);
     filter: saturate(1) brightness(1);
     transform: scale(1);
   }
@@ -741,13 +714,13 @@ body.theme-light .ci-indicator.branch-indicator {
   font-weight: 400;
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
   transform: translateY(-2px);
   transition:
-    opacity 90ms ease var(--popover-hide-delay),
-    transform 90ms ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
+    opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
 }
 .session-popover::before {
   content: "";
@@ -775,9 +748,9 @@ body.theme-light .ci-indicator.branch-indicator {
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
-  font: 11px/1.4 var(--mono-font);
+  font: var(--ui-font-size-xs)/1.4 var(--mono-font);
   white-space: pre;
   user-select: text;
   cursor: text;
@@ -785,12 +758,12 @@ body.theme-light .ci-indicator.branch-indicator {
 /* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: var(--pc-control-fg);
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: var(--active-control-soft-border);
   box-shadow: 0 18px 50px rgb(var(--overlay-slate-rgb) / 0.16);
 }
 body.theme-light .session-popover::before {
-  background: #ffffff;
+  background: var(--paint-white);
   border-inline-start-color: var(--active-control-soft-border);
   border-top-color: var(--active-control-soft-border);
 }
@@ -802,7 +775,7 @@ body.theme-light .popover-label,
 body.theme-light .popover-desc-body,
 body.theme-light .state-legend-item,
 body.theme-light .session-popover .meta-muted {
-  color: #586072;
+  color: var(--lt-muted);
 }
 body.theme-light .session-popover .meta-sep {
   color: #9aa3b2;
@@ -1000,12 +973,12 @@ body.theme-light .branch-link {
 .pane-drag-image-title {
   min-width: 0;
   font-weight: 700;
-  font-size: 12px;
+  font-size: var(--ui-font-size-sm);
   line-height: 1.2;
 }
 .pane-drag-image-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.2;
 }
 .pane-drag-image-tabs {
@@ -1024,7 +997,7 @@ body.theme-light .branch-link {
   background: var(--pane-bar-bg, var(--panel2));
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.15;
 }
 .file-drag-main {
@@ -1038,7 +1011,7 @@ body.theme-light .branch-link {
   width: 24px;
   height: 24px;
   object-fit: contain;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--active-control-soft-border);
 }
@@ -1096,9 +1069,21 @@ body.theme-light .branch-link {
   margin-top: 4px;
 }
 .popover-value a,
-.branch-link {
+.branch-link,
+.meta a,
+.summary-context a {
   color: var(--link-soft);
   text-decoration: none;
+}
+body :is(
+  .popover-value a,
+  .branch-link,
+  .meta a,
+  .summary-context a,
+  .info-tree-group-label-action
+):is(:hover, :focus-visible) {
+  color: var(--link-soft-hover);
+  text-decoration: underline;
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
@@ -1122,7 +1107,15 @@ body.theme-light .branch-link {
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
 .branch-meta a.pr-status-merged {
-  color: var(--pr-status-merged);
+  color: var(--pr-link-merged);
+}
+body :is(
+  .popover-value a.pr-status-merged,
+  .meta a.pr-status-merged,
+  .summary-context a.pr-status-merged,
+  .branch-meta a.pr-status-merged
+):is(:hover, :focus-visible) {
+  color: var(--pr-link-merged-hover);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,

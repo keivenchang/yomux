@@ -7,6 +7,7 @@ from yolomux_lib import web
 from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.locales import normalize_locale
 from yolomux_lib.locales import resolve_locale_preference
+from yolomux_lib.workdir import available_agent_commands
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
@@ -316,8 +317,6 @@ def test_setup_auth_script_has_no_parallel_english_status_fallbacks():
 def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
     # Menu-bar: the new-session menu shows "Claude — <params>" using the launch commands, and Term is
     # always offered (a plain shell), not greyed "unavailable".
-    from yolomux_lib.workdir import available_agent_commands
-
     assert "term" in available_agent_commands(), "Term (a shell) is always launchable"
 
     def boot(page):

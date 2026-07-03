@@ -25,7 +25,9 @@
   --accent-sky-strong: #9fd8ff;
   --surface-ink: #11151d;
   --status-tool: #f59e0b;
+  --warning-border-strong: #ffe27a;
   --danger-border-soft: #d56b7a;
+  --danger-text-soft: #ffd8dc;
   --text-muted-cool: #9ea8b7;
   --text-muted-soft: #667085;
   --subwindow-pid-color: var(--text-muted-soft);
@@ -35,6 +37,13 @@
   --neutral-text-cool: #e2e8f0;
   --overlay-surface: #111820;
   --overlay-surface-strong: rgba(17, 24, 32, 0.98);
+  --overlay-input-bg: #0b1017;
+  --overlay-option-hover-bg: #273140;
+  --neutral-status-bg: #161d29;
+  --neutral-surface-subtle-light: #eef1f5;
+  --yoagent-action-heading-light: #0f4c81;
+  --yoagent-action-code-bg-light: #eef6ff;
+  --yoagent-action-code-border-light: #8ab4f8;
   --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
@@ -54,6 +63,26 @@
   --sep-muted: #5e6878;
   --divider: #384356;
   --overlay-slate-rgb: 15 23 42;
+  /* Literal-paint palette: one numeric owner for repeated fixed shades that are shared by otherwise
+     unrelated components. Semantic tokens stay preferred when one exists; component CSS never
+     restates these channel/alpha combinations. */
+  --paint-black: #000;
+  --paint-white: #fff;
+  --paint-black-34: rgb(0 0 0 / 0.34);
+  --paint-black-42: rgb(0 0 0 / 0.42);
+  --paint-black-45: rgb(0 0 0 / 0.45);
+  --paint-black-58: rgb(0 0 0 / 0.58);
+  --paint-dark-green-16: rgb(8 18 5 / 0.16);
+  --paint-deep-ink-98: rgb(10 14 20 / 0.98);
+  --paint-gold-20: rgb(245 197 66 / 0.20);
+  --paint-warning-transparent: rgb(255 226 122 / 0);
+  --paint-white-04: rgb(255 255 255 / 0.04);
+  --paint-white-06: rgb(255 255 255 / 0.06);
+  --paint-white-08: rgb(255 255 255 / 0.08);
+  --paint-white-10: rgb(255 255 255 / 0.10);
+  --paint-white-28: rgb(255 255 255 / 0.28);
+  --paint-white-85: rgb(255 255 255 / 0.85);
+  --paint-white-92: rgb(255 255 255 / 0.92);
   --accent-lime: #c4f970;
   --radius-pill: 999px;
   --radius-control: 4px;
@@ -83,7 +112,7 @@
   /* --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
      literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
   --accent: #6ea8fe;
-  --drop-outline: #ffffff;
+  --drop-outline: var(--paint-white);
   --drop-outline-light: #1d4ed8;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
@@ -117,7 +146,7 @@
   --danger-panel-confirming-bg: rgba(122, 25, 20, 0.42);
   --danger-panel-confirming-border: #ff8f6a;
   --danger-panel-confirming-ring: rgba(255, 142, 90, 0.12);
-  --danger-action-text: #ffffff;
+  --danger-action-text: var(--paint-white);
   --danger-action-bg: #d92d20;
   --danger-action-border: #ff8a80;
   --danger-action-hover-bg: #b42318;
@@ -131,6 +160,8 @@
   --pr-status-failing: #ff8a95;
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
+  --pr-link-merged: var(--pr-status-merged);
+  --pr-link-merged-hover: var(--pr-status-merged);
   --pr-status-closed: #aeb8c7;
   --pr-number-chip-bg: #000;
   --git-modified: var(--accent-gold);
@@ -174,6 +205,8 @@
   --active-control-soft-bg: var(--active-accent-soft);
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-focus-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  --active-control-focus-shadow-compact: 0 0 0 1px var(--active-control-focus-ring);
   --active-terminal-cursor-rgb: var(--active-accent-rgb);
   --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
   --disclosure-triangle-expanded-color: var(--active-control-bg);
@@ -231,9 +264,10 @@
   --pane-tab-control-hover-border: #8fa1bc;
   --pane-tab-zoom-bg: var(--active-control-bg);
   --pane-tab-zoom-border: var(--active-control-border);
-  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
-  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
+  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
   --pane-tab-badge-gold: var(--accent-gold);
+  --file-missing-active-bg: #7a2e3d;
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
   --pane-resizer-size: 1px;
@@ -242,7 +276,13 @@
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: rgba(255, 225, 77, 0.72);
+  --pane-resizer-hover-shadow: 0 0 0 1px var(--drop-outline-shadow);
+  --pane-resizer-preview-shadow: 0 0 12px var(--pane-resizer-shadow);
   --tab-insert-preview-width: 24px;
+  --motion-activity-duration: 900ms;
+  --motion-interaction-fast: 90ms;
+  --motion-interaction-standard: 100ms;
+  --motion-disclosure: 120ms;
   --popover-show-delay: 1000ms;
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
@@ -274,11 +314,17 @@
   --z-layer-preview: 4;
   --z-layer-sticky: 6;
   --z-layer-marker: 8;
+  --z-info-tree-summary-base: var(--z-layer-editor);
+  --z-info-tree-summary-depth-0: var(--z-layer-preview);
+  --z-info-tree-summary-depth-1: calc(var(--z-info-tree-summary-depth-0) + 1);
+  --z-info-tree-summary-depth-2: var(--z-layer-sticky);
+  --z-info-tree-summary-depth-3: calc(var(--z-info-tree-summary-depth-2) + 1);
   --z-share-mirror-stage: var(--z-layer-background);
   --z-pane-tab: var(--z-layer-raised);
   --z-inline-control: var(--z-layer-raised);
   --z-panel-resizer-inline: var(--z-layer-control);
   --z-file-editor-layer: var(--z-layer-editor);
+  --z-file-editor-find-overlay: calc(var(--z-file-editor-layer) + 1);
   --z-file-editor-preview-layer: var(--z-layer-preview);
   --z-tabs-row: var(--z-layer-preview);
   --z-sticky-pane-head: var(--z-layer-sticky);
@@ -307,6 +353,8 @@
   --z-file-editor-actions: 220;
   --z-file-editor-dialog: 275;
   --z-share-presence: 320;
+  --z-share-popup-mirror: calc(var(--z-share-presence) + 1);
+  --z-share-viewer-banner: calc(var(--z-share-presence) + 2);
   --z-rename-input: 9000;
   --file-pane-min-inline-size: min(260px, 46vw);
   --file-editor-pane-min-inline-size: min(340px, 52vw);
@@ -392,16 +440,16 @@
   --editor-ui-font-size-sm: max(9px, calc(var(--editor-font-size) - 3px));
   --editor-line-height: 1.2;
   --file-explorer-font-size: var(--ui-font-size);
-  --lt-bg: #ffffff;
+  --lt-bg: var(--paint-white);
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
   --lt-text: var(--markdown-html-light-text);
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
-  --lt-editor-bg: #ffffff;
+  --lt-editor-bg: var(--paint-white);
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
-  --document-preview-bg: #ffffff;
+  --document-preview-bg: var(--paint-white);
   --image-preview-checker-bg: #151a22;
   --image-preview-checker-bg-light: #e9edf2;
   --lt-markdown-heading: var(--active-accent);
@@ -426,6 +474,7 @@
   --markdown-code-block-bg: #2a303b;
   --markdown-html-light-text: #111827;
   --markdown-html-light-link: #075985;
+  --vanilla-preview-link: #0645ad;
   --markdown-html-light-code: #a40e26;
   --markdown-html-light-code-bg: #fff1d6;
   --markdown-html-light-code-border: #d8a657;
@@ -441,6 +490,7 @@
   --lt-code-block-bg: #f3f4f6;
   --lt-code-block-border: #e4e7ec;
   --lt-code-block-text: #1f2328;
+  --editor-search-border-light: #8c959f;
   --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
@@ -453,13 +503,13 @@
   --pc-control-bg: #1b2432;
   --pc-control-fg: #dfe6ef;
   --pc-control-border: #536074;
-  --pc-control-hover-fg: #ffffff;
+  --pc-control-hover-fg: var(--paint-white);
   --pc-control-hover-bg: #263247;
   --pc-control-hover-border: #8fa1bc;
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
-  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
-  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
+  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
   --panel-close-size: 18px;
   --panel-close-radius: 4px;
   --panel-close-glyph-width: 9px;
@@ -580,7 +630,7 @@ body.theme-light {
   --pane-tab-control-hover-border: #6b7788;
   --pane-tab-zoom-bg: var(--active-control-bg);
   --pane-tab-zoom-border: var(--active-control-border);
-  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   --pane-tab-zoom-hover-border: var(--active-control-border);
   /* active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
@@ -596,6 +646,7 @@ body.theme-light {
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-panel-head-text: #1f2937;
   --pane-tab-panel-detail-bg: #dce8d2;
+  --file-missing-active-bg: #f7d2d8;
   --pane-detail-bg: #e7edf5;
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
@@ -605,7 +656,7 @@ body.theme-light {
   --pane-resizer-hover-bg: rgba(37, 99, 235, 0.96);
   --pane-resizer-shadow: rgba(29, 78, 216, 0.48);
   --bg: #f6f8fb;
-  --panel: #ffffff;
+  --panel: var(--paint-white);
   --panel-inactive: #eef2f7;
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
@@ -616,13 +667,13 @@ body.theme-light {
   --subwindow-recency-color: var(--text-muted-cool);
   --line: #c9d2df;
   --tree-indent-line: rgba(100, 116, 139, 0.12);
-  --info-pane-bg: #ffffff;
+  --info-pane-bg: var(--paint-white);
   --info-tree-border: #8793a3;
   /* Tree connectors and record outlines need to remain visible against the white Info pane. */
   --info-tree-line: rgb(71 85 105 / 0.42);
   --info-tree-record-border: var(--info-tree-line);
   --info-tree-group-bg: #f6f9fd;
-  --info-tree-chip-bg: #ffffff;
+  --info-tree-chip-bg: var(--paint-white);
   --info-tree-pr-neutral: var(--link-soft);
   --info-tree-pr-neutral-hover: var(--link-soft-hover);
   --info-tree-search-match-text: var(--auto-text);
@@ -643,6 +694,8 @@ body.theme-light {
   --icon-archive: #c2410c;
   --link-soft: #075985;
   --link-soft-hover: #0369a1;
+  --pr-link-merged: var(--lt-code-function);
+  --pr-link-merged-hover: #6639ba;
   --git-modified: var(--accent-gold);
   --git-modified-badge: #f5c542;
   --git-untracked-name: #116329;
@@ -716,7 +769,7 @@ body.theme-light {
   --pc-control-hover-border: #6b7788;
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
-  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   --pc-zoom-hover-border: var(--active-control-border);
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
@@ -750,11 +803,90 @@ body.theme-light {
   cursor: pointer;
   font: inherit;
 }
+.app-menu-bar,
+.file-explorer-quick-access,
+.file-explorer-quick-access-panel {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  overflow: visible;
+}
 .control-active-hover:hover,
 .control-active-hover:focus-visible {
   outline: 0;
   color: var(--active-control-text);
   background: var(--active-control-bg);
+}
+#tabMetaToggle.active,
+.topbar-language-menu.open > .topbar-language,
+.app-menu-ui-icon.active,
+.notify-toggle.active,
+.session-state-badge.session-state-yolo-approval,
+.preferences-search-button,
+.tmux-window-bar .tmux-window-button.active,
+.session-rename-actions .session-rename-submit,
+.info-tree-preset.active,
+.info-tree-preset:hover,
+.info-tree-preset:focus-visible,
+.file-explorer-hidden-toggle.active,
+.file-explorer-root-mode-toggle.active,
+.file-explorer-quick-access-button.active,
+.file-explorer-date-toggle.active,
+.file-editor-preview-zoom-toolbar button[aria-pressed="true"],
+.file-editor-codemirror .cm-search label:has(input:checked),
+.file-editor-codemirror-panel .cm-search label:has(input:checked) {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+}
+body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .file-explorer-tree-col) {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+.share-viewer-banner-text,
+.app-menu-setting-label,
+.status-indicator--label,
+.diff-ref-suggestion-description,
+.preferences-section-title,
+.js-debug-client-perf-row,
+.js-debug-chart-summary,
+.js-debug-x-axis span,
+.tmux-window-button .tmux-window-name-text,
+.search-history-row-title,
+.search-history-row-meta,
+.yoagent-recent-agent-paths,
+.yoagent-transcript-value,
+.yoagent-compact-label,
+.yoagent-job-meta,
+.yoagent-job-text,
+.info-tree-group-label-line,
+.info-tree-group-label,
+.file-editor-title-name,
+.file-tree-row.tabber-row .tabber-window-text,
+.share-entry-heading strong,
+.share-url-primary-head > span,
+.share-users-row span,
+.terminal-drop-suggestion-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-yolo-marker.inactive {
+  color: var(--agent-inactive-marker-text);
+  background: var(--agent-inactive-marker-bg);
+  border-color: var(--agent-inactive-marker-border);
+}
+.terminal-context-menu button:disabled,
+.file-editor-preview-zoom-toolbar button:disabled,
+.file-editor-find:disabled,
+.file-editor-preview-font-panel button:disabled,
+.file-editor-find-panel:disabled {
+  opacity: 0.42;
+  cursor: default;
 }
 html {
   height: 100%;
@@ -808,7 +940,7 @@ body {
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
-  transition: background 100ms ease;
+  transition: background var(--motion-interaction-standard) ease;
   overflow: visible;
   white-space: nowrap;
 }
@@ -843,7 +975,7 @@ body {
   margin-inline-start: 8px;
   padding: 1px 7px;
   border: 1px solid var(--active-control-border, var(--line));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
@@ -885,7 +1017,7 @@ body {
   z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
   padding: 8px 10px;
-  color: #ffd8dc;
+  color: var(--danger-text-soft);
   background: rgba(42, 14, 18, 0.98);
   border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
@@ -895,7 +1027,7 @@ body {
   opacity: 0;
   pointer-events: none;
   transform: translateY(-2px);
-  transition: opacity 100ms ease, transform 100ms ease;
+  transition: opacity var(--motion-interaction-standard) ease, transform var(--motion-interaction-standard) ease;
 }
 .transport-warning:hover::after,
 .transport-warning:focus-visible::after {
@@ -936,11 +1068,6 @@ body {
 }
 #tabMetaToggle {
   --action-icon: var(--icon-tab-meta);
-}
-#tabMetaToggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
@@ -1032,7 +1159,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-popup-mirror-layer {
   position: absolute;
   inset: 0;
-  z-index: calc(var(--z-share-presence) + 1);
+  z-index: var(--z-share-popup-mirror);
   overflow: hidden;
   pointer-events: none;
   font: inherit;
@@ -1078,7 +1205,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   position: fixed;
   left: 50%;
   bottom: 8px;
-  z-index: calc(var(--z-share-presence) + 2);
+  z-index: var(--z-share-viewer-banner);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1094,12 +1221,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
   transform: translateX(-50%);
   pointer-events: auto;
-}
-.share-viewer-banner-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .share-viewer-mirror-status {
   flex: 0 0 auto;
@@ -1146,7 +1267,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   pointer-events: none;
   opacity: 0;
   transform: translate3d(-9999px, -9999px, 0);
-  transition: transform 45ms linear, opacity 100ms ease;
+  transition: transform 45ms linear, opacity var(--motion-interaction-standard) ease;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
@@ -1208,10 +1329,28 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 }
 .topbar-status-surface {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
   color: var(--muted);
   font: inherit;
+}
+button.topbar-status-surface {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: var(--compact-control-height);
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-status-surface[hidden] {
+  display: none;
+}
+button.topbar-status-surface:hover,
+button.topbar-status-surface:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
 }
 .latency-meter {
   height: 24px;
@@ -1269,7 +1408,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   place-items: center;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: inherit;
@@ -1299,7 +1438,7 @@ body.theme-light .topbar-nav-button {
   height: var(--compact-control-height);
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--muted);
   cursor: text;
@@ -1324,7 +1463,7 @@ body.theme-light .topbar-search {
   height: var(--compact-control-height);
   max-width: 140px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: inherit;
@@ -1334,11 +1473,6 @@ body.theme-light .topbar-search {
 }
 .topbar-language-menu > .topbar-language {
   min-width: 72px;
-}
-.topbar-language-menu.open > .topbar-language {
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-  color: var(--active-control-text);
 }
 body.theme-light .topbar-language {
   background: rgb(var(--overlay-slate-rgb) / 0.05);
@@ -1362,7 +1496,7 @@ body.theme-light .topbar-language {
   font: inherit;
   font-size: var(--ui-font-size-3xs, 10px);
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 0 4px;
   color: var(--muted);
   background: transparent;
@@ -1376,22 +1510,8 @@ body.app-vw-lte-1100 .topbar-search {
   padding: 0 6px;
 }
 .topbar-owner-status {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-  height: var(--compact-control-height);
   padding: 0 8px;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-owner-status[hidden] {
-  display: none;
-}
-.topbar-owner-status:hover {
-  border-color: var(--accent);
-  color: var(--text);
 }
 .topbar-owner-status-key {
   color: var(--text-muted-cool);
@@ -1409,29 +1529,16 @@ body.app-vw-lte-1100 .topbar-search {
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
   gap: 4px;
-  height: var(--compact-control-height);
   padding: 0 6px;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-activity[hidden] {
-  display: none;
-}
-.topbar-activity:hover {
-  border-color: var(--accent);
-  color: var(--text);
 }
 .topbar-activity.has-attention {
   border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
   background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
   color: var(--text);
 }
-.topbar-activity.has-attention:hover {
+.topbar-activity.has-attention:hover,
+.topbar-activity.has-attention:focus-visible {
   border-color: var(--danger-strong);
   background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
 }
@@ -1470,14 +1577,6 @@ body.app-vw-lte-760 .topbar-search {
   outline-offset: 2px;
   border-radius: 7px;
 }
-.app-menu-bar {
-  flex: 0 0 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  overflow: visible;
-}
 .app-menu {
   position: relative;
   flex: 0 0 auto;
@@ -1491,7 +1590,7 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: 600 var(--ui-font-size)/1 var(--ui-font);
   white-space: nowrap;
 }
@@ -1543,15 +1642,15 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--chrome-text-strong);
   background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow:
     0 -3px 12px rgba(0, 0, 0, 0.30),
     var(--shadow-popover);
   transform: translate(var(--app-menu-fit-offset, 0), -2px);
   transition:
-    opacity 90ms ease,
-    transform 90ms ease,
-    visibility 0s linear 90ms;
+    opacity var(--motion-interaction-fast) ease,
+    transform var(--motion-interaction-fast) ease,
+    visibility 0s linear var(--motion-interaction-fast);
   top: 100%;
   left: 0;
 }
@@ -1623,7 +1722,7 @@ body.app-vw-lte-760 .topbar-search {
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   text-align: start;
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
@@ -1654,7 +1753,7 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
   color: var(--pane-tab-panel-head-text);
-  background: #273140;
+  background: var(--overlay-option-hover-bg);
   border-color: var(--accent-gold);
   outline: 0;
 }
@@ -1675,10 +1774,6 @@ body.app-vw-lte-760 .topbar-search {
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-setting-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 600;
 }
 .app-menu-setting-control {
@@ -1692,7 +1787,7 @@ body.app-vw-lte-760 .topbar-search {
   height: var(--compact-control-height);
   padding: 0 5px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--input-bg);
   color: var(--text);
   font: var(--ui-font-size-sm)/1 var(--mono-font);
@@ -1741,7 +1836,7 @@ body.app-vw-lte-760 .topbar-search {
   color: #c8d2df;
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .app-menu-ui-icon::before {
   content: "";
@@ -1750,11 +1845,6 @@ body.app-vw-lte-760 .topbar-search {
   background: currentColor;
   -webkit-mask: var(--app-menu-ui-icon) center / contain no-repeat;
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
-}
-.app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -1882,7 +1972,7 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command .session-state-badge {
   min-width: 20px;
   padding: 0 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
 }
 .app-menu-tab-command .ci-indicator {
@@ -1913,19 +2003,8 @@ body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
 .app-menu-submenu-wrap.open > .app-menu-command .app-menu-submenu-arrow {
   transform: rotate(90deg);
 }
-body.theme-light .topbar {
-  background: var(--panel2);
-}
-body.theme-light .topbar:hover,
-body.theme-light .topbar:focus-within {
-  background: var(--pane-tab-strip-bg);
-}
 /* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
-body.theme-light #tabMetaToggle.active {
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
 body.theme-light .app-menu-button-badge {
   border-color: var(--active-control-border);
 }
@@ -1942,14 +2021,16 @@ body.theme-light .app-menu-button {
 }
 body.theme-light .app-menu-button:hover,
 body.theme-light .app-menu-button:focus-visible,
-body.theme-light .app-menu.open > .app-menu-button {
+body.theme-light .app-menu.open > .app-menu-button,
+body.theme-light .app-menu-ui-icon:hover,
+body.theme-light .app-menu-ui-icon:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #dfe7f2;
   border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-popover {
   color: var(--text);
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: var(--pc-control-border);
   box-shadow:
     0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
@@ -1977,17 +2058,15 @@ body.theme-light .app-menu-setting-row {
   color: var(--text);
 }
 body.theme-light .app-menu-setting-control input[type="number"] {
-  background: #ffffff;
-}
-body.theme-light .app-menu-command[data-checked="true"] {
-  background: var(--active-control-soft-bg);
-  border-color: transparent;
+  background: var(--paint-white);
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
 body.theme-light .app-menu-command:focus-visible,
 body.theme-light .app-menu-command.share-mirror-active:not(:disabled),
 body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
-body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
+body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled),
+body.theme-light .app-menu-tab-command:hover:not(:disabled),
+body.theme-light .app-menu-tab-command:focus-visible {
   color: var(--pc-control-hover-fg);
   background: #e8f0fb;
   border-color: var(--menu-accent);
@@ -1995,28 +2074,15 @@ body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) 
 body.theme-light .app-menu-command:disabled {
   color: var(--text-muted-strong);
 }
-body.theme-light .app-menu-ui-icon {
+:where(body.theme-light) .app-menu-ui-icon {
   color: var(--text);
   background: var(--pane-tab-control-bg);
   border-color: var(--line);
 }
-/* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
-   default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
-   still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
-body.theme-light .app-menu-ui-icon:hover,
-body.theme-light .app-menu-ui-icon:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #dfe7f2;
-  border-color: var(--pc-control-border);
-}
-body.theme-light .app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
+/* Active paint is owned by the shared base selector; light mode only varies its hover paint. */
 body.theme-light .app-menu-ui-icon.active:hover,
 body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  background: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
   border-color: var(--active-control-border);
 }
 /* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
@@ -2029,20 +2095,6 @@ body.theme-light .app-menu-tab-command .session-button-text,
 body.theme-light .app-menu-tab-command .session-button-prefix,
 body.theme-light .app-menu-tab-command .session-button-dir {
   color: var(--text);
-}
-body.theme-light .app-menu-tab-command:hover:not(:disabled),
-body.theme-light .app-menu-tab-command:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #e8f0fb;
-  border-color: var(--menu-accent);
-}
-/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
-   concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
-   toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
-.notify-toggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 .session-button-number {
   flex: 0 0 auto;
@@ -2146,15 +2198,11 @@ body.theme-light .app-menu-tab-command:focus-visible {
   text-transform: uppercase;
 }
 .status-indicator--label {
-  min-width: 0;
   max-width: 100%;
   padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .status-indicator--dot {
   width: 1em;
@@ -2163,7 +2211,7 @@ body.theme-light .app-menu-tab-command:focus-visible {
   font-size: 0.9em;
   line-height: 1;
   text-align: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 1;
 }
 .status-indicator--dot.heartbeat-pulse {
@@ -2271,21 +2319,25 @@ body.theme-light .app-menu-tab-command:focus-visible {
   --agent-status-acknowledgement-delay: var(--attention-animation-delay, 0s);
   --agent-status-acknowledgement-iteration-count: infinite;
 }
+.agent-window-activity,
+.changes-file-agent,
+.file-tree-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
 .agent-window-activity {
   --agent-window-icon-size: 18px;
   /* Canonical Tab status-ball diameter. Sub-window (per-window) balls derive from this so the
      two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
   --agent-status-ball-size-base: 14px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
-  --agent-status-ball-border: #000;
+  --agent-status-ball-border: var(--paint-black);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
   margin-inline-start: 2px;
-  vertical-align: middle;
 }
 .agent-window-activity .agent-icon {
   width: var(--agent-window-icon-size);
@@ -2296,6 +2348,12 @@ body.theme-light .app-menu-tab-command:focus-visible {
 .agent-window-activity .agent-icon svg {
   width: var(--agent-window-icon-size);
   height: var(--agent-window-icon-size);
+}
+.changes-file-agent .agent-icon svg,
+.agent-window-activity--subwindow .agent-icon svg {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
 }
 .agent-window-status-dot {
   margin-inline-start: 0;
@@ -2386,18 +2444,7 @@ body.theme-light .app-menu-tab-command:focus-visible {
 }
 .session-state-badge {
   color: var(--pr-status-closed);
-  background: #161d29;
-}
-.session-state-needs-approval,
-.session-state-needs-input {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-}
-.session-state-yolo-approval {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  background: var(--neutral-status-bg);
 }
 .session-state-blocked,
 .session-state-disconnected {
@@ -2468,7 +2515,7 @@ body.theme-light .app-menu-tab-command:focus-visible {
     transform: scale(0.97);
   }
   45%, 55% {
-    color: #ffffff;
+    color: var(--paint-white);
     background-color: #ff304a;
     filter: saturate(1.45) brightness(1.12);
     transform: scale(1.08);
@@ -2536,7 +2583,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
+  box-shadow: 0 0 0 1px var(--paint-black-42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
@@ -2566,28 +2613,17 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
-.session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
-}
 .session-yolo-marker.locked {
   color: #ffd75d;
   background: #3a3524;
   border-color: #f0b85d;
 }
-/* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
-   status colors — red/blue/green — already read on white and are left alone).
-   Repaint the neutral chips as light gray with dark text. */
-body.theme-light .session-state-badge {
+/* Light mode repaints only neutral state badges. Specialized states keep their own shared paint; a
+   generic higher-specificity theme rule previously turned danger/review/test badges neutral. */
+body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .session-state-needs-input, .session-state-blocked, .session-state-disconnected, .session-state-tests-running, .session-state-ready-review, .session-state-yolo-approval)) {
   color: var(--neutral-text-strong);
-  background: #eef1f5;
+  background: var(--neutral-surface-subtle-light);
   border-color: #cdd5e0;
-}
-body.theme-light .session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
 }
 /* The session YO marker no longer rotates to signal "working" — the pulsing green ball beside the
    agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
@@ -2620,7 +2656,7 @@ body.theme-light .session-yolo-marker.inactive {
   border-radius: 0;
   border: 1px solid var(--divider);
   color: var(--pr-status-closed);
-  background: #161d29;
+  background: var(--neutral-status-bg);
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
 body.tab-meta-hidden .pane-tab .tab-symbol,
@@ -2643,19 +2679,25 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .popover-chip-link:hover {
   text-decoration: none;
 }
-.ci-indicator.pr-status-failing {
+.session-state-needs-approval,
+.session-state-needs-input,
+.ci-indicator.pr-status-failing,
+.ci-indicator.pr-review-changes {
   color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
+}
+.ci-indicator.pr-status-failing {
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
 .ci-indicator.pr-status-draft {
   color: #161000;
   background: var(--pane-tab-badge-gold);
-  border-color: #ffe27a;
+  border-color: var(--warning-border-strong);
 }
-.ci-indicator.pr-status-passing {
+.ci-indicator.pr-status-passing,
+.ci-indicator.pr-review-approved {
   color: #051408;
   background: var(--pr-status-passing);
   border-color: #8ff2a7;
@@ -2669,16 +2711,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .ci-indicator.pr-review-chip {
   padding: 0 5px;
   font-weight: 700;
-}
-.ci-indicator.pr-review-approved {
-  color: #051408;
-  background: var(--pr-status-passing);
-  border-color: #8ff2a7;
-}
-.ci-indicator.pr-review-changes {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
 }
 .ci-indicator.pr-review-required {
   color: #172033;
@@ -2698,15 +2730,13 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 /* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
    are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
    theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
-body.theme-light .ci-indicator {
+body.theme-light .ci-indicator:not(.branch-indicator):not(.pr-number-chip) {
   color: #1c2430;
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: #b9c2d0;
 }
 body.theme-light .ci-indicator.pr-number-chip {
-  color: #ffffff;
-  background: var(--pr-number-chip-bg);
-  border-color: var(--pr-number-chip-bg);
+  color: var(--paint-white);
 }
 body.theme-light .ci-indicator.pr-status-passing,
 body.theme-light .ci-indicator.pr-review-approved {
@@ -2716,7 +2746,7 @@ body.theme-light .ci-indicator.pr-review-approved {
 }
 body.theme-light .ci-indicator.pr-status-failing,
 body.theme-light .ci-indicator.pr-review-changes {
-  color: #ffffff;
+  color: var(--paint-white);
   background: #d83048;
   border-color: #b21f34;
 }
@@ -2733,16 +2763,11 @@ body.theme-light .ci-indicator.pr-status-merged {
 }
 body.theme-light .ci-indicator.pr-review-required {
   color: #41506a;
-  background: #e7ebf1;
-  border-color: #aab4c4;
 }
 body.theme-light .ci-indicator.branch-indicator {
   --branch-indicator-text: #07314f;
   --branch-indicator-bg: #bfe3ff;
   --branch-indicator-border: #7fb8e0;
-  color: var(--branch-indicator-text);
-  background: var(--branch-indicator-bg);
-  border-color: var(--branch-indicator-border);
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
@@ -2753,8 +2778,8 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
-    outline: 0 solid rgba(255, 226, 122, 0);
-    box-shadow: 0 0 0 0 rgba(255, 226, 122, 0);
+    outline: 0 solid var(--paint-warning-transparent);
+    box-shadow: 0 0 0 0 var(--paint-warning-transparent);
     filter: saturate(1) brightness(1);
     transform: scale(1);
   }
@@ -2787,13 +2812,13 @@ body.theme-light .ci-indicator.branch-indicator {
   font-weight: 400;
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
   transform: translateY(-2px);
   transition:
-    opacity 90ms ease var(--popover-hide-delay),
-    transform 90ms ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
+    opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
 }
 .session-popover::before {
   content: "";
@@ -2821,9 +2846,9 @@ body.theme-light .ci-indicator.branch-indicator {
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
-  font: 11px/1.4 var(--mono-font);
+  font: var(--ui-font-size-xs)/1.4 var(--mono-font);
   white-space: pre;
   user-select: text;
   cursor: text;
@@ -2831,12 +2856,12 @@ body.theme-light .ci-indicator.branch-indicator {
 /* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: var(--pc-control-fg);
-  background: #ffffff;
+  background: var(--paint-white);
   border-color: var(--active-control-soft-border);
   box-shadow: 0 18px 50px rgb(var(--overlay-slate-rgb) / 0.16);
 }
 body.theme-light .session-popover::before {
-  background: #ffffff;
+  background: var(--paint-white);
   border-inline-start-color: var(--active-control-soft-border);
   border-top-color: var(--active-control-soft-border);
 }
@@ -2848,7 +2873,7 @@ body.theme-light .popover-label,
 body.theme-light .popover-desc-body,
 body.theme-light .state-legend-item,
 body.theme-light .session-popover .meta-muted {
-  color: #586072;
+  color: var(--lt-muted);
 }
 body.theme-light .session-popover .meta-sep {
   color: #9aa3b2;
@@ -3046,12 +3071,12 @@ body.theme-light .branch-link {
 .pane-drag-image-title {
   min-width: 0;
   font-weight: 700;
-  font-size: 12px;
+  font-size: var(--ui-font-size-sm);
   line-height: 1.2;
 }
 .pane-drag-image-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.2;
 }
 .pane-drag-image-tabs {
@@ -3070,7 +3095,7 @@ body.theme-light .branch-link {
   background: var(--pane-bar-bg, var(--panel2));
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.15;
 }
 .file-drag-main {
@@ -3084,7 +3109,7 @@ body.theme-light .branch-link {
   width: 24px;
   height: 24px;
   object-fit: contain;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--active-control-soft-border);
 }
@@ -3142,9 +3167,21 @@ body.theme-light .branch-link {
   margin-top: 4px;
 }
 .popover-value a,
-.branch-link {
+.branch-link,
+.meta a,
+.summary-context a {
   color: var(--link-soft);
   text-decoration: none;
+}
+body :is(
+  .popover-value a,
+  .branch-link,
+  .meta a,
+  .summary-context a,
+  .info-tree-group-label-action
+):is(:hover, :focus-visible) {
+  color: var(--link-soft-hover);
+  text-decoration: underline;
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
@@ -3168,7 +3205,15 @@ body.theme-light .branch-link {
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
 .branch-meta a.pr-status-merged {
-  color: var(--pr-status-merged);
+  color: var(--pr-link-merged);
+}
+body :is(
+  .popover-value a.pr-status-merged,
+  .meta a.pr-status-merged,
+  .summary-context a.pr-status-merged,
+  .branch-meta a.pr-status-merged
+):is(:hover, :focus-visible) {
+  color: var(--pr-link-merged-hover);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
@@ -3199,7 +3244,8 @@ body.theme-light .branch-link {
   overflow: auto;
   padding: 10px;
 }
-.js-debug-scroll {
+.js-debug-scroll,
+.js-debug-events-view {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
@@ -3211,7 +3257,7 @@ body.theme-light .branch-link {
   min-width: 0;
   height: var(--pane-tab-height);
   border: 1px solid var(--line);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   overflow: hidden;
   background: var(--pane-bar-bg, var(--panel2));
 }
@@ -3232,14 +3278,6 @@ body.theme-light .branch-link {
 .js-debug-subtab:last-child {
   border-inline-end: 0;
 }
-.js-debug-subtab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-}
-.js-debug-subtab:not(.active):hover {
-  color: var(--text);
-  background: var(--pane-inactive-tab-bg-hover);
-}
 .js-debug-subtab .session-button-dir {
   color: inherit;
 }
@@ -3249,11 +3287,6 @@ body.theme-light .branch-link {
 }
 .js-debug-subview[hidden] {
   display: none;
-}
-.js-debug-events-view {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
 }
 .ui-disclosure-triangle,
 .info-tree-group summary::before,
@@ -3273,7 +3306,7 @@ body.theme-light .branch-link {
   line-height: 1;
   text-align: center;
   transform-origin: center;
-  transition: color 120ms ease, opacity 120ms ease, transform 120ms ease;
+  transition: color var(--motion-disclosure) ease, opacity var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
 }
 .ui-disclosure-triangle[data-disclosure-expanded="true"],
 .file-tree-row.kind-dir[aria-expanded="true"] > .ui-disclosure-triangle,
@@ -3301,7 +3334,7 @@ body.theme-light .branch-link {
   --js-debug-agent-token-rose: #ff4f70;
   --js-debug-agent-token-violet: #9b6cff;
   --js-debug-agent-token-total: #ffe1a3;
-  --js-debug-agent-token-pattern-ink: #fff;
+  --js-debug-agent-token-pattern-ink: var(--paint-white);
   --js-debug-agent-token-pattern-ink-rgb: 255 255 255;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
@@ -3320,7 +3353,7 @@ body.theme-light .js-debug-graph-view {
   --js-debug-agent-token-rose: #c21f45;
   --js-debug-agent-token-violet: #5b21d1;
   --js-debug-agent-token-total: #8a5a20;
-  --js-debug-agent-token-pattern-ink: #000;
+  --js-debug-agent-token-pattern-ink: var(--paint-black);
   --js-debug-agent-token-pattern-ink-rgb: 0 0 0;
 }
 .js-debug-toolbar {
@@ -3344,7 +3377,7 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   padding: 4px 7px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .js-debug-stat span {
@@ -3368,10 +3401,10 @@ body.theme-light .js-debug-graph-view {
   resize: none;
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--text);
   background: var(--panel);
-  font: 11px/1.35 var(--mono-font);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
   white-space: pre;
 }
 .js-debug-graph {
@@ -3382,7 +3415,7 @@ body.theme-light .js-debug-graph-view {
   min-height: 180px;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .js-debug-graph--empty {
@@ -3402,12 +3435,11 @@ body.theme-light .js-debug-graph-view {
   align-items: center;
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--panel2);
 }
-.js-debug-scale-button,
-.js-debug-range-button {
+.js-debug-scale-button {
   min-width: 54px;
   height: 24px;
   padding: 0 8px;
@@ -3418,20 +3450,13 @@ body.theme-light .js-debug-graph-view {
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
-.js-debug-range-button {
-  min-width: 66px;
-}
-.js-debug-scale-button:last-child,
-.js-debug-range-button:last-child {
+.js-debug-scale-button:last-child {
   border-inline-end: 0;
 }
-.js-debug-scale-button.active,
-.js-debug-range-button.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-}
+.js-debug-subtab:not(.active):hover,
+.js-debug-subtab:not(.active):focus-visible,
 .js-debug-scale-button:not(.active):hover,
-.js-debug-range-button:not(.active):hover {
+.js-debug-scale-button:not(.active):focus-visible {
   color: var(--text);
   background: var(--pane-inactive-tab-bg-hover);
 }
@@ -3459,16 +3484,11 @@ body.theme-light .js-debug-graph-view {
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--muted);
   background: var(--panel2);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
-}
-.js-debug-hidden-chart:hover,
-.js-debug-chart-close:hover {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
 }
 .js-debug-chart-close {
   flex: 0 0 auto;
@@ -3477,7 +3497,7 @@ body.theme-light .js-debug-graph-view {
   margin-inline-start: auto;
   padding: 0;
   border-color: transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--muted);
   background: transparent;
   font-size: 16px;
@@ -3513,10 +3533,14 @@ body.theme-light .js-debug-graph-view {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
+}
+.js-debug-subtab.active,
+.js-debug-scale-button.active,
+.js-debug-zoom-reset {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .js-debug-graph-meta {
   flex: 0 0 auto;
@@ -3545,12 +3569,6 @@ body.theme-light .js-debug-graph-view {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 2px 10px;
   min-width: 0;
-}
-.js-debug-client-perf-row {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .js-debug-chart-shell {
   position: relative;
@@ -3605,7 +3623,7 @@ body.theme-light .js-debug-graph-view {
   min-height: 150px;
   padding: 7px 8px 8px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--panel2) 54%, transparent);
 }
 .js-debug-chart-head {
@@ -3628,13 +3646,9 @@ body.theme-light .js-debug-graph-view {
   white-space: normal;
 }
 .js-debug-chart-summary {
-  min-width: 0;
   margin-inline-start: auto;
   color: var(--active-accent-bright);
   font: 700 var(--ui-font-size-xs)/1.15 var(--ui-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .js-debug-chart-body {
   display: grid;
@@ -3652,7 +3666,7 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   min-height: 104px;
   color: var(--muted);
-  font: 700 10px/1 var(--mono-font);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
   text-align: end;
   white-space: nowrap;
 }
@@ -3684,13 +3698,7 @@ body.theme-light .js-debug-graph-view {
   gap: 8px;
   min-width: 0;
   color: var(--muted);
-  font: 600 10px/1 var(--mono-font);
-}
-.js-debug-x-axis span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font: 600 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .js-debug-x-axis span[data-js-debug-x-tick="mid"] {
   text-align: center;
@@ -3965,10 +3973,12 @@ body.theme-light .js-debug-graph-view {
   border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
   border-top-color: currentColor;
   border-radius: 50%;
-  animation: metadata-refresh-spin 0.9s linear infinite;
 }
-#refreshMeta.loading::before {
-  animation: metadata-refresh-spin 0.9s linear infinite;
+.info-refresh.loading::before,
+#refreshMeta.loading::before,
+.info-loading-spinner,
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  animation: metadata-refresh-spin var(--motion-activity-duration) linear infinite;
 }
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
@@ -3981,7 +3991,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 10px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--muted);
   font-family: var(--ui-font);
@@ -4069,7 +4079,7 @@ body.theme-light .js-debug-graph-view {
   overflow: auto;
   padding: 4px 12px 4px 4px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel2);
   color: var(--text);
   box-shadow: var(--shadow-elevated);
@@ -4128,11 +4138,6 @@ body.theme-light .js-debug-graph-view {
   color: var(--muted);
   white-space: nowrap;
 }
-.diff-ref-suggestion-description {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .diff-ref-suggestion-pr {
   flex: 0 0 auto;
   font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
@@ -4172,7 +4177,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 8px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--text);
   font-family: var(--ui-font);
@@ -4214,7 +4219,7 @@ body.theme-light .js-debug-graph-view {
 .changes-empty {
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: #ff8a8a;
   font-size: var(--ui-font-size-sm);
@@ -4230,7 +4235,7 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: 10px;
   min-inline-size: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--panel);
 }
@@ -4333,12 +4338,6 @@ body.theme-light .js-debug-graph-view {
 .changes-tree {
   padding: 2px 0;
 }
-.changes-file-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;  /* C5: space multiple agent icons when a file was touched by both Claude and Codex */
-  flex: 0 0 auto;
-}
 .changes-file-agent .agent-icon {
   width: 16px;
   min-width: 16px;
@@ -4346,11 +4345,6 @@ body.theme-light .js-debug-graph-view {
   margin: 0;
   padding: 0;
   vertical-align: 0;
-}
-.changes-file-agent .agent-icon svg {
-  flex-basis: 14px;
-  width: 14px;
-  height: 14px;
 }
 .changes-meta-separator {
   color: rgba(174, 184, 199, 0.62);
@@ -4381,7 +4375,7 @@ body.theme-light .js-debug-graph-view {
   gap: 8px;
   padding: 7px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--muted);
   font-family: var(--mono-font);
@@ -4414,7 +4408,7 @@ body.theme-light .js-debug-graph-view {
 .preferences-section {
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
 }
 .preferences-section-toggle {
@@ -4427,7 +4421,7 @@ body.theme-light .js-debug-graph-view {
   padding: 8px 10px;
   border: 0;
   border-bottom: 1px solid var(--line);
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg, var(--panel2));
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
@@ -4436,15 +4430,10 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-section.collapsed .preferences-section-toggle {
   border-bottom: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .preferences-section-caret {
   margin-inline-end: 2px;
-}
-.preferences-section-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .preferences-section-count {
   color: currentColor;
@@ -4516,7 +4505,7 @@ body.theme-light .js-debug-graph-view {
   border: 1px solid var(--line);
   border-radius: 2px;
   background: var(--preferences-radio-swatch);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  box-shadow: inset 0 0 0 1px var(--paint-white-28);
 }
 .preferences-radio-swatches.joined .preferences-radio-swatch {
   border-radius: 0;
@@ -4578,7 +4567,7 @@ body.theme-light .js-debug-graph-view {
   color: var(--preferences-advisory-code-text);
   background: var(--preferences-advisory-code-bg);
   border: 1px solid var(--preferences-advisory-code-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .preferences-setting-label {
@@ -4615,7 +4604,7 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-search:focus {
   border-color: var(--active-control-border);
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 .preferences-search-button,
 .preferences-reset-all {
@@ -4627,15 +4616,12 @@ body.theme-light .js-debug-graph-view {
   font: 700 var(--ui-font-size-xs)/1 var(--control-font);
 }
 .preferences-search-button {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
   font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-search-button:hover,
 .preferences-search-button:focus-visible {
-  background: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  background: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
   border-color: var(--active-control-border);
 }
 .preferences-global-reset {
@@ -4648,7 +4634,7 @@ body.theme-light .js-debug-graph-view {
   color: var(--danger-panel-text);
   background: var(--danger-panel-bg);
   border: 1px solid var(--danger-panel-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .preferences-global-reset.confirming {
   background: var(--danger-panel-confirming-bg);
@@ -4696,7 +4682,7 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-reset-cancel {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--paint-white-06);
   border-color: rgba(255, 255, 255, 0.22);
 }
 
@@ -4718,9 +4704,9 @@ body.theme-light .js-debug-graph-view {
   color: var(--text);
   background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow:
-    0 -4px 14px rgba(0, 0, 0, 0.34),
+    0 -4px 14px var(--paint-black-34),
     0 24px 70px rgba(0, 0, 0, 0.62);
 }
 .command-palette-input {
@@ -4728,7 +4714,7 @@ body.theme-light .js-debug-graph-view {
   height: 38px;
   padding: 7px 10px;
   color: var(--text);
-  background: #0b1017;
+  background: var(--overlay-input-bg);
   border: 0;
   border-bottom: 1px solid var(--line);
   outline: 0;
@@ -4747,10 +4733,13 @@ body.theme-light .js-debug-graph-view {
   width: 6px;
   height: 6px;
   margin-inline-end: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent-gold);
-  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
   vertical-align: 1px;
+}
+.command-palette-status::before,
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  animation: command-palette-thinking var(--motion-activity-duration) ease-in-out infinite alternate;
 }
 @keyframes command-palette-thinking {
   from { opacity: 0.35; }
@@ -4780,12 +4769,15 @@ body.theme-light .js-debug-graph-view {
 .command-palette-row.active,
 .command-palette-row:hover {
   color: var(--pane-tab-panel-head-text);
-  background: #273140;
+  background: var(--overlay-option-hover-bg);
   border-color: var(--accent-gold);
 }
-.command-palette-group {
+.command-palette-group,
+.command-palette-keybinding {
   color: #9fb0c4;
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-group {
   text-transform: uppercase;
 }
 .command-palette-main {
@@ -4833,11 +4825,6 @@ body.theme-light .js-debug-graph-view {
   border-color: var(--active-control-border);
   color: var(--text);
 }
-body.theme-light .command-palette-view-chip {
-  border-color: var(--active-control-soft-border);
-  color: var(--text);
-  background: var(--active-control-soft-bg);
-}
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
   padding: 0;
@@ -4852,8 +4839,6 @@ body.theme-light .command-palette-view-chip {
 }
 .command-palette-keybinding {
   justify-self: end;
-  color: #9fb0c4;
-  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
 }
 .command-palette-empty {
@@ -4879,7 +4864,7 @@ body.theme-light .command-palette-view-chip {
   color: var(--text);
   background: var(--overlay-surface);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 24px 70px rgb(var(--shadow-rgb) / 0.62);
 }
 .keyboard-shortcuts-head {
@@ -4907,7 +4892,7 @@ body.theme-light .command-palette-view-chip {
 .keyboard-shortcuts-close:hover,
 .keyboard-shortcuts-close:focus-visible {
   border-color: var(--accent-gold);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--paint-white-08);
 }
 .keyboard-shortcuts-body {
   min-height: 0;
@@ -4943,13 +4928,13 @@ body.theme-light .command-palette-view-chip {
   gap: 6px;
   align-items: center;
   padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--paint-white-06);
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-shortcut-row kbd {
   padding: 1px 4px;
   color: var(--pane-tab-text);
-  background: #0b1017;
+  background: var(--overlay-input-bg);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
@@ -4961,7 +4946,7 @@ body.theme-light .command-palette-view-chip {
   gap: 6px;
   align-items: center;
   padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--paint-white-06);
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-legend-sample {
@@ -4989,9 +4974,9 @@ body.theme-light .command-palette-view-chip {
   width: 14px;
   height: 14px;
   display: inline-flex;
-  border-radius: 999px;
-  border: 1px solid rgb(255 255 255 / 0.28);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.34);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--paint-white-28);
+  box-shadow: 0 0 0 1px var(--paint-black-34);
 }
 .keyboard-legend-swatch-merged {
   background: var(--pr-status-merged);
@@ -5046,12 +5031,11 @@ body.theme-light .preferences-setting-control input[type="text"],
 body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
-body.theme-light .changes-refresh,
+:where(body.theme-light) .changes-refresh,
 body.theme-light .diff-ref-input,
 body.theme-light .diff-ref-control input,
 body.theme-light .diff-ref-suggestion-popover {
-  background: #ffffff;
-  color: var(--text);
+  background: var(--paint-white);
 }
 body.theme-light .info-refresh:hover,
 body.theme-light .info-refresh:focus-visible {
@@ -5079,39 +5063,11 @@ body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: var(--lt-panel);
   --changes-indent-line: var(--tree-indent-line);
-  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
-  --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--lt-muted);
   --changes-icon-text: var(--menu-accent);
 }
-body.theme-light .changes-toolbar,
-body.theme-light .changes-repo-group {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--line);
-}
-body.theme-light .file-explorer-changes-panel:hover > .changes-toolbar,
-body.theme-light .file-explorer-changes-panel:focus-within > .changes-toolbar {
-  background: var(--pane-tab-strip-bg);
-  color: var(--text);
-}
-body.theme-light .changes-comparison-head {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--line);
-}
-body.theme-light .changes-repo-head {
-  color: var(--text);
-  background: var(--changes-repo-head-bg);
-}
-body.theme-light .changes-repo-title {
-  color: var(--accent-gold);
-}
 body.theme-light .changes-diff-add {
-  color: #166534;
-}
-body.theme-light .changes-diff-add-neutral {
-  color: var(--muted);
+  color: var(--success-text-strong);
 }
 body.theme-light .changes-diff-remove {
   color: var(--danger-strong-hover);
@@ -5240,20 +5196,6 @@ body.theme-light .changes-diff-remove {
   border-color: var(--active-control-soft-border);
   color: var(--active-control-bg);
 }
-body.theme-light .preferences-inline-action {
-  color: var(--active-control-bg);
-}
-.popover-value a:hover,
-.branch-link:hover {
-  color: var(--link-soft-hover);
-  text-decoration: underline;
-}
-.popover-value a.pr-status-merged:hover,
-.meta a.pr-status-merged:hover,
-.summary-context a.pr-status-merged:hover,
-.branch-meta a.pr-status-merged:hover {
-  color: var(--pr-status-merged);
-}
 .branch-list {
   margin-top: 8px;
   padding-top: 8px;
@@ -5307,14 +5249,14 @@ body.theme-light .preferences-inline-action {
   display: block;
 }
 .agent-icon.codex {
-  color: #ffffff;
+  color: var(--paint-white);
 }
 .agent-icon.codex svg {
   transform: scale(1.16);
   transform-origin: center;
 }
 .agent-icon.claude {
-  color: #ffffff;
+  color: var(--paint-white);
 }
 /* ============================================================================
    Light mode: dialogs and warning chrome hardcode dark fills + light
@@ -5344,9 +5286,6 @@ body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,
 body.theme-light .command-palette-keybinding {
   color: var(--muted);
-}
-body.theme-light .keyboard-shortcuts-section h3 {
-  color: var(--active-accent-bright);
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {
@@ -5383,7 +5322,6 @@ body.theme-light .preferences-global-reset-warning {
   color: var(--danger-light-text);
 }
 body.theme-light .preferences-global-reset .preferences-reset-all {
-  color: var(--danger-action-text);
   background: var(--danger-strong);
   border-color: var(--danger-action-light-border);
 }
@@ -5403,7 +5341,7 @@ body.theme-light .agent-icon.claude {
 button {
   min-width: 34px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel2);
   color: var(--text);
   padding: 6px 9px;
@@ -5416,7 +5354,6 @@ button:disabled {
   opacity: 0.55;
 }
 button:disabled:hover { border-color: var(--line); }
-6
 .grid {
   position: relative;
   height: 100%;
@@ -5621,33 +5558,7 @@ button:disabled:hover { border-color: var(--line); }
   content: "";
   position: absolute;
   background: var(--pane-resizer-bg);
-  transition: background 90ms ease, inset 90ms ease;
-}
-.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before {
-  top: 0;
-  bottom: 0;
-  left: calc(50% - (var(--pane-resizer-line-size) / 2));
-  right: calc(50% - (var(--pane-resizer-line-size) / 2));
-}
-.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before {
-  top: calc(50% - (var(--pane-resizer-line-size) / 2));
-  bottom: calc(50% - (var(--pane-resizer-line-size) / 2));
-  left: 0;
-  right: 0;
-}
-.yolomux-dockview .dv-sash:hover::before,
-.yolomux-dockview .dv-sash:active::before {
-  background: var(--pane-resizer-hover-bg);
-}
-.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:hover::before,
-.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:active::before {
-  left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-}
-.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:hover::before,
-.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:active::before {
-  top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  transition: background var(--motion-interaction-fast) ease, inset var(--motion-interaction-fast) ease;
 }
 .yolomux-dockview .dv-tab {
   flex: 0 0 var(--dockview-tab-inline-size, var(--pane-tab-width));
@@ -5671,21 +5582,10 @@ button:disabled:hover { border-color: var(--line); }
   height: var(--pane-tab-height);
   border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
 }
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
-}
 .yolomux-dockview .dv-tab.dv-inactive-tab > .dockview-pane-tab:not(.active) {
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--pane-inactive-tab-border);
-}
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail {
-  color: var(--pane-tab-active-text);
 }
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
@@ -5696,7 +5596,7 @@ button:disabled:hover { border-color: var(--line); }
   border: 2px dashed var(--pane-resizer-hover-bg) !important;
   border-radius: 2px !important;
   background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent) !important;
-  box-shadow: 0 0 12px var(--pane-resizer-shadow);
+  box-shadow: var(--pane-resizer-preview-shadow);
   pointer-events: none;
 }
 .yolomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
@@ -5793,47 +5693,63 @@ button:disabled:hover { border-color: var(--line); }
   inset: 0;
   border-radius: 0;
   background: var(--pane-resizer-bg);
-  transition: background 90ms ease, box-shadow 90ms ease;
+  transition: background var(--motion-interaction-fast) ease, box-shadow var(--motion-interaction-fast) ease;
 }
 .layout-resizer:hover::before,
 .layout-resizer:focus-visible::before,
 .layout-resizing .layout-resizer::before {
   background: transparent;
-  box-shadow: 0 0 0 1px var(--drop-outline-shadow);
+  box-shadow: var(--pane-resizer-hover-shadow);
 }
 .resizer-row {
   width: var(--pane-resizer-size);
   cursor: col-resize;
 }
+.resizer-column {
+  height: var(--pane-resizer-size);
+  cursor: row-resize;
+}
+
+/* Dockview and the fallback layout render the same separator contract through one geometry owner. */
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before,
 .resizer-row::before {
   top: 0;
   bottom: 0;
   left: calc(50% - (var(--pane-resizer-line-size) / 2));
   right: calc(50% - (var(--pane-resizer-line-size) / 2));
 }
-.resizer-row:hover::before,
-.resizer-row:focus-visible::before,
-.layout-resizing .resizer-row::before {
-  left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  background: var(--pane-resizer-hover-bg);
-}
-.resizer-column {
-  height: var(--pane-resizer-size);
-  cursor: row-resize;
-}
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before,
 .resizer-column::before {
   top: calc(50% - (var(--pane-resizer-line-size) / 2));
   bottom: calc(50% - (var(--pane-resizer-line-size) / 2));
   left: 0;
   right: 0;
 }
+.yolomux-dockview .dv-sash:hover::before,
+.yolomux-dockview .dv-sash:active::before,
+.resizer-row:hover::before,
+.resizer-row:focus-visible::before,
+.resizer-column:hover::before,
+.resizer-column:focus-visible::before,
+.layout-resizing .resizer-row::before,
+.layout-resizing .resizer-column::before {
+  background: var(--pane-resizer-hover-bg);
+}
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:hover::before,
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:active::before,
+.resizer-row:hover::before,
+.resizer-row:focus-visible::before,
+.layout-resizing .resizer-row::before {
+  left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+}
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:hover::before,
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:active::before,
 .resizer-column:hover::before,
 .resizer-column:focus-visible::before,
 .layout-resizing .resizer-column::before {
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  background: var(--pane-resizer-hover-bg);
 }
 /* Invisible grab zone extending ~5px past the 1px line on each side (absolute overlay = no layout
    width), so the divider is easy to grab while the visible seam stays 1px. */
@@ -5866,7 +5782,7 @@ body.layout-resizing {
 .layout-column.drag-over {
   outline: 1px dashed var(--pane-resizer-hover-bg);
   outline-offset: -3px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
 }
 .drop-slot {
   position: relative;
@@ -5874,7 +5790,7 @@ body.layout-resizing {
   min-height: 0;
   overflow: visible;
   border: 1px dashed transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
 }
 .drop-slot.drag-over {
   border-color: var(--pane-resizer-hover-bg);
@@ -6188,7 +6104,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   min-height: 0;
   border: 1px dashed #94a2b5;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 46%),
     rgba(255, 255, 255, 0.012);
@@ -6204,14 +6120,11 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-resizer-hover-bg);
   background: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
   border: 2px dashed var(--pane-resizer-hover-bg);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   font-weight: 700;
   pointer-events: none;
 }
-.terminal.path-drag-over {
-  outline: 2px dashed var(--pane-resizer-hover-bg);
-  outline-offset: -5px;
-}
+.terminal.path-drag-over,
 .panel.path-drag-over {
   outline: 2px dashed var(--pane-resizer-hover-bg);
   outline-offset: -5px;
@@ -6275,19 +6188,8 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel-detail-close:hover,
 .panel-detail-close:focus-visible {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.08);
-}
-.panel-detail-close::before,
-.panel-detail-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 1.4px;
-  border-radius: var(--radius-pill);
-  background: currentColor;
+  color: var(--paint-white);
+  background: var(--paint-white-08);
 }
 .panel-detail-close::before {
   transform: translate(-50%, -50%) rotate(45deg);
@@ -6316,8 +6218,8 @@ body.theme-light .drop-slot.drag-over {
   pointer-events: auto;
   transform: translateY(0);
   transition:
-    opacity 90ms ease var(--popover-show-delay),
-    transform 90ms ease var(--popover-show-delay),
+    opacity var(--motion-interaction-fast) ease var(--popover-show-delay),
+    transform var(--motion-interaction-fast) ease var(--popover-show-delay),
     visibility 0s linear var(--popover-show-delay);
 }
 .panel-popover-zone > .session-popover::before {
@@ -6514,16 +6416,6 @@ body.theme-light .drop-slot.drag-over {
     animation: none;
   }
 }
-.meta a,
-.summary-context a {
-  color: var(--link-soft);
-  text-decoration: none;
-}
-.meta a:hover,
-.summary-context a:hover {
-  color: var(--link-soft-hover);
-  text-decoration: underline;
-}
 .meta-branch {
   color: var(--pane-meta-branch);
 }
@@ -6651,7 +6543,7 @@ body.theme-light .drop-slot.drag-over {
   transform: translateX(-50%);
   pointer-events: none;
   background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
-  box-shadow: 0 0 12px var(--pane-resizer-shadow);
+  box-shadow: var(--pane-resizer-preview-shadow);
 }
 .transparent-drag-image {
   position: fixed;
@@ -6662,61 +6554,40 @@ body.theme-light .drop-slot.drag-over {
   opacity: 0;
   pointer-events: none;
 }
-.pane-tab {
-  width: min(var(--pane-tab-width), 100%);
-  min-width: 0;
-  max-width: min(var(--pane-tab-width), 100%);
-  height: var(--pane-tab-height);
-  display: inline-flex;
+.pane-tab,
+.tmux-pane-tab-token {
   position: relative;
-  z-index: var(--z-pane-tab);
-  vertical-align: top;
+  display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin: 0 1px 0 0;
+  min-width: 0;
+  height: var(--pane-tab-height);
   padding: 1px 5px 0;
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
-  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   border-bottom-color: var(--pane-inactive-tab-border);
-  line-height: var(--tab-line-height);
-  white-space: nowrap;
-  text-align: start;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   font-stretch: condensed;
   font-weight: 500;
+  line-height: var(--tab-line-height);
+  text-align: start;
+  white-space: nowrap;
   overflow: hidden;
+}
+.pane-tab {
+  width: min(var(--pane-tab-width), 100%);
+  max-width: min(var(--pane-tab-width), 100%);
+  z-index: var(--z-pane-tab);
+  vertical-align: top;
+  margin: 0 1px 0 0;
   cursor: pointer;
   user-select: none;
 }
-.pane-tab:hover {
-  border-color: rgba(255, 255, 255, 0.92);
-  background: var(--pane-inactive-tab-bg-hover);
-}
 .tmux-pane-tab-token {
   box-sizing: border-box;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  height: var(--pane-tab-height);
-  padding: 1px 5px 0;
-  color: var(--pane-tab-text);
-  background: var(--pane-inactive-tab-bg);
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: var(--pane-inactive-tab-border);
-  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--tab-label-size);
-  font-stretch: condensed;
-  font-weight: 500;
-  line-height: var(--tab-line-height);
-  text-align: start;
-  white-space: nowrap;
-  overflow: hidden;
 }
 .tmux-pane-tab-token-action {
   cursor: pointer;
@@ -6724,36 +6595,83 @@ body.theme-light .drop-slot.drag-over {
 .tmux-pane-tab-token-action:hover,
 .tmux-pane-tab-token-action:focus-visible {
   color: var(--pane-tab-text);
-  background: var(--pane-inactive-tab-bg-hover);
-  border-color: rgba(255, 255, 255, 0.92);
   text-decoration: none;
   outline: 0;
 }
 .tmux-pane-tab-token > .pane-tab-core {
-  flex: 1 1 auto;
-  min-width: 0;
   inline-size: 100%;
 }
-.tmux-pane-tab-token .session-button-text {
-  flex: 1 1 auto;
-  min-width: 0;
+.tmux-pane-tab-token .session-button-text,
+.pane-tab .session-button-text {
   gap: 1px;
 }
-.tmux-pane-tab-token .tab-inline-detail {
+.tmux-pane-tab-token .tab-inline-detail,
+.pane-tab .tab-inline-detail,
+.pane-tab.file-editor-item .session-button-dir {
   flex: 1 1 auto;
   min-width: 0;
   max-width: none;
 }
-.tmux-pane-tab-token.active {
+.file-explorer-mode-switcher {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: var(--pane-tab-height);
+}
+.file-explorer-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  flex: 0 0 auto;
+  height: var(--pane-tab-height);
+  min-width: 0;
+  padding: 0 3px;
+  box-sizing: border-box;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: transparent;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  font-family: var(--tab-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.file-explorer-mode-toggle:hover,
+.file-explorer-mode-toggle:focus-visible {
+  color: var(--pane-tab-active-text);
+  border-color: var(--pane-tab-active-border);
+  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
+}
+.file-explorer-mode-label {
+  pointer-events: none;
+}
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
+.tmux-pane-tab-token.active,
+.panel.active-pane .pane-tab.active:not(.file-missing),
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing),
+.file-explorer-mode-toggle[aria-pressed="true"] {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
   border-bottom-color: var(--pane-tab-active-bg);
 }
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail,
 .tmux-pane-tab-token.active .session-button-name,
 .tmux-pane-tab-token.active .session-button-dir,
-.tmux-pane-tab-token.active .session-button-detail {
-  color: var(--pane-tab-active-text);
+.tmux-pane-tab-token.active .session-button-detail,
+.pane-tab.active .session-button-name,
+.pane-tab.active .session-button-dir,
+.pane-tab.active .session-button-detail {
+  color: inherit;
 }
 body.theme-light .tmux-pane-tab-token:not(.active) .session-button-name,
 body.theme-light .tmux-pane-tab-token:not(.active) .session-button-dir,
@@ -6766,14 +6684,6 @@ body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
   border-color: var(--pane-tab-unfocused-active-border);
   border-bottom-color: var(--pane-tab-unfocused-active-bg);
   font-weight: 500;
-  box-shadow: none;
-}
-.panel.active-pane .pane-tab.active,
-.panel.file-explorer-panel .pane-tab.active {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
   box-shadow: none;
 }
 /* every pane keeps its active tab clearly green (no dimming) so you can tell which session
@@ -6803,17 +6713,15 @@ body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
    when the pane is unfocused). The bars themselves (strip, Info Bar, editor toolbar, find) already read
    --pane-bar-bg, so only the tabs need this; the active tab stays green. */
-.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active) {
+.panel .pane-tab:not(.active) {
   background: var(--pane-bar-bg);
 }
-.panel.active-pane .pane-tab:not(.active),
-.panel.typing-ready-pane .pane-tab:not(.active) {
-  background: var(--pane-bar-bg);
-}
-.pane-tab.active .session-button-name,
-.pane-tab.active .session-button-dir,
-.pane-tab.active .session-button-detail {
-  color: var(--pane-tab-unfocused-active-text);
+.pane-tab:not(.active):hover,
+.pane-tab:not(.active):focus-visible,
+.tmux-pane-tab-token-action:not(.active):hover,
+.tmux-pane-tab-token-action:not(.active):focus-visible {
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--paint-white-92);
 }
 /* image 008: the inactive-tab name/dir/detail hardcode near-white colors (tuned for the dark tab bg),
    so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text
@@ -6822,25 +6730,6 @@ body.theme-light .pane-tab:not(.active) .session-button-name,
 body.theme-light .pane-tab:not(.active) .session-button-dir,
 body.theme-light .pane-tab:not(.active) .session-button-detail {
   color: var(--pc-control-fg);
-}
-.panel.active-pane .pane-tab.active .session-button-name,
-.panel.active-pane .pane-tab.active .session-button-dir,
-.panel.active-pane .pane-tab.active .session-button-detail,
-.panel.file-explorer-panel .pane-tab.active .session-button-name,
-.panel.file-explorer-panel .pane-tab.active .session-button-dir,
-.panel.file-explorer-panel .pane-tab.active .session-button-detail {
-  color: var(--pane-tab-active-text);
-}
-.panel.active-pane .pane-tab.active .ci-indicator.branch-indicator,
-.panel.file-explorer-panel .pane-tab.active .ci-indicator.branch-indicator {
-  color: var(--branch-indicator-text);
-  background: var(--branch-indicator-bg);
-  border-color: var(--branch-indicator-border);
-}
-.pane-tab.active .session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab.file-missing {
   color: #ffdbe1;
@@ -6853,9 +6742,9 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 }
 .pane-tab.file-missing.active {
   color: #fff2f4;
-  background: #7a2e3d;
+  background: var(--file-missing-active-bg);
   border-color: #ff9aa8;
-  border-bottom-color: #7a2e3d;
+  border-bottom-color: var(--file-missing-active-bg);
 }
 .pane-tab.file-missing .session-button-dir {
   text-decoration: line-through;
@@ -6884,18 +6773,11 @@ body.theme-light .pane-tab.file-missing:hover {
 }
 body.theme-light .pane-tab.file-missing.active {
   color: #7a1f2c;
-  background: #f7d2d8;
   border-color: #cf5566;
-  border-bottom-color: #f7d2d8;
 }
 body.theme-light .pane-tab.file-missing .file-tab-missing-badge,
 body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #b3263a;
-}
-body.theme-light .pane-tab.active .session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
 }
 .pane-tab-close {
   position: relative;
@@ -6938,7 +6820,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 }
 .pane-tab.active .pane-tab-close:hover {
   opacity: 0.92;
-  background: rgba(8, 18, 5, 0.16);
+  background: var(--paint-dark-green-16);
 }
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
 .file-explorer-close.pc-window-control,
@@ -6946,7 +6828,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 .file-editor-close.pc-window-control,
 .file-editor-panel-close.pc-window-control {
   border: 1px solid var(--pc-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--pc-control-bg);
   color: var(--pc-control-fg);
   opacity: 0.82;
@@ -6989,13 +6871,8 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 }
 .pane-tab.active .pane-tab-close.pc-window-control:hover {
   color: currentColor;
-  background: rgba(8, 18, 5, 0.16);
+  background: var(--paint-dark-green-16);
   border-color: rgba(8, 18, 5, 0.28);
-}
-.pane-tab .session-button-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  gap: 1px;
 }
 .pane-tab:not(.active) .session-button-dir {
   max-width: none;
@@ -7020,14 +6897,6 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   border-radius: var(--radius-control);
   font-size: var(--ui-font-size-2xs);
 }
-.pane-tab-core .session-button-text {
-  flex: 1 1 auto;
-}
-.pane-tab .tab-inline-detail {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-}
 .session-popover-host > .session-popover,
 .pane-tab-detached-popover {
   position: fixed;
@@ -7039,11 +6908,11 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   max-height: var(--pane-tab-popover-max-block-size);
   white-space: normal;
   box-shadow:
-    -22px 18px 34px rgba(0, 0, 0, 0.58),
-    22px 18px 34px rgba(0, 0, 0, 0.58),
+    -22px 18px 34px var(--paint-black-58),
+    22px 18px 34px var(--paint-black-58),
     0 34px 62px rgba(0, 0, 0, 0.66),
     0 8px 16px rgba(0, 0, 0, 0.52),
-    0 0 0 1px var(--active-control-focus-ring);
+    var(--active-control-focus-shadow-compact);
 }
 body.share-replay-shell .share-mirror-stage .app-overlay-root,
 body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
@@ -7169,15 +7038,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 20px;
   margin-inline-start: 4px;
   border-radius: 0;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-}
-.tmux-status-toggle:hover,
-.tmux-status-toggle:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: var(--pane-tab-control-hover-bg);
-  border-color: var(--pane-tab-control-hover-border);
+  border: 1px solid;
 }
 .tmux-window-button {
   flex: 0 1 auto;
@@ -7197,16 +7058,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   overflow: visible;
   /* Info Bar sub-window buttons are fully square — no rounded corners (overrides the .tab 5px). */
   border-radius: 0;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-}
-.pane-info-bar .tmux-window-button:not(.active):hover,
-.panel-detail-row .tmux-window-button:not(.active):hover,
-.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):hover {
-  color: var(--pc-control-hover-fg);
-  background: var(--pane-tab-control-hover-bg);
-  border-color: var(--pane-tab-control-hover-border);
+  border: 1px solid;
 }
 .tmux-window-button .tmux-window-number-label {
   display: block;
@@ -7223,11 +7075,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-}
-.tmux-window-button .tmux-window-name-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .pane-info-bar .tmux-window-button .tmux-window-name-label,
 .panel-detail-row .tmux-window-button .tmux-window-name-label,
@@ -7264,11 +7111,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .agent-window-activity--subwindow .agent-icon {
   padding: 0;
   vertical-align: middle;
-}
-.agent-window-activity--subwindow .agent-icon svg {
-  flex-basis: 14px;
-  width: 14px;
-  height: 14px;
 }
 .agent-window-activity--subwindow .agent-window-status-dot {
   --subwindow-status-attention-fill: var(--danger-strong);
@@ -7374,15 +7216,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   max-width: 28px;
   padding-inline: 3px;
 }
-/* The active window's button reads as a PRESSED toggle (like the active Term tab). SCOPED through
-   the bar so it beats the generic `.tab.active` fallback (which otherwise wins on source order at
-   equal specificity and paints a flat slate box). Routed through the shared --active-control-* tokens
-   so it follows the user's Active color preference and flips with the theme (no hardcoded hex);
-   inactive buttons keep the plain .tab look. font-weight overrides .tab.active's heavy 700. */
+/* Active-window paint comes from the shared base selector. This scoped weight still beats the generic
+   `.tab.active` fallback without duplicating the theme-aware paint declarations. */
 .tmux-window-bar .tmux-window-button.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
   font-weight: 600;
 }
 .tmux-window-bar .tmux-window-button.active .agent-window-status-dot,
@@ -7460,7 +7296,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tabs .pane-actions:focus-visible,
 .tabs .panel-tab-overflow:hover,
 .tabs .panel-tab-overflow:focus-visible {
-  color: #ffffff;
+  color: var(--paint-white);
   background: var(--pc-control-hover-bg);
   border-color: var(--pc-control-hover-border);
 }
@@ -7481,6 +7317,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   max-width: min(20px, var(--pane-tab-height));
   padding: 0;
 }
+.panel-detail-close::before,
+.panel-detail-close::after,
 .tabs .pane-close::before,
 .tabs .pane-close::after,
 .tabs .pane-detail-toggle::before,
@@ -7550,28 +7388,34 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tabs .pane-expand::after {
   transform: translate(-50%, -50%) rotate(90deg);
 }
-/* ── SHARED pane-head control buttons (single source of truth) ──────────────────────────────────────
-   Every control button (terminal/window pill, actions …, detail/info toggle, minimize,
+/* ── SHARED pane control buttons (single source of truth) ───────────────────────────────────────────
+   Every control button (terminal/window pill, status toggle, actions …, detail/info toggle, minimize,
    expand +, close ×) shares ONE color treatment — they only add their own glyph/layout, never their own
    colors. Rest = white (light) / near-black (dark) via --pane-ctl-*; the PRESSED/ACTIVE state (active
    terminal/agent tab, a toggled-on info toggle, etc.) = green. The .auto-toggle (YO/YOLO) keeps its own
    green-glow below. This replaces the old per-button one-offs (navy active tab, always-green zoom). */
+.tmux-status-toggle,
+.pane-info-bar .tmux-window-button:not(.active),
+.panel-detail-row .tmux-window-button:not(.active),
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active),
 .tabs .tab:not(.auto-toggle) {
   color: var(--pane-ctl-fg, var(--pc-control-fg));
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
 }
-.tabs .tab:not(.auto-toggle):hover {
+.tmux-status-toggle:hover,
+.tmux-status-toggle:focus-visible,
+.pane-info-bar .tmux-window-button:not(.active):hover,
+.pane-info-bar .tmux-window-button:not(.active):focus-visible,
+.panel-detail-row .tmux-window-button:not(.active):hover,
+.panel-detail-row .tmux-window-button:not(.active):focus-visible,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):hover,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):focus-visible,
+.tabs .tab:not(.auto-toggle):hover,
+.tabs .tab:not(.auto-toggle):focus-visible {
   color: var(--pc-control-hover-fg);
   background: var(--pane-tab-control-hover-bg);
   border-color: var(--pane-tab-control-hover-border);
-}
-.tabs .tab.active:not(.auto-toggle),
-.tabs .tab[aria-pressed="true"]:not(.auto-toggle) {
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
-  font-weight: 700;
 }
 /* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
 .tab.active:not(.tmux-window-button) {
@@ -7580,7 +7424,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   border-color: #566176;
   font-weight: 700;
 }
-body.theme-light .tab.active:not(.tmux-window-button) {
+/* Keep the theme qualifier specificity-free so a component's shared pressed-state owner can override
+   this detached-tab fallback without adding a parallel light-mode rule. */
+:where(body.theme-light) .tab.active:not(.tmux-window-button) {
   background: #dce3ec;
   border-color: #b3bdcb;
 }
@@ -7618,31 +7464,12 @@ body.theme-light .panel-detail-close:focus-visible {
   color: var(--pc-control-hover-fg);
   background: rgb(var(--overlay-slate-rgb) / 0.08);
 }
-/* light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
-   cases (links on the light Info Bar, the near-white tab-hover border, white hover-glyph text on
-   the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
-body.theme-light .meta a,
-body.theme-light .summary-context a {
-  color: var(--link-soft);
-}
-body.theme-light .meta a:hover,
-body.theme-light .summary-context a:hover {
-  color: var(--link-soft-hover);
-}
-/* a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
-   not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
-   light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
-body.theme-light .popover-value a.pr-status-merged,
-body.theme-light .meta a.pr-status-merged,
-body.theme-light .summary-context a.pr-status-merged,
-body.theme-light .branch-meta a.pr-status-merged {
-  color: var(--lt-code-function);
-}
-body.theme-light .meta a.pr-status-merged:hover,
-body.theme-light .summary-context a.pr-status-merged:hover {
-  color: #6639ba;
-}
-body.theme-light .pane-tab:hover {
+/* Light-mode contrast fixes for the near-white tab-hover border and white hover-glyph text on
+   the light control hover bg. Saturated-chip light text (red/dark-blue badges) is left as-is. */
+body.theme-light .pane-tab:not(.active):hover,
+body.theme-light .pane-tab:not(.active):focus-visible,
+body.theme-light .tmux-pane-tab-token-action:not(.active):hover,
+body.theme-light .tmux-pane-tab-token-action:not(.active):focus-visible {
   border-color: rgb(var(--overlay-slate-rgb) / 0.5);
 }
 body.theme-light .tabs .pane-actions:hover,
@@ -7756,7 +7583,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   inset-block-start: 50%;
   width: 72%;
   height: 1.5px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--danger-text);
   transform-origin: center;
   pointer-events: none;
@@ -7773,7 +7600,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   pointer-events: none;
   background: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.16);
   box-shadow: inset 0 0 0 1px rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.24);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .terminal .xterm-rows .terminal-attention-question-row {
   background: transparent;
@@ -7865,11 +7692,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
-.session-rename-actions .session-rename-submit {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
 .terminal-context-menu button {
   width: 100%;
   display: block;
@@ -7896,7 +7718,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .context-menu-icon .app-menu-ui-icon {
   width: 20px;
   height: 18px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 .context-menu-icon .app-menu-ui-icon::before {
   width: 12px;
@@ -7917,10 +7739,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu button.danger:focus-visible {
   color: #1d0307;
   background: var(--bad);
-}
-.terminal-context-menu button:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .terminal-context-menu button:disabled:hover,
 .terminal-context-menu button:disabled:focus-visible {
@@ -7972,7 +7790,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: #14171d;
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--accent-gold);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
@@ -8034,9 +7852,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .attention-toast-agent-button {
   pointer-events: none;
   max-width: none;
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border: 1px solid var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+  border: 1px solid;
   font-weight: 700;
 }
 .attention-toast-agent-button .tmux-window-name-text {
@@ -8069,9 +7885,13 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .toast button {
   min-width: 28px;
   padding: 1px 6px;
-  color: #14171d;
+  color: inherit;
   background: #fff3c6;
   border-color: #b98c24;
+}
+.toast-close,
+.toast-keep {
+  color: #3a2b00;
 }
 .toast-close {
   position: static;
@@ -8079,7 +7899,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   height: 20px;
   min-width: 20px;
   padding: 0;
-  color: #3a2b00;
   background: transparent;
   border: 0;
   font: 700 var(--ui-font-size-xl)/1 var(--ui-font);
@@ -8089,9 +7908,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 42px;
   height: 20px;
   padding: 0 6px;
-  color: #3a2b00;
   background: rgba(255, 243, 198, 0.72);
-  border-color: #b98c24;
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .toast.kept .toast-line::after,
@@ -8109,7 +7926,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   height: 24px;
   padding: 0 10px;
   border: 1px solid var(--active-control-border, var(--line));
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
@@ -8131,11 +7948,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
 }
 .toast .startup-helper-nav-button:first-child {
-  border-radius: 8px 0 0 8px;
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
 }
 .toast .startup-helper-nav-button:last-child {
   margin-inline-start: -1px;
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
 }
 .panel-toast-stack {
   position: absolute;
@@ -8175,7 +7992,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: var(--surface-ink);
   font: var(--ui-font-size-sm)/1.3 var(--mono-font);
 }
-.transcript {
+.transcript,
+.summary {
   height: 100%;
   min-height: 0;
   background: var(--bg);
@@ -8248,13 +8066,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .transcript-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.summary {
-  height: 100%;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  background: var(--bg);
 }
 .summary-context {
   padding: 7px 10px;
@@ -8331,7 +8142,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .info-tree-panel .info-pane.info-tree-pane-scrolled::before {
   content: "";
   position: absolute;
-  z-index: 2;
+  z-index: var(--z-layer-control);
   inset-block-start: 0;
   inset-inline: 0;
   height: var(--info-tree-sticky-level-block, 27px);
@@ -8410,10 +8221,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
-.info-tree-search-control input:focus {
+.info-tree-search-control input:focus,
+.search-history-input:focus {
   outline: 0;
   border-color: var(--active-control-border);
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 .info-tree-preset {
   height: 24px;
@@ -8428,9 +8240,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .info-tree-preset.active,
 .info-tree-preset:hover,
 .info-tree-preset:focus-visible {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
   outline: 0;
 }
 .info-tree-group-select {
@@ -8517,18 +8326,13 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 5px;
   font: var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
-.search-history-input:focus {
-  outline: 0;
-  border-color: var(--active-control-border);
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
-}
 .search-history-error,
 .search-history-empty {
   padding: 8px;
   color: var(--muted);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .search-history-error {
@@ -8559,7 +8363,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
   text-align: start;
   cursor: pointer;
@@ -8577,19 +8381,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   opacity: 0.72;
 }
 .search-history-row-title {
-  min-width: 0;
-  overflow: hidden;
   color: var(--markdown-heading);
   font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .search-history-row-meta {
-  min-width: 0;
-  overflow: hidden;
   color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .search-history-row-snippet,
 .search-history-row-field {
@@ -8622,13 +8418,16 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--mono-font);
 }
+.yoagent-global-head,
+.yoagent-headline {
+  color: #f4f7fb;
+}
 .yoagent-global-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 5px;
-  color: #f4f7fb;
   font-weight: 800;
 }
 .yoagent-refresh-progress {
@@ -8659,7 +8458,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-headline {
   margin-bottom: 5px;
-  color: #f4f7fb;
   font-size: var(--terminal-font-size);
   line-height: 1.35;
 }
@@ -8743,11 +8541,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--muted);
 }
 .yoagent-recent-agent-paths {
-  min-width: 0;
-  overflow: hidden;
   color: var(--text-muted-strong);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .yoagent-recent-agent-activity {
   flex: 0 0 auto;
@@ -8768,7 +8562,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   align-items: center;
   min-height: 16px;
   border: 1px solid var(--divider);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   padding: 1px 4px;
   color: var(--text);
   background: var(--panel);
@@ -8804,7 +8598,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   flex: 0 0 auto;
   min-height: 18px;
   border: 1px solid var(--divider);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   padding: 1px 6px;
   color: var(--auto-text);
   background: var(--brand-green);
@@ -8828,12 +8622,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   text-transform: uppercase;
 }
 .yoagent-transcript-value {
-  min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
   color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .yoagent-transcript-loading {
   color: var(--muted);
@@ -8900,11 +8690,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font-size: 9px;
 }
 .yoagent-compact-label {
-  min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .yoagent-waiting-age {
   flex: 0 0 auto;
@@ -8920,12 +8706,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   cursor: pointer;
   font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
   padding: 4px 7px;
-}
-.yoagent-compact-action:hover,
-.yoagent-compact-action:focus-visible {
-  border-color: var(--active-control-focus-ring);
-  color: var(--text);
-  outline: 0;
 }
 .yoagent-chat-queue {
   display: grid;
@@ -8947,7 +8727,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border-radius: 50%;
-  font: 800 10px/1 var(--mono-font);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .yoagent-jobs-list {
   display: grid;
@@ -8995,11 +8775,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-job-meta,
 .yoagent-job-text {
-  min-width: 0;
-  overflow: hidden;
   color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .yoagent-job-meta {
   flex: 1 1 auto;
@@ -9028,14 +8804,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: var(--panel);
   color: var(--muted);
 }
-.yoagent-job-confirm:hover,
-.yoagent-job-confirm:focus-visible,
-.yoagent-job-cancel:hover,
-.yoagent-job-cancel:focus-visible {
-  border-color: var(--active-control-focus-ring);
-  color: var(--text);
-  outline: 0;
-}
 .yoagent-chat-spinner {
   min-width: 18px;
   height: 18px;
@@ -9058,7 +8826,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   padding: 0 8px;
   color: var(--auto-text);
   background: var(--pane-tab-badge-gold);
-  border: 1px solid #ffe27a;
+  border: 1px solid var(--warning-border-strong);
   border-radius: var(--radius-control);
   font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
 }
@@ -9118,7 +8886,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-message-state {
   color: var(--muted);
-  font: 11px/1.2 var(--ui-font);
+  font: var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .yoagent-message.assistant.streaming .yoagent-message-role::after {
   content: "";
@@ -9126,7 +8894,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   height: 6px;
   border-radius: 50%;
   background: var(--active-control-border);
-  animation: command-palette-thinking 900ms ease-in-out infinite alternate;
 }
 .yoagent-recent-agents-message .yoagent-recent-agents {
   padding: 0;
@@ -9234,7 +9001,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--text);
   background: color-mix(in srgb, var(--panel2) 72%, var(--bg));
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .yoagent-message-details pre.yoagent-auxiliary-stream {
   color: color-mix(in srgb, var(--muted) 72%, var(--text));
@@ -9267,7 +9034,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--text);
   background: color-mix(in srgb, var(--panel2) 70%, var(--bg));
   border: 1px solid rgba(112, 167, 255, 0.65);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .yoagent-action-card.sent {
   border-color: var(--active-control-border);
@@ -9313,9 +9080,9 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--pane-tab-text);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--paint-white-06);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   padding: 1px 4px;
 }
 .yoagent-action-text {
@@ -9327,7 +9094,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: #eef4ff;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   white-space: pre-wrap;
 }
 /* Composer (mockup 044): one rounded container with the input on top and a control row below —
@@ -9389,21 +9156,19 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 50%;
   background: var(--agent-inactive-marker-bg);
   border: 2px solid var(--yoagent-inactive-backend-dot-border);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+  box-shadow: 0 0 0 1px var(--paint-black-45);
 }
 .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
   background: var(--pr-status-passing);
-  border-color: color-mix(in srgb, var(--pr-status-passing) 30%, #ffffff);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 30%, var(--paint-white));
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.48), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 22%, transparent);
 }
 body.theme-light .yoagent-backend-pill-dot {
-  background: var(--agent-inactive-marker-bg);
   border-color: var(--agent-inactive-marker-border);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.45);
+  box-shadow: 0 0 0 1px var(--paint-black-42), 0 0 0 2px rgb(255 255 255 / 0.45);
 }
 body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
-  background: var(--pr-status-passing);
-  border-color: color-mix(in srgb, var(--pr-status-passing) 34%, #ffffff);
+  border-color: color-mix(in srgb, var(--pr-status-passing) 34%, var(--paint-white));
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.38), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 24%, transparent);
 }
 .yoagent-composer-pill select,
@@ -9488,17 +9253,17 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
 .yoagent-global .markdown-body pre {
   background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: auto;
   padding: 8px 10px;
 }
 body.theme-light .info-pane {
-  background: #ffffff;
+  background: var(--paint-white);
 }
 body.theme-light .info-list {
-  background: #ffffff;
+  background: var(--paint-white);
 }
 body.theme-light .yoagent-global {
   color: var(--text);
@@ -9510,19 +9275,15 @@ body.theme-light .yoagent-message {
   --yoagent-content-text: var(--pc-control-hover-fg);
   --yoagent-detail-text: #334155;
   color: var(--yoagent-content-text);
+}
+body.theme-light .yoagent-message {
   background: var(--panel);
-  border-color: var(--line);
 }
 body.theme-light .yoagent-message.assistant {
-  border-color: var(--active-control-border);
-  background: color-mix(in srgb, var(--active-control-soft-bg) 78%, #ffffff);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 78%, var(--paint-white));
 }
 body.theme-light .yoagent-message.assistant.yoagent-agent-result {
-  border-inline-start-color: var(--accent-gold);
-  background: color-mix(in srgb, var(--accent-gold) 10%, #ffffff);
-}
-body.theme-light .yoagent-message.user {
-  border-color: var(--link-soft);
+  background: color-mix(in srgb, var(--accent-gold) 10%, var(--paint-white));
 }
 body.theme-light .yoagent-message,
 body.theme-light .yoagent-message-body,
@@ -9566,11 +9327,16 @@ body.theme-light .yoagent-details-note {
 }
 body.theme-light .yoagent-chat-queue {
   color: var(--lt-text);
-  background: color-mix(in srgb, var(--active-control-soft-bg) 72%, #ffffff);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 72%, var(--paint-white));
   border-color: var(--active-control-soft-border);
 }
 body.theme-light :is(.yoagent-section-title, .yoagent-compact-action) {
   color: var(--lt-muted-strong);
+}
+body :is(.yoagent-compact-action, .yoagent-job-confirm, .yoagent-job-cancel):is(:hover, :focus-visible) {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: 0;
 }
 body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
   color: #7a5b00;
@@ -9586,7 +9352,7 @@ body.theme-light .yoagent-action-card {
   border-color: var(--link-soft);
 }
 body.theme-light .yoagent-chat-form {
-  background: color-mix(in srgb, var(--link-soft) 8%, #ffffff);
+  background: color-mix(in srgb, var(--link-soft) 8%, var(--paint-white));
   border-color: var(--link-soft);
 }
 body.theme-light .yoagent-chat-input {
@@ -9596,14 +9362,16 @@ body.theme-light .yoagent-chat-input::placeholder {
   color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-action-head {
-  color: #0f4c81;
+  color: var(--yoagent-action-heading-light);
 }
 body.theme-light .yoagent-action-row code {
   color: var(--lt-text);
-  background: #eef6ff;
-  border-color: #8ab4f8;
+  background: var(--yoagent-action-code-bg-light);
+  border-color: var(--yoagent-action-code-border-light);
 }
-body.theme-light .yoagent-action-text {
+body.theme-light .yoagent-action-text,
+body.theme-light .yoagent-chat .markdown-body pre,
+body.theme-light .yoagent-global .markdown-body pre {
   color: var(--lt-code-block-text);
   background: var(--lt-code-block-bg);
   border-color: var(--lt-code-block-border);
@@ -9618,18 +9386,9 @@ body.theme-light .yoagent-global .markdown-body em {
 }
 body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
 body.theme-light .yoagent-global .markdown-body :not(pre) > code {
-  color: #0f4c81;
-  background: #eef6ff;
-  border-color: #8ab4f8;
-}
-/* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
-   light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
-   light override). Matches the soft gray code boxes in mockup 044. */
-body.theme-light .yoagent-chat .markdown-body pre,
-body.theme-light .yoagent-global .markdown-body pre {
-  background: var(--lt-code-block-bg);
-  border-color: var(--lt-code-block-border);
-  color: var(--lt-code-block-text);
+  color: var(--yoagent-action-heading-light);
+  background: var(--yoagent-action-code-bg-light);
+  border-color: var(--yoagent-action-code-border-light);
 }
 body.theme-light .yoagent-chat .markdown-body pre code,
 body.theme-light .yoagent-global .markdown-body pre code {
@@ -9666,24 +9425,19 @@ body.theme-light .yoagent-global .markdown-body pre code {
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
 body.theme-light .info-tree {
-  --info-tree-ai-color: var(--icon-code);
   --info-tree-ai-color-hover: var(--link-soft);
-  --info-tree-path-color: var(--text);
-  --info-tree-path-color-hover: var(--text);
-  --info-tree-branch-color: var(--link-soft);
-  --info-tree-branch-color-hover: var(--link-soft-hover);
-  --info-tree-pr-color: var(--info-tree-pr-neutral);
-  --info-tree-pr-color-hover: var(--info-tree-pr-neutral-hover);
   --info-tree-linear-color: var(--git-untracked-badge);
   --info-tree-linear-color-hover: #115e59;
 }
 .info-tree-group {
+  --info-tree-sticky-offset: 0;
+  --z-info-tree-summary-current: var(--z-info-tree-summary-base);
   min-width: 0;
 }
 .info-tree-group summary {
   position: sticky;
-  inset-block-start: 0;
-  z-index: 3;
+  inset-block-start: var(--info-tree-sticky-offset);
+  z-index: var(--z-info-tree-summary-current);
   display: grid;
   grid-template-columns: max-content max-content minmax(0, 1fr);
   align-items: center;
@@ -9700,21 +9454,21 @@ body.theme-light .info-tree {
   list-style: none;
   overflow: visible;
 }
-.info-tree-group[data-info-depth="0"] > summary {
-  inset-block-start: 0;
-  z-index: 4;
+.info-tree-group[data-info-depth="0"] {
+  --info-tree-sticky-offset: 0;
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-0);
 }
-.info-tree-group[data-info-depth="1"] > summary {
-  inset-block-start: var(--info-tree-sticky-level-block);
-  z-index: 5;
+.info-tree-group[data-info-depth="1"] {
+  --info-tree-sticky-offset: var(--info-tree-sticky-level-block);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-1);
 }
-.info-tree-group[data-info-depth="2"] > summary {
-  inset-block-start: calc(var(--info-tree-sticky-level-block) * 2);
-  z-index: 6;
+.info-tree-group[data-info-depth="2"] {
+  --info-tree-sticky-offset: calc(var(--info-tree-sticky-level-block) * 2);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-2);
 }
-.info-tree-group[data-info-depth="3"] > summary {
-  inset-block-start: calc(var(--info-tree-sticky-level-block) * 3);
-  z-index: 7;
+.info-tree-group[data-info-depth="3"] {
+  --info-tree-sticky-offset: calc(var(--info-tree-sticky-level-block) * 3);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-3);
 }
 .info-tree-group summary::-webkit-details-marker {
   display: none;
@@ -9786,21 +9540,11 @@ body.theme-light .info-tree {
 .info-tree-group[data-info-dimension="pr"] > summary .info-tree-group-dimension {
   text-transform: none;
 }
-.info-tree-group-label-line {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .info-tree-group-label-line a {
   color: var(--info-tree-dimension-color, var(--link-soft));
 }
 .info-tree-group-label {
-  min-width: 0;
-  overflow: hidden;
   color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .info-tree-group-label-line > .info-tree-tab-group-status {
   margin-inline: 0 5px;
@@ -9820,7 +9564,8 @@ button.info-tree-tab-token.active:focus-visible {
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
 }
-.info-tree-group-label-action {
+.info-tree-group-label-action,
+.info-tree-action-link {
   padding: 0;
   border: 0;
   background: transparent;
@@ -9830,8 +9575,6 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-group-label-action:hover,
 .info-tree-group-label-action:focus-visible {
-  color: var(--link-soft-hover);
-  text-decoration: underline;
   outline: 0;
 }
 .info-tree-group[data-info-dimension] > summary .info-tree-group-label-action:hover,
@@ -9886,7 +9629,7 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-group-children > .info-tree-item::before {
   content: "";
   position: absolute;
-  z-index: 1;
+  z-index: var(--z-layer-raised);
   inset-block-start: var(--info-tree-record-connector-y);
   inset-inline-start: var(--info-tree-connector-arm-start);
   width: var(--info-tree-connector-arm-width);
@@ -9899,7 +9642,7 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-group-children > .info-tree-item::after {
   content: "";
   position: absolute;
-  z-index: 0;
+  z-index: var(--z-layer-background);
   inset-block-start: calc((var(--info-tree-children-gap) / -2) - var(--info-tree-connector-line-width));
   inset-block-end: calc((var(--info-tree-children-gap) / -2) - var(--info-tree-connector-line-width));
   inset-inline-start: var(--info-tree-connector-x);
@@ -9921,7 +9664,7 @@ button.info-tree-tab-token.active:focus-visible {
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid var(--info-tree-record-border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: none;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -9932,12 +9675,12 @@ button.info-tree-tab-token.active:focus-visible {
   border-block-start-width: 0;
 }
 .info-tree-group-children > .info-tree-record.info-tree-item-first {
-  border-start-start-radius: 8px;
-  border-start-end-radius: 8px;
+  border-start-start-radius: var(--radius-lg);
+  border-start-end-radius: var(--radius-lg);
 }
 .info-tree-group-children > .info-tree-record.info-tree-item-last {
-  border-end-start-radius: 8px;
-  border-end-end-radius: 8px;
+  border-end-start-radius: var(--radius-lg);
+  border-end-end-radius: var(--radius-lg);
 }
 .info-tree-record-main {
   min-width: 0;
@@ -10011,10 +9754,6 @@ button.info-tree-tab-token.active:focus-visible {
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   flex: 0 0 auto;
-}
-.info-tree-ai-value .agent-window-activity .agent-icon {
-  width: var(--agent-window-icon-size);
-  height: var(--agent-window-icon-size);
 }
 .info-tree-ai-status-label {
   flex: 0 0 auto;
@@ -10101,14 +9840,6 @@ button.info-tree-tab-token.active:focus-visible {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.info-tree-action-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
-}
 .info-tree-field-pr a:hover,
 .info-tree-field-linear a:hover,
 .info-tree-action-link:hover,
@@ -10167,7 +9898,6 @@ button.info-tree-tab-token.active:focus-visible {
   border: 2px solid color-mix(in srgb, var(--muted) 28%, transparent);
   border-top-color: var(--pane-tab-active-bg);
   border-radius: 50%;
-  animation: metadata-refresh-spin 0.9s linear infinite;
 }
 .info-error {
   color: var(--bad);
@@ -10207,7 +9937,7 @@ button.info-tree-tab-token.active:focus-visible {
   max-width: calc(100vw - 24px);
   padding: 6px 8px 6px 12px;
   border: 1px solid var(--accent-gold, #f0b85d);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #1b2230;
   color: #e8edf4;
   box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.45);
@@ -10218,7 +9948,7 @@ button.info-tree-tab-token.active:focus-visible {
   border: 1px solid var(--danger-strong-hover);
   border-radius: var(--radius-control);
   background: var(--danger-strong);
-  color: #ffffff;
+  color: var(--paint-white);
   font: inherit;
   font-weight: 800;
   padding: 2px 10px;
@@ -10227,7 +9957,7 @@ button.info-tree-tab-token.active:focus-visible {
 .server-update-banner-reload:focus-visible {
   border-color: var(--danger-strong-border);
   background: var(--danger-strong-hover);
-  color: #ffffff;
+  color: var(--paint-white);
 }
 .server-update-banner-dismiss {
   cursor: pointer;
@@ -10261,7 +9991,7 @@ button.info-tree-tab-token.active:focus-visible {
   grid-template-rows: auto minmax(0, 1fr);
   background: #10141b;
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
 }
 .modal-head {
@@ -10278,7 +10008,7 @@ button.info-tree-tab-token.active:focus-visible {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
 }
 #modalBody {
@@ -10354,11 +10084,7 @@ button.info-tree-tab-token.active:focus-visible {
   gap: 10px;
 }
 .share-entry-heading strong {
-  min-width: 0;
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .share-entry-heading span {
   flex: 0 0 auto;
@@ -10431,10 +10157,6 @@ button.info-tree-tab-token.active:focus-visible {
   min-width: 0;
 }
 .share-url-primary-head > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
   font-size: var(--ui-font-size-xs);
   font-weight: 900;
@@ -10541,12 +10263,6 @@ button.info-tree-tab-token.active:focus-visible {
   font-weight: 900;
   background: transparent;
 }
-.share-users-row span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .share-users-empty {
   padding: 7px 0 0;
   border-top: 1px solid var(--line);
@@ -10594,7 +10310,7 @@ button.info-tree-tab-token.active:focus-visible {
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 body.theme-light .modal.share-open .modal-dialog {
-  background: #ffffff;
+  background: var(--paint-white);
   box-shadow: 0 18px 46px rgb(var(--shadow-rgb) / 0.24);
 }
 body.app-vw-lte-760 .share-create-controls {
@@ -10685,7 +10401,7 @@ body.app-vw-lte-760 .share-result-meta {
   text-decoration: underline;
 }
 body.theme-light .modal.about-open .modal-dialog {
-  background: #ffffff;
+  background: var(--paint-white);
 }
 body.app-vw-lte-1500 .topbar {
   gap: 6px;
@@ -10826,9 +10542,9 @@ body.app-vw-lte-980 .tabs {
 .file-explorer-path:focus,
 .file-explorer-path-inline:focus {
   color: var(--text);
-  background: rgba(10, 14, 20, 0.98);
+  background: var(--paint-deep-ink-98);
   border-color: var(--active-control-border);
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 .file-explorer-path.invalid,
 .file-explorer-path-inline.invalid {
@@ -10883,7 +10599,7 @@ body.app-vw-lte-980 .tabs {
 .file-explorer-panel-close:focus-visible,
 .file-editor-panel-close:hover,
 .file-editor-panel-close:focus-visible {
-  color: #ffffff;
+  color: var(--paint-white);
   background: var(--panel-close-hover-bg);
 }
 .file-explorer-close::before,
@@ -10955,16 +10671,6 @@ body.app-vw-lte-980 .tabs {
   background: transparent;
   box-shadow: none;
 }
-.file-tree-row.selected {
-  color: var(--file-selection-text);
-  background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
-}
-.file-tree-row.current-file:not(.selected) {
-  color: var(--file-selection-text);
-  background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
-}
 .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
   background: var(--active-control-soft-bg);
@@ -11026,6 +10732,8 @@ body.app-vw-lte-980 .tabs {
 .file-tree-row.selected,
 .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.selected .file-tree-name,
 .file-tree-row.current-file:not(.selected) .file-tree-name {
@@ -11077,7 +10785,7 @@ body.app-vw-lte-980 .tabs {
   max-width: 360px;
   padding: 6px 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel2);
   box-shadow: 0 6px 20px rgb(var(--shadow-rgb) / 0.35);
   font-size: var(--ui-font-size-2xs);
@@ -11113,7 +10821,7 @@ body.app-vw-lte-980 .tabs {
   text-align: center;
   font-size: var(--file-tree-icon-font-size);
   line-height: 1;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .file-tree-icon.ui-disclosure-triangle {
   inline-size: var(--file-tree-icon-size);
@@ -11192,8 +10900,7 @@ body.app-vw-lte-980 .tabs {
   inset: 2px;
   border: 1px solid currentColor;
   border-top-color: transparent;
-  border-radius: 999px;
-  animation: metadata-refresh-spin 0.7s linear infinite;
+  border-radius: var(--radius-pill);
   opacity: 0.9;
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
@@ -11235,27 +10942,13 @@ body.app-vw-lte-980 .tabs {
    ring (the --file-selection-* fill/border tokens are already theme-aware).
    ============================================================================ */
 body.theme-light .server-update-banner {
-  background: #ffffff;
+  background: var(--paint-white);
   color: var(--pc-control-fg);
   border-color: #d68c1e;
   box-shadow: 0 6px 20px rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .server-update-banner-dismiss {
-  color: #586072;
-}
-body.theme-light .server-update-banner-reload {
-  border-color: var(--danger-strong-hover);
-  background: var(--danger-strong);
-  color: #ffffff;
-}
-body.theme-light .server-update-banner-reload:hover,
-body.theme-light .server-update-banner-reload:focus-visible {
-  border-color: var(--danger-strong-border);
-  background: var(--danger-strong-hover);
-  color: #ffffff;
-}
-body.theme-light .file-tree-row.selected {
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
+  color: var(--lt-muted);
 }
 body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #b06a00;
@@ -11301,12 +10994,6 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   font-weight: 800;
   line-height: 1;
 }
-.file-tree-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
 .file-tree-row:has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
 .file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
 .file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
@@ -11336,7 +11023,7 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   min-width: var(--file-tree-row-control-size);
   height: var(--file-tree-row-control-size);
   padding: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: #061207;
   font-family: var(--mono-font);
   font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
@@ -11405,40 +11092,18 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
 }
-body.theme-light .file-explorer,
-body.theme-light .file-explorer-tree-col {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--line);
-}
-body.theme-light .file-explorer-head {
-  color: var(--text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border-color: var(--line);
-}
 body.theme-light .file-explorer-path,
 body.theme-light .file-explorer-path-inline {
-  color: var(--text);
   background: rgba(255, 255, 255, 0.58);
   border-color: rgba(37, 99, 235, 0.18);
 }
 body.theme-light .file-explorer-path:focus,
 body.theme-light .file-explorer-path-inline:focus {
-  color: var(--text);
-  background: #ffffff;
+  background: var(--paint-white);
 }
 body.theme-light .file-explorer-path.invalid,
 body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
-}
-body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: var(--file-selection-text);
-  background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
-}
-body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: var(--text);
-  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.new-entry:not(.selected) {
   color: #4f3600;
@@ -11448,7 +11113,7 @@ body.theme-light .file-tree-row.git-modified:not(.selected) .file-tree-name {
   color: #8a5a00;
 }
 body.theme-light .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: #166534;
+  color: var(--success-text-strong);
 }
 body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
   color: var(--danger-strong-hover);
@@ -11460,13 +11125,6 @@ body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
   border-color: rgb(var(--overlay-slate-rgb) / 0.12);
   background: rgb(var(--overlay-slate-rgb) / 0.06) !important;
   color: rgb(var(--overlay-slate-rgb) / 0.36);
-}
-body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
-  color: var(--disclosure-triangle-collapsed-color);
-}
-body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
-body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
-  color: var(--disclosure-triangle-expanded-color);
 }
 body.theme-light .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   color: var(--good);
@@ -11544,41 +11202,10 @@ body.theme-light .file-tree-children::before {
   border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
-.file-explorer-sort-select:hover,
-.file-explorer-sort-select:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
-}
-.file-explorer-hidden-toggle:hover,
-.file-explorer-hidden-toggle:focus-visible,
-.file-explorer-root-mode-toggle:hover,
-.file-explorer-root-mode-toggle:focus-visible,
-.file-explorer-header-action:hover,
-.file-explorer-header-action:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
-}
-.file-explorer-hidden-toggle.active,
-.file-explorer-root-mode-toggle.active,
-.file-explorer-quick-access-button.active,
-.file-explorer-date-toggle.active {
-  color: var(--active-control-text);
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-}
 .file-explorer-date-toggle[data-date-mode="none"] {
   text-decoration-line: line-through;
   text-decoration-thickness: 2px;
   text-decoration-color: currentColor;
-}
-.file-explorer-quick-access,
-.file-explorer-quick-access-panel {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  min-width: 0;
-  flex: 0 0 auto;
-  overflow: visible;
 }
 .file-explorer-quick-access-button {
   display: inline-flex;
@@ -11668,11 +11295,6 @@ body.theme-light .file-tree-children::before {
   font: var(--ui-font-size-sm) var(--mono-font);
   box-shadow: 0 1px 0 var(--active-accent-text);
 }
-.terminal-drop-suggestion-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .file-editor-path {
   flex: 1 1 min(42vw, 72ch);
   min-width: min(22ch, 28vw);
@@ -11728,10 +11350,10 @@ body.theme-light .file-tree-children::before {
 .file-editor-image-panel {
   background-color: var(--image-preview-checker-bg);
   background-image:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%);
+    linear-gradient(45deg, var(--paint-white-10) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--paint-white-10) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--paint-white-10) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--paint-white-10) 75%);
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   background-size: 24px 24px;
 }
@@ -11766,7 +11388,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-preview-image {
   max-height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 0.5px var(--paint-white-85)) drop-shadow(0 10px 24px var(--paint-black-45));
 }
 .file-editor-preview-fallback,
 .markdown-image-error,
@@ -11840,19 +11462,10 @@ body.editor-theme-light .file-editor-image-panel {
   min-width: 28px;
   padding: 0 6px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-zoom-toolbar button[aria-pressed="true"] {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
-.file-editor-preview-zoom-toolbar button:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-preview-zoom-value {
   min-width: 4ch;
@@ -12110,7 +11723,7 @@ body.editor-theme-light .file-editor-image-panel {
   position: absolute;
   top: 0;
   right: 0;
-  font: 800 10px/1 var(--mono-font);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   color: currentColor;
 }
 .file-editor-icon-theme::before {
@@ -12175,7 +11788,7 @@ body.editor-theme-light .file-editor-image-panel {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
   color: var(--text);
 }
 .file-editor-dialog-title {
@@ -12201,7 +11814,7 @@ body.editor-theme-light .file-editor-image-panel {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--mono-font);
-  font-size: 12px;
+  font-size: var(--ui-font-size-sm);
   line-height: 1.45;
 }
 .file-editor-dialog-actions {
@@ -12225,11 +11838,11 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-action:focus-visible {
   border-color: var(--active-control-border);
   outline: 0;
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
 }
 .file-editor-dialog-action.danger {
   border-color: #9b2d33;
-  color: #ffd8dc;
+  color: var(--danger-text-soft);
 }
 .file-editor-conflict-compare {
   display: grid;
@@ -12284,7 +11897,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   color: var(--muted);
 }
 .file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::before {
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::after {
   content: "V";
@@ -12321,15 +11934,11 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   color: var(--code-number);
   background: transparent;
   border-color: #c69a15;
-  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
+  box-shadow: inset 0 0 0 1px var(--paint-gold-20);
 }
 .file-editor-wrap.active,
 .file-editor-gutter.active {
   background: rgba(159, 216, 255, 0.10);
-}
-.file-editor-find:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-codemirror {
   position: absolute;
@@ -12348,7 +11957,7 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
 /* Light editor: the image backdrop + the transparency checkerboard are tuned dark
    (white-on-dark checker). Repaint as a light backdrop with a dark checker. */
 body.editor-theme-light .file-editor-image {
-  background: #eef1f5;
+  background: var(--neutral-surface-subtle-light);
 }
 .file-editor-status {
   padding: 3px 10px;
@@ -12379,7 +11988,7 @@ body.editor-theme-light .file-editor-image {
   color: var(--auto-text);
   background: var(--brand-green);
   border: 1px solid #a8e95a;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
   font-weight: 850;
   line-height: 1.1;
@@ -12404,7 +12013,7 @@ body.editor-theme-light .file-editor-image {
   flex: 0 0 auto;
   height: 20px;
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .file-editor-mode-control[hidden] {
@@ -12428,8 +12037,7 @@ body.editor-theme-light .file-editor-image {
 .file-editor-mode-control button:last-child {
   border-inline-end: 0;
 }
-.file-editor-mode-control button:hover,
-.file-editor-mode-control button.active {
+.file-editor-mode-control button:hover {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
 }
@@ -12468,11 +12076,16 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
 .markdown-body em {
   color: var(--markdown-emphasis, var(--text));
 }
-.markdown-body code {
+.markdown-body code,
+.file-editor-raw-panel .md-code,
+.file-editor-code-preview .md-code,
+.cm-content .md-code {
   color: var(--code-inline);
   background: var(--code-inline-bg);
   border: 1px solid var(--code-inline-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
+}
+.markdown-body code {
   padding: 1px 4px;
   font-family: var(--mono-font);
   font-size: 0.9em;
@@ -12501,155 +12114,112 @@ body.theme-light .summary-preview pre {
   overflow: visible;
   padding: 0;
 }
-.markdown-body pre code .hljs-comment,
-.markdown-body pre code .hljs-quote {
-  color: var(--code-comment) !important;
-}
 .markdown-body pre code .hljs-keyword,
 .markdown-body pre code .hljs-selector-tag,
 .markdown-body pre code .hljs-literal,
 .markdown-body pre code .hljs-section,
-.markdown-body pre code .hljs-doctag {
+.markdown-body pre code .hljs-doctag,
+.markdown-body pre code .code-keyword,
+.cm-content .code-keyword,
+.cm-content .code-keyword * {
   color: var(--code-keyword) !important;
+}
+.markdown-body pre code .code-control,
+.cm-content .code-control,
+.cm-content .code-control * {
+  color: var(--code-control) !important;
 }
 .markdown-body pre code .hljs-string,
 .markdown-body pre code .hljs-regexp,
 .markdown-body pre code .hljs-addition,
-.markdown-body pre code .hljs-template-variable {
-  color: var(--code-string) !important;
-}
-.markdown-body pre code .hljs-number,
-.markdown-body pre code .hljs-symbol,
-.markdown-body pre code .hljs-bullet,
-.markdown-body pre code .hljs-attr {
-  color: var(--code-number) !important;
-}
-.markdown-body pre code .hljs-title,
-.markdown-body pre code .hljs-title.function_,
-.markdown-body pre code .hljs-function .hljs-title {
-  color: var(--code-function) !important;
-}
-.markdown-body pre code .hljs-built_in,
-.markdown-body pre code .hljs-type,
-.markdown-body pre code .hljs-class .hljs-title {
-  color: var(--code-type) !important;
-}
-.markdown-body pre code .hljs-variable,
-.markdown-body pre code .hljs-params,
-.markdown-body pre code .hljs-name {
-  color: var(--code-variable) !important;
-}
-.markdown-body pre code .hljs-property,
-.markdown-body pre code .hljs-attribute {
-  color: var(--code-property) !important;
-}
-.markdown-body pre code .hljs-tag {
-  color: var(--code-tag) !important;
-}
-.markdown-body pre code .hljs-deletion {
-  color: var(--code-invalid) !important;
-}
-.markdown-body pre code .hljs-meta {
-  color: var(--code-atom) !important;
-}
-.markdown-body pre code .code-keyword {
-  color: var(--code-keyword) !important;
-}
-.markdown-body pre code .code-control {
-  color: var(--code-control) !important;
-}
-.markdown-body pre code .code-string {
-  color: var(--code-string) !important;
-}
-.markdown-body pre code .code-comment {
-  color: var(--code-comment) !important;
-}
-.markdown-body pre code .code-number {
-  color: var(--code-number) !important;
-}
-.markdown-body pre code .code-constant {
-  color: var(--code-atom) !important;
-}
-.markdown-body pre code .code-builtin,
-.markdown-body pre code .code-function {
-  color: var(--code-function) !important;
-  font-weight: 700;
-}
-.markdown-body pre code .code-type,
-.markdown-body pre code .code-attr {
-  color: var(--code-type) !important;
-}
-.markdown-body pre code .code-variable {
-  color: var(--code-variable) !important;
-}
-.markdown-body pre code .code-property {
-  color: var(--code-property) !important;
-}
-.markdown-body pre code .code-tag {
-  color: var(--code-tag) !important;
-}
-.markdown-body pre code .code-invalid {
-  color: var(--code-invalid) !important;
-}
-.cm-content .code-keyword,
-.cm-content .code-keyword * {
-  color: var(--code-keyword) !important;
-  font-weight: 700;
-}
-.cm-content .code-control,
-.cm-content .code-control * {
-  color: var(--code-control) !important;
-  font-weight: 700;
-}
+.markdown-body pre code .hljs-template-variable,
+.markdown-body pre code .code-string,
 .cm-content .code-string,
 .cm-content .code-string * {
   color: var(--code-string) !important;
 }
+.markdown-body pre code .hljs-comment,
+.markdown-body pre code .hljs-quote,
+.markdown-body pre code .code-comment,
 .cm-content .code-comment,
 .cm-content .code-comment * {
   color: var(--code-comment) !important;
 }
+.markdown-body pre code .hljs-number,
+.markdown-body pre code .hljs-symbol,
+.markdown-body pre code .hljs-bullet,
+.markdown-body pre code .hljs-attr,
+.markdown-body pre code .code-number,
 .cm-content .code-number,
 .cm-content .code-number * {
   color: var(--code-number) !important;
 }
+.markdown-body pre code .hljs-meta,
+.markdown-body pre code .code-constant,
 .cm-content .code-constant,
 .cm-content .code-constant * {
   color: var(--code-atom) !important;
 }
+.markdown-body pre code .hljs-title,
+.markdown-body pre code .hljs-title.function_,
+.markdown-body pre code .hljs-function .hljs-title,
+.markdown-body pre code .code-builtin,
+.markdown-body pre code .code-function,
 .cm-content .code-builtin,
 .cm-content .code-builtin *,
 .cm-content .code-function,
 .cm-content .code-function * {
   color: var(--code-function) !important;
-  font-weight: 700;
 }
+.markdown-body pre code .hljs-built_in,
+.markdown-body pre code .hljs-type,
+.markdown-body pre code .hljs-class .hljs-title,
+.markdown-body pre code .code-type,
+.markdown-body pre code .code-attr,
 .cm-content .code-type,
 .cm-content .code-type *,
 .cm-content .code-attr,
 .cm-content .code-attr * {
   color: var(--code-type) !important;
 }
+.markdown-body pre code .hljs-variable,
+.markdown-body pre code .hljs-params,
+.markdown-body pre code .hljs-name,
+.markdown-body pre code .code-variable,
 .cm-content .code-variable,
 .cm-content .code-variable * {
   color: var(--code-variable) !important;
 }
+.markdown-body pre code .hljs-property,
+.markdown-body pre code .hljs-attribute,
+.markdown-body pre code .code-property,
 .cm-content .code-property,
 .cm-content .code-property * {
   color: var(--code-property) !important;
 }
+.markdown-body pre code .hljs-tag,
+.markdown-body pre code .code-tag,
 .cm-content .code-tag,
 .cm-content .code-tag * {
   color: var(--code-tag) !important;
 }
+.markdown-body pre code .hljs-deletion,
+.markdown-body pre code .code-invalid,
 .cm-content .code-invalid,
 .cm-content .code-invalid * {
   color: var(--code-invalid) !important;
 }
-body.editor-theme-light .file-editor-content .markdown-body code {
-  color: var(--lt-code-inline);
-  background: var(--lt-code-inline-bg);
-  border-color: var(--lt-code-inline-border);
+.markdown-body pre code .code-builtin,
+.markdown-body pre code .code-function,
+.cm-content .code-keyword,
+.cm-content .code-keyword *,
+.cm-content .code-control,
+.cm-content .code-control *,
+.cm-content .code-builtin,
+.cm-content .code-builtin *,
+.cm-content .code-function,
+.cm-content .code-function * {
+  font-weight: 700;
 }
 body.editor-theme-light .file-editor-content .markdown-body pre code {
   color: inherit;
@@ -12702,11 +12272,6 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
 .markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: 2px; }
 .markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
-.markdown-body blockquote.markdown-alert code {
-  color: var(--markdown-html-light-code);
-  background: var(--markdown-html-light-code-bg);
-  border-color: var(--markdown-html-light-code-border);
-}
 .markdown-body blockquote.markdown-alert-caution {
   background: var(--markdown-alert-caution-light-bg);
 }
@@ -12727,11 +12292,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.mar
   background: var(--markdown-alert-caution-dark-bg);
 }
 body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
-body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) code {
-  color: var(--markdown-html-dark-code);
-  background: var(--markdown-html-dark-code-bg);
-  border-color: var(--markdown-html-dark-code-border);
-}
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
@@ -12762,14 +12322,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(
 .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-light-text);
 }
-.markdown-body .markdown-html-light-bg code,
-.markdown-body table.markdown-html-light-bg code,
-.markdown-body table[bgcolor] code,
-.markdown-body :is(th, td)[bgcolor] code {
-  color: var(--markdown-html-light-code);
-  background: var(--markdown-html-light-code-bg);
-  border-color: var(--markdown-html-light-code-border);
-}
 body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg,
 body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg :is(th, td),
 body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor],
@@ -12792,18 +12344,10 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor]
 body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-dark-text);
 }
-body:not(.editor-theme-light) .file-editor-content .markdown-body .markdown-html-light-bg code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body table.markdown-html-light-bg code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor] code,
-body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] code {
-  color: var(--markdown-html-dark-code);
-  background: var(--markdown-html-dark-code-bg);
-  border-color: var(--markdown-html-dark-code-border);
-}
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
-  background: #ffffff;
+  background: var(--paint-white);
   color: var(--markdown-html-light-text);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
@@ -12819,28 +12363,35 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane-panel.vanilla-preview-body h3,
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
-.file-editor-preview-pane-panel.vanilla-preview-body h6 {
+.file-editor-preview-pane-panel.vanilla-preview-body h6,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
   color: var(--markdown-html-light-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
-.file-editor-preview-pane-panel.vanilla-preview-body a {
-  color: #0645ad;
+.file-editor-preview-pane-panel.vanilla-preview-body a,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
+  color: var(--vanilla-preview-link);
 }
 .file-editor-preview-pane.vanilla-preview-body strong,
 .file-editor-preview-pane.vanilla-preview-body em,
 .file-editor-preview-pane-panel.vanilla-preview-body strong,
-.file-editor-preview-pane-panel.vanilla-preview-body em {
+.file-editor-preview-pane-panel.vanilla-preview-body em,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
   color: inherit;
 }
 .file-editor-preview-pane.vanilla-preview-body code,
-.file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
+.file-editor-preview-pane-panel.vanilla-preview-body code,
 .file-editor-preview-pane.vanilla-preview-body pre,
-.file-editor-preview-pane-panel.vanilla-preview-body pre {
+.file-editor-preview-pane-panel.vanilla-preview-body pre,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
@@ -12848,7 +12399,9 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane.vanilla-preview-body pre code,
 .file-editor-preview-pane-panel.vanilla-preview-body pre code,
 .file-editor-preview-pane.vanilla-preview-body pre code *,
-.file-editor-preview-pane-panel.vanilla-preview-body pre code * {
+.file-editor-preview-pane-panel.vanilla-preview-body pre code *,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
   color: inherit !important;
   background: transparent !important;
   border-color: transparent;
@@ -12928,17 +12481,17 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   color: var(--text);
   font: inherit;
   line-height: 18px;
-  background: rgba(10, 14, 20, 0.98);
+  background: var(--paint-deep-ink-98);
   border: 1px solid var(--active-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   outline: 0;
-  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow);
 }
 /* Light mode: the rename box hardcodes a near-black fill while its text
    uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
 body.theme-light .file-tree-rename-input {
   color: var(--pc-control-fg);
-  background: #ffffff;
+  background: var(--paint-white);
 }
 .file-explorer-toolbar {
   display: flex;
@@ -13120,7 +12673,7 @@ body.resizing-file-explorer-changes {
   top: calc(50% - (var(--pane-resizer-line-size) / 2));
   height: var(--pane-resizer-line-size);
   background: var(--pane-resizer-bg);
-  transition: background 90ms ease, box-shadow 90ms ease, height 90ms ease, top 90ms ease;
+  transition: background var(--motion-interaction-fast) ease, box-shadow var(--motion-interaction-fast) ease, height var(--motion-interaction-fast) ease, top var(--motion-interaction-fast) ease;
 }
 .file-explorer-changes-resizer:hover::before,
 .file-explorer-changes-resizer:focus-visible::before,
@@ -13128,7 +12681,7 @@ body.resizing-file-explorer-changes {
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   height: var(--pane-resizer-hover-line-size);
   background: var(--pane-resizer-hover-bg);
-  box-shadow: 0 0 0 1px var(--drop-outline-shadow);
+  box-shadow: var(--pane-resizer-hover-shadow);
 }
 .file-explorer-changes-panel {
   --changes-row-hover-bg: var(--active-control-soft-bg);
@@ -13160,6 +12713,8 @@ body.resizing-file-explorer-changes {
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
   color: var(--text);
+}
+body.theme-light .file-explorer-tree-panel {
   background: var(--panel);
 }
 body.theme-light .file-explorer-changes-panel {
@@ -13186,11 +12741,6 @@ body.theme-light .file-explorer-changes-panel {
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
-}
-body.theme-light .file-explorer-changes-head {
-  color: var(--text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border-color: var(--line);
 }
 .file-explorer-changes-head .changes-title {
   min-width: 0;
@@ -13221,12 +12771,6 @@ body.theme-light .file-explorer-changes-head {
   border-radius: 0;
   background: transparent;
   font-size: var(--ui-font-size-xs);
-}
-/* Win over `body.theme-light .changes-comparison-head` (higher specificity) so the caption stays
-   chrome-free in light mode too, not re-boxed with a panel background + border. */
-body.theme-light .file-explorer-changes-panel .changes-comparison-head {
-  background: transparent;
-  border-color: transparent;
 }
 .file-explorer-changes-panel .changes-comparison-title {
   font-weight: 600;
@@ -13303,23 +12847,24 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 .file-explorer-changes-panel .changes-refresh:focus-visible,
 .file-explorer-date-reload-cluster .changes-refresh:hover,
 .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
-}
-body.theme-light .file-explorer-changes-panel .changes-refresh,
-body.theme-light .file-explorer-date-reload-cluster .changes-refresh {
-  background: transparent;
-  color: var(--muted);
-  border-color: var(--line);
 }
 body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
 body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
+}
+body :is(
+  .file-explorer-sort-select,
+  .file-explorer-hidden-toggle,
+  .file-explorer-root-mode-toggle,
+  .file-explorer-header-action,
+  .file-explorer-changes-panel .changes-refresh,
+  .file-explorer-date-reload-cluster .changes-refresh
+):is(:hover, :focus-visible) {
   color: var(--text);
   border-color: var(--text);
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .file-explorer-changes-head .changes-date-toggle,
 .file-explorer-date-reload-cluster .changes-date-toggle {
@@ -13467,52 +13012,6 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   stroke-width: 1.35;
   stroke-linecap: round;
   stroke-linejoin: round;
-  pointer-events: none;
-}
-.file-explorer-mode-switcher {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 1px;
-  flex: 0 0 auto;
-  min-width: 0;
-  height: var(--pane-tab-height);
-}
-.file-explorer-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  flex: 0 0 auto;
-  height: var(--pane-tab-height);
-  min-width: 0;
-  padding: 0 3px;
-  box-sizing: border-box;
-  color: var(--pane-tab-text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: transparent;
-  border-radius: 6px 6px 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size-2xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.file-explorer-mode-toggle:hover,
-.file-explorer-mode-toggle:focus-visible {
-  color: var(--pane-tab-active-text);
-  border-color: var(--pane-tab-active-border);
-  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
-}
-.file-explorer-mode-toggle[aria-pressed="true"] {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
-}
-.file-explorer-mode-label {
   pointer-events: none;
 }
 .file-tree-row.file-tree-row--sync-expanded > .file-tree-name,
@@ -13672,21 +13171,16 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   pointer-events: none;
 }
 body.editor-theme-light .file-editor-diff-codemirror {
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
   --diff-add-line-bg: #bfeac8;
   --diff-remove-line-bg: #f3b7b7;
   --diff-search-match-bg: #ffcc00;
   --diff-search-match-fg: var(--lt-text);
   --diff-search-match-ring: #7c2d12;
-  --diff-search-selected-bg: #ff9f1c;
-  --diff-search-selected-ring: #7c2d12;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
-  color: #3b0a0a;
-}
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine *,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk *,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine * {
@@ -13702,13 +13196,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   color: var(--success-text-strong);
   background: #b9e7c2;
   text-decoration-color: var(--success-text-strong);
-}
-/* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
-   scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
-   inline editor used the dark mix in editor-light. Re-map at the content scope. */
-body.editor-theme-light .file-editor-content {
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
@@ -13735,11 +13222,6 @@ body.editor-theme-light .file-editor-content {
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
-}
-.file-editor-title-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .file-editor-panel-actions {
   position: relative;
@@ -13887,14 +13369,10 @@ body.editor-theme-light .file-editor-content {
   min-width: 24px;
   padding: 0 4px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-font-panel button:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-preview-font-value {
   min-width: 2.2ch;
@@ -13916,7 +13394,7 @@ body.editor-theme-light .file-editor-content {
   flex: 0 0 auto;
   padding: 0 3px;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font-size: var(--ui-font-size-xs);
@@ -13969,14 +13447,8 @@ body.editor-theme-light .file-editor-content {
   justify-content: center;
   line-height: 1;
 }
-/* blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
-   is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
-   (theme-aware, the same gray common in Popular IDEs), never selectable/copied as code. */
-.file-editor-blame-panel[aria-pressed="true"] {
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
-}
+/* The blame toggle uses the shared pressed-control owner below. Its inline annotation is a dim
+   ::after on the cursor's current line, colored by the editor scheme's comment token. */
 .cm-line[data-blame]::after {
   content: " " attr(data-blame);
   color: var(--code-comment);
@@ -13986,12 +13458,6 @@ body.editor-theme-light .file-editor-content {
   white-space: pre;
   user-select: none;
   pointer-events: none;
-}
-/* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
-.file-editor-diff-expand-panel[aria-pressed="true"] {
-  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
-  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
-  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -14007,11 +13473,20 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-popout-preview-panel:hover,
 .file-editor-theme-panel:hover,
-.file-editor-reload-panel:hover {
+.file-editor-reload-panel:hover,
+.file-editor-preview-find-panel button:not(:disabled):hover {
   color: var(--editor-toolbar-control-hover-fg);
   border-color: var(--editor-toolbar-control-hover-border);
   background: var(--editor-toolbar-control-hover-bg);
 }
+/* This final grouped state owner intentionally follows every component hover rule: pressed controls
+   stay pressed while hovered, and all pane/editor surfaces consume the same theme-aware paint. */
+.tabs .tab.active:not(.auto-toggle),
+.tabs .tab[aria-pressed="true"]:not(.auto-toggle),
+.attention-toast-agent-button,
+.file-editor-mode-control button.active,
+.file-editor-blame-panel[aria-pressed="true"],
+.file-editor-diff-expand-panel[aria-pressed="true"],
 .file-editor-mode-control-panel button.active,
 .file-editor-gutter-panel.active,
 .file-editor-gutter-panel[aria-pressed="true"],
@@ -14023,7 +13498,6 @@ body.editor-theme-light .file-editor-content {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
   border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
-  font-weight: 700;
 }
 .file-editor-theme-panel.theme-dark,
 .file-editor-theme-panel.theme-light,
@@ -14034,18 +13508,11 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel.theme-dark {
   box-shadow: inset 0 0 0 1px rgba(159, 216, 255, 0.14);
 }
-.file-editor-theme-panel.theme-light {
-  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
-}
 .file-editor-theme-panel.theme-vanilla {
   color: var(--lt-text);
   background: var(--lt-editor-bg);
   border-color: var(--lt-line);
   box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
-}
-.file-editor-find-panel:disabled {
-  opacity: 0.42;
-  cursor: default;
 }
 .file-editor-save-panel:not(:disabled):hover {
   background: var(--success-soft-bg);
@@ -14110,6 +13577,9 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-emphasis: var(--lt-markdown-emphasis);
 }
 body.editor-theme-light {
+  /* One light-editor owner feeds both merge and inline diff surfaces; local remaps previously drifted. */
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
   --drop-outline: var(--drop-outline-light);
   --drop-outline-text: #0f2d69;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -14127,40 +13597,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
-  background: #ffffff;
+  background: var(--paint-white);
   color: var(--markdown-html-light-text);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: var(--markdown-html-light-text);
-  background: transparent;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
-  color: #0645ad;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
-  color: inherit;
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
-  color: inherit !important;
-  background: transparent !important;
-  border-color: transparent;
 }
 body.editor-theme-light .file-editor-raw-panel .md-heading,
 body.editor-theme-light .file-editor-code-preview .md-heading {
@@ -14186,10 +13624,8 @@ body.editor-theme-light .file-editor-raw-panel .code-control,
 body.editor-theme-light .file-editor-code-preview .code-control {
   color: var(--lt-code-control);
 }
-body.editor-theme-light .file-editor-raw-panel .md-code,
 body.editor-theme-light .file-editor-raw-panel .md-codeblock,
 body.editor-theme-light .file-editor-raw-panel .md-fence,
-body.editor-theme-light .file-editor-code-preview .md-code,
 body.editor-theme-light .file-editor-code-preview .md-codeblock,
 body.editor-theme-light .file-editor-code-preview .md-fence,
 body.editor-theme-light .file-editor-raw-panel .code-string,
@@ -14255,7 +13691,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-panel {
   position: absolute;
-  z-index: calc(var(--z-file-editor-layer) + 1);
+  z-index: var(--z-file-editor-find-overlay);
   top: 8px;
   inset-inline-end: 10px;
   display: inline-flex;
@@ -14264,7 +13700,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   max-width: calc(100% - 20px);
   padding: 4px;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   box-shadow: 0 3px 12px rgb(0 0 0 / 0.24);
@@ -14274,7 +13710,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-find-overview {
   position: absolute;
-  z-index: calc(var(--z-file-editor-layer) + 1);
+  z-index: var(--z-file-editor-find-overlay);
   inset-block: 3px;
   inset-inline-end: 3px;
   width: 4px;
@@ -14299,7 +13735,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   width: clamp(12ch, 22vw, 28ch);
   min-width: 0;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 2px 5px;
   color: var(--text);
   background: var(--panel);
@@ -14316,15 +13752,10 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   height: 20px;
   padding: 0;
   border: 1px solid var(--editor-toolbar-control-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
   background: var(--editor-toolbar-control-bg);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.file-editor-preview-find-panel button:not(:disabled):hover {
-  color: var(--editor-toolbar-control-hover-fg);
-  border-color: var(--editor-toolbar-control-hover-border);
-  background: var(--editor-toolbar-control-hover-bg);
 }
 .file-editor-preview-find-panel button:disabled {
   opacity: 0.42;
@@ -14402,9 +13833,9 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   /* CodeMirror uses the shared pane scrollbar behavior. Only gutter geometry is local because the diff
      overview rail is positioned next to this native scrollbar. */
   --pane-scrollbar-size: 12px;
-  --pane-scrollbar-track: rgba(255, 255, 255, 0.10);
-  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.10);
-  --pane-scrollbar-corner: rgba(255, 255, 255, 0.04);
+  --pane-scrollbar-track: var(--paint-white-10);
+  --pane-scrollbar-track-active: var(--paint-white-10);
+  --pane-scrollbar-corner: var(--paint-white-04);
   --pane-scrollbar-border: 2px solid rgba(7, 10, 14, 0.95);
   --pane-scrollbar-radius: 6px;
 }
@@ -14454,7 +13885,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
   --pane-scrollbar-track: rgb(var(--overlay-slate-rgb) / 0.16);
   --pane-scrollbar-track-active: rgb(var(--overlay-slate-rgb) / 0.16);
   --pane-scrollbar-corner: rgb(var(--overlay-slate-rgb) / 0.10);
-  --pane-scrollbar-border: 2px solid rgba(255, 255, 255, 0.92);
+  --pane-scrollbar-border: 2px solid var(--paint-white-92);
 }
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {
@@ -14488,7 +13919,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
      like the others, so it INHERITS --pane-bar-bg rather than pinning a static --panel2. */
   background: var(--pane-bar-bg);
   border-color: var(--line);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: 0 1px 0 var(--paint-white-04);
 }
 .file-editor-codemirror .cm-search,
 .file-editor-codemirror-panel .cm-search {
@@ -14633,7 +14064,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search .cm-button:hover,
 .file-editor-codemirror-panel .cm-search .cm-button:hover {
-  color: #ffffff;
+  color: var(--paint-white);
   border-color: var(--accent-sky-strong);
   background: rgba(159, 216, 255, 0.12);
 }
@@ -14702,12 +14133,6 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   content: attr(data-search-label);
   font-size: var(--ui-font-size-3xs);
 }
-.file-editor-codemirror .cm-search label:has(input:checked),
-.file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: var(--active-control-text);
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-}
 .file-editor-codemirror .cm-search input[type="checkbox"],
 .file-editor-codemirror-panel .cm-search input[type="checkbox"] {
   position: absolute;
@@ -14742,35 +14167,28 @@ body.editor-theme-light .file-editor-codemirror .cm-search .cm-textfield,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-textfield {
   color: var(--lt-text);
   background: var(--lt-editor-bg);
-  border-color: #8c959f;
+  border-color: var(--editor-search-border-light);
   box-shadow: inset 0 0 0 1px rgba(9, 105, 218, 0.04);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button,
-body.editor-theme-light .file-editor-codemirror .cm-search label,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label {
+:where(body.editor-theme-light) .file-editor-codemirror .cm-search label,
+:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label {
   color: var(--lt-markdown-link);
   background: var(--lt-panel);
-  border-color: #8c959f;
+  border-color: var(--editor-search-border-light);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover,
-body.editor-theme-light .file-editor-codemirror .cm-search label:hover,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
+:where(body.editor-theme-light) .file-editor-codemirror .cm-search label:hover,
+:where(body.editor-theme-light) .file-editor-codemirror-panel .cm-search label:hover {
   color: var(--lt-code-atom);
   background: var(--lt-code-inline-bg);
   border-color: var(--lt-markdown-link);
 }
-body.editor-theme-light .file-editor-codemirror .cm-search label:has(input:checked),
-body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close {
   color: var(--lt-text);
-  background: transparent;
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close:hover,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
@@ -14881,13 +14299,10 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--markdown-emphasis);
   font-style: italic;
 }
-.file-editor-raw-panel .md-code,
 .file-editor-raw-panel .md-codeblock,
 .file-editor-raw-panel .md-fence,
-.file-editor-code-preview .md-code,
 .file-editor-code-preview .md-codeblock,
 .file-editor-code-preview .md-fence,
-.cm-content .md-code,
 .cm-content .md-codeblock,
 .cm-content .md-fence {
   color: var(--code-inline);
@@ -14900,18 +14315,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-raw-panel .md-code,
 .file-editor-code-preview .md-code,
 .cm-content .md-code {
-  color: var(--code-inline);
-  background: var(--code-inline-bg);
-  border: 1px solid var(--code-inline-border);
-  border-radius: 3px;
   padding: 0 2px;
-}
-body.editor-theme-light .file-editor-raw-panel .md-code,
-body.editor-theme-light .file-editor-code-preview .md-code,
-body.editor-theme-light .cm-content .md-code {
-  color: var(--lt-code-inline);
-  background: var(--lt-code-inline-bg);
-  border-color: var(--lt-code-inline-border);
 }
 .file-editor-raw-panel .md-html,
 .file-editor-code-preview .md-html,
@@ -15069,7 +14473,7 @@ body.editor-theme-light .cm-content .md-code {
   max-height: none;
   object-fit: contain;
   cursor: zoom-in;
-  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 0.5px var(--paint-white-85)) drop-shadow(0 10px 24px var(--paint-black-45));
 }
 .file-editor-image-panel[data-preview-zoom-mode="actual"] .file-editor-image,
 .file-editor-image-panel[data-preview-zoom-mode="manual"] .file-editor-image {
@@ -15140,11 +14544,6 @@ body.editor-theme-light .cm-content .md-code {
   flex-basis: min(160px, 100%);
   min-width: min(120px, 100%);
 }
-.pane-tab.file-editor-item .session-button-dir {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: none;
-}
 .pane-tab.file-editor-item {
   flex-basis: min(220px, 100%);
   min-width: min(120px, 100%);
@@ -15214,12 +14613,6 @@ body.editor-theme-light .cm-content .md-code {
 body.theme-light .file-tree-row.tabber-row {
   --tabber-level0-color: var(--text);
   --tabber-level1-color: var(--text);
-  --tabber-path-color: var(--text);
-  --tabber-detail-color: var(--muted);
-}
-.file-tree-row.tabber-row:not(.selected):hover {
-  background: var(--file-hover-bg);
-  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
 .file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
   display: inline-flex;
@@ -15238,7 +14631,7 @@ body.theme-light .file-tree-row.tabber-row {
   --agent-window-activity-block-size: var(--agent-window-icon-size);
 }
 .file-tree-row.tabber-row.selected .tabber-session-tab {
-  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: var(--active-control-focus-shadow-compact);
 }
 .file-tree-row.tabber-row .tabber-window-token {
   display: inline-flex;
@@ -15283,11 +14676,6 @@ body.theme-light .file-tree-row.tabber-row {
   margin: 0;
   padding: 0;
   vertical-align: middle;
-}
-.file-tree-row.tabber-row .tabber-window-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .file-tree-row.tabber-row[data-tabber-type="session"]:not(.selected) > .file-tree-icon:not(.ui-disclosure-triangle) {
   color: var(--tabber-level0-color);

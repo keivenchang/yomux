@@ -1486,27 +1486,13 @@ function infoRecordAgentPayload(record) {
 }
 
 function infoRecordAgentActivityItem(record) {
-  if (!infoRecordHasAi(record) || typeof agentWindowActivityIcon !== 'function') return null;
+  if (!infoRecordHasAi(record)) return null;
   const agent = infoRecordAgentPayload(record);
-  return agentWindowActivityIcon(record.aiKind, agent.state, typeof agentWindowIdleSeconds === 'function' ? agentWindowIdleSeconds(agent) : null, {
-    session: record.tabSession,
-    window: agent.window,
-    window_index: agent.window_index,
-    pane: agent.pane,
-    pane_target: agent.pane_target,
+  return agentWindowActivityIconForStatusItem(agent, record.aiKind, record.tabSession, {
     current: false,
     window_active: false,
-    working_stopped_ts: agent.working_stopped_ts,
     scheduleRefresh: false,
   });
-}
-
-function infoTabGroupStatusRank(state) {
-  const key = String(state || '');
-  if (key === 'attention') return 0;
-  if (key === 'cooldown') return 1;
-  if (key === STATE_KEY.working) return 2;
-  return 9;
 }
 
 function infoTabGroupStatusItem(group = {}) {
@@ -1518,8 +1504,9 @@ function infoTabGroupStatusRecord(group = {}) {
   let best = null;
   for (const record of Array.isArray(group.records) ? group.records : []) {
     const item = infoRecordAgentActivityItem(record);
-    if (!item || infoTabGroupStatusRank(item.state) >= 9) continue;
-    if (!best || infoTabGroupStatusRank(item.state) < infoTabGroupStatusRank(best.item.state)) best = {record, item};
+    const rank = agentWindowStatusItemVisualRank(item);
+    if (!item || rank >= 9) continue;
+    if (!best || rank < best.rank) best = {record, item, rank};
   }
   return best;
 }
@@ -1531,9 +1518,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
   const info = transcriptMeta.sessions?.[session] || {};
-  const summary = typeof sessionStatusAgentWindowSummaryForTab === 'function'
-    ? sessionStatusAgentWindowSummaryForTab(session, info, autoApproveStates.get(session))
-    : null;
+  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
@@ -2412,25 +2397,7 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     toggleAutoApprove(target.dataset.autoSession || session);
   });
-  panel.querySelector('.meta')?.addEventListener('click', event => {
-    event.stopPropagation();
-    const cycle = event.target.closest('[data-repo-cycle]');
-    if (cycle) {
-      event.preventDefault();
-      const targetSession = cycle.dataset.repoCycle || session;
-      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
-      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
-      renderSessionButtons();
-      renderPaneTabStrips();
-      return;
-    }
-    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
-    const chip = event.target.closest('[data-repo-chip]');
-    if (chip) {
-      event.preventDefault();
-      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
-    }
-  });
+  delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
 }
@@ -2943,12 +2910,46 @@ function acknowledgeTerminalAttentionFromTransportInput(session, data, options =
   return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
 }
 
-const terminalTmuxPrefixPendingBySession = new Map();
+const terminalTmuxInputStates = new Map();
 const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
 const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
 const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
-const terminalTmuxWindowRepeatBySession = new Map();
+
+function terminalTmuxInputState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalTmuxInputStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {prefixPending: false, repeatUntilMs: 0};
+    terminalTmuxInputStates.set(key, state);
+  }
+  return state;
+}
+
+function pruneTerminalTmuxInputState(session, now = Date.now()) {
+  const key = String(session || '');
+  const state = terminalTmuxInputState(key);
+  if (!state) return null;
+  if (Number(state.repeatUntilMs || 0) <= now) state.repeatUntilMs = 0;
+  if (state.prefixPending !== true && !state.repeatUntilMs) {
+    terminalTmuxInputStates.delete(key);
+    return null;
+  }
+  return state;
+}
+
+function updateTerminalTmuxInputState(session, updates = {}) {
+  const state = terminalTmuxInputState(session, {create: true});
+  if (!state) return null;
+  if (updates.prefixPending !== undefined) state.prefixPending = updates.prefixPending === true;
+  if (updates.repeatUntilMs !== undefined) state.repeatUntilMs = Math.max(0, Number(updates.repeatUntilMs) || 0);
+  return pruneTerminalTmuxInputState(session);
+}
+
+function pruneTerminalTmuxInputStates(now = Date.now()) {
+  for (const session of terminalTmuxInputStates.keys()) pruneTerminalTmuxInputState(session, now);
+}
 
 const terminalTmuxWindowShortcutDefs = Object.freeze({
   n: {labelKey: 'terminal.window.next', repeatable: true},
@@ -3178,8 +3179,7 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
-  if (shortcut.repeatable) terminalTmuxWindowRepeatBySession.set(session, Date.now() + terminalTmuxWindowRepeatMs);
-  else terminalTmuxWindowRepeatBySession.delete(session);
+  updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
@@ -3193,7 +3193,7 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
 function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   const text = String(data || '');
   if (!text) return false;
-  let pending = terminalTmuxPrefixPendingBySession.get(session) === true;
+  let pending = terminalTmuxInputState(session)?.prefixPending === true;
   let mirrored = false;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
@@ -3205,7 +3205,7 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
         continue;
       }
     }
-    const repeatUntil = Number(terminalTmuxWindowRepeatBySession.get(session) || 0);
+    const repeatUntil = Number(terminalTmuxInputState(session)?.repeatUntilMs || 0);
     const repeatActive = repeatUntil > Date.now();
     const repeatShortcut = repeatActive ? terminalTmuxPrefixWindowShortcut(char) : null;
     if (!pending && repeatShortcut && repeatShortcut.repeatable) {
@@ -3219,11 +3219,8 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
     }
     if (char === '\x02') pending = true;
   }
-  if (pending) terminalTmuxPrefixPendingBySession.set(session, true);
-  else terminalTmuxPrefixPendingBySession.delete(session);
-  for (const [key, expires] of terminalTmuxWindowRepeatBySession.entries()) {
-    if (Number(expires || 0) <= Date.now()) terminalTmuxWindowRepeatBySession.delete(key);
-  }
+  updateTerminalTmuxInputState(session, {prefixPending: pending});
+  pruneTerminalTmuxInputStates();
   return mirrored;
 }
 
@@ -3265,6 +3262,43 @@ function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
+function uploadResultRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = uploadResultRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {entries: [], cleanupTimer: null};
+    uploadResultRecords.set(key, record);
+  }
+  return record;
+}
+
+function clearUploadResultCleanup(session, record = uploadResultRecord(session)) {
+  if (!record || record.cleanupTimer === null) return false;
+  clearTimeout(record.cleanupTimer);
+  record.cleanupTimer = null;
+  return true;
+}
+
+function deleteUploadResultRecord(session) {
+  const key = String(session || '');
+  const record = uploadResultRecord(key);
+  if (!record) return false;
+  clearUploadResultCleanup(key, record);
+  return uploadResultRecords.delete(key);
+}
+
+function moveUploadResultRecord(oldSession, newSession) {
+  const oldKey = String(oldSession || '');
+  const newKey = String(newSession || '');
+  const record = uploadResultRecord(oldKey);
+  if (!record || !newKey || oldKey === newKey) return false;
+  clearUploadResultCleanup(oldKey, record);
+  if (!uploadResultRecords.has(newKey)) uploadResultRecords.set(newKey, record);
+  uploadResultRecords.delete(oldKey);
+  return true;
+}
+
 function showUploadResult(session, payload, inserted) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return null;
@@ -3291,9 +3325,9 @@ function showUploadResult(session, payload, inserted) {
       path: target,
       expiresAt,
     }];
-  const existing = uploadResultsBySession.get(session) || [];
-  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session, {create: true});
+  const active = [...record.entries.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
+  record.entries = active;
   renderUploadResult(session);
   return {expiresAt};
 }
@@ -3309,40 +3343,42 @@ function ensureUploadResultShell(session, node) {
 }
 
 function keepUploadResult(session) {
-  const entries = uploadResultsBySession.get(session) || [];
-  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
-  uploadResultsBySession.set(session, entries);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  const record = uploadResultRecord(session);
+  if (!record) return;
+  for (const entry of record.entries) entry.expiresAt = Number.POSITIVE_INFINITY;
+  clearUploadResultCleanup(session, record);
 }
 
-function scheduleUploadResultCleanup(session, active, now) {
-  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
-  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
-  uploadCleanupTimers.set(session, window.setTimeout(() => {
-    uploadCleanupTimers.delete(session);
+function scheduleUploadResultCleanup(session, record, now) {
+  clearUploadResultCleanup(session, record);
+  const delays = record.entries
+    .map(entry => entry.expiresAt - now)
+    .filter(Number.isFinite);
+  if (!delays.length) return;
+  const delay = Math.max(1, Math.min(...delays));
+  const timer = window.setTimeout(() => {
+    const current = uploadResultRecord(session);
+    if (current !== record || record.cleanupTimer !== timer) return;
+    record.cleanupTimer = null;
     renderUploadResult(session);
-  }, delay));
+  }, delay);
+  record.cleanupTimer = timer;
 }
 
 function renderUploadResult(session) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return;
   const now = Date.now();
-  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session);
+  const active = (record?.entries || []).filter(entry => entry.expiresAt > now).slice(-8);
+  if (record) record.entries = active;
   if (!active.length) {
     node.hidden = true;
     const titleNode = node.querySelector('.toast-title');
     if (titleNode) titleNode.textContent = '';
     const textNode = node.querySelector('.toast-body');
     if (textNode) textNode.replaceChildren();
-    if (uploadCleanupTimers.has(session)) {
-      clearTimeout(uploadCleanupTimers.get(session));
-      uploadCleanupTimers.delete(session);
-    }
+    deleteUploadResultRecord(session);
     return;
   }
   const textNode = ensureUploadResultShell(session, node);
@@ -3354,15 +3390,11 @@ function renderUploadResult(session) {
     text: entry.text,
     countdownMs: entry.expiresAt - now,
   })));
-  scheduleUploadResultCleanup(session, active, now);
+  scheduleUploadResultCleanup(session, record, now);
 }
 
 function hideUploadResult(session) {
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  deleteUploadResultRecord(session);
   const node = document.getElementById(`upload-${session}`);
   if (node) {
     const titleNode = node.querySelector('.toast-title');
@@ -5188,7 +5220,7 @@ function maybeNotifyYoagentJob(notification = {}) {
 function tmuxSignalsPayloadWithWindowOverrides(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.windows)) return data;
   const overrides = new Map();
-  for (const [session, override] of tmuxWindowActiveIndexOverrides.entries()) {
+  for (const [session, override] of tmuxWindowActiveIndexOverrideEntries()) {
     if (override === tmuxWindowPendingActiveIndex) continue;
     const indexKey = tmuxWindowIndexKey(override);
     if (indexKey !== null) overrides.set(String(session), indexKey);

@@ -177,10 +177,7 @@ let shareGeometryResyncInFlight = false;
 let shareGeometryResyncLastStartedAt = 0;
 let shareGeometryRepairInFlight = false;
 const shareAppliedTextWrapMetricsByKey = new Map();
-let sharePointerGhost = null;
-let sharePointerGhosts = new Map();
-let sharePointerHideTimer = null;
-let sharePointerHideTimers = new Map();
+const sharePointerRecords = new Map();
 let applyingShareRemoteScroll = false;
 let applyingShareRemoteUiState = 0;
 let sharePopupLayerNode = null;
@@ -539,9 +536,6 @@ for (const renderer of PREVIEW_RENDERERS) {
     }
   }
 }
-const IMAGE_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'image')?.extensions || []);
-const PDF_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'pdf')?.extensions || []);
-const MERMAID_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'mermaid')?.extensions || []);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
@@ -762,14 +756,12 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
-const promptAttentionClears = new Map();
-const attentionAcknowledgementTimers = new Map();
-const attentionAcknowledgementPendingKeys = new Set();
+const attentionAcknowledgementRecords = new Map();
+const attentionAcknowledgementRecordLimit = 1024;
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
-const uploadResultsBySession = new Map();
-const uploadCleanupTimers = new Map();
+const uploadResultRecords = new Map();
 let uploadResultSequence = 0;
 const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
@@ -1394,11 +1386,9 @@ let runHistoryError = null;
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
-const sessionStateKeys = new Map();
-const notificationLastSent = new Map();
-const workingAgentNotificationTones = new Map();
-const attentionAlertTimers = new Map();
-const metadataBadgePulseUntil = new Map();
+const sessionStatusRecords = new Map();
+const watchedPrNotificationLastSent = new Map();
+const toastRecords = new Map();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
@@ -1410,6 +1400,32 @@ function setLimitedMapEntry(map, key, value, limit) {
     if (oldest === undefined) break;
     map.delete(oldest);
   }
+}
+
+function sessionStatusRecord(session, create = false) {
+  const key = String(session || '').trim();
+  if (!key) return null;
+  let record = sessionStatusRecords.get(key) || null;
+  if (!record && create) {
+    record = {
+      state: null,
+      notificationLastSent: new Map(),
+      workingAgentNotificationTones: new Map(),
+      metadataBadgePulseUntil: new Map(),
+    };
+    sessionStatusRecords.set(key, record);
+  }
+  return record;
+}
+
+function sessionNotificationLastSentAt(session, key) {
+  return Number(sessionStatusRecord(session)?.notificationLastSent.get(key) || 0);
+}
+
+function recordSessionNotificationSent(session, key, sentAt) {
+  const record = sessionStatusRecord(session, true);
+  if (!record) return;
+  setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);
 }
 
 let shareInfoBranchRowsOverride = null;

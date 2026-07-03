@@ -1,5 +1,7 @@
 import copy
+import re
 import threading
+from pathlib import Path
 
 import yolomux_lib.app as app_module
 from yolomux_lib.app import METADATA_BADGE_PULSE_UNTIL_STATE_KEY
@@ -10,8 +12,7 @@ from yolomux_lib.app import TmuxWebtermApp
 def make_metadata_app():
     app = object.__new__(TmuxWebtermApp)
     app.metadata_badge_lock = threading.Lock()
-    app.metadata_badge_signatures = {}
-    app.metadata_badge_pulse_until = {}
+    app.metadata_badge_records = {}
     app.load_metadata_badge_state()
     return app
 
@@ -94,6 +95,33 @@ def install_state_store(monkeypatch, state):
 
     monkeypatch.setattr(app_module, "read_yolomux_state", read_state)
     monkeypatch.setattr(app_module, "update_yolomux_state", update_state)
+
+
+def test_metadata_badge_state_has_one_typed_session_owner():
+    source = (Path(__file__).resolve().parents[1] / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
+    assert "class MetadataBadgeRecord:" in source
+    assert "self.metadata_badge_records" in source
+    assert re.search(r"self\.metadata_badge_signatures(?!_for_session)", source) is None
+    assert re.search(r"self\.metadata_badge_pulse_until\b", source) is None
+    assert "sanitized_metadata_badge_pulse_until" not in source
+
+
+def test_metadata_badge_records_drop_absent_sessions(monkeypatch):
+    state = {
+        METADATA_BADGE_SIGNATURES_STATE_KEY: {
+            "s": {"main": "", "pr": "10", "status": "open", "ci": "pending"},
+            "gone": {"main": "main", "pr": "", "status": "", "ci": ""},
+        }
+    }
+    install_state_store(monkeypatch, state)
+    monkeypatch.setattr(app_module.time, "time", lambda: 900.0)
+    app = make_metadata_app()
+
+    app.apply_metadata_badge_pulses(session_payload(pending_pr()))
+
+    assert set(app.metadata_badge_records) == {"s"}
+    assert set(state[METADATA_BADGE_SIGNATURES_STATE_KEY]) == {"s"}
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}
 
 
 def test_metadata_badge_pulse_does_not_persist_across_server_restart(monkeypatch):

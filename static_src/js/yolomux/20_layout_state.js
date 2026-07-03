@@ -1384,6 +1384,55 @@ function attentionAcknowledgementKey(parts = []) {
   return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
 }
 
+function attentionAcknowledgementKeySession(key) {
+  try {
+    const parts = JSON.parse(String(key || ''));
+    return Array.isArray(parts) && parts.length > 1 ? String(parts[1] || '') : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function attentionAcknowledgementRecord(key, create = false) {
+  const value = String(key || '');
+  if (!value) return null;
+  let record = attentionAcknowledgementRecords.get(value) || null;
+  if (!record && create) {
+    record = {recordedAt: null, timer: null, pending: false};
+    attentionAcknowledgementRecords.set(value, record);
+  }
+  return record;
+}
+
+function pruneAttentionAcknowledgementRecords() {
+  while (attentionAcknowledgementRecords.size > attentionAcknowledgementRecordLimit) {
+    let removed = false;
+    for (const [key, record] of attentionAcknowledgementRecords) {
+      if (record?.timer !== null || record?.pending === true) continue;
+      attentionAcknowledgementRecords.delete(key);
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+}
+
+function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  attentionAcknowledgementRecords.delete(String(key || ''));
+  return true;
+}
+
+function clearSessionAttentionAcknowledgementRecords(session) {
+  const value = String(session || '');
+  if (!value) return;
+  for (const [key, record] of attentionAcknowledgementRecords) {
+    if (attentionAcknowledgementKeySession(key) !== value) continue;
+    if (record?.timer !== null) clearTimeout(record.timer);
+    attentionAcknowledgementRecords.delete(key);
+  }
+}
+
 function attentionAcknowledgementKeysFromPayload(payload = {}) {
   const keys = payload?.attention_acks?.keys;
   return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
@@ -1395,7 +1444,8 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
   // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
   if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
-  if (promptAttentionClears.has(value)) return true;
+  const record = attentionAcknowledgementRecord(value);
+  if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
 }
@@ -1403,12 +1453,16 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
 function recordAttentionAcknowledgementKey(key) {
   const value = String(key || '');
   if (!value) return false;
-  setLimitedMapEntry(promptAttentionClears, value, Date.now(), 1024);
+  const record = attentionAcknowledgementRecord(value, true);
+  record.recordedAt = Date.now();
+  attentionAcknowledgementRecords.delete(value);
+  attentionAcknowledgementRecords.set(value, record);
+  pruneAttentionAcknowledgementRecords();
   return true;
 }
 
 function applyAttentionAcknowledgementResponse(payload = {}) {
-  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
+  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged.map(key => String(key || '')).filter(Boolean) : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
   const changedSessions = new Set();
   for (const [session, current] of autoApproveStates) {
@@ -1457,11 +1511,20 @@ async function submitAttentionAcknowledgementKeys(keys) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({keys}),
     });
-    applyAttentionAcknowledgementResponse(payload);
+    const acknowledged = (Array.isArray(payload?.acknowledged) ? payload.acknowledged : [])
+      .map(key => String(key || ''))
+      .filter(key => attentionAcknowledgementRecord(key)?.pending === true);
+    applyAttentionAcknowledgementResponse({...payload, acknowledged});
   } catch (error) {
     console.warn('attention acknowledgement failed', error);
   } finally {
-    for (const key of keys) attentionAcknowledgementPendingKeys.delete(key);
+    for (const key of keys) {
+      const record = attentionAcknowledgementRecord(key);
+      if (!record) continue;
+      record.pending = false;
+      releaseIdleAttentionAcknowledgementRecord(key, record);
+    }
+    pruneAttentionAcknowledgementRecords();
   }
 }
 
@@ -1472,9 +1535,10 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  const pending = unique.filter(key => !attentionAcknowledgementPendingKeys.has(key) && !attentionAcknowledgementKeyIsRecorded(key));
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
   if (!pending.length) return true;
-  for (const key of pending) attentionAcknowledgementPendingKeys.add(key);
+  for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
+  pruneAttentionAcknowledgementRecords();
   submitAttentionAcknowledgementKeys(pending);
   return true;
 }
@@ -1485,14 +1549,18 @@ function acknowledgeAttentionKeys(keys, options = {}) {
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   if (delayMs > 0) {
     for (const key of unique) {
-      const existing = attentionAcknowledgementTimers.get(key);
-      if (existing) continue;
+      const record = attentionAcknowledgementRecord(key, true);
+      if (record.timer !== null) continue;
       const timer = setTimeout(() => {
-        attentionAcknowledgementTimers.delete(key);
+        const current = attentionAcknowledgementRecord(key);
+        if (!current || current.timer !== timer) return;
+        current.timer = null;
         postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
+        releaseIdleAttentionAcknowledgementRecord(key, current);
       }, delayMs);
-      attentionAcknowledgementTimers.set(key, timer);
+      record.timer = timer;
     }
+    pruneAttentionAcknowledgementRecords();
     return true;
   }
   return postAttentionAcknowledgementKeys(unique, options);
@@ -4152,17 +4220,25 @@ function toastTextLines(text) {
 }
 
 function clearToastRemovalTimer(id) {
-  if (!attentionAlertTimers.has(id)) return;
-  clearTimeout(attentionAlertTimers.get(id));
-  attentionAlertTimers.delete(id);
+  const record = toastRecords.get(id);
+  if (!record?.timer) return;
+  clearTimeout(record.timer);
+  record.timer = null;
 }
 
 function scheduleToastRemoval(id, node, remainingMs) {
   const delay = Math.max(1, Number(remainingMs) || 1);
+  let record = toastRecords.get(id);
+  if (!record) {
+    record = {node, timer: null};
+    toastRecords.set(id, record);
+  } else {
+    record.node = node;
+  }
   clearToastRemovalTimer(id);
   node.dataset.toastRemainingMs = String(delay);
   node.dataset.toastRemovalStartedAt = String(Date.now());
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), delay));
+  record.timer = window.setTimeout(() => removeAttentionAlert(id), delay);
 }
 
 function pauseToastRemoval(id, node, reason) {
@@ -4510,11 +4586,17 @@ function showAttentionAlert(session, state) {
   }
 }
 
-function dismissAttentionAlertsForSession(session) {
-  for (const node of document.querySelectorAll('.toast[data-toast-kind="attention"]')) {
+function dismissSessionToasts(session, options = {}) {
+  const kind = String(options.kind || '');
+  for (const [id, record] of toastRecords.entries()) {
+    const node = record.node;
     if (node.dataset.toastSession !== session) continue;
-    removeAttentionAlert(Number(node.dataset.alertId || 0));
+    if (!kind || node.dataset.toastKind === kind) removeAttentionAlert(id);
   }
+}
+
+function dismissAttentionAlertsForSession(session) {
+  dismissSessionToasts(session, {kind: 'attention'});
 }
 
 function attentionAlreadyVisible(session) {
@@ -4526,8 +4608,10 @@ function attentionAlreadyVisible(session) {
 }
 
 function removeAttentionAlert(id) {
+  const node = toastRecords.get(id)?.node || null;
   clearToastRemovalTimer(id);
-  document.querySelector(`[data-alert-id="${id}"]`)?.remove();
+  node?.remove();
+  toastRecords.delete(id);
 }
 
 function sendTestNotification(options = {}) {
@@ -4565,9 +4649,10 @@ function stateSignature(state) {
 function trackSessionStateChanges() {
   for (const session of sessions.filter(isTmuxSession)) {
     const state = sessionState(session, transcriptMeta.sessions?.[session]);
-    const previous = sessionStateKeys.get(session);
+    const record = sessionStatusRecord(session, true);
+    const previous = record?.state || null;
     const signature = stateSignature(state);
-    sessionStateKeys.set(session, {key: state.key, reason: state.reason, signature});
+    if (record) record.state = {key: state.key, reason: state.reason, signature};
     if (!stateTrackingReady || previous == null || previous.signature === signature) continue;
     postEvent(session, 'state_changed', eventMessageForState(session, state), {
       from: previous.key,
@@ -4587,10 +4672,10 @@ function maybeNotifyState(session, state, options = {}) {
   // Letting the generic session-state path handle it too duplicates the popup and bypasses the
   // user's working-AI attention preference when that preference is off.
   if (workingAgentTransitionOwnsSessionStateNotification(session, state)) return;
-  const key = `${session}:${stateSignature(state)}`;
+  const key = `state:${stateSignature(state)}`;
   const now = Date.now();
   if (attentionAlreadyVisible(session)) {
-    setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+    recordSessionNotificationSent(session, key, now);
     dismissAttentionAlertsForSession(session);
     postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
       state: state.key,
@@ -4598,9 +4683,9 @@ function maybeNotifyState(session, state, options = {}) {
     });
     return;
   }
-  const lastSent = notificationLastSent.get(key) || 0;
+  const lastSent = sessionNotificationLastSentAt(session, key);
   if (options.force !== true && now - lastSent < 60_000) return;
-  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  recordSessionNotificationSent(session, key, now);
   const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
   if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {
@@ -4611,7 +4696,7 @@ function maybeNotifyState(session, state, options = {}) {
   try {
     sendBrowserNotification(sessionNotificationTitle(session, state), {
       body,
-      tag: key,
+      tag: `yolomux:session:${session}:${key}`,
       renotify: true,
       session,
     });
@@ -4649,14 +4734,14 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   if (!marker) return false;
   const target = workingAgentTransitionNotificationTarget(agentKey, tone, options);
   const targetKey = typeof agentWindowActivityTransitionKey === 'function'
-    ? agentWindowActivityTransitionKey(agentKey, {...target, session})
-    : `${session}:${target.window_index ?? target.window ?? ''}:${agentKey}`;
+    ? agentWindowActivityTransitionKey(agentKey, {...target, session: ''})
+    : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
-  const lastSent = notificationLastSent.get(key) || 0;
+  const lastSent = sessionNotificationLastSentAt(session, key);
   if (now - lastSent < throttleMs) return false;
-  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  recordSessionNotificationSent(session, key, now);
   const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
   const agent = kind ? agentLabel(kind) : t('common.agentLabel');
   const title = t(`notify.working.${descriptor.copyKey}.title`);
@@ -4670,7 +4755,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    sendBrowserNotification(title, {body, tag: key, renotify: true, session});
+    sendBrowserNotification(title, {body, tag: `yolomux:session:${session}:${key}`, renotify: true, session});
     postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
@@ -4699,10 +4784,11 @@ function workingAgentTransitionSnapshot(session, agent) {
   const options = typeof agentWindowActivityOptionsForStatus === 'function'
     ? agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false})
     : {...agent, session};
-  const key = agentWindowActivityTransitionKey(kind, options);
+  const key = agentWindowActivityTransitionKey(kind, {...options, session: ''});
   if (!key) return null;
   const tone = workingAgentNotificationTone(agent);
-  return {agent, kind, options, key, tone, previousTone: workingAgentNotificationTones.get(key) || ''};
+  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
+  return {agent, kind, options, key, tone, previousTone: toneMap?.get(key) || ''};
 }
 
 function workingAgentTransitionOwnsSessionStateNotification(session, state) {
@@ -4716,6 +4802,8 @@ function workingAgentTransitionOwnsSessionStateNotification(session, state) {
 // transition notifies the user.
 function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
   if (!session || typeof agentWindowActivityTransitionKey !== 'function') return 0;
+  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
+  if (!toneMap) return 0;
   const rows = typeof sessionAgentWindowStatusPayloads === 'function'
     ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
     : typeof agentWindowPayloadRows === 'function'
@@ -4744,10 +4832,10 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
         stoppedAt: Number(options.working_stopped_ts || 0),
       }));
     }
-    workingAgentNotificationTones.set(key, tone);
+    toneMap.set(key, tone);
   }
-  for (const key of workingAgentNotificationTones.keys()) {
-    if (key.startsWith(`${session}:`) && !nextKeys.has(key)) workingAgentNotificationTones.delete(key);
+  for (const key of toneMap.keys()) {
+    if (!nextKeys.has(key)) toneMap.delete(key);
   }
   return notified;
 }
@@ -4793,16 +4881,16 @@ function notifyWatchedPrTransitions(prs) {
 
 // Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
 // the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
-// throttled by notifications.throttle_seconds via the shared notificationLastSent map.
+// throttled by notifications.throttle_seconds via the bounded watched-PR throttle map.
 function maybeNotifyWatchedPr(ref, key, message, url) {
   if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyTransitionKey(key)) return;
   const signature = `watched-pr:${ref}:${key}`;
   const now = Date.now();
   const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
-  const lastSent = notificationLastSent.get(signature) || 0;
+  const lastSent = watchedPrNotificationLastSent.get(signature) || 0;
   if (now - lastSent < throttleMs) return;
-  setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
+  setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);
   if (notificationDeliveryEnabled('inApp')) showToast(message, [ref], {onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;

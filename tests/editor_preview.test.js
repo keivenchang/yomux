@@ -584,9 +584,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
     assert.ok(/width:\s*1em/.test(dotBlock) && /min-width:\s*1em/.test(dotBlock) && /color:\s*var\(--muted\)/.test(dotBlock) && /font-size:\s*0\.9em/.test(dotBlock), 'status ball markers keep the compact glyph-dot style from the shared parent modifier');
     assert.ok(/\.heartbeat-pulse\s*\{[^}]*animation-duration:\s*var\(--pulse-duration\)[^}]*animation-delay:\s*var\(--attention-animation-delay, 0s\)[^}]*animation-timing-function:\s*var\(--status-pulse-timing\)[^}]*animation-iteration-count:\s*infinite[^}]*animation-direction:\s*normal/.test(sessionsCss), 'heartbeat indicators share one stepped pulse cadence parent');
-    assert.ok(/\.status-indicator--dot\s*\{[^}]*border-radius:\s*999px[\s\S]*opacity:\s*1/.test(sessionsCss), 'circle status markers retain their shared round footprint before the pulse applies opacity');
+    assert.ok(/\.status-indicator--dot\s*\{[^}]*border-radius:\s*var\(--radius-pill\)[\s\S]*opacity:\s*1/.test(sessionsCss), 'circle status markers reuse the shared pill radius before the pulse applies opacity');
     assert.equal(/status-ball-size-pulse|--status-dot-rest-scale|--status-dot-peak-scale|--status-dot-size/.test(sessionsCss), false, 'status balls do not pulse by changing geometry or use the filled-disc size path');
-    assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-border:\s*#000/.test(sessionsCss), 'one shared owner defines the thin black status-ball border');
+    assert.ok(/\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-border:\s*var\(--paint-black\)/.test(sessionsCss), 'the shared status-ball border reuses the one fixed-black paint token');
     assert.ok(/\.session-agent-activity-marker \.agent-window-status-dot\s*\{[\s\S]*inline-size:\s*var\(--agent-status-ball-size\)[\s\S]*block-size:\s*var\(--agent-status-ball-size\)[\s\S]*flex:\s*0 0 var\(--agent-status-ball-size\)[\s\S]*background:\s*var\(--agent-status-ball-fill, currentColor\)[\s\S]*border:\s*1px solid var\(--agent-status-ball-border\)[\s\S]*color:\s*transparent[\s\S]*filter:\s*none/.test(sessionsCss), 'session status balls are square-footprint filled discs with a thin black border and no glow filter');
     assert.equal(/display:\s*inline-grid/.test(dotBlock), false, 'status balls are not drawn as fixed inline-grid discs');
     assert.equal(/font-size:\s*0\s*;/.test(dotBlock), false, 'status balls keep a visible glyph font size');
@@ -619,7 +619,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone\(item\.state\)[\s\S]*`status-indicator--\$\{item\.state\}`[\s\S]*acknowledgementShapeClass/.test(activitySource), 'gray acknowledgement keeps the original play-triangle, stop-square, or pause-bar shape modifier');
     assert.ok(/function agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*attentionAnimationDurationMs\(agentStatusPulsePeriodMs\)/.test(activitySource) && /const durationMs = agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*setTimeout\([\s\S]*}, durationMs\)/.test(activitySource), 'gray acknowledgement lifetime comes from the configured status-ball pulse period');
     assert.ok(/@keyframes agent-status-acknowledgement-fade\s*\{[\s\S]*0%\s*\{\s*opacity:\s*1[\s\S]*100%\s*\{\s*opacity:\s*0/.test(sessionsCss) && /agent-window-status-dot--acknowledging[\s\S]*animation-name:\s*agent-status-acknowledgement-fade[\s\S]*animation-duration:\s*var\(--agent-status-acknowledgement-duration, var\(--pulse-duration\)\)/.test(sessionsCss), 'one shared one-way fade retires gray live and preview markers over the pulse period');
-    assert.ok(/agentWindowAcknowledgementVisuals\.set\(key, \{startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options\.refresh !== false, agent: visualAgent\}\)/.test(activitySource) && /acknowledgementElapsedMs:\s*Math\.max\(0, Date\.now\(\) - acknowledgementVisual\.startedAtMs\)/.test(activitySource) && /--agent-status-acknowledgement-delay: \$\{-elapsedMs \/ 1000\}s/.test(activitySource), 'gray fade progress survives live window-bar rerenders instead of restarting from opaque');
+    assert.ok(/const agentWindowActivityRecords = new Map\(\)[\s\S]*function createAgentWindowActivityRecord\(\)[\s\S]*activity:\s*null[\s\S]*stoppedRefresh:\s*null[\s\S]*transitionPulseRefresh:\s*null[\s\S]*acknowledgedStoppedAt:\s*0[\s\S]*acknowledgementVisual:\s*null/.test(activitySource), 'one per-window transition record owns activity, both refresh timers, stopped acknowledgement, and acknowledgement visual state');
+    assert.equal(/agentWindowActivityStates|agentWindowStoppedTimers|agentWindowTransitionPulseTimers|agentWindowAcknowledgedStops|agentWindowAcknowledgementVisuals/.test(activitySource), false, 'parallel per-window state maps stay removed');
+    assert.ok(/record\.acknowledgementVisual = \{startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options\.refresh !== false, agent: visualAgent\}/.test(activitySource) && /acknowledgementElapsedMs:\s*Math\.max\(0, Date\.now\(\) - acknowledgementVisual\.startedAtMs\)/.test(activitySource) && /--agent-status-acknowledgement-delay: \$\{-elapsedMs \/ 1000\}s/.test(activitySource), 'gray fade progress survives live window-bar rerenders instead of restarting from opaque');
     assert.ok(/function preferencesStatusPulseExampleHtml\(\)[\s\S]*const states = AGENT_WINDOW_VISIBLE_TONES[\s\S]*groupHtml\('tab'\)[\s\S]*groupHtml\('subwindow'\)[\s\S]*groupHtml\('acknowledgement'\)/.test(preferencesSource) && /function preferencesStatusPulseExampleMarkerHtml\(state, group\)[\s\S]*pref\.performance\.statusSample\.acknowledged[\s\S]*agentWindowStatusSampleItem\(state, sampleOptions\)[\s\S]*agentWindowStatusDotHtmlForTone\(state, sampleOptions\)/.test(preferencesSource), 'Preferences routes colored Tab balls, colored glyphs, and fading gray glyphs through the shared sample item and live dot renderer');
     assert.ok(/function keyboardLegendStatusSample\(kind, text = '●', options = \{\}\)[\s\S]*agentWindowVisibleTone\(kind\)[\s\S]*agentWindowStatusDotHtmlForTone\(kind,[\s\S]*surface: subwindow \? 'subwindow' : 'legend'/.test(layoutSource), 'keyboard shape and color samples route through the live status-dot renderer');
     assert.equal(/subwindowPulseActive:\s*true/.test(activitySource), false, 'working/play sub-window glyphs use the shared pulseActive path instead of a parallel forever-pulse override');
@@ -653,7 +655,6 @@ async function runEditorPreviewSuite() {
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, resolvedWindowIndex[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'sub-window acknowledgement captures its gray visual before the shared prompt acknowledgement can hide the glyph');
     assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains every visible child tone while inheriting opacity pulse from any visible child');
-    assert.ok(/function sessionStatusAgentWindowSummaryForTab\(session, info, payload = autoApproveStates\.get\(session\)\)[\s\S]*sessionAgentWindowStatusSummary\(session, info, payload\)/.test(popoverSource), 'the parent Tab delegates status classification to the shared model instead of maintaining a second classifier');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
     assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const acknowledged = item\?\.acknowledged === true;[\s\S]*if \(acknowledged && statusOnly\) return ''[\s\S]*const markerHtml = acknowledged \? '' : agentWindowStatusDotHtml/.test(activitySource), 'acknowledgement removes the transient ball/play/pause/stop glyph while preserving the stable sub-window agent identity');
@@ -835,6 +836,34 @@ async function runEditorPreviewSuite() {
     assert.equal(differRows['/repo/just.md'].dataset.recency, 'just-updated', 'Differ Date rows preserve the recency signal');
     assert.equal(dateCell(differRows['/repo/just.md']).classList.contains('attention-pulse'), true, 'Differ Date rows keep the shared pulse');
     api.setFileTreeRecencyNowForTest(null);
+  });
+
+  test('pane tabs and YO!info share mixed agent-window status precedence', () => {
+    const api = loadYolomux();
+    const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
+    const popoverSource = fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function agentWindowStatusItemVisualRank\(item\)[\s\S]*agentWindowStatusToneForItem\(item\)[\s\S]*agentWindowActivityVisualRank\(tone\)/.test(activitySource), 'one item-rank owner resolves attention, working, cooldown, and acknowledged precedence for every aggregate surface');
+    assert.ok(/function sessionTabLeadingActivityHtml\(session, info, auto, options = \{\}\)[\s\S]*sessionAgentWindowStatusSummary\(session, info, payload\)/.test(popoverSource), 'the parent Tab calls the canonical status summary directly');
+    assert.equal(/function sessionStatusAgentWindow(?:Summary)?ForTab/.test(popoverSource + activitySource), false, 'no Tab-specific status wrapper remains between consumers and the canonical model');
+    assert.ok(/function infoRecordAgentActivityItem\(record\)[\s\S]*agentWindowActivityIconForStatusItem\(agent, record\.aiKind, record\.tabSession/.test(terminalSource), 'YO!info builds each candidate through the canonical item classifier');
+    assert.ok(/function infoTabGroupStatusRecord\(group = \{\}\)[\s\S]*agentWindowStatusItemVisualRank\(item\)/.test(terminalSource), 'YO!info group selection uses the canonical item-rank owner');
+    const session = 'status-rank-parity';
+    const stoppedAt = Math.floor(Date.now() / 1000) - 2;
+    api.setAutoApproveStateForTest(session, {agent_windows: [
+      {kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', working_stopped_ts: stoppedAt},
+      {kind: 'codex', state: 'working', window_index: 1, window_label: '1:codex'},
+    ]});
+    const tabStatus = api.sessionAgentWindowStatusSummaryForTest(session, {panes: [
+      {window: '0', process_label: 'claude', window_active: true, active: true},
+      {window: '1', process_label: 'codex', window_active: false, active: true},
+    ]});
+    const infoStatus = api.infoTabGroupStatusRecordForTest({dimension: 'tab', records: [
+      {tabSession: session, aiKey: '0:claude', aiLabel: '0:claude', aiKind: 'claude', aiState: 'idle', aiWindow: '0', aiWindowIndex: '0', aiWorkingStoppedTs: stoppedAt},
+      {tabSession: session, aiKey: '1:codex', aiLabel: '1:codex', aiKind: 'codex', aiState: 'working', aiWindow: '1', aiWindowIndex: '1'},
+    ]});
+    assert.equal(tabStatus.item?.state, 'working', 'the parent Tab chooses a working child ahead of a cooldown child');
+    assert.equal(infoStatus.item?.state, 'working', 'YO!info chooses the same working child through the shared item-rank owner');
   });
 
   test('t@6215', () => {
@@ -1431,8 +1460,44 @@ async function runEditorPreviewSuite() {
     const acknowledgementSurvivesWindowSwitch = api.agentWindowActivityIconForTest('codex', 'working', 0, {session: '1', window_index: 7, pane_target: '1:7.0', nowSeconds: 4500, scheduleRefresh: false});
     assert.equal(acknowledgementSurvivesWindowSwitch.acknowledging, true, 'switching the acknowledged window to its active working capture keeps the gray marker visible for the full interval');
     assert.equal(acknowledgementSurvivesWindowSwitch.state, 'cooldown', 'the gray marker retains the acknowledged pause shape instead of changing to a green play');
+    const acknowledgingRecord = canonical(api.agentWindowActivityRecordForTest('1:7::codex'));
+    assert.equal(acknowledgingRecord.activity.stoppedAt, 4000, 'the shared record retains the stopped transition while its acknowledgement visual is active');
+    assert.equal(acknowledgingRecord.acknowledgedStoppedAt, 4000, 'the same record owns the matching stopped acknowledgement generation');
+    assert.equal(acknowledgingRecord.acknowledgementVisual.durationMs, 1550, 'the same record owns the gray acknowledgement lifetime');
     assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1000), true, 'the gray acknowledgement interval remains active before the configured 1550ms pulse period ends');
     assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1600), false, 'the gray acknowledgement interval expires after the configured status-ball pulse period');
+    const retiredAcknowledgementRecord = canonical(api.agentWindowActivityRecordForTest('1:7::codex'));
+    assert.equal(retiredAcknowledgementRecord.acknowledgementVisual, null, 'retiring the gray visual clears only its field on the shared record');
+    assert.equal(retiredAcknowledgementRecord.activity.stoppedAt, 4000, 'retiring the gray visual does not erase the matching activity generation');
+
+    let nextActivityTimer = 1;
+    const scheduledActivityTimers = [];
+    const clearedActivityTimers = [];
+    const timerApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, ms) {
+        const timer = nextActivityTimer++;
+        scheduledActivityTimers.push({timer, callback, ms});
+        return timer;
+      },
+      clearTimeout(timer) { clearedActivityTimers.push(timer); },
+    });
+    scheduledActivityTimers.length = 0;
+    clearedActivityTimers.length = 0;
+    timerApi.setWorkflowTransitionGlowSecondsForTest(60);
+    const timerTransitionKey = 'timer-record-owner';
+    const timerNowSeconds = Date.now() / 1000;
+    timerApi.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: timerTransitionKey, nowSeconds: timerNowSeconds});
+    const firstTransitionTimer = scheduledActivityTimers.at(-1).timer;
+    timerApi.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: timerTransitionKey, nowSeconds: timerNowSeconds + 1});
+    const scheduledRecord = canonical(timerApi.agentWindowActivityRecordForTest(timerTransitionKey));
+    assert.equal(scheduledRecord.activity.visualTone, 'cooldown', 'the shared record advances the activity generation from working to cooldown');
+    assert.ok(scheduledRecord.stoppedRefreshUntilMs > Date.now() && scheduledRecord.transitionPulseRefreshUntilMs > Date.now(), 'both refresh schedules live on the same transition record');
+    assert.ok(clearedActivityTimers.includes(firstTransitionTimer), 'replacing a transition generation cancels its stale pulse timer');
+    assert.equal(timerApi.acknowledgeAgentWindowStoppedTransitionForTest(timerTransitionKey, null, {refresh: false}), true, 'the timer-backed cooldown generation remains acknowledgeable');
+    const clearedRecord = canonical(timerApi.agentWindowActivityRecordForTest(timerTransitionKey));
+    assert.equal(clearedRecord.acknowledgedStoppedAt, clearedRecord.activity.stoppedAt, 'acknowledgement is stored beside the exact stopped activity generation');
+    assert.equal(clearedRecord.stoppedRefreshUntilMs, 0, 'acknowledgement clears the stopped refresh field');
+    assert.equal(clearedRecord.transitionPulseRefreshUntilMs, 0, 'acknowledgement clears the transition pulse field');
     api.setWorkflowTransitionGlowSecondsForTest(60);
     const freshAttention = api.agentWindowActivityIconForTest('codex', 'needs-input', 0, {transitionKey, nowSeconds: 1061, scheduleRefresh: false});
     assert.equal(freshAttention.state, 'attention', 'needs-input outranks cooldown and stays on the persistent red attention state');
@@ -1623,7 +1688,7 @@ async function runEditorPreviewSuite() {
     assert.equal(source.includes('panel-agent-slot'), false, 'DOIT.57 T1: no agent-badge slot is rendered in the Info Bar');
     assert.ok(/\.tmux-window-button\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(yoloCss), 'DOIT.57 T2: the active window button is a pressed toggle via the shared active-control tokens');
     assert.equal(/\.tmux-window-button\.active\s*\{[^}]*#[0-9a-fA-F]{3,6}/.test(yoloCss), false, 'DOIT.57 T2: the active window button uses theme-aware tokens, not hardcoded hex');
-    assert.ok(/\.agent-window-activity--subwindow \.agent-icon\s*\{[\s\S]*\.agent-window-activity--subwindow \.agent-icon svg\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'all renderer-marked sub-window agent glyphs stay compact beside the canonical label');
+    assert.ok(/\.changes-file-agent \.agent-icon svg,\s*\.agent-window-activity--subwindow \.agent-icon svg\s*\{[\s\S]*width:\s*14px[\s\S]*height:\s*14px/.test(yoloCss), 'Differ and renderer-marked sub-window agent glyphs share one compact geometry owner');
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot,\s*\.session-agent-window-block > \.session-agent-row\.current \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-glyph-border-color:\s*var\(--subwindow-status-glyph-border-color-active\)/.test(yoloCss), 'active tmux sub-window and current popover status glyphs keep a visible shared border');
     assert.ok(/\.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--attention,[\s\S]*\.session-agent-row\.current \.agent-window-status-dot\.status-indicator--attention\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--subwindow-status-attention-fill\)/.test(yoloCss), 'active/current attention window glyphs keep the scoped saturated red fill even on active green buttons');
     assert.ok(/\.tmux-window-bar \.tmux-window-button\.active \.agent-window-status-dot\.status-indicator--working,[\s\S]*\.session-agent-window-block > \.session-agent-row\.current \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(yoloCss), 'active working play glyphs stay green and rely on their real border for contrast');
@@ -1646,7 +1711,6 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.status-indicator--cooldown\s*\{[^}]*--attention-ring-rgb:\s*var\(--agent-status-cooldown-rgb\)/.test(yoloCss), 'cooldown dots use the vibrant yellow glow in the built CSS');
     assert.equal((yoloCss.match(/255 51 71/g) || []).length, 1, 'the built CSS contains the red ring RGB tuple only at its token owner');
     assert.equal((yoloCss.match(/82 210 115/g) || []).length, 1, 'the built CSS contains the green ring RGB tuple only at its token owner');
-    assert.equal(yoloCss.includes('245 197 66'), false, 'the built CSS omits the stale cooldown RGB tuple');
     assert.equal(/status-indicator--dot\.status-indicator--working\.heartbeat-pulse[\s\S]{0,240}animation-direction:\s*alternate/.test(yoloCss), false, 'working dots no longer double the pulse period with alternate direction');
     assert.ok(/\.pane-info-bar \.tmux-window-bar,[\s\S]*\.panel-detail-row \.tmux-window-bar\s*\{[\s\S]*order:\s*-1[\s\S]*flex:\s*0 0 auto[\s\S]*max-width:\s*none[\s\S]*margin-inline-start:\s*0[\s\S]*justify-content:\s*flex-start/.test(yoloCss), 'Info Bar tmux sub-window bar left-aligns (order:-1) without shrinking');
     assert.ok(source.includes('function tmuxStatusToggleHtml(session)') && source.includes('data-tmux-status-toggle'), 'Info Bar renders one shared native tmux status toggle');
@@ -1739,7 +1803,9 @@ async function runEditorPreviewSuite() {
       ],
     });
     const terminalFrames = [];
+    const otherTerminalFrames = [];
     relativeApi.registerTerminalForTest('meta-preview', {focus() {}}, {readyState: WebSocket.OPEN, send(message) { terminalFrames.push(JSON.parse(message)); }});
+    relativeApi.registerTerminalForTest('other-preview', {focus() {}}, {readyState: WebSocket.OPEN, send(message) { otherTerminalFrames.push(JSON.parse(message)); }});
     relativeApi.setFetchForTest((url, options = {}) => {
       if (String(url).startsWith('/api/fs/batch')) {
         const requests = JSON.parse(options.body || '{}').requests || [];
@@ -1758,6 +1824,24 @@ async function runEditorPreviewSuite() {
     assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '0')?.getAttribute('aria-pressed'), 'false', 'Ctrl-b n clears aria-pressed synchronously');
     assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '1')?.classList.contains('active'), false, 'Ctrl-b n does not guess the next active button locally');
     assert.equal(relativeMetaNode.innerHTML, 'stale', 'Ctrl-b n does not locally predict path/repo metadata');
+    const pendingNavigation = relativeApi.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(pendingNavigation.activeIndexOverride, '__pending__', 'relative tmux selection stores its pending override in the shared navigation record');
+    assert.ok(pendingNavigation.sequence > 0, 'relative tmux selection assigns a transaction sequence in the shared navigation record');
+    assert.equal(pendingNavigation.directTargetGuard, null, 'relative tmux selection has no explicit-target guard');
+    const repeatState = relativeApi.terminalTmuxInputStateForTest('meta-preview');
+    assert.equal(repeatState.prefixPending, false, 'a complete Ctrl-b n sequence leaves no prefix pending');
+    assert.ok(repeatState.repeatUntilMs > Date.now(), 'repeatable tmux navigation retains its bounded repeat interval in the shared input state');
+    assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', 'p'), true, 'a repeated p within the bounded interval is observed without a second prefix');
+    assert.equal(terminalFrames.at(-1).data, 'p', 'repeat observation still sends the original terminal byte');
+    assert.ok(relativeApi.tmuxWindowNavigationRecordForTest('meta-preview').sequence > pendingNavigation.sequence, 'repeat observation advances the tmux navigation transaction');
+    assert.equal(relativeApi.handleTerminalDataForTest('other-preview', '\x02'), true, 'another session can retain an independent split prefix');
+    assert.equal(otherTerminalFrames.at(-1).data, '\x02', 'the other session prefix remains transport-owned');
+    assert.equal(relativeApi.terminalTmuxInputStateForTest('other-preview').prefixPending, true, 'split-prefix state is isolated by session');
+    assert.ok(relativeApi.terminalTmuxInputStateForTest('meta-preview').repeatUntilMs > Date.now(), 'another session cannot clobber this session repeat interval');
+    assert.equal(relativeApi.expireTerminalTmuxRepeatForTest('meta-preview'), null, 'expired repeat-only state is pruned');
+    assert.equal(relativeApi.terminalTmuxInputStateForTest('other-preview').prefixPending, true, 'pruning one session cannot clear another session prefix');
+    assert.equal(relativeApi.handleTerminalDataForTest('other-preview', 'x'), true, 'the other session consumes its pending prefix independently');
+    assert.equal(relativeApi.terminalTmuxInputStateForTest('other-preview'), null, 'a consumed non-window prefix leaves no inactive parser record');
     relativeMetaNode.innerHTML = 'stale again';
     assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', '\x02'), true, 'a split Ctrl-b prefix is still sent verbatim');
     assert.equal(relativeApi.handleTerminalDataForTest('meta-preview', '1'), true, 'a split tmux numeric selection key is still sent verbatim');
@@ -1767,10 +1851,26 @@ async function runEditorPreviewSuite() {
     assert.equal(tmuxWindowButtonFromElement(relativeApi.testElementForId('body'), '0')?.classList.contains('active'), false, 'Ctrl-b numeric selection clears the previous active button synchronously');
     assert.notEqual(relativeMetaNode.innerHTML, 'stale again', 'Ctrl-b then a number updates known target-window path/repo metadata immediately');
     assert.ok(relativeMetaNode.innerHTML.includes('/tmp/shell'), 'Ctrl-b numeric target uses the known target-window pane path immediately');
+    const directNavigation = relativeApi.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(directNavigation.activeIndexOverride, '1', 'numeric selection stores the explicit override in the same navigation record');
+    assert.ok(directNavigation.sequence > pendingNavigation.sequence, 'a newer numeric selection advances the shared transaction sequence');
+    assert.equal(directNavigation.directTargetGuard.index, '1', 'the explicit-target guard shares the selected index');
+    assert.equal(directNavigation.directTargetGuard.sequence, directNavigation.sequence, 'the explicit-target guard shares the transaction sequence');
+    assert.equal(relativeApi.expireTmuxWindowDirectTargetGuardForTest('meta-preview'), null, 'an expired direct-target guard is pruned');
+    assert.equal(relativeApi.tmuxWindowNavigationRecordForTest('meta-preview').directTargetGuard, null, 'guard expiry clears only the guard field');
+    assert.equal(relativeApi.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'guard expiry preserves the still-pending explicit override');
     const tmuxPrefixObserver = source.slice(source.indexOf('function observeTerminalTmuxPrefixWindowSwitches(session, data)'), source.indexOf('function handleTerminalData(session, data, options = {})'));
     assert.ok(tmuxPrefixObserver.includes("char === '\\x02'") && tmuxPrefixObserver.includes('terminalTmuxPrefixWindowShortcut(char)'), 'terminal transport observes tmux prefix window shortcuts without owning the bytes');
     assert.equal(source.includes('function previewTmuxWindowInfo'), false, 'tmux sub-window switching has no relative-index predictor');
     assert.equal(source.includes('function previewTmuxWindowLabel'), false, 'tmux sub-window switching has no optimistic local label repaint');
+    assert.equal((source.match(/const tmuxWindowNavigationRecords = new Map\(\)/g) || []).length, 1, 'tmux-window navigation has one per-session record map');
+    for (const oldMap of ['tmuxWindowActiveIndexOverrides', 'tmuxWindowSwitchSequences', 'tmuxWindowDirectTargetGuards']) {
+      assert.equal(source.includes(oldMap), false, `${oldMap} cannot return as a parallel source of tmux-window navigation state`);
+    }
+    assert.equal((source.match(/const terminalTmuxInputStates = new Map\(\)/g) || []).length, 1, 'terminal tmux-prefix parsing has one per-session state map');
+    for (const oldMap of ['terminalTmuxPrefixPendingBySession', 'terminalTmuxWindowRepeatBySession']) {
+      assert.equal(source.includes(oldMap), false, `${oldMap} cannot return as a parallel terminal input-parser state source`);
+    }
     assert.ok(/function noteTerminalTmuxWindowSwitch\(session, shortcut\)[\s\S]*const sequence = directIndex !== null[\s\S]*setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*setTmuxWindowActiveIndexPending\(session\)[\s\S]*expectedIndex: directIndex, sequence[\s\S]*previousIndex, sequence/.test(source), 'terminal prefix observer highlights explicit targets and carries a sequence through readback');
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
@@ -1858,6 +1958,9 @@ async function runEditorPreviewSuite() {
     await flushAsyncWork();
 
     assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), undefined, 'failed direct select clears the optimistic target');
+    const failedNavigation = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.ok(failedNavigation.sequence > 0, 'failed direct selection retains its sequence so delayed work stays stale');
+    assert.equal(failedNavigation.directTargetGuard, null, 'failed direct selection clears its target guard from the shared record');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: codex', 'failed direct select restores the previous active-window metadata');
   });
 
@@ -2200,6 +2303,9 @@ async function runEditorPreviewSuite() {
     api.tmuxWindowForTest('meta-preview', {windowIndex: '0'}, 'tmux sub-window 0:codex');
     api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
     assert.equal(api.tmuxWindowActiveIndexOverrideForTest('meta-preview'), '1', 'latest direct click owns the optimistic target');
+    const latestNavigation = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.ok(latestNavigation.sequence >= 2, 'each direct click advances the one shared transaction sequence');
+    assert.equal(latestNavigation.directTargetGuard.sequence, latestNavigation.sequence, 'the latest target guard and sequence remain one transaction');
     assert.equal(api.terminalTabTitle('meta-preview', api.transcriptInfoForTest('meta-preview')), 'terminal: claude', 'latest direct click shows Claude before readback');
 
     postResolves[0]();
@@ -2902,6 +3008,15 @@ async function runEditorPreviewSuite() {
     });
     assert.equal(api.jsDebugEventsForTest().length, 4, 'debug event recorder stores bounded diagnostics while enabled');
     const html = api.debugPanelHtmlForTest();
+    assert.deepStrictEqual(canonical(api.debugGraphGeometryForTest()), {
+      width: 600,
+      height: 120,
+      plotTop: 8,
+      plotHeight: 104,
+      plotBottom: 112,
+      hoverBottom: 116,
+    }, 'YO!stats exposes one internally consistent SVG coordinate model');
+    assert.ok(html.includes('viewBox="0 0 600 120"'), 'YO!stats chart viewBox consumes the shared SVG geometry');
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
     assert.ok(html.indexOf('data-js-debug-subtab="graph"') < html.indexOf('data-js-debug-subtab="events"'), 'YO!stats puts the Graph button left of API/SSE');
@@ -2940,6 +3055,9 @@ async function runEditorPreviewSuite() {
     const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2000;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30000;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 5000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30000;'), 'YO!stats retries cold-start samples every two seconds, then keeps its thirty-second steady cadence and a bounded request timeout');
+    assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = 104;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: height - hoverBottomInset/.test(debugPaneSource), 'YO!stats owns SVG width, height, plot, baseline, and hover coordinates in one frozen model');
+    const debugGeometryConsumers = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphPointForValue'));
+    assert.equal(/viewBox="0 0 600 120"|x2="600"|\* 600|\/ 120|const top = 8|const height = 104|baseline = 112|y2="116"|height="120"/.test(debugGeometryConsumers), false, 'YO!stats renderers and interactions do not restate shared SVG coordinate literals');
     assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
@@ -2954,13 +3072,17 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-bar--workingAgents') && debugPaneCss.includes('.js-debug-bar--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, line/bar graph styling, and legends');
     assert.ok(debugPaneCss.includes('.js-debug-range-slider') && debugPaneCss.includes('.js-debug-hover-line') && debugPaneCss.includes('.js-debug-selection-rect'), 'YO!stats ships compact range slider plus hover and selection overlays');
+    assert.ok(/\.js-debug-subtab\.active,\s*\.js-debug-scale-button\.active,\s*\.js-debug-zoom-reset\s*\{[\s\S]*color:\s*var\(--active-control-text\)[\s\S]*background:\s*var\(--active-control-bg\)/.test(debugPaneCss), 'YO!stats selected and static accent controls share one paint owner');
+    assert.ok(/\.js-debug-subtab:not\(\.active\):hover,[\s\S]*\.js-debug-scale-button:not\(\.active\):focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(debugPaneCss), 'YO!stats inactive subtabs and scale controls share pointer and keyboard paint');
+    assert.ok(/class="js-debug-hidden-chart control-active-hover"/.test(debugPaneSource) && /class="js-debug-chart-close control-active-hover"/.test(debugPaneSource), 'YO!stats chart restore and close controls reuse the global accent hover/focus parent');
+    assert.equal(debugPaneCss.includes('.js-debug-range-button'), false, 'YO!stats has no dead range-button CSS after migrating to the slider');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
     assert.equal(debugPaneCss.includes('.js-debug-line--apiSseTotal'), false, 'YO!stats has no obsolete combined-total series after API and SSE each aggregate all clients');
     assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss), 'YO!stats per-server CPU lines and legends consume their shared series color');
     assert.ok(/\.js-debug-line--systemCpu\s*\{[\s\S]*stroke:\s*var\(--bad\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--systemCpu\s*\{[\s\S]*color:\s*var\(--bad\)/.test(debugPaneCss), 'YO!stats system CPU uses the red warning color');
-    assert.ok(/\.js-debug-chart\s*\{[\s\S]*border:\s*1px solid color-mix\(in srgb, var\(--line\) 88%, transparent\)[\s\S]*border-radius:\s*6px/.test(debugPaneCss), 'YO!stats encloses each graph in a clear bordered chart box');
+    assert.ok(/\.js-debug-chart\s*\{[\s\S]*border:\s*1px solid color-mix\(in srgb, var\(--line\) 88%, transparent\)[\s\S]*border-radius:\s*var\(--radius-md\)/.test(debugPaneCss), 'YO!stats graph boxes reuse the shared medium corner radius');
     assert.ok(/const jsDebugAgentStatusSeriesKeys = Object\.freeze\(\['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'\]\)/.test(debugPaneSource) && /const jsDebugAgentStatusLegendSeriesKeys = Object\.freeze\(\['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'\]\)/.test(debugPaneSource), 'YO!stats agent-status plot and legend order have named series owners');
     assert.ok(/series: jsDebugAgentStatusSeriesKeys/.test(debugPaneSource) && /legendSeries: jsDebugAgentStatusLegendSeriesKeys/.test(debugPaneSource) && /jsDebugAgentStatusBucketValueGetters\[key\]/.test(debugPaneSource), 'YO!stats agent-status chart and bucket values consume the named series owners');
     for (const series of DEBUG_AGENT_STATUS_SERIES.filter(key => key !== 'idleAgents')) {
@@ -5278,8 +5400,8 @@ async function runEditorPreviewSuite() {
     };
     api.setTranscriptInfoForTest('tab-a', {
       agent_windows: [
-        {kind: 'claude', state: 'working', window_index: 0, git: {root: '/repo/app', branch: 'main'}},
-        {kind: 'codex', state: 'idle', window_index: 0, git: {root: '/repo/lib', branch: 'lib-main'}},
+        {kind: 'claude', state: 'working', window_index: 0, pane_target: '%tab-a-claude', git: {root: '/repo/app', branch: 'main'}},
+        {kind: 'codex', state: 'idle', window_index: 0, pane_target: '%tab-a-codex', git: {root: '/repo/lib', branch: 'lib-main'}},
       ],
       project: appProject,
     });
@@ -5575,7 +5697,7 @@ async function runEditorPreviewSuite() {
     const yellowTabSummary = tabSummaryFor('yellow-tab');
     const greenTabSummary = tabSummaryFor('green-tab');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--attention/.test(redTabSummary), 'YO!info Tab group aggregates red attention inside the shared tab token above other child tmux sub-window states');
-    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--cooldown/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--working'), 'YO!info Tab group aggregates yellow cooldown inside the shared tab token above green working child states');
+    assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(yellowTabSummary) && !yellowTabSummary.includes('status-indicator--cooldown'), 'YO!info Tab group uses the shared precedence where a live working child outranks a stopped cooldown child');
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
     assert.ok(greenTabSummary.includes('agent-window-status-dot--transition-glow'), 'YO!info inherits the same animated green status marker as the Tab surface');
     assert.equal((greenTabSummary.match(/\bagent-window-status-dot(?=\s|")/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
@@ -5714,11 +5836,11 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.info-tree-record-main\s*\{[\s\S]*flex-direction:\s*column[\s\S]*padding-inline-start:\s*10px/.test(infoTreeCss), 'YO!info record fields stack as one left-indented labeled row per line');
     assert.ok(/\.info-tree-record\s*\{[\s\S]*--info-tree-field-label-width:\s*18ch/.test(infoTreeCss), 'YO!info records define one shared label column width for aligned key/value rows');
     assert.equal(infoTreeCss.includes('.info-tree-list::before'), false, 'YO!info does not reserve a fixed-height sticky mask that leaves blank space under a single sticky parent');
-    assert.ok(/\.info-tree-panel \.info-pane\.info-tree-pane-scrolled::before\s*\{[\s\S]*position:\s*absolute[\s\S]*z-index:\s*2[\s\S]*height:\s*var\(--info-tree-sticky-level-block,\s*27px\)[\s\S]*background:\s*var\(--info-pane-bg\)[\s\S]*pointer-events:\s*none/.test(infoTreeCss), 'YO!info masks clipped leaf rows only after the tree body scrolls, without adding layout space');
+    assert.ok(/\.info-tree-panel \.info-pane\.info-tree-pane-scrolled::before\s*\{[\s\S]*position:\s*absolute[\s\S]*z-index:\s*var\(--z-layer-control\)[\s\S]*height:\s*var\(--info-tree-sticky-level-block,\s*27px\)[\s\S]*background:\s*var\(--info-pane-bg\)[\s\S]*pointer-events:\s*none/.test(infoTreeCss), 'YO!info masks clipped leaf rows only after the tree body scrolls through the shared control layer');
     assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-children-gap:\s*0px/.test(infoTreeCss), 'YO!info sibling leaf node boxes touch vertically without an inserted gap');
     assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(tokenCss), 'YO!info leaf box outline uses the same visible color token as the left tree guides');
-    assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*8px[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf rows keep transparent fill with only a faint 1px rounded node outline and no card shadow');
-    assert.ok(/\.info-tree-group-children > \.info-tree-record\s*\{[\s\S]*border-radius:\s*0[\s\S]*\.info-tree-group-children > \.info-tree-record:not\(\.info-tree-item-first\)\s*\{[\s\S]*border-block-start-width:\s*0[\s\S]*\.info-tree-group-children > \.info-tree-record\.info-tree-item-first\s*\{[\s\S]*border-start-start-radius:\s*8px[\s\S]*border-start-end-radius:\s*8px[\s\S]*\.info-tree-group-children > \.info-tree-record\.info-tree-item-last\s*\{[\s\S]*border-end-start-radius:\s*8px[\s\S]*border-end-end-radius:\s*8px/.test(infoTreeCss), 'YO!info sibling leaf rows share four outer rounded corners with one straight internal divider');
+    assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*var\(--radius-lg\)[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf rows keep transparent fill with the shared large corner radius, a faint 1px outline, and no card shadow');
+    assert.ok(/\.info-tree-group-children > \.info-tree-record\s*\{[\s\S]*border-radius:\s*0[\s\S]*\.info-tree-group-children > \.info-tree-record:not\(\.info-tree-item-first\)\s*\{[\s\S]*border-block-start-width:\s*0[\s\S]*\.info-tree-group-children > \.info-tree-record\.info-tree-item-first\s*\{[\s\S]*border-start-start-radius:\s*var\(--radius-lg\)[\s\S]*border-start-end-radius:\s*var\(--radius-lg\)[\s\S]*\.info-tree-group-children > \.info-tree-record\.info-tree-item-last\s*\{[\s\S]*border-end-start-radius:\s*var\(--radius-lg\)[\s\S]*border-end-end-radius:\s*var\(--radius-lg\)/.test(infoTreeCss), 'YO!info sibling leaf rows share four token-owned outer corners with one straight internal divider');
     assert.ok(/\.info-tree-field\s*\{[\s\S]*grid-template-columns:\s*var\(--info-tree-field-label-width\) minmax\(0, 1fr\)[\s\S]*width:\s*100%/.test(infoTreeCss), 'YO!info labeled rows keep aligned labels and wrapping values');
     assert.ok(/\.info-tree-field-label\s*\{[\s\S]*justify-self:\s*start[\s\S]*text-align:\s*left/.test(infoTreeCss), 'YO!info field labels left-align while every value starts in the same column');
     assert.ok(/\.info-tree-field,[\s\S]*\.info-tree-field-value,[\s\S]*\.info-tree-value-text\s*\{[\s\S]*overflow:\s*visible[\s\S]*text-overflow:\s*clip[\s\S]*white-space:\s*normal[\s\S]*overflow-wrap:\s*anywhere/.test(infoTreeCss), 'YO!info row values wrap instead of ellipsizing');
@@ -5732,7 +5854,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.info-tree-group\[data-info-depth="1"\] > summary::after,[\s\S]*\.info-tree-group\[data-info-depth="3"\] > summary::after\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-summary-connector-y\)[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*width:\s*var\(--info-tree-connector-arm-width\)[\s\S]*background:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info sticky parent summaries draw one horizontal connector arm aligned to the summary label row without overpainting the vertical stroke');
     assert.ok(/\.info-tree-group-children > \.info-tree-group\.info-tree-item::before\s*\{[\s\S]*content:\s*none/.test(infoTreeCss), 'YO!info group rows do not draw a second child-row horizontal connector on top of the sticky summary connector');
     assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-tab-color:\s*var\(--pane-tab-active-bg\)[\s\S]*--info-tree-ai-color:\s*var\(--icon-code\)[\s\S]*--info-tree-path-color:\s*var\(--text\)[\s\S]*--info-tree-branch-color:\s*var\(--link-soft\)[\s\S]*--info-tree-pr-color:\s*var\(--info-tree-pr-neutral\)[\s\S]*--info-tree-linear-color:\s*#5eead4/.test(infoTreeCss), 'YO!info dark-mode Path uses normal text color and Branch uses blue while Tab stays tied to the theme color');
-    assert.ok(/body\.theme-light \.info-tree\s*\{[\s\S]*--info-tree-ai-color:\s*var\(--icon-code\)[\s\S]*--info-tree-path-color:\s*var\(--text\)[\s\S]*--info-tree-branch-color:\s*var\(--link-soft\)[\s\S]*--info-tree-pr-color:\s*var\(--info-tree-pr-neutral\)[\s\S]*--info-tree-linear-color:\s*var\(--git-untracked-badge\)/.test(infoTreeCss), 'YO!info light-mode Path uses black text and Branch uses blue without using red or merged purple for PR/Branch');
+    assert.ok(/body\.theme-light \.info-tree\s*\{[\s\S]*--info-tree-ai-color-hover:\s*var\(--link-soft\)[\s\S]*--info-tree-linear-color:\s*var\(--git-untracked-badge\)/.test(infoTreeCss), 'YO!info light mode overrides only the AI hover and Linear colors that differ from the shared token-driven base');
+    assert.equal(/body\.theme-light \.info-tree\s*\{[^}]*(?:--info-tree-ai-color:|--info-tree-path-color:|--info-tree-branch-color:|--info-tree-pr-color:)/.test(infoTreeCss), false, 'YO!info light Path, Branch, PR, and base AI colors inherit their theme-aware token owners');
     assert.equal(/--info-tree-branch-color:\s*(?:var\(--code-keyword\)|#6d28d9|#5b21b6)/.test(infoTreeCss), false, 'YO!info Branch color does not use the purple reserved for merged PR status');
     assert.equal(/--info-tree-pr-color:\s*(?:#fb7185|#fecdd3|#be123c|#9f1239)/.test(infoTreeCss), false, 'YO!info PR relationship color does not use the red reserved for status/attention');
     assert.ok(/:root\s*\{[\s\S]*--info-tree-pr-neutral:\s*var\(--link-soft-hover\)[\s\S]*--info-tree-pr-neutral-hover:\s*var\(--text\)/.test(tokenCss), 'YO!info dark-mode PR relationship labels use readable link-toned text instead of muted neutral gray');
@@ -5740,7 +5863,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.info-tree-group\[data-info-dimension="tab"\] > summary\s*\{[\s\S]*--info-tree-dimension-color:\s*var\(--info-tree-tab-color\)/.test(infoTreeCss) && /\.info-tree-group\[data-info-dimension="linear"\] > summary\s*\{[\s\S]*--info-tree-dimension-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info group headers route each dimension through its own color token');
     assert.ok(/\.info-tree-field-tab\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-tab-color\)[\s\S]*\.info-tree-field-linear\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info record rows route each dimension through its own color token');
     assert.ok(/\.info-tree-field-ai\s*\{[\s\S]*--info-tree-field-color:\s*var\(--pane-tab-active-bg\)[\s\S]*--info-tree-field-hover:\s*var\(--pane-tab-active-border\)/.test(infoTreeCss), 'YO!info tmux sub-window leaf rows follow the active theme color');
-    assert.ok(/\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'shared compact tmux pane-tab tokens own inactive and active tab styling');
+    assert.ok(/\.pane-tab,\s*\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*\.tmux-pane-tab-token\.active,[\s\S]*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'regular and compact tmux pane tabs share inactive and active paint owners');
     assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')), 'tmux session tabs offer the YO button only for enabled, externally locked, or prompted sessions');
     assert.ok(/function tmuxPaneTabHtml\(session, info, state, auto, options = \{\}\)[\s\S]*sessionTabLeadingActivityHtml\(session, info, auto,[\s\S]*state/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'real tabs, Tabber, and YO!info pass the shared tab state into the shared YO marker offer rule');
     assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*sessionLabelHtml,/.test(infoSource), 'YO!info Tab values delegate their content unchanged to the shared compact tmux pane-tab renderer');
@@ -5762,7 +5885,9 @@ async function runEditorPreviewSuite() {
 	    assert.ok(/function infoRecordAiRecencyHtml\(record\)[\s\S]*function infoRecordAiPidHtml\(record\)[\s\S]*tmuxWindowPidText\(record\?\.aiPid\)/.test(infoSource), 'YO!info reuses the shared PID formatter and existing recency formatter');
     assert.ok(/\.info-tree-group-child-count\s*\{[\s\S]*margin-inline-start:\s*6px[\s\S]*color:\s*var\(--muted\)/.test(infoTreeCss), 'YO!info child counts render inline beside group labels in a less prominent color');
     assert.equal(infoTreeCss.includes('.info-tree-group-count'), false, 'YO!info CSS no longer defines the detached count bubble');
-    assert.ok(/\.info-tree-group\[data-info-depth="0"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*0[\s\S]*z-index:\s*4[\s\S]*\.info-tree-group\[data-info-depth="1"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-sticky-level-block\)[\s\S]*z-index:\s*5[\s\S]*\.info-tree-group\[data-info-depth="3"\]\s*>\s*summary\s*\{[\s\S]*inset-block-start:\s*calc\(var\(--info-tree-sticky-level-block\) \* 3\)/.test(infoTreeCss), 'YO!info sticky parent headers stack by tree depth instead of piling on top of each other');
+    assert.ok(/\.info-tree-group\s*\{[\s\S]*--info-tree-sticky-offset:\s*0[\s\S]*--z-info-tree-summary-current:\s*var\(--z-info-tree-summary-base\)/.test(infoTreeCss), 'YO!info owns sticky offset and the selected token layer on one group parent');
+    assert.ok(/\.info-tree-group summary\s*\{[\s\S]*inset-block-start:\s*var\(--info-tree-sticky-offset\)[\s\S]*z-index:\s*var\(--z-info-tree-summary-current\)/.test(infoTreeCss), 'YO!info sticky summaries consume one offset and z-index paint owner');
+    assert.ok(/\.info-tree-group\[data-info-depth="0"\]\s*\{[\s\S]*--info-tree-sticky-offset:\s*0[\s\S]*--z-info-tree-summary-current:\s*var\(--z-info-tree-summary-depth-0\)[\s\S]*\.info-tree-group\[data-info-depth="1"\]\s*\{[\s\S]*--info-tree-sticky-offset:\s*var\(--info-tree-sticky-level-block\)[\s\S]*--z-info-tree-summary-current:\s*var\(--z-info-tree-summary-depth-1\)[\s\S]*\.info-tree-group\[data-info-depth="3"\]\s*\{[\s\S]*--info-tree-sticky-offset:\s*calc\(var\(--info-tree-sticky-level-block\) \* 3\)[\s\S]*--z-info-tree-summary-current:\s*var\(--z-info-tree-summary-depth-3\)/.test(infoTreeCss), 'YO!info sticky parent depth selectors select inherited offset/layer data without duplicating rendered z-index properties');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(fullCss), 'disclosure chevrons share one scaled muted collapsed parent style');
     assert.ok(/\.info-tree-group summary::before\s*\{\s*content:\s*"›";\s*\}[\s\S]*\.info-tree-group:not\(\[open\]\) summary::before\s*\{\s*content:\s*"›";\s*\}/.test(infoTreeCss), 'YO!info disclosure chevrons use one shared rotated glyph without a bespoke larger font');
     assert.ok(/\.info-actions-bar\s*\{[\s\S]*position:\s*relative[\s\S]*z-index:\s*var\(--z-layer-marker\)[\s\S]*background:\s*var\(--pane-bar-bg/.test(infoTreeCss), 'YO!info action bar paints as the opaque layer above sticky tree summaries');
@@ -7198,6 +7323,26 @@ async function runEditorPreviewSuite() {
     ]}}};
     api.applyAutoApprovePayloadForTest(twoWorkingWindowsPayload, {render: false});
     assert.equal(api.applyAutoApprovePayloadForTest(twoFinishedWindowsPayload, {render: false}).workingAgentTransitionNotifications, 2, 'same-kind windows that finish in one sample each notify through their shared per-window identity');
+    const previousSessionInfo = api.transcriptInfoForTest('1');
+    const canonicalWindowInfo = {panes: [{window: '17', pane_id: '%34', target: '%34', process_label: 'codex', window_name: 'node', window_active: true, active: true}]};
+    const staleClaudeWorking = {kind: 'claude', state: 'working', window_index: 17, pane_target: '%34', observed_ts: stoppedAt - 5};
+    const liveCodexWorking = {kind: 'codex', state: 'working', window_index: 17, pane_target: '%34', observed_ts: stoppedAt};
+    api.setTranscriptInfoForTest('1', canonicalWindowInfo);
+    api.setTabberActivityForTest({agent_windows: {'1': [staleClaudeWorking]}});
+    assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [liveCodexWorking]}}}, {render: false}).workingAgentTransitionNotifications, 0, 'a live Codex row establishes one quiet physical-window baseline even when cached activity still says Claude');
+    assert.deepStrictEqual(
+      canonical(api.sessionAgentWindowStatusPayloadsForTest('1', canonicalWindowInfo).map(agent => ({kind: agent.kind, window_index: agent.window_index}))),
+      [{kind: 'codex', window_index: 17}],
+      'the shared status model exposes one canonical live agent for a physical tmux window',
+    );
+    api.setTabberActivityForTest({agent_windows: {'1': [{...staleClaudeWorking, state: 'idle', working_stopped_ts: stoppedAt}]}});
+    const canonicalToastCount = transitionToasts.length;
+    const canonicalFinished = api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{...liveCodexWorking, state: 'idle', working_stopped_ts: stoppedAt}]}}}, {render: false});
+    assert.equal(canonicalFinished.workingAgentTransitionNotifications, 1, 'stale Claude plus live Codex on one physical window emits one completion notification');
+    assert.equal(transitionToasts.length, canonicalToastCount + 1, 'the canonical physical-window transition cannot render duplicate Claude and Codex toasts');
+    assert.equal(transitionToasts.at(-1).title, 'Working AI finished', 'the canonical Codex completion keeps the normal finished copy');
+    api.setTabberActivityForTest({});
+    api.setTranscriptInfoForTest('1', previousSessionInfo);
     const missedGreenFinishedPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 6, window_label: '6:claude', working_stopped_ts: stoppedAt}]}}};
     assert.equal(api.applyAutoApprovePayloadForTest(missedGreenFinishedPayload, {render: false}).workingAgentTransitionNotifications, 1, 'a fresh server-observed stop also notifies when this browser missed the transient green snapshot');
     const staleFinishedPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 3, window_label: '3:claude', working_stopped_ts: stoppedAt - 61}]}}};
@@ -7654,7 +7799,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-composer-pill,\s*\n\.yoagent-backend-pill\s*\{/.test(css), 'composer selectors are styled as compact pills');
     assert.ok(/\.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--agent-inactive-marker-bg\)[\s\S]*border:\s*2px solid var\(--yoagent-inactive-backend-dot-border\)[\s\S]*box-shadow:/.test(css), 'YO!agent inactive backend dot is a clear black circle with a token-owned visible border');
     assert.ok(/\.yoagent-composer-pill-backend:not\(:has\(select:disabled\)\) \.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--pr-status-passing\)[\s\S]*box-shadow:/.test(css), 'YO!agent usable backend dot switches to the green active status without reusing the current-window marker');
-    assert.ok(/body\.theme-light \.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--agent-inactive-marker-bg\)[\s\S]*border-color:\s*var\(--agent-inactive-marker-border\)/.test(css), 'YO!agent inactive backend dot keeps its black fill with an explicit light-mode border pair');
+    assert.ok(/body\.theme-light \.yoagent-backend-pill-dot\s*\{[\s\S]*border-color:\s*var\(--agent-inactive-marker-border\)/.test(css), 'YO!agent inactive backend dot inherits its black fill and changes only the light-mode border pair');
+    assert.equal(/body\.theme-light \.yoagent-backend-pill-dot\s*\{[^}]*background:/.test(css), false, 'YO!agent light inactive backend dot does not restate its token-driven fill');
     assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
     assert.ok(/function yoagentRecentAgentPathText\(agent, signal = yoagentRecentAgentSignal\(agent\)\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
     assert.ok(/function yoagentRecentAgentsHtml\(payload = yoagentStartupActivityPayload\(\)\)[\s\S]*payload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from the startup activity-summary snapshot as a list');
@@ -7696,7 +7842,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-yoagent-chat-form[\s\S]*addEventListener\('wheel'[\s\S]*history\.scrollTop = nextTop/.test(src), 'YO!agent composer wheel events forward to the single history scroll owner');
     assert.ok(src.includes("loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: 'auto'})"), 'YO!agent background result pushes preserve manual scrollback unless the chat is already near bottom');
     assert.ok(/\.yoagent-transcript-path\s*\{[^}]*display:\s*flex[\s\S]*min-width:\s*0/.test(css), 'YO!agent transcript path row is compact and ellipsizes inside the chat panel');
-    assert.ok(/\.yoagent-transcript-value\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'YO!agent transcript path cannot overflow the chat panel');
+    assert.ok(/\.share-viewer-banner-text,[\s\S]*\.yoagent-transcript-value,[\s\S]*\.share-users-row span,[\s\S]*\.terminal-drop-suggestion-label\s*\{[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/.test(css), 'YO!agent transcript paths and terminal drop labels consume the complete shared single-line ellipsis owner');
     assert.ok(/\.yoagent-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent assistant bubbles are left-indented and use the active theme accent');
     assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result\s*\{[\s\S]*border-inline-start-color:\s*var\(--accent-gold\)[\s\S]*border-inline-start-width:\s*6px/.test(css), 'YO!agent target-agent result bubbles have a stronger colored left rule');
     assert.ok(/function yoagentAgentResultParts\(text\)[\s\S]*heading[\s\S]*output/.test(src), 'YO!agent target-agent result parser splits the heading from the output');
@@ -7739,18 +7885,19 @@ async function runEditorPreviewSuite() {
     assert.ok(actionCardStart >= 0 && actionCardBody.includes('data-yoagent-action-card') && actionCardBody.includes('data-yoagent-action-send'), 'YO!agent action previews render as confirmed-send cards');
     assert.ok(actionCardBody.includes("t('yoagent.action.preview')") && actionCardBody.includes("t('yoagent.action.send')"), 'YO!agent action card labels are localized');
     assert.ok(src.includes("t('yoagent.statusActionSent'") && src.includes("t('yoagent.statusBackend'"), 'YO!agent action/backend status strings are localized');
-    assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
+    assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*var\(--radius-lg\)/.test(css), 'YO!agent code blocks reuse the shared large corner radius');
     assert.ok(/\.yoagent-chat \.markdown-body pre,[\s\S]*\.yoagent-global \.markdown-body pre\s*\{[\s\S]*overflow-x:\s*auto[\s\S]*overflow-y:\s*auto[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent code blocks keep horizontal scrolling and normal vertical wheel chaining');
     assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
     assert.ok(/--lt-code-block-bg:\s*#f3f4f6;[\s\S]*--lt-code-block-border:\s*#e4e7ec;[\s\S]*--lt-code-block-text:\s*#1f2328;/.test(css), 'R4: neutral light code-block values live in the shared lt token owner');
-    assert.ok(/body\.theme-light \.yoagent-chat,[\s\S]*body\.theme-light \.yoagent-message\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: YO!agent light bubbles use shared panel and line tokens');
+    assert.ok(/body\.theme-light \.yoagent-chat,\s*body\.theme-light \.yoagent-message\s*\{[^}]*--yoagent-content-text:\s*var\(--pc-control-hover-fg\)[^}]*color:\s*var\(--yoagent-content-text\)/.test(css), 'R4: YO!agent light chat and bubbles share one readable content-color owner');
+    assert.ok(/body\.theme-light \.yoagent-message\s*\{[^}]*background:\s*var\(--panel\)/.test(css), 'R4: only YO!agent message bubbles override their distinct base surface in light mode');
     assert.ok(/body\.theme-light \.yoagent-message-details pre\s*\{[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);/.test(css), 'R4: YO!agent details code blocks use shared neutral code-block tokens');
-    assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre,[\s\S]*body\.theme-light \.yoagent-global \.markdown-body pre\s*\{[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);[\s\S]*color:\s*var\(--lt-code-block-text\);/.test(css), 'R4: YO!agent markdown code blocks use shared neutral code-block tokens');
+    assert.ok(/body\.theme-light \.yoagent-action-text,[\s\S]*body\.theme-light \.yoagent-chat \.markdown-body pre,[\s\S]*body\.theme-light \.yoagent-global \.markdown-body pre\s*\{[\s\S]*color:\s*var\(--lt-code-block-text\);[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);/.test(css), 'R4: YO!agent action and markdown code blocks share one neutral light-code paint owner');
     assert.ok(/\.file-editor-theme-panel\.theme-vanilla\s*\{[\s\S]*background:\s*var\(--lt-editor-bg\);[\s\S]*border-color:\s*var\(--lt-line\);/.test(css), 'R4: editor vanilla swatch uses light editor tokens');
     assert.ok(/body\.theme-light \.command-palette-dialog,[\s\S]*body\.theme-light \.keyboard-shortcuts-dialog\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: command palette and shortcuts dialogs use shared light panel tokens');
     assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
     assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
-    assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
+    assert.ok(/--yoagent-action-heading-light:\s*#0f4c81/.test(css) && /body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*var\(--yoagent-action-heading-light\)/.test(css), 'YO!agent light-mode inline code uses the shared readable app-blue token');
     // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
     // newlines between/inside the generated <ul><li> HTML were widening them).
     assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');
@@ -8788,8 +8935,11 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yolomux-dockview \.dockview-pane-header-actions \.tab\s*\{[\s\S]*?height:\s*min\(18px,\s*var\(--pane-tab-height\)\)/.test(css), 'Dockview header action buttons stay compact instead of growing taller than the tab row');
     assert.ok(/\.yolomux-dockview \.dv-split-view-container > \.dv-sash-container > \.dv-sash,[\s\S]*?\.dv-sash:not\(\.disabled\):hover,[\s\S]*?\.dv-sash:not\(\.disabled\):active\s*\{[\s\S]*?background-color:\s*transparent;/.test(css), 'Dockview sash hit targets stay transparent so only the skinny pseudo-line is visible');
     assert.ok(/\.yolomux-dockview \.dv-sash::before\s*\{[\s\S]*?background:\s*var\(--pane-resizer-bg\)/.test(css), 'Dockview sashes draw the shared skinny pane separator at rest');
-    assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash::before\s*\{[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(css), 'Dockview horizontal sashes center the 1px resting separator');
-    assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash:hover::before,[\s\S]*?var\(--pane-resizer-hover-line-size\)/.test(css), 'Dockview horizontal sashes thicken only to the shared hover separator size');
+    assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash::before,\s*\.resizer-row::before\s*\{[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(css), 'Dockview and fallback horizontal sashes share one centered resting-separator geometry rule');
+    assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash:hover::before,[\s\S]*?\.layout-resizing \.resizer-row::before\s*\{[\s\S]*?var\(--pane-resizer-hover-line-size\)/.test(css), 'Dockview and fallback horizontal sashes share one hover-separator geometry rule');
+    assert.equal((css.match(/color:\s*var\(--pc-control-hover-fg\);\s*background:\s*var\(--pane-tab-control-hover-bg\);\s*border-color:\s*var\(--pane-tab-control-hover-border\);/g) || []).length, 1, 'pane status, sub-window, and frame controls have one hover/focus paint owner');
+    assert.ok(/\.tmux-status-toggle:focus-visible,[\s\S]*?\.pane-info-bar \.tmux-window-button:not\(\.active\):focus-visible,[\s\S]*?\.tabs \.tab:not\(\.auto-toggle\):focus-visible\s*\{/.test(css), 'every pane-control family routes keyboard focus through the shared hover/focus owner');
+    assert.ok(/\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.tabs \.pane-expand::after\s*\{[\s\S]*?width:\s*8px;[\s\S]*?height:\s*1\.4px;/.test(css), 'Info Bar close and pane-frame glyphs share one pseudo-element base');
     assert.ok(css.includes('--dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg)'), 'Dockview drag overlays use the configurable pane separator color');
     assert.ok(tokenCss.includes('--tab-insert-preview-width: 24px'), 'tab insertion previews use a large enough between-tabs box to see while dragging');
     assert.ok(/\.grid\.drop-preview::before\s*\{[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\)/.test(css), 'root tab-drag previews use the configurable pane separator color');
@@ -8821,6 +8971,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/function dockviewLayoutToHost[\s\S]*api\.layout\?\.\(width, height\)/.test(dockviewSrc), 'Dockview is explicitly laid out to the host size instead of staying at the default 100px shell');
     assert.ok(dockviewSrc.includes('const DOCKVIEW_MIN_LAYOUT_WIDTH = 640') && dockviewSrc.includes('const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240'), 'Dockview serialized fallback dimensions use functional minimums');
     assert.ok(/function dockviewHostCanAdoptLayout\(host = dockviewLayoutState\.host\)[\s\S]*return width > 1 && height > 1/.test(dockviewSrc), 'Dockview adoption rejects hidden or zero-area hosts');
+    assert.ok(/function dockviewLayoutAdoptionAllowed\(\)[\s\S]*return !shareViewMode \|\| shareWriteMode/.test(dockviewSrc), 'read-only share viewers have one layout-adoption ownership predicate');
+    assert.ok(/function queueDockviewLayoutAdoption\(\)[\s\S]*if \(!dockviewLayoutAdoptionAllowed\(\)\) return/.test(dockviewSrc) && /function adoptDockviewLayout\(\)[\s\S]*if \(!dockviewLayoutAdoptionAllowed\(\)\) return/.test(dockviewSrc), 'both queued and direct Dockview adoption reject read-only share viewer geometry');
     assert.ok(/function adoptDockviewLayout\(\)[\s\S]*if \(!dockviewHostCanAdoptLayout\(\)\) return/.test(dockviewSrc), 'Dockview skips adopting snapshots while the host has no measurable area');
     assert.ok(/api\.onDidRemoveGroup\?\.\(group => dockviewHandleRemovedGroup\(group\)\)/.test(dockviewSrc), 'Dockview removed-group events queue Finder/Differ recovery');
     assert.ok(/function dockviewJsonFromLayoutSlots\(slots = layoutSlots\)[\s\S]*Math\.max\(DOCKVIEW_MIN_LAYOUT_HEIGHT[\s\S]*Math\.max\(DOCKVIEW_MIN_LAYOUT_WIDTH/.test(dockviewSrc), 'Dockview JSON snapshots clamp serialized dimensions to functional minimums');
@@ -8887,7 +9039,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('.file-preview-popout-window.editor-theme-light .markdown-body pre'), 'preview pop-out has light-theme code block rules outside .file-editor-content');
     assert.ok(source.includes('.file-preview-popout-window .markdown-body'), 'preview pop-out sets readable body text in its standalone document');
     assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto minmax\(0,\s*1fr\)/.test(source), 'preview pop-out top bar uses left/title, centered font, and right theme zones');
-    assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*1000/.test(source), 'preview pop-out top bar stays fixed above the preview body while scrolling');
+    assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-topbar\)/.test(source), 'preview pop-out top bar stays fixed through the shared topbar layer');
     assert.ok(/\.file-preview-popout-shell\s*\{[\s\S]*width:\s*100%[\s\S]*padding:\s*64px 24px 36px/.test(source), 'preview pop-out shell uses the full window width and reserves space below the fixed top bar');
     assert.equal(/\.file-preview-popout-shell\s*\{[\s\S]*width:\s*min\(/.test(source), false, 'preview pop-out content is not capped at a fixed desktop width');
     assert.ok(/<span class="file-preview-popout-title-path">[\s\S]*\$\{previewPopoutToolbarHtml\(\)\}/.test(source), 'preview pop-out header renders the path before the shared pop-out toolbar controls');
@@ -8899,6 +9051,8 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('applyMarkdownFenceFallbackHighlight(block);'), 'markdown fenced code falls back to editor syntax highlighting when hljs lacks the language');
     assert.ok(source.includes("const filePreviewPopouts = panePopoutNamespaceMap('file-preview')"), 'preview pop-out uses the shared pane-popout registry namespace');
     assert.ok(/function writePanePopoutDocument\(popoutWindow, options = \{\}\)[\s\S]*currentStylesheetHref\('yolomux\.css'\)[\s\S]*doc\.write/.test(source), 'generic pane pop-outs share one same-origin document writer with copied stylesheet/theme variables');
+    assert.equal((source.match(/doc\.open\(\)/g) || []).length, 1, 'pane and preview pop-outs have one detached-document open/write owner');
+    assert.ok(/function writeFilePreviewPopoutDocument\(path, previewWindow, snapshot\)[\s\S]*writePanePopoutDocument\(previewWindow,[\s\S]*style:\s*filePreviewPopoutDocumentStyle\(\)[\s\S]*bodyHtml:\s*filePreviewPopoutBodyHtml\(path, snapshot\)/.test(source), 'file preview pop-outs pass only preview-specific style/body data to the shared document writer');
     assert.ok(/function panePopoutVariableStyle\(\)[\s\S]*name\?\.startsWith\?\.\('--'\)[\s\S]*root\.getPropertyValue\(name\)/.test(source), 'generic pane pop-outs copy current CSS variables instead of hard-coding per-pane theme values');
     assert.ok(/function openPanePopout\(item\)[\s\S]*tabTypeForItem\(item\)[\s\S]*window\.open\(`\/pane-popout\?item=\$\{encodeURIComponent\(item\)\}`/.test(source), 'generic pane pop-out opens a same-origin detached pane shell');
     assert.ok(/function panePopoutDisabledReason\(item\)[\s\S]*isTmuxSession\(item\)[\s\S]*t\('pane\.popout\.disabledTerminal'\)[\s\S]*popoutDisabledReason/.test(source), 'unsupported live or interactive pane pop-outs carry an explicit localized phase-1 disabled reason');

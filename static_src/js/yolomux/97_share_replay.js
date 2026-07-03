@@ -2485,16 +2485,21 @@ function sharePointerSenderColor(sender = '') {
 
 function ensureSharePointerGhost(sender = '') {
   const key = sharePointerSenderKey(sender);
-  const existing = sharePointerGhosts.get(key);
-  if (existing?.isConnected) return existing;
+  let record = sharePointerRecords.get(key) || null;
+  if (record?.ghost?.isConnected) return record.ghost;
+  if (!record) {
+    record = {ghost: null, hideTimer: null};
+    sharePointerRecords.set(key, record);
+  }
+  if (record.hideTimer) clearTimeout(record.hideTimer);
+  record.hideTimer = null;
   const ghost = document.createElement('div');
   ghost.className = 'share-ghost-cursor';
   ghost.dataset.shareSender = key;
   ghost.setAttribute('aria-hidden', 'true');
   ghost.style.setProperty('--share-cursor-color', sharePointerSenderColor(key));
   document.body.appendChild(ghost);
-  sharePointerGhosts.set(key, ghost);
-  sharePointerGhost = ghost;
+  record.ghost = ghost;
   return ghost;
 }
 
@@ -2517,16 +2522,17 @@ function renderSharePointerGhost(payload = {}) {
   if (!point) return;
   const sender = sharePointerSenderKey(payload.sender || '');
   const ghost = ensureSharePointerGhost(sender);
+  const record = sharePointerRecords.get(sender);
   ghost.style.transform = `translate3d(${Math.round(point.x)}px, ${Math.round(point.y)}px, 0)`;
   ghost.classList.add('visible');
-  const existingTimer = sharePointerHideTimers.get(sender);
-  if (existingTimer) clearTimeout(existingTimer);
+  if (record.hideTimer) clearTimeout(record.hideTimer);
   const timer = setTimeout(() => {
-    sharePointerHideTimers.delete(sender);
-    sharePointerGhosts.get(sender)?.classList.remove('visible');
+    const current = sharePointerRecords.get(sender);
+    if (!current || current.hideTimer !== timer) return;
+    current.hideTimer = null;
+    current.ghost?.classList.remove('visible');
   }, 1800);
-  sharePointerHideTimers.set(sender, timer);
-  sharePointerHideTimer = timer;
+  record.hideTimer = timer;
   if (payload.click === true) renderShareClickRipple(point.x, point.y, sender);
 }
 

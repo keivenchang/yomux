@@ -11,7 +11,9 @@ const {
 function runYostatsPerformanceSuite() {
   test('YO!stats renders a full 24-hour mixed-resolution fixture with no-data overlays under 300ms', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const now = Math.ceil(Date.now() / 60_000) * 60_000;
+    const tenMinuteMs = 10 * 60_000;
+    const now = Math.ceil(Date.now() / tenMinuteMs) * tenMinuteMs;
+    assert.equal(now % tenMinuteMs, 0, 'fixture is anchored to the compaction boundary that exposed disconnect-only buckets as client traffic');
     const gapStart = now - (6 * 60 * 60 * 1000);
     const gapEnd = gapStart + (5 * 60 * 1000);
     const disconnectedStart = gapStart + (2 * 60 * 1000);

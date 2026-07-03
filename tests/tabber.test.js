@@ -53,7 +53,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('row.classList.toggle(CLS.selected, selected)') && source.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && source.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
     assert.equal(/classList\??\.\s*(?:add|remove|toggle|contains)\s*\(\s*['"](active|open|selected|collapsed)['"]/.test(source), false, 'MV-1: active/open/selected/collapsed classList calls route through CLS');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover/.test(css), 'tree hover color is the shared row token path');
-    assert.ok(/\.file-tree-row\.selected\s*\{/.test(css), 'tree selected color is the shared row token path');
+    assert.ok(/\.file-tree-row\.selected,\s*\.file-tree-row\.current-file:not\(\.selected\)\s*\{/.test(css), 'tree selected/current-file paint has one grouped owner');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)/.test(css), 'tree current-file color is the shared row token path');
     assert.ok(/\.file-tree-row\.current-directory:not\(\.selected\)/.test(css), 'tree current-directory color is the shared row token path');
     assert.equal(/differ-[^{]*(?:selected|current-file|current-directory)/.test(css), false, 'Differ has no forked selected/current row color classes');
@@ -497,8 +497,8 @@ async function runTabberSuite() {
     // The topbar is neutral at rest and switches to the green tab-strip color only on hover/focus.
     assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'topbar bg is neutral at rest');
     assert.ok(/\.topbar:hover,\s*\.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'topbar bg matches the green tab strip on hover/focus');
-    assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'light-mode topbar is neutral at rest');
-    assert.ok(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'light-mode topbar uses the green tab-strip bg on hover/focus');
+    assert.equal(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), false, 'light-mode topbar inherits neutral rest paint from the tokenized base owner');
+    assert.equal(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), false, 'light-mode topbar inherits hover/focus paint from the tokenized base owner');
     // / the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in
     // renderPanels, and endSessionDrag MUST flush via the scheduler instead of direct renderPanels().
     assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragSession != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
@@ -1360,30 +1360,43 @@ async function runTabberSuite() {
     assert.equal(/function tabberRowHtml|function renderTabberRowHtml|function tabberFileRowHtml/.test(source), false, 'B3: no bespoke tabber *RowHtml builder');
     assert.ok((source.match(/\.file-tree-row\[data-path\]:not\(\[data-tabber-type\]\)/g) || []).length >= 2, 'finder global row refreshes exclude tabber rows (no relabel/clobber)');
     assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--markdown-heading\)[\s\S]*--tabber-level1-color:\s*var\(--code-function\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber uses restrained level colors and keeps path rows normal text');
-    assert.ok(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--text\)[\s\S]*--tabber-level1-color:\s*var\(--text\)[\s\S]*--tabber-path-color:\s*var\(--text\)/.test(css), 'Tabber light mode keeps session, window, and path row text dark');
+    assert.ok(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-level0-color:\s*var\(--text\)[\s\S]*--tabber-level1-color:\s*var\(--text\)/.test(css), 'Tabber light mode keeps session and window row text dark');
+    assert.equal(/body\.theme-light \.file-tree-row\.tabber-row\s*\{[^}]*(?:--tabber-path-color|--tabber-detail-color)/.test(css), false, 'Tabber path and detail colors inherit their theme-aware base tokens instead of restating them in light mode');
     assert.ok(/\.file-tree-row\.tabber-row\[data-tabber-type="tab"\]:not\(\.selected\) > \.file-tree-name,[\s\S]*color:\s*var\(--tabber-level0-color\)/.test(css), 'non-tmux Tabber pane rows do not use purple');
     assert.ok(/\.file-tree-row:is\(\.tabber-active-window, \.tabber-active-tab\):not\(\.selected\) \.file-tree-name\s*\{[\s\S]*font-weight:\s*800/.test(css), 'active Tabber windows and non-tmux tabs share one bold row emphasis');
-    const sharedTmuxTabCss = css.match(/\.tmux-pane-tab-token\s*\{([\s\S]*?)\}/)?.[1] || '';
-    assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
-    assert.ok(/padding:\s*1px 5px 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
-    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
-    assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
-    assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab font');
-    assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(sharedTmuxTabCss), 'A2: compact tmux tab tokens use pane-tab line height');
+    const sharedPaneTabCss = css.match(/\.pane-tab,\s*\.tmux-pane-tab-token\s*\{([\s\S]*?)\}/)?.[1] || '';
+    assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
+    assert.ok(/padding:\s*1px 5px 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
+    assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
+    assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
+    assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab font');
+    assert.ok(/line-height:\s*var\(--tab-line-height\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab line height');
     assert.ok(/\.tmux-pane-tab-token-action\s*\{[\s\S]*cursor:\s*pointer/.test(css), 'A2: shared compact tmux tab tokens own the interactive cursor');
-    assert.ok(/\.tmux-pane-tab-token-action:hover,[\s\S]*\.tmux-pane-tab-token-action:focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)[\s\S]*border-color:\s*rgba\(255, 255, 255, 0\.92\)/.test(css), 'A2: shared compact tmux tab tokens own inactive hover styling');
-    assert.ok(/\.tmux-pane-tab-token\.active\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(css), 'A5: compact tmux tab tokens inherit active pane-tab tokens');
+    assert.ok(/\.pane-tab:not\(\.active\):hover,\s*\.pane-tab:not\(\.active\):focus-visible,\s*\.tmux-pane-tab-token-action:not\(\.active\):hover,\s*\.tmux-pane-tab-token-action:not\(\.active\):focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)[\s\S]*border-color:\s*var\(--paint-white-92\)/.test(css), 'A2: regular and compact inactive pane tabs share token-owned pointer and keyboard interaction paint');
+    assert.ok(/body\.theme-light \.pane-tab:not\(\.active\):hover,[\s\S]*body\.theme-light \.tmux-pane-tab-token-action:not\(\.active\):focus-visible\s*\{[\s\S]*border-color:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.5\)/.test(css), 'A2: one light-theme owner corrects every regular and compact interaction border');
+    const sharedActiveTabRule = css.match(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*?\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{([\s\S]*?)\}/);
+    assert.ok(sharedActiveTabRule, 'A5: every active tab-like surface routes through one paint owner');
+    for (const selector of ['.tmux-pane-tab-token.active', '.panel.active-pane .pane-tab.active:not(.file-missing)', '.panel.file-explorer-panel .pane-tab.active:not(.file-missing)']) {
+      assert.ok(sharedActiveTabRule[0].includes(selector), `A5: shared active tab owner includes ${selector}`);
+    }
+    assert.ok(/color:\s*var\(--pane-tab-active-text\)[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-color:\s*var\(--pane-tab-active-border\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(sharedActiveTabRule[1]), 'A5: the shared active tab owner carries the complete active paint');
+    assert.equal((css.match(/border-bottom-color:\s*var\(--pane-tab-active-bg\)/g) || []).length, 1, 'A5: the exact active-tab paint signature has one owner');
+    assert.ok(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab \.session-button-name,[\s\S]*\.tmux-pane-tab-token\.active \.session-button-detail,[\s\S]*\.pane-tab\.active \.session-button-detail\s*\{\s*color:\s*inherit/.test(css), 'A5: every active tab child inherits color from the shared shell paint');
+    assert.ok(/\.panel \.pane-tab:not\(\.active\)\s*\{\s*background:\s*var\(--pane-bar-bg\)/.test(css), 'A5: one unconditional panel owner paints inactive pane tabs');
+    assert.equal(css.includes('.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active)'), false, 'A5: inactive tab paint has no focus/readiness partition');
+    assert.equal(/\.panel\.active-pane \.pane-tab\.active,\s*\.panel\.file-explorer-panel \.pane-tab\.active\s*\{\s*box-shadow:\s*none/.test(css), false, 'A5: focused pane tabs do not restate the base active no-shadow rule');
     const tabberSessionTabCss = css.match(/\.file-tree-row\.tabber-row \.tabber-session-tab\s*\{([\s\S]*?)\}/)?.[1] || '';
     assert.ok(/inline-size:\s*100%/.test(tabberSessionTabCss) && /max-inline-size:\s*100%/.test(tabberSessionTabCss), 'A2/A4: Tabber session label stretches to the row instead of the pane tab width cap');
     assert.equal(/max-inline-size:\s*min\(var\(--pane-tab-width\), 100%\)/.test(tabberSessionTabCss), false, 'A2/A4: Tabber session label has no shared pane-tab-width max cap');
     assert.equal(/(?:^|\n)\s*(?:color|background|border|border-radius|cursor)\s*:/.test(tabberSessionTabCss), false, 'A2: Tabber session labels do not duplicate visual tab shell styling');
     assert.equal(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\][\s\S]*:hover \.tabber-session-tab/.test(css), false, 'A2: Tabber session hover styling stays on the shared tmux tab token');
     assert.equal(/\.file-tree-row\.tabber-row\.tabber-active-session \.tabber-session-tab/.test(css), false, 'A5: Tabber active styling stays on the shared tmux tab token');
-    assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*0 0 0 1px var\(--active-control-focus-ring\)/.test(css), 'A2/A3: selected tree rows keep a visible focus ring on the tab-shaped label');
-    assert.ok(/\.tmux-pane-tab-token > \.pane-tab-core\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*inline-size:\s*100%/.test(css), 'TR3: shared compact tmux tab chrome stretches its pane-tab core');
+    assert.ok(/\.file-tree-row\.tabber-row\.selected \.tabber-session-tab\s*\{[\s\S]*box-shadow:\s*var\(--active-control-focus-shadow-compact\)/.test(css), 'A2/A3: selected tree rows use the shared compact focus shadow on the tab-shaped label');
+    assert.ok(/\.tmux-pane-tab-token > \.pane-tab-core\s*\{\s*inline-size:\s*100%;\s*\}/.test(css), 'TR3: compact tmux tab chrome only adds its full-width core override');
+    assert.ok(/\.pane-tab-core\s*\{[\s\S]*min-width:\s*0[\s\S]*flex:\s*1 1 auto/.test(css), 'TR3: regular and compact tabs inherit core flex behavior from one generic owner');
     assert.ok(/\.session-button-prefix\s*\{[\s\S]*flex:\s*0 0 auto[\s\S]*min-width:\s*max-content[\s\S]*overflow:\s*visible/.test(css), 'A4/TR1: one shared intrinsic session prefix preserves the identifier while the detail flexes');
     assert.equal(/\.session-button-(?:name|prefix)[\s\S]{0,160}max-width:\s*(?:72|120)px/.test(css), false, 'A4/TR1: session labels do not carry fixed pixel capacity caps');
-    assert.ok(/\.tmux-pane-tab-token \.tab-inline-detail\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*max-width:\s*none/.test(css), 'A4/TR1: the shared compact tmux tab token stretches tab detail text');
+    assert.ok(/\.tmux-pane-tab-token \.tab-inline-detail,\s*\.pane-tab \.tab-inline-detail,\s*\.pane-tab\.file-editor-item \.session-button-dir\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0[\s\S]*max-width:\s*none/.test(css), 'A4/TR1: regular, compact, and file-editor pane-tab text share one stretching owner');
     assert.ok(/body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-name,[\s\S]*body\.theme-light \.tmux-pane-tab-token:not\(\.active\) \.session-button-detail\s*\{[\s\S]*color:\s*currentColor/.test(css), 'compact tmux tab tokens own light-mode child label inheritance');
     assert.equal(/\.file-tree-row\.tabber-row \.tabber-session-tab > \.pane-tab-core/.test(css), false, 'TR3: Tabber no longer owns the compact tab core flex rule');
     assert.equal(/\.info-tree-tab-token > \.pane-tab-core/.test(css), false, 'TR3: YO!info no longer owns a duplicate compact tab core flex rule');
@@ -1405,6 +1418,8 @@ async function runTabberSuite() {
     assert.ok(/\.agent-window-activity--subwindow \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*currentColor/.test(css), 'Tabber fallback child process rows inherit the renderer-owned sub-window glyph selector');
     assert.equal(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\][^{]*\.agent-window-status-dot::before/.test(css), false, 'Tabber parent session aggregate status balls never get sub-window pseudo-glyphs');
     assert.ok(/\.agent-window-activity \.agent-icon\s*\{[\s\S]*width:\s*var\(--agent-window-icon-size\)[\s\S]*height:\s*var\(--agent-window-icon-size\)/.test(css), 'shared agent process icons inherit width and height from the shared activity-size variable');
+    assert.ok(/\.info-tree-ai-value \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*14px/.test(css), 'YO!info supplies only its compact icon-size parameter to the shared activity renderer');
+    assert.equal(/\.info-tree-ai-value \.agent-window-activity \.agent-icon\s*\{[^}]*(?:width|height):/.test(css), false, 'YO!info does not copy the shared variable-driven agent icon geometry');
 	    assert.equal((css.match(/--agent-status-ball-size:/g) || []).length, 3, 'status ball size has only the base owner, topbar status-ball owner, and shared sub-window 100% reference owner');
     assert.ok(/\.agent-window-status-dot\s*\{[\s\S]*font-family:\s*var\(--ui-font\)[\s\S]*font-stretch:\s*normal/.test(css), 'Tabber status balls reset inherited condensed tab typography instead of shrinking beside the agent icon');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(css), 'Tabber status balls inherit the shared agent status-ball glyph size parent');

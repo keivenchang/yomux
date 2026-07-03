@@ -17,10 +17,19 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import shutil
 import sys
 import time
 from urllib.parse import urljoin
+
+SELENIUM_AVAILABLE = importlib.util.find_spec("selenium") is not None
+if SELENIUM_AVAILABLE:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
 
 
 def find_chrome() -> str | None:
@@ -48,13 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     if not chrome:
         print("error: Chrome/Chromium not found (install google-chrome or chromium)", file=sys.stderr)
         return 2
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.webdriver.support.ui import WebDriverWait
-    except ImportError:
+    if not SELENIUM_AVAILABLE:
         print("error: selenium is not installed (pip install selenium)", file=sys.stderr)
         return 2
 

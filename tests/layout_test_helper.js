@@ -891,6 +891,7 @@ globalThis.__layoutTestApi = {
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
+  debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {
@@ -1147,25 +1148,114 @@ globalThis.__layoutTestApi = {
   setTmuxWindowActiveIndexOverrideForTest: setTmuxWindowActiveIndexOverride,
   setTmuxWindowActiveIndexPendingForTest: setTmuxWindowActiveIndexPending,
   tmuxWindowActiveIndexOverrideForTest: tmuxWindowActiveIndexOverride,
+  tmuxWindowNavigationRecordForTest(session) {
+    const record = tmuxWindowNavigationRecord(session);
+    return record ? {
+      activeIndexOverride: record.activeIndexOverride,
+      sequence: record.sequence,
+      directTargetGuard: record.directTargetGuard ? {...record.directTargetGuard} : null,
+    } : null;
+  },
+  expireTmuxWindowDirectTargetGuardForTest(session) {
+    const record = tmuxWindowNavigationRecord(session);
+    if (record?.directTargetGuard) record.directTargetGuard.guardUntilMs = 0;
+    return tmuxWindowDirectTargetGuard(session);
+  },
   activeTmuxSignalWindowForSessionForTest: activeTmuxSignalWindowForSession,
+  seedSessionLifecycleStateForTest(session) {
+    const record = sessionStatusRecord(session, true);
+    record.state = {key: 'needs-input', reason: 'test attention', signature: 'needs-input:test attention'};
+    record.notificationLastSent.set('state:needs-input:test attention', 123);
+    record.workingAgentNotificationTones.set('0::codex', 'working');
+    record.metadataBadgePulseUntil.set('pr', Date.now() + 5000);
+    autoApproveStates.set(session, {enabled: true});
+    paneViewState.set(session, {scrollTop: 9});
+    pasteCounters.set(session, 4);
+    sessionRepoDisplayRoot.set(session, '/repo/test');
+    tabLastActivatedAt.set(session, 100);
+    tmuxStatusModes.set(session, 'top');
+    terminalAppClipboardText.set(session, {text: 'copied text', timestamp: Date.now()});
+    tmuxWindowNavigationRecords.set(session, {activeIndexOverride: '1', sequence: 9, directTargetGuard: null});
+    terminalTmuxInputStates.set(session, {prefixPending: true, repeatUntilMs: Date.now() + 900});
+    altScreenWheelRemainder.set(session, 0.5);
+    attentionAcknowledgementRecords.set(
+      attentionAcknowledgementKey(['prompt', session, 'seed']),
+      {recordedAt: null, timer: 84, pending: false},
+    );
+    agentWindowActivityRecords.set(session + ':0::codex', {
+      activity: {state: 'working'},
+      stoppedRefresh: {timer: 81, untilMs: Date.now() + 1000},
+      transitionPulseRefresh: {timer: 82, untilMs: Date.now() + 1000},
+      acknowledgedStoppedAt: 0,
+      acknowledgementVisual: {timer: 83, untilMs: Date.now() + 1000},
+    });
+  },
+  seedSessionToastForTest(session, kind = 'attention', timer = 71) {
+    const id = ++attentionAlertSequence;
+    const node = document.createElement('div');
+    node.className = 'toast';
+    node.dataset.alertId = String(id);
+    node.dataset.toastKind = kind;
+    node.dataset.toastSession = session;
+    attentionAlerts.appendChild(node);
+    toastRecords.set(id, {node, timer});
+    return id;
+  },
+  toastStateForTest(id) {
+    const record = toastRecords.get(id);
+    return record ? {session: record.node.dataset.toastSession || '', timer: Boolean(record.timer)} : null;
+  },
   seedSessionTeardownStateForTest(session) {
     const closed = {transcript: 0, summary: 0};
     transcriptStreams.set(session, {close() { closed.transcript += 1; }});
     summaryStreams.set(session, {close() { closed.summary += 1; }});
-    autoApproveStates.set(session, {enabled: true});
-    uploadResultsBySession.set(session, [{text: 'uploaded'}]);
-    uploadCleanupTimers.set(session, 123);
+    this.seedSessionLifecycleStateForTest(session);
+    uploadResultRecords.set(session, {entries: [{text: 'uploaded'}], cleanupTimer: 123});
     return closed;
   },
+  showUploadResultForTest: showUploadResult,
+  renderUploadResultForTest: renderUploadResult,
+  keepUploadResultForTest: keepUploadResult,
+  hideUploadResultForTest: hideUploadResult,
+  uploadResultRecordForTest(session) {
+    const record = uploadResultRecord(session);
+    return record ? {entries: record.entries, cleanupTimer: record.cleanupTimer} : null;
+  },
+  seedUploadResultRecordForTest(session, entries, cleanupTimer = null) {
+    uploadResultRecords.set(session, {entries: Array.from(entries || []), cleanupTimer});
+  },
   stopSessionUiForTest: stopSessionUi,
+  sessionLifecycleStateForTest(session) {
+    const record = sessionStatusRecord(session);
+    return {
+      statusRecord: Boolean(record),
+      trackedState: record?.state?.key || '',
+      notificationCount: record?.notificationLastSent.size || 0,
+      toneCount: record?.workingAgentNotificationTones.size || 0,
+      pulseCount: record?.metadataBadgePulseUntil.size || 0,
+      autoApprove: autoApproveStates.has(session),
+      paneScrollTop: paneViewState.get(session)?.scrollTop ?? null,
+      pasteCount: pasteCounters.get(session) ?? null,
+      repoDisplayRoot: sessionRepoDisplayRoot.get(session) || '',
+      lastActivatedAt: tabLastActivatedAt.get(session) ?? null,
+      tmuxStatusMode: tmuxStatusModes.get(session) || '',
+      clipboardText: terminalAppClipboardText.get(session)?.text || '',
+      navigation: tmuxWindowNavigationRecords.has(session),
+      terminalInput: terminalTmuxInputStates.has(session),
+      wheelRemainder: altScreenWheelRemainder.has(session),
+      agentActivityCount: Array.from(agentWindowActivityRecords.keys()).filter(key => key.startsWith(session + ':')).length,
+      acknowledgementCount: Array.from(attentionAcknowledgementRecords.keys()).filter(key => attentionAcknowledgementKeySession(key) === session).length,
+    };
+  },
   sessionTeardownStateForTest(session) {
+    const uploadRecord = uploadResultRecord(session);
     return {
       terminal: terminals.has(session),
       transcript: transcriptStreams.has(session),
       summary: summaryStreams.has(session),
-      autoApprove: autoApproveStates.has(session),
-      uploads: uploadResultsBySession.has(session),
-      uploadTimer: uploadCleanupTimers.has(session),
+      uploads: Boolean(uploadRecord),
+      uploadTimer: uploadRecord?.cleanupTimer !== null && uploadRecord?.cleanupTimer !== undefined,
+      ...this.sessionLifecycleStateForTest(session),
     };
   },
   tmuxSessionActionCommands,
@@ -1332,6 +1422,14 @@ globalThis.__layoutTestApi = {
   clearPromptAttentionForSessionForTest(session, options = {}) { return clearPromptAttentionForSession(session, {...options, localOnly: options.localOnly !== false}); },
   attentionAcknowledgementKeyIsRecordedForTest: attentionAcknowledgementKeyIsRecorded,
   applyAttentionAcknowledgementResponseForTest: applyAttentionAcknowledgementResponse,
+  acknowledgeAttentionKeysForTest: acknowledgeAttentionKeys,
+  postAttentionAcknowledgementKeysForTest: postAttentionAcknowledgementKeys,
+  clearSessionAttentionAcknowledgementRecordsForTest: clearSessionAttentionAcknowledgementRecords,
+  attentionAcknowledgementRecordForTest(key) {
+    const record = attentionAcknowledgementRecord(key);
+    return record ? {...record} : null;
+  },
+  attentionAcknowledgementRecordCountForTest() { return attentionAcknowledgementRecords.size; },
   terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   updateSessionButtonStatesForTest: updateSessionButtonStates,
   browserFaviconBadgeCount,
@@ -1410,6 +1508,15 @@ globalThis.__layoutTestApi = {
   terminalTabDisplayLabel,
   terminalTmuxPrefixWindowShortcutForTest: terminalTmuxPrefixWindowShortcut,
   terminalTmuxAltWindowShortcutForTest: terminalTmuxAltWindowShortcut,
+  terminalTmuxInputStateForTest(session) {
+    const state = terminalTmuxInputState(session);
+    return state ? {...state} : null;
+  },
+  expireTerminalTmuxRepeatForTest(session) {
+    const state = terminalTmuxInputState(session);
+    if (state) state.repeatUntilMs = 0;
+    return pruneTerminalTmuxInputState(session);
+  },
   tmuxWindowForTest: tmuxWindow,
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
@@ -1610,12 +1717,31 @@ globalThis.__layoutTestApi = {
   agentWindowAggregateTonesForTest() { return [...AGENT_WINDOW_AGGREGATE_TONES]; },
   agentWindowVisibleToneForTest: agentWindowVisibleTone,
   agentWindowStatusToneForItemForTest: agentWindowStatusToneForItem,
+  agentWindowStatusItemVisualRankForTest: agentWindowStatusItemVisualRank,
   agentWindowActivityToneWrapperClassForTest: agentWindowActivityToneWrapperClass,
   agentWindowStatusSampleItemForTest: agentWindowStatusSampleItem,
   agentWindowStatusDotHtmlForToneForTest: agentWindowStatusDotHtmlForTone,
   agentWindowStatusDotHtmlForTest: agentWindowStatusDotHtml,
   agentWindowActivityStyleAttributeForTest: agentWindowActivityStyleAttribute,
   agentWindowActivityIconForTest: agentWindowActivityIcon,
+  agentWindowActivityRecordForTest(key) {
+    const record = agentWindowActivityRecord(key);
+    if (!record) return null;
+    const visual = record.acknowledgementVisual;
+    return {
+      activity: record.activity ? {...record.activity} : null,
+      stoppedRefreshUntilMs: Number(record.stoppedRefresh?.untilMs || 0),
+      transitionPulseRefreshUntilMs: Number(record.transitionPulseRefresh?.untilMs || 0),
+      acknowledgedStoppedAt: Number(record.acknowledgedStoppedAt || 0),
+      acknowledgementVisual: visual ? {
+        startedAtMs: Number(visual.startedAtMs || 0),
+        untilMs: Number(visual.untilMs || 0),
+        durationMs: Number(visual.durationMs || 0),
+        acknowledgementKey: String(visual.acknowledgementKey || ''),
+        refreshed: visual.refreshed === true,
+      } : null,
+    };
+  },
   topbarActivityCountBallHtmlForTest: topbarActivityCountBallHtml,
   keyboardLegendStatusSampleForTest: keyboardLegendStatusSample,
   preferencesStatusPulseExampleHtmlForTest: preferencesStatusPulseExampleHtml,
@@ -1626,6 +1752,8 @@ globalThis.__layoutTestApi = {
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,
   sessionAgentWindowStatusModelForTest: sessionAgentWindowStatusModel,
   sessionAgentWindowStatusPayloadsForTest: sessionAgentWindowStatusPayloads,
+  sessionAgentWindowStatusSummaryForTest: sessionAgentWindowStatusSummary,
+  infoTabGroupStatusRecordForTest: infoTabGroupStatusRecord,
   tmuxWindowCanonicalLabelForTest: tmuxWindowCanonicalLabel,
   buildTabberTreeForTest: buildTabberTree,
   tabMenuItems,
@@ -1760,6 +1888,14 @@ globalThis.__layoutTestApi = {
   scheduleShareReplayScrollPublishForElementForTest: scheduleShareReplayScrollPublishForElement,
   shareReplayPointerPayloadForTest: shareReplayPointerPayload,
   shareReplayApplyPointerForTest: shareReplayApplyPointer,
+  renderSharePointerGhostForTest: renderSharePointerGhost,
+  sharePointerRecordsForTest() {
+    return Array.from(sharePointerRecords.entries()).map(([sender, record]) => ({
+      sender,
+      ghost: record.ghost,
+      hideTimer: record.hideTimer,
+    }));
+  },
   shareReplayDeltaSequenceStatusForTest: shareReplayDeltaSequenceStatus,
   shareReplayDeltaCanApplyBestEffortForTest: shareReplayDeltaCanApplyBestEffort,
   applyShareReplayKeyframeForTest: applyShareReplayKeyframe,

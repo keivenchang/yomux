@@ -889,7 +889,6 @@ async function runShareThemeSuite() {
     assert.equal(/var\(--input-bg,\s*#[0-9a-fA-F]{3,8}\)/.test(changedFilesCss), false, 'input controls do not hide dark literals inside token fallbacks');
     assert.equal(/z-index:\s*(?:260|220)\b/.test(changedFilesCss), false, 'file editor z-index collision literals are routed through named tokens');
     assert.equal(changedFilesCss.includes('#a78bfa'), false, 'the old untracked purple is gone — no non-merged status uses purple');
-    assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*container-type:\s*inline-size/.test(changedFilesCss), 'Finder modified-files header uses pane-width container queries');
@@ -900,7 +899,6 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
     assert.ok(/\.file-explorer-date-reload-cluster \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder date/reload cluster refresh paints the same visible refresh icon');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-refresh[\s\S]*?\{\s*background:\s*transparent/.test(changedFilesCss), 'light-mode embedded Differ refresh is not a blank white square');
     assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
@@ -1776,7 +1774,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-section-toggle\s*\{[\s\S]*color:\s*var\(--pane-tab-text\)[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Preferences section headers use the same background token as the pane tab container');
     assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'Preferences search button uses the normal UI font, not condensed tab text');
     assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
-    assert.ok(preferencesCss.includes('--drop-outline: #ffffff'), '#40: dark-mode drag preview/outline is white (light mode stays blue, asserted below)');
+    assert.ok(preferencesCss.includes('--drop-outline: var(--paint-white)'), '#40: dark-mode drag preview/outline consumes the shared white paint (light mode stays blue, asserted below)');
     assert.ok(preferencesCss.includes('--text-selection-bg: #2563eb'), 'dark mode browser text selection uses a prominent blue fill');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--text-selection-bg:\s*#93c5fd/.test(preferencesCss), 'light mode browser text selection uses a visible blue fill');
     assert.ok(/::selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'browser text selection paints background only, preserving text color');
@@ -1795,10 +1793,10 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-path-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the dedicated path row and can shrink without wrapping Sync or Copy');
     assert.equal(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer/.test(preferencesCss), false, 'Finder files mode keeps the primary-row spacer so Session stays pinned right');
     assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex[\s\S]*height:\s*var\(--pane-tab-height\)/.test(preferencesCss), 'Finder/Differ/Tabber mode switcher uses pane-tab height');
-    assert.ok(/\.file-explorer-mode-toggle\s*\{(?=[\s\S]*height:\s*var\(--pane-tab-height\))(?=[\s\S]*font-family:\s*var\(--tab-font\))(?=[\s\S]*border-radius:\s*6px 6px 0 0)/.test(preferencesCss), 'Finder/Differ/Tabber mode buttons look like pane tabs');
+    assert.ok(/\.file-explorer-mode-toggle\s*\{(?=[\s\S]*height:\s*var\(--pane-tab-height\))(?=[\s\S]*font-family:\s*var\(--tab-font\))(?=[\s\S]*border-radius:\s*var\(--radius-md\) var\(--radius-md\) 0 0)/.test(preferencesCss), 'Finder/Differ/Tabber mode buttons reuse the shared pane-tab corner radius');
     assert.equal(/\.file-explorer-mode-label\s*\{[\s\S]*writing-mode:\s*vertical-rl/.test(preferencesCss), false, 'Finder/Differ mode labels are regular left-to-right text');
     assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'inactive Finder/Differ/Tabber mode tabs use the pane tab strip background');
-    assert.ok(/\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'active Finder/Differ/Tabber mode tab is filled from the pane-tab active token');
+    assert.ok(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'active Finder/Differ/Tabber mode tabs share the pane-tab active paint owner');
     assert.ok(/\.file-explorer-folder-icon\s*\{[\s\S]*border:\s*1\.5px solid currentColor[\s\S]*\.file-explorer-folder-icon::before/.test(preferencesCss), 'Finder new-folder button renders a folder icon instead of a square glyph');
     assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
     const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1859,14 +1857,16 @@ async function runShareThemeSuite() {
     const resizerBlock = preferencesCss.slice(resizerStart, resizerEnd);
     assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
     assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
-    assert.ok(resizerBlock.includes('var(--drop-outline-shadow)'), 'C15: the Finder resizer hover uses the shared outline-shadow token');
+    assert.ok(resizerBlock.includes('box-shadow: var(--pane-resizer-hover-shadow)'), 'C15: the Finder resizer hover uses the shared shadow-geometry token');
+    assert.ok(preferencesCss.includes('--pane-resizer-hover-shadow: 0 0 0 1px var(--drop-outline-shadow)'), 'C15: the shared resizer shadow derives from the outline color token');
     assert.equal(/118,\s*185,\s*0|255,\s*255,\s*255,\s*0\.04/.test(resizerBlock), false, 'C15: the hardcoded green gradient + white border are gone from the Finder resizer');
-    // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but #28
-    // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
+    // Light theme drives base pane-tab/ring/link styling via tokens; only genuinely distinct
+    // interaction contrast keeps a component-level light rule.
     assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
     assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
-    assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for Info Bar links');
-    assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
+    assert.ok(/\.meta a,\s*\.summary-context a\s*\{[^}]*color:\s*var\(--link-soft\)/.test(preferencesCss), '#28: Info Bar links consume the shared theme-aware link token');
+    assert.equal(/body\.theme-light \.(?:meta|summary-context) a/.test(preferencesCss), false, '#28: Info Bar links do not duplicate their theme-token paint in light-only rules');
+    assert.ok(/body\.theme-light \.pane-tab:not\(\.active\):hover,[\s\S]*body\.theme-light \.tmux-pane-tab-token-action:not\(\.active\):focus-visible/.test(preferencesCss), '#28: light theme fixes regular and compact tab hover/focus borders through one owner');
     assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-bright:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green (via the active-accent token) so a theme switch repaints it');
     assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane Info Bar header label is forced dark in light mode (was light-on-light)');
@@ -1912,8 +1912,8 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
     assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
     assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'compact Differ and noncompact editor pickers share the two-thirds-browser maximum');
-    assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');
-    assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in light mode');
+    assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*var\(--paint-white\)/.test(preferencesCss), 'server update Reload button uses the danger and opaque-white tokens in dark mode');
+    assert.equal(/body\.theme-light \.server-update-banner-reload/.test(preferencesCss), false, 'server update Reload button uses one theme-safe danger paint owner');
     assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
     assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder panes');
     assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
@@ -1962,10 +1962,9 @@ async function runShareThemeSuite() {
     // The name/dir/detail spans hardcode near-white (for dark tabs); light mode overrides them dark too,
     // or the branch/path text stays white-on-white even with a dark base tab color.
     assert.ok(/body\.theme-light \.pane-tab:not\(\.active\) \.session-button-name,[\s\S]*?\.session-button-detail\s*\{[^}]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text is dark via the shared control foreground token');
-    // An inactive pane's inactive tabs follow the gray bar (--pane-bar-bg, which is --panel2 when unfocused);
-    // the bars themselves go gray via --pane-bar-bg (asserted above), so only the tabs need this rule.
-    assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
-    assert.ok(/\.panel\.active-pane \.pane-tab:not\(\.active\),\s*\.panel\.typing-ready-pane \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an active pane\'s inactive tabs match the bright tab-strip bar (--pane-bar-bg)');
+    // Every inactive tab follows its own panel's --pane-bar-bg; the variable itself carries the focused,
+    // typing-ready, or inactive pane state, so CSS does not need a second focus/readiness partition.
+    assert.ok(/\.panel \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'all inactive pane tabs follow their panel tab-strip bar through one owner');
     assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
     assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
     assert.ok(/--inactive-pane-opacity-scale:\s*1/.test(preferencesCss), 'inactive-pane dim defaults to full strength');
@@ -2002,7 +2001,7 @@ async function runShareThemeSuite() {
     // .terminal container's theme background shows through.
     assert.ok(/\.terminal \.xterm:not\(\.allow-transparency\) \.xterm-viewport\s*\{[^}]*background-color:\s*transparent/.test(preferencesCss), 'xterm viewport is transparent (no black #000 line at the top of the terminal)');
     assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
-    assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
+    assert.ok(/\.dv-sash::before,\s*\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'Dockview and fallback row splitters share one tokenized centered visible line');
     assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
     assert.ok(/\.layout-resizer:hover::before,[\s\S]*background:\s*transparent/.test(preferencesCss), 'resizer hover does not return to a solid fill');
     assert.ok(/\.resizer-row:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: row splitter hover is a solid straight yellow bar (no dashed gradient)');
@@ -2092,7 +2091,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines force dark red text on the stronger red fill');
+    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine \*\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines and descendants share one dark-red text rule on the stronger red fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*var\(--success-text-strong\)[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
     assert.ok(/--diff-remove-line-bg:\s*#540c06/.test(preferencesCss), '#250: diff removed lines use the sampled opaque red fill over the dark bg');
@@ -2104,9 +2103,9 @@ async function runShareThemeSuite() {
     assert.equal(/\.preferences-scroll\s*\{[^}]*scrollbar-color:/.test(preferencesCss), false, 'Preferences does not customize scrollbar colors locally');
     assert.equal(/\.preferences-scroll::\-webkit-scrollbar-thumb/.test(preferencesCss), false, 'Preferences does not customize WebKit scrollbar thumbs locally');
     assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
-    assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned active-control fill (no dark square)');
+    assert.ok(/\.app-menu-ui-icon\.active,[\s\S]*\.file-editor-codemirror-panel \.cm-search label:has\(input:checked\)\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: app-menu and CodeMirror checked controls consume the shared persistent active-control owner');
+    assert.equal(/body\.theme-light \.app-menu-ui-icon\.active(?:,|\s*\{)|body\.editor-theme-light \.file-editor-codemirror(?:-panel)? \.cm-search label:has\(input:checked\)(?:,|\s*\{)/.test(preferencesCss), false, '#251: light themes do not copy the persistent active-control paint');
     assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');
     assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
     assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
     // Wrapped-line diff bug: the full-bleed box-shadow/clip-path trick is ONLY for BLOCK line elements.
@@ -2165,7 +2164,9 @@ async function runShareThemeSuite() {
     assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
     assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
     assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-action-bg\)[\s\S]*?border-color:\s*var\(--danger-action-border\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses danger action tokens and normal UI text');
-    assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-strong\)[\s\S]*?border-color:\s*var\(--danger-action-light-border\)/.test(preferencesCss), 'preferences global reset button uses shared danger tokens in light mode');
+    const lightResetButtonRule = /body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{([^}]*)\}/.exec(preferencesCss)?.[1] || '';
+    assert.ok(/background:\s*var\(--danger-strong\)/.test(lightResetButtonRule) && /border-color:\s*var\(--danger-action-light-border\)/.test(lightResetButtonRule), 'preferences global reset button uses light-specific danger surface tokens');
+    assert.equal(/(?:^|;)\s*color:/.test(lightResetButtonRule), false, 'preferences global reset button inherits its shared danger text token instead of restating it in light mode');
     assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
     const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
     assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -3176,7 +3177,52 @@ async function runShareThemeSuite() {
       assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
       assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
       assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
-      assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
+      assert.ok(/const sharePointerRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
+      assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
+      assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
+      assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*record\.hideTimer = timer[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors, replace one record-owned timer, and ignore their own echoed cursor');
+      const pointerTimers = new Map();
+      const clearedPointerTimers = [];
+      let nextPointerTimer = 1;
+      const pointerApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {share: {view: true, id: 'pointer-test', mode: 'ro'}},
+        sessionStorage: {'yolomux.share.viewer.pointer-test': 'self-client'},
+        setTimeout(callback, milliseconds) {
+          const id = nextPointerTimer++;
+          pointerTimers.set(id, {callback, milliseconds});
+          return id;
+        },
+        clearTimeout(id) {
+          clearedPointerTimers.push(id);
+          pointerTimers.delete(id);
+        },
+      });
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 10, y: 20});
+      let pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords.length, 1, 'first remote sender creates one pointer record');
+      const firstGhost = pointerRecords[0].ghost;
+      const firstTimer = pointerRecords[0].hideTimer;
+      assert.equal(firstGhost.classList.contains('visible'), true, 'remote pointer is visible after its first frame');
+      assert.equal(pointerTimers.get(firstTimer).milliseconds, 1800, 'remote pointer uses the shared hide duration');
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 30, y: 40});
+      pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords[0].ghost, firstGhost, 'the same sender reuses one ghost DOM node');
+      assert.notEqual(pointerRecords[0].hideTimer, firstTimer, 'a new frame replaces the sender hide timer');
+      assert.deepEqual(clearedPointerTimers, [firstTimer], 'timer replacement clears the prior sender timer exactly once');
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-b', x: 50, y: 60});
+      pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords.length, 2, 'different senders retain isolated pointer records');
+      assert.notEqual(pointerRecords[0].ghost, pointerRecords[1].ghost, 'different senders retain isolated ghost DOM nodes');
+      pointerApi.renderSharePointerGhostForTest({sender: 'self-client', x: 70, y: 80});
+      assert.equal(pointerApi.sharePointerRecordsForTest().length, 2, 'the client ignores its own echoed pointer frame');
+      const remoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
+      const remoteATimer = pointerTimers.get(remoteA.hideTimer);
+      remoteATimer.callback();
+      const hiddenRemoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
+      const visibleRemoteB = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-b');
+      assert.equal(hiddenRemoteA.hideTimer, null, 'the active hide callback clears only its record timer');
+      assert.equal(hiddenRemoteA.ghost.classList.contains('visible'), false, 'the active hide callback hides its sender ghost');
+      assert.equal(visibleRemoteB.ghost.classList.contains('visible'), true, 'one sender hide callback does not hide another sender');
       assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
       assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
       const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
@@ -4021,14 +4067,14 @@ async function runShareThemeSuite() {
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*#ffffff[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses an opaque light pane surface');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*var\(--paint-white\)[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses the shared opaque-white pane surface');
       assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(71 85 105 \/ 0\.42\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visibly dark enough against its white pane');
       assert.ok(/\.info-pane\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss) && /\.info-list\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss), 'YO!info pane and list surfaces inherit the theme-aware pane background');
       assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-connector-arm-start:\s*calc\(var\(--info-tree-connector-x\) \+ var\(--info-tree-connector-line-width\)\)[\s\S]*--info-tree-summary-connector-y:\s*13px[\s\S]*--info-tree-record-connector-y:\s*13px[\s\S]*\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item::after\s*\{[\s\S]*inset-block-start:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-record-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss), 'YO!info tree renders overlapping connector lines aligned to text midlines and stops the last item as a 90-degree angle');
       assert.ok(/\.info-tree-group summary\s*\{[\s\S]*border:\s*0[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info group summaries are compact sticky text rows, not boxed cards');
       assert.equal(infoTreeCss.includes('.info-tree-list::before'), false, 'YO!info does not reserve a fixed-height sticky mask that leaves blank space under a single sticky parent');
       assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-children-gap:\s*0px/.test(infoTreeCss), 'YO!info sibling leaf node boxes touch vertically without an inserted gap');
-      assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*8px[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use a transparent fill with a faint 1px rounded node outline and no card shadow');
+      assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*var\(--radius-lg\)[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use the shared large corner radius with a faint 1px outline and no card shadow');
     }
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
     assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));

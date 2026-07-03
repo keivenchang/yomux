@@ -78,6 +78,13 @@ def new_chrome_driver(window_size: str = "1000,700"):
     return webdriver.Chrome(options=options)
 
 
+def fast_pointer_actions(browser):
+    # Hover/click tests need real W3C pointer events, not Selenium's human-speed 250 ms travel. Keep
+    # roughly three 60 Hz frames so hover paint/popover geometry can settle before the next command.
+    # Drag tests keep constructing ActionChains directly so their motion duration remains deliberate.
+    return ActionChains(browser, duration=50)
+
+
 def app_css() -> str:
     # The shipped app stylesheet, read once and reused. Every Selenium fixture used to re-read
     # static/yolomux.css from disk (~36 reads per run); the content is identical every time.
@@ -167,54 +174,81 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
 
 
 def cleanup_isolated_browser_runtime_paths(paths):
-    control_socket_dir = getattr(paths, "control_socket_dir", None)
-    if control_socket_dir:
-        shutil.rmtree(control_socket_dir, ignore_errors=True)
+    if paths is None:
+        return
+    shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
 
 
-def start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1):
+def run_isolated_tmux(runtime, *args, timeout=8):
+    return subprocess.run(
+        [runtime.tmux_binary, "-S", str(runtime.socket_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def capture_isolated_tmux_pane(runtime, session, timeout=8):
+    return run_isolated_tmux(runtime, "capture-pane", "-p", "-t", f"{session}:", timeout=timeout).stdout or ""
+
+
+def wait_for_isolated_tmux_panes(runtime, sessions, predicate, timeout=20, poll_interval=0.4):
+    session_names = list(sessions)
+    deadline = time.monotonic() + timeout
+    panes = {}
+    while time.monotonic() < deadline:
+        panes = {session: capture_isolated_tmux_pane(runtime, session) for session in session_names}
+        if predicate(panes):
+            return True, panes
+        time.sleep(poll_interval)
+    return False, panes
+
+
+def start_isolated_tmux_runtime(
+    monkeypatch,
+    tmp_path,
+    session_count=1,
+    *,
+    session_commands=None,
+    columns=120,
+    rows=36,
+):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
     socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     socket_dir.mkdir(mode=0o700)
     socket_path = socket_dir / "s"
-    session_names = [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
+    commands = dict(session_commands or {})
+    session_names = list(commands) if session_commands is not None else [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
+    if not session_names:
+        shutil.rmtree(socket_dir, ignore_errors=True)
+        raise ValueError("at least one isolated tmux session is required")
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-    for session in session_names:
-        result = subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "new-session", "-d", "-s", session, "-x", "120", "-y", "36"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode != 0:
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-    return SimpleNamespace(socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
+    runtime = SimpleNamespace(tmux_binary=tmux_binary, socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
+    try:
+        for session in session_names:
+            args = ["new-session", "-d", "-s", session, "-x", str(columns), "-y", str(rows)]
+            command = commands.get(session)
+            if command is not None:
+                args.append(command)
+            result = run_isolated_tmux(runtime, *args, timeout=10)
+            if result.returncode != 0:
+                raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
+            if command is None:
+                run_isolated_tmux(runtime, "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter", timeout=5)
+        return runtime
+    except Exception:
+        stop_isolated_tmux_runtime(runtime)
+        raise
 
 
 def stop_isolated_tmux_runtime(runtime):
-    socket_path = getattr(runtime, "socket_path", None)
-    if socket_path:
-        subprocess.run(
-            ["tmux", "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-    socket_dir = getattr(runtime, "socket_dir", None)
-    if socket_dir:
-        shutil.rmtree(socket_dir, ignore_errors=True)
+    if runtime is None:
+        return
+    run_isolated_tmux(runtime, "kill-server", timeout=5)
+    shutil.rmtree(runtime.socket_dir, ignore_errors=True)
 
 
 def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True):
@@ -232,11 +266,11 @@ def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, 
 
 
 def stop_isolated_browser_share_app(runtime):
-    control_server = getattr(getattr(runtime, "app", None), "control_server", None)
-    if control_server is not None:
-        control_server.stop()
-    stop_isolated_tmux_runtime(getattr(runtime, "tmux", None))
-    cleanup_isolated_browser_runtime_paths(getattr(runtime, "paths", None))
+    if runtime is None:
+        return
+    runtime.app.control_server.stop()
+    stop_isolated_tmux_runtime(runtime.tmux)
+    cleanup_isolated_browser_runtime_paths(runtime.paths)
 
 
 def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
@@ -256,9 +290,8 @@ def stop_browser_share_server(server, thread):
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
-    control_server = getattr(getattr(server, "app", None), "control_server", None)
-    if control_server is not None:
-        control_server.stop()
+    if "control_server" in vars(server.app):
+        server.app.control_server.stop()
 
 
 def install_browser_websocket_tracker(driver):

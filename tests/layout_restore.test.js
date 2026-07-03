@@ -1015,9 +1015,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
     assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
-    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'vanilla preview uses the stable neutral email-friendly text token');
+    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'vanilla preview uses the shared opaque-white paint and stable neutral email-friendly text token');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--markdown-html-light-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
-    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
+    assert.ok(/--vanilla-preview-link:\s*#0645ad/.test(editorCss) && /\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*var\(--vanilla-preview-link\)/.test(editorCss), 'vanilla preview links use one conventional-blue token instead of copied scheme colors');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
     assert.ok(/\.markdown-body pre code \.hljs-keyword,[\s\S]*color:\s*var\(--code-keyword\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js keyword color instead of relying on the external stylesheet');
     assert.ok(/\.markdown-body pre code \.hljs-string,[\s\S]*color:\s*var\(--code-string\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js string color');
@@ -1490,7 +1490,19 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('transcriptMetaLoading = true;'), 'metadata refreshes expose a loading state');
     assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
-    assert.ok(source.includes('setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);'), 'notification signatures use the shared bounded-map helper');
+    assert.ok(source.includes('const sessionStatusRecords = new Map();'), 'session status, notification throttle, working tone, and badge pulse state share one session-keyed owner');
+    assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);'), 'per-session notification signatures use the shared bounded-map helper');
+    assert.ok(source.includes('setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);'), 'global watched-PR notification signatures use the same bounded-map helper without pretending to be session state');
+    assert.equal(/const (?:sessionStateKeys|notificationLastSent|workingAgentNotificationTones|metadataBadgePulseUntil) = new Map\(\)/.test(source), false, 'parallel session status maps cannot return');
+    assert.ok(source.includes('const toastRecords = new Map();'), 'toast nodes and numeric-ID timers share one record owner');
+    assert.equal(/const attentionAlertTimers = new Map\(\)|function replaceSessionMetadata[\s\S]*?toastRecords,/.test(source), false, 'toast records are not split into a parallel timer map or passed through session-key rekeying');
+    assert.ok(source.includes('const attentionAcknowledgementRecords = new Map();'), 'acknowledgement cache, timer, and pending state share one key record');
+    assert.equal(/const (?:promptAttentionClears|attentionAcknowledgementTimers) = new Map\(\)|const attentionAcknowledgementPendingKeys = new Set\(\)/.test(source), false, 'parallel acknowledgement containers cannot return');
+    assert.ok(/function clearSessionEphemeralRuntimeState\(session\)[\s\S]*tmuxWindowNavigationRecords\.delete\(session\)[\s\S]*terminalTmuxInputStates\.delete\(session\)[\s\S]*altScreenWheelRemainder\.delete\(session\)[\s\S]*clearAgentWindowActivityRecordsForSession\(session\)[\s\S]*clearSessionAttentionAcknowledgementRecords\(session\)/.test(source), 'one detach helper clears every in-flight session runtime family');
+    assert.equal((source.match(/pendingPaneViewStateCaptures\.delete\(session\)/g) || []).length, 1, 'pending pane-view captures have one session lifecycle owner');
+    assert.ok(/function detachSessionUi\(session\)[\s\S]*pendingPaneViewStateCaptures\.delete\(session\)[\s\S]*function clearSessionUiState/.test(source), 'detach owns pending pane-view capture cleanup before durable session state is cleared or migrated');
+    assert.ok(/function dismissSessionToasts\(session, options = \{\}\)[\s\S]*for \(const \[id, record\] of toastRecords\.entries\(\)\)/.test(source), 'session toast cleanup consumes the record owner');
+    assert.equal(/moveAttentionAlertsForSession|querySelectorAll\(['"]\.toast\[data-toast-kind=/.test(source), false, 'toast cleanup has no metadata-only rename path or parallel DOM scan');
     assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
     assert.ok(/async function boot\(\)[\s\S]*?initialAutoStatusesPromise = loadAutoStatuses\(\)\.catch[\s\S]*?\}\s*bindClipboardPaste\(\);/.test(source), 'image paste binding is installed during boot and does not wait on background auto-status refresh');
     // C12 F3: terminal fit scheduling collapsed from rAF + 80ms + 250ms (three fits) to one rAF + a single
@@ -2109,19 +2121,224 @@ async function runLayoutRestoreSuite() {
 
   test('t@2147', () => {
     // T5: stopping a session clears every session-keyed UI map and closes live streams.
-    const api = loadYolomux('', ['1']);
+    const cleared = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {clearTimeout(id) { cleared.push(id); }});
     api.registerTerminalForTest('1', {dispose() {}}, {readyState: 1, close() {}});
     const closed = api.seedSessionTeardownStateForTest('1');
+    const alertId = api.seedSessionToastForTest('1', 'attention', 71);
+    const connectionId = api.seedSessionToastForTest('1', 'terminal-connection', 72);
     api.stopSessionUiForTest('1');
     assert.deepEqual(api.sessionTeardownStateForTest('1'), {
       terminal: false,
       transcript: false,
       summary: false,
-      autoApprove: false,
       uploads: false,
       uploadTimer: false,
+      statusRecord: false,
+      trackedState: '',
+      notificationCount: 0,
+      toneCount: 0,
+      pulseCount: 0,
+      autoApprove: false,
+      paneScrollTop: null,
+      pasteCount: null,
+      repoDisplayRoot: '',
+      lastActivatedAt: null,
+      tmuxStatusMode: '',
+      clipboardText: '',
+      navigation: false,
+      terminalInput: false,
+      wheelRemainder: false,
+      agentActivityCount: 0,
+      acknowledgementCount: 0,
     }, 'stopSessionUi clears all session-keyed UI state');
+    assert.equal(api.toastStateForTest(alertId), null, 'stopSessionUi removes the session attention toast and its numeric-ID timer');
+    assert.equal(api.toastStateForTest(connectionId), null, 'stopSessionUi removes the session connection toast through the same record owner');
+    for (const timer of [71, 72, 81, 82, 83, 84, 123]) assert.equal(cleared.includes(timer), true, `stopSessionUi clears timer ${timer}`);
     assert.deepEqual(closed, {transcript: 1, summary: 1}, 'stopSessionUi closes both EventSource streams');
+  });
+
+  test('attention acknowledgement records own timer replacement, session cleanup, and their bound', () => {
+    const timers = new Map();
+    const cleared = [];
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, milliseconds) {
+        const id = nextTimer++;
+        timers.set(id, {callback, milliseconds});
+        return id;
+      },
+      clearTimeout(id) {
+        cleared.push(id);
+        timers.delete(id);
+      },
+    });
+    const firstKey = '["prompt","1","first"]';
+    const secondKey = '["prompt","2","second"]';
+    assert.equal(api.acknowledgeAttentionKeysForTest([firstKey], {delayMs: 25, localOnly: true}), true);
+    assert.equal(api.acknowledgeAttentionKeysForTest([firstKey], {delayMs: 25, localOnly: true}), true);
+    assert.equal(timers.size, 1, 'repeated delayed acknowledgement reuses its record timer');
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(firstKey), {recordedAt: null, timer: 1, pending: false});
+    const staleTimer = timers.get(1).callback;
+
+    api.acknowledgeAttentionKeysForTest([secondKey], {delayMs: 25, localOnly: true});
+    api.clearSessionAttentionAcknowledgementRecordsForTest('1');
+    assert.deepEqual(cleared, [1], 'session cleanup cancels only its delayed acknowledgement');
+    assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null);
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(secondKey), {recordedAt: null, timer: 2, pending: false});
+    staleTimer();
+    assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null, 'a stale cleared timer cannot recreate its session record');
+
+    timers.get(2).callback();
+    const completed = api.attentionAcknowledgementRecordForTest(secondKey);
+    assert.equal(completed.timer, null);
+    assert.equal(completed.pending, false);
+    assert.ok(Number.isFinite(completed.recordedAt), 'the surviving timer records the acknowledgement on completion');
+    for (let index = 0; index < 1025; index += 1) {
+      api.applyAttentionAcknowledgementResponseForTest({acknowledged: [`["prompt","bound","${index}"]`]});
+    }
+    assert.equal(api.attentionAcknowledgementRecordCountForTest(), 1024, 'completed acknowledgement facts retain only the newest 1,024 keys');
+  });
+
+  await testAsync('late acknowledgement response cannot recreate a detached session record', async () => {
+    const api = loadYolomux('', ['1']);
+    const key = '["agent-window","1","0","%1","codex","needs-input","late"]';
+    let resolveFetch;
+    api.setFetchForTest(() => new Promise(resolve => { resolveFetch = resolve; }));
+    assert.equal(api.postAttentionAcknowledgementKeysForTest([key], {localOnly: false}), true);
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(key), {recordedAt: null, timer: null, pending: true});
+    api.stopSessionUiForTest('1');
+    assert.equal(api.attentionAcknowledgementRecordForTest(key), null);
+    resolveFetch(jsonResponse({acknowledged: [key]}));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(api.attentionAcknowledgementRecordForTest(key), null, 'the resolved request filters keys whose session detached while it was in flight');
+  });
+
+  test('upload result entries and cleanup timer share one session record', () => {
+    const timers = new Map();
+    const cleared = [];
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, milliseconds) {
+        const id = nextTimer++;
+        timers.set(id, {callback, milliseconds});
+        return id;
+      },
+      clearTimeout(id) {
+        cleared.push(id);
+        timers.delete(id);
+      },
+    });
+    const uploadNode = api.testElementForId('upload-1');
+    const uploadBody = new TestElement('upload-body');
+    uploadBody.className = 'toast-body';
+    uploadNode.appendChild(uploadBody);
+    const files = Array.from({length: 10}, (_value, index) => ({
+      name: `file-${index + 1}.txt`,
+      path: `/tmp/file-${index + 1}.txt`,
+    }));
+
+    api.showUploadResultForTest('1', {files, target_dir: '/tmp'}, true);
+    let record = api.uploadResultRecordForTest('1');
+    assert.equal(record.entries.length, 8, 'one upload record bounds accumulated lines to the newest eight');
+    assert.deepEqual(record.entries.map(entry => entry.path), files.slice(-8).map(file => file.path), 'the bounded record retains the newest upload paths');
+    assert.equal(timers.has(record.cleanupTimer), true, 'render schedules cleanup on the same upload record');
+    assert.equal(uploadNode.hidden, false, 'a non-empty upload record shows its toast');
+
+    const scheduledTimer = record.cleanupTimer;
+    api.keepUploadResultForTest('1');
+    record = api.uploadResultRecordForTest('1');
+    assert.equal(record.cleanupTimer, null, 'Keep clears the record-owned cleanup timer');
+    assert.equal(record.entries.every(entry => entry.expiresAt === Number.POSITIVE_INFINITY), true, 'Keep makes every retained upload line persistent');
+    assert.equal(cleared.includes(scheduledTimer), true, 'Keep clears the active platform timer');
+    api.renderUploadResultForTest('1');
+    assert.equal(api.uploadResultRecordForTest('1').cleanupTimer, null, 'persistent upload lines do not schedule an infinite-delay cleanup loop');
+
+    api.hideUploadResultForTest('1');
+    assert.equal(api.uploadResultRecordForTest('1'), null, 'Hide deletes the whole upload record');
+    assert.equal(uploadNode.hidden, true, 'Hide also clears the visible toast');
+
+    api.showUploadResultForTest('1', {files: [files[0]], target_dir: '/tmp'}, false);
+    record = api.uploadResultRecordForTest('1');
+    const expiryTimer = record.cleanupTimer;
+    record.entries[0].expiresAt = 0;
+    timers.get(expiryTimer).callback();
+    assert.equal(api.uploadResultRecordForTest('1'), null, 'expiry rendering deletes an empty upload record');
+    assert.equal(uploadNode.hidden, true, 'expiry rendering hides the empty toast');
+
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/const uploadResultRecords = new Map\(\)/.test(source), 'upload entries and cleanup timer have one session-keyed map owner');
+    assert.equal(/uploadResultsBySession|uploadCleanupTimers/.test(source), false, 'parallel upload entry and timer maps are removed');
+  });
+
+  test('session rename moves the whole upload result record before old-session teardown', () => {
+    const cleared = [];
+    let nextTimer = 100;
+    const api = loadYolomux('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout() { return nextTimer++; },
+      clearTimeout(id) { cleared.push(id); },
+    });
+    const renamedBody = new TestElement('renamed-upload-body');
+    renamedBody.className = 'toast-body';
+    api.testElementForId('upload-renamed').appendChild(renamedBody);
+    api.seedUploadResultRecordForTest('1', [{text: 'uploaded', path: '/tmp/file.txt', expiresAt: Date.now() + 5000}], 77);
+
+    api.replaceTmuxSessionInClient('1', 'renamed', ['renamed']);
+
+    assert.equal(api.uploadResultRecordForTest('1'), null, 'rename removes the old upload record key');
+    const renamed = api.uploadResultRecordForTest('renamed');
+    assert.equal(renamed.entries.length, 1, 'rename preserves upload entries under the new session');
+    assert.notEqual(renamed.cleanupTimer, 77, 'rename replaces the stale old-session timer');
+    assert.equal(cleared.includes(77), true, 'rename clears the old-session platform timer before teardown');
+  });
+
+  test('session rename migrates the one lifecycle record instead of deleting or partially rekeying it', () => {
+    const api = loadYolomux('?sessions=1&layout=left&tabs=left:1', ['1']);
+    api.seedSessionLifecycleStateForTest('1');
+    const alertId = api.seedSessionToastForTest('1');
+
+    api.replaceTmuxSessionInClient('1', 'renamed', ['renamed']);
+
+    assert.deepEqual(api.sessionLifecycleStateForTest('1'), {
+      statusRecord: false,
+      trackedState: '',
+      notificationCount: 0,
+      toneCount: 0,
+      pulseCount: 0,
+      autoApprove: false,
+      paneScrollTop: null,
+      pasteCount: null,
+      repoDisplayRoot: '',
+      lastActivatedAt: null,
+      tmuxStatusMode: '',
+      clipboardText: '',
+      navigation: false,
+      terminalInput: false,
+      wheelRemainder: false,
+      agentActivityCount: 0,
+      acknowledgementCount: 0,
+    }, 'rename leaves no state under the old session');
+    assert.deepEqual(api.sessionLifecycleStateForTest('renamed'), {
+      statusRecord: true,
+      trackedState: 'needs-input',
+      notificationCount: 1,
+      toneCount: 1,
+      pulseCount: 1,
+      autoApprove: true,
+      paneScrollTop: 9,
+      pasteCount: 4,
+      repoDisplayRoot: '/repo/test',
+      lastActivatedAt: 100,
+      tmuxStatusMode: 'top',
+      clipboardText: 'copied text',
+      navigation: false,
+      terminalInput: false,
+      wheelRemainder: false,
+      agentActivityCount: 0,
+      acknowledgementCount: 0,
+    }, 'rename preserves every lifecycle field under the new session');
+    assert.equal(api.toastStateForTest(alertId), null, 'rename discards transient toasts whose click handlers captured the old session');
   });
 
   test('t@2164', () => {
@@ -2212,7 +2429,8 @@ async function runLayoutRestoreSuite() {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
     assert.ok(/\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*#172033[\s\S]*background:\s*#e7ebf1[\s\S]*opacity:\s*1/.test(css), '#6: review-required chip is filled with dark text, readable on bright active tabs');
-    assert.ok(/body\.theme-light \.ci-indicator\.pr-review-required\s*\{[^}]*background:\s*#e7ebf1/.test(css), '#6: review-required chip is legible (light fill) in light theme');
+    assert.ok(/body\.theme-light \.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*#41506a/.test(css), '#6: review-required chip has readable light-theme text');
+    assert.equal((css.match(/background:\s*#e7ebf1/g) || []).length, 1, '#6: review-required fill has one shared owner instead of a repeated light-theme copy');
     assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
     // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); red attention states use balls/rings instead of text badges.
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
