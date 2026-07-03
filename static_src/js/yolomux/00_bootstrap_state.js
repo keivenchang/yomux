@@ -1411,6 +1411,7 @@ function sessionStatusRecord(session, create = false) {
       state: null,
       notificationLastSent: new Map(),
       workingAgentNotificationTones: new Map(),
+      workingAgentTransitionNotificationPending: new Map(),
       metadataBadgePulseUntil: new Map(),
     };
     sessionStatusRecords.set(key, record);

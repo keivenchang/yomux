@@ -1412,6 +1412,7 @@ function sessionStatusRecord(session, create = false) {
       state: null,
       notificationLastSent: new Map(),
       workingAgentNotificationTones: new Map(),
+      workingAgentTransitionNotificationPending: new Map(),
       metadataBadgePulseUntil: new Map(),
     };
     sessionStatusRecords.set(key, record);
@@ -10327,6 +10328,7 @@ const workingAgentTransitionNotificationDescriptors = Object.freeze({
   attention: Object.freeze({settingPath: 'notifications.notify_working_attention', defaultEnabled: true, copyKey: 'attention'}),
   cooldown: Object.freeze({settingPath: 'notifications.notify_working_done', defaultEnabled: false, copyKey: 'done'}),
 });
+const workingAgentTransitionNotificationConfirmMs = 5000;
 
 function workingAgentTransitionNotificationDescriptor(tone) {
   return workingAgentTransitionNotificationDescriptors[tone] || null;
@@ -10335,6 +10337,61 @@ function workingAgentTransitionNotificationDescriptor(tone) {
 function workingAgentTransitionNotificationEnabled(tone) {
   const descriptor = workingAgentTransitionNotificationDescriptor(tone);
   return descriptor ? boolSetting(descriptor.settingPath, descriptor.defaultEnabled) : false;
+}
+
+function workingAgentTransitionNotificationPendingMap(session, create = false) {
+  return sessionStatusRecord(session, create)?.workingAgentTransitionNotificationPending || null;
+}
+
+function clearWorkingAgentTransitionNotificationPending(session, key) {
+  const pendingMap = workingAgentTransitionNotificationPendingMap(session);
+  const pending = pendingMap?.get(key);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingMap.delete(key);
+  return true;
+}
+
+function clearWorkingAgentTransitionNotificationSession(session) {
+  const record = sessionStatusRecord(session);
+  if (!record) return;
+  for (const pending of record.workingAgentTransitionNotificationPending.values()) clearTimeout(pending.timer);
+  record.workingAgentTransitionNotificationPending.clear();
+  record.workingAgentNotificationTones.clear();
+}
+
+function confirmWorkingAgentTransitionNotification(key, pending) {
+  const session = pending.session;
+  const record = sessionStatusRecord(session);
+  if (record?.workingAgentTransitionNotificationPending.get(key) !== pending) return false;
+  record.workingAgentTransitionNotificationPending.delete(key);
+  if (record.workingAgentNotificationTones.get(key) !== pending.tone) return false;
+  return maybeNotifyWorkingAgentTransition(pending.session, pending.kind, pending.tone, pending.options);
+}
+
+function scheduleWorkingAgentTransitionNotification(session, kind, key, tone, options = {}) {
+  const pendingMap = workingAgentTransitionNotificationPendingMap(session, true);
+  if (!pendingMap) return false;
+  if (!workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) {
+    clearWorkingAgentTransitionNotificationPending(session, key);
+    return false;
+  }
+  const existing = pendingMap.get(key);
+  if (existing?.tone === tone) return false;
+  clearWorkingAgentTransitionNotificationPending(session, key);
+  const pending = {session, kind, tone, options: {...options}, timer: 0};
+  pending.timer = setTimeout(
+    () => confirmWorkingAgentTransitionNotification(key, pending),
+    workingAgentTransitionNotificationConfirmMs,
+  );
+  pendingMap.set(key, pending);
+  return true;
+}
+
+function rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession) {
+  const record = sessionStatusRecord(oldSession);
+  if (!record) return;
+  for (const pending of record.workingAgentTransitionNotificationPending.values()) pending.session = newSession;
 }
 
 function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {
@@ -10406,16 +10463,19 @@ function workingAgentTransitionSnapshot(session, agent) {
 function workingAgentTransitionOwnsSessionStateNotification(session, state) {
   const agent = attentionToastAgent(session, state)?.agent;
   const transition = workingAgentTransitionSnapshot(session, agent);
-  return transition?.previousTone === STATE_KEY.working && transition.tone === 'attention';
+  return transition?.tone === 'attention';
 }
 
 // Notifications are driven by one authoritative auto-approve payload, never by a surface renderer.
 // A hidden tab, a rebuilt Info Bar, or a late popover must not change whether a live green->red/yellow
-// transition notifies the user.
+// transition notifies the user. Both exit tones share one confirmation timer so detector flicker and
+// auto-approve turnarounds return to working without producing a false popup.
 function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
   if (!session || typeof agentWindowActivityTransitionKey !== 'function') return 0;
-  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
-  if (!toneMap) return 0;
+  const record = sessionStatusRecord(session, true);
+  const toneMap = record?.workingAgentNotificationTones;
+  const pendingMap = record?.workingAgentTransitionNotificationPending;
+  if (!toneMap || !pendingMap) return 0;
   const rows = typeof sessionAgentWindowStatusPayloads === 'function'
     ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
     : typeof agentWindowPayloadRows === 'function'
@@ -10431,23 +10491,27 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
     const shouldNotify = (previousTone === STATE_KEY.working && (tone === 'attention' || tone === 'cooldown'))
       // `working_stopped_ts` is written by the server only after it observes working->idle. Use that
       // durable transition proof when a browser refresh missed its transient green snapshot.
-      || (tone === 'cooldown' && previousTone !== 'cooldown' && workingAgentFinishedRecently(agent));
+      || (tone === 'cooldown' && previousTone === '' && workingAgentFinishedRecently(agent));
     if (shouldNotify) {
       const attentionKey = tone === 'attention' && typeof agentWindowActivityAcknowledgementKey === 'function'
         ? agentWindowActivityAcknowledgementKey(kind, agent.state, options, options.attention_signature || options.screen_text)
         : '';
-      notified += Number(maybeNotifyWorkingAgentTransition(session, kind, tone, {
+      notified += Number(scheduleWorkingAgentTransitionNotification(session, kind, key, tone, {
         ...agent,
         ...options,
         attentionKey,
         attentionSignature: options.attention_signature || options.screen_text,
         stoppedAt: Number(options.working_stopped_ts || 0),
       }));
+    } else if (pendingMap.get(key)?.tone !== tone) {
+      clearWorkingAgentTransitionNotificationPending(session, key);
     }
     toneMap.set(key, tone);
   }
   for (const key of toneMap.keys()) {
-    if (!nextKeys.has(key)) toneMap.delete(key);
+    if (nextKeys.has(key)) continue;
+    toneMap.delete(key);
+    clearWorkingAgentTransitionNotificationPending(session, key);
   }
   return notified;
 }
@@ -26398,6 +26462,7 @@ function clearSessionUiState(session) {
   autoApproveStates.delete(session);
   paneViewState.delete(session);
   deleteUploadResultRecord(session);
+  if (typeof clearWorkingAgentTransitionNotificationSession === 'function') clearWorkingAgentTransitionNotificationSession(session);
   sessionStatusRecords.delete(session);
   sessionRepoDisplayRoot.delete(session);
   tmuxStatusModes.delete(session);
@@ -26412,6 +26477,9 @@ function stopSessionUi(session) {
 }
 
 function replaceSessionMetadata(oldSession, newSession) {
+  if (typeof rekeyWorkingAgentTransitionNotificationSession === 'function') {
+    rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession);
+  }
   for (const map of [
     autoApproveStates,
     sessionStatusRecords,

@@ -1167,6 +1167,7 @@ globalThis.__layoutTestApi = {
     record.state = {key: 'needs-input', reason: 'test attention', signature: 'needs-input:test attention'};
     record.notificationLastSent.set('state:needs-input:test attention', 123);
     record.workingAgentNotificationTones.set('0::codex', 'working');
+    record.workingAgentTransitionNotificationPending.set('0::codex', {session, tone: 'attention', timer: 79});
     record.metadataBadgePulseUntil.set('pr', Date.now() + 5000);
     autoApproveStates.set(session, {enabled: true});
     paneViewState.set(session, {scrollTop: 9});
@@ -1232,6 +1233,8 @@ globalThis.__layoutTestApi = {
       trackedState: record?.state?.key || '',
       notificationCount: record?.notificationLastSent.size || 0,
       toneCount: record?.workingAgentNotificationTones.size || 0,
+      pendingTransitionCount: record?.workingAgentTransitionNotificationPending.size || 0,
+      pendingTransitionSessions: Array.from(record?.workingAgentTransitionNotificationPending.values() || []).map(pending => pending.session).sort().join(','),
       pulseCount: record?.metadataBadgePulseUntil.size || 0,
       autoApprove: autoApproveStates.has(session),
       paneScrollTop: paneViewState.get(session)?.scrollTop ?? null,

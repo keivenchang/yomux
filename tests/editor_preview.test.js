@@ -1652,6 +1652,36 @@ async function runEditorPreviewSuite() {
     assert.equal(paneInfoBarMetaHtml.includes('meta-repo-switch'), false, 'Info Bar metadata does not embed the fixed repo selector');
     assert.equal(paneInfoBarMetaHtml.includes(' · '), false, 'Info Bar no longer uses wide middot separators');
     assert.ok(/pane-info-bar-scroll-viewport[\s\S]*#76 DRAFT[\s\S]*DIS-2239 In Review[\s\S]*keivenchang\/DIS-2239__parity-commit-link-frontend-crates[\s\S]*fix\(performance\): repair v1 PARITY commit \+ case-doc links after/.test(paneInfoBarMetaHtml), 'Info Bar keeps Linear immediately after the PR, before branch and path metadata');
+    const repoControlApi = loadYolomux('', ['repo-control']);
+    repoControlApi.setTranscriptInfoForTest('repo-control', longMetaInfo);
+    repoControlApi.renderPanels([]);
+    const repoControlPanel = repoControlApi.testElementForId('panelPool').children.find(child => child.id === 'panel-repo-control');
+    const clickRepoControl = control => {
+      repoControlPanel.appendChild(control);
+      const event = {
+        target: control,
+        clientX: 40,
+        clientY: 24,
+        preventDefault() {},
+        stopPropagation() {},
+      };
+      for (const listener of repoControlPanel.listeners.get('click') || []) listener(event);
+      control.remove();
+    };
+    const nextRepo = new TestElement('next-repo', 'button');
+    nextRepo.dataset.repoCycle = 'repo-control';
+    nextRepo.dataset.repoCycleDir = '1';
+    clickRepoControl(nextRepo);
+    assert.ok(repoControlApi.projectMetaHtml('repo-control', longMetaInfo).includes('~/dynamo/dynamo-utils.dev'), 'Info Bar > advances the displayed repository through the fixed controls slot');
+    const previousRepo = new TestElement('previous-repo', 'button');
+    previousRepo.dataset.repoCycle = 'repo-control';
+    previousRepo.dataset.repoCycleDir = '-1';
+    clickRepoControl(previousRepo);
+    assert.ok(repoControlApi.projectMetaHtml('repo-control', longMetaInfo).includes('~/dynamo/dynamo4'), 'Info Bar < moves back through repositories with the same delegated control path');
+    const repoPicker = new TestElement('repo-picker', 'button');
+    repoPicker.dataset.repoChip = 'repo-control';
+    clickRepoControl(repoPicker);
+    assert.ok(repoControlApi.testElementForId('appOverlayRoot').querySelector('.repo-chip-menu'), 'Info Bar repository count opens the complete repository picker from the fixed controls slot');
     const idempotentInfoBarApi = loadYolomux('', ['info-scroll']);
     const idempotentMeta = idempotentInfoBarApi.testElementForId('meta-info-scroll');
     let idempotentMetaHtml = '';
@@ -1680,6 +1710,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\)[\s\S]{0,240}meta-controls-\$\{session\}/.test(source), 'Info Bar renders the repo selector slot directly after the tmux sub-window bar');
     assert.equal(/tmuxWindowBarHtml\(session, transcriptMeta\.sessions\?\.\[session\], \{infoBar: true\}\) : ''\}[\s\S]{0,120}panel-detail-close/.test(source), false, 'Info Bar no longer renders the detail-close (×) button after the sub-window bar');
     assert.ok(/delegate\(panel, 'click', '\[data-window-dir\], \[data-window-index\]'/.test(source), 'DOIT.53 P3: in-panel window buttons use the shared delegated click path');
+    assert.ok(source.includes("const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';") && source.includes("delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));"), 'Info Bar repo arrows and count use one delegated panel path after moving outside scrolling metadata');
+    assert.ok(/const chromeTarget = event\.target\?\.closest\?\.\(`[^`]*\$\{repoSelectorControlSelector\}/.test(source), 'Info Bar repo controls are pane chrome and do not acknowledge terminal attention');
     assert.ok(/if \(windowTarget\) \{[\s\S]*windowTarget\.dataset\.pointerActionHandled = '1'[\s\S]*handleWindowStepButtonClick\(\{target: windowTarget, currentTarget: windowTarget\}\)[\s\S]*return;[\s\S]*\}/.test(source), 'focused and unfocused pane sub-window clicks activate the original target once during pointer capture');
     assert.ok(source.includes("if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;"), 'YO!stats graph gestures bypass panel focus rerenders that replace native controls');
     assert.ok(/function tmuxWindowUserInteractionIndex\(session\)[\s\S]*querySelectorAll\('\.tmux-window-bar \.tmux-window-button\.active'\)[\s\S]*resolvedWindowIndex/.test(source), 'terminal attention acknowledgement follows the visibly active tmux sub-window when metadata is stale');
@@ -7278,7 +7310,25 @@ async function runEditorPreviewSuite() {
 
   // notify_transitions gates the new PR keys — they are opt-in (NOT in the default allowlist).
   test('t@7124', () => {
-    const api = loadYolomux();
+    let transitionTimerNow = 0;
+    let transitionTimerId = 0;
+    const transitionTimers = new Map();
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, ms) {
+        if (ms !== 5000 || typeof callback !== 'function') return 0;
+        const id = ++transitionTimerId;
+        transitionTimers.set(id, {callback, at: transitionTimerNow + ms});
+        return id;
+      },
+      clearTimeout(id) { transitionTimers.delete(id); },
+    });
+    const advanceTransitionTimers = ms => {
+      transitionTimerNow += ms;
+      for (const [id, timer] of [...transitionTimers.entries()].sort((left, right) => left[1].at - right[1].at)) {
+        if (timer.at > transitionTimerNow || !transitionTimers.delete(id)) continue;
+        timer.callback();
+      }
+    };
     assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'a default session-state key still notifies');
     assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'pr-merged is opt-in, off by default');
     const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
@@ -7303,14 +7353,21 @@ async function runEditorPreviewSuite() {
     const workingPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude'}]}}};
     const attentionPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 1, window_label: '1:claude', attention_key: 'working-to-attention'}]}}};
     assert.equal(api.applyAutoApprovePayloadForTest(workingPayload, {render: false}).workingAgentTransitionNotifications, 0, 'the first auto-approve payload establishes a quiet baseline');
-    assert.equal(api.applyAutoApprovePayloadForTest(attentionPayload, {render: false}).workingAgentTransitionNotifications, 1, 'a green-to-red transition notifies from the authoritative payload even without rendering status surfaces');
+    assert.equal(api.applyAutoApprovePayloadForTest(attentionPayload, {render: false}).workingAgentTransitionNotifications, 1, 'a green-to-red transition schedules confirmation from the authoritative payload even without rendering status surfaces');
+    assert.equal(transitionToasts.length, 0, 'green-to-red does not notify on its first red sample');
+    advanceTransitionTimers(4999);
+    assert.equal(transitionToasts.length, 0, 'green-to-red remains quiet before the shared five-second confirmation window');
+    advanceTransitionTimers(1);
     assert.equal(transitionToasts.at(-1).title, 'Working AI needs your attention', 'green-to-red dispatches the human-readable attention toast');
     assert.equal(api.applyAutoApprovePayloadForTest(attentionPayload, {render: false}).workingAgentTransitionNotifications, 0, 'a repeated red payload does not duplicate the notification');
     const stoppedAt = Date.now() / 1000;
     const secondWorkingPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 2, window_label: '2:claude'}]}}};
     const finishedPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 2, window_label: '2:claude', working_stopped_ts: stoppedAt}]}}};
     assert.equal(api.applyAutoApprovePayloadForTest(secondWorkingPayload, {render: false}).workingAgentTransitionNotifications, 0, 'green establishes the second window baseline without notifying');
-    assert.equal(api.applyAutoApprovePayloadForTest(finishedPayload, {render: false}).workingAgentTransitionNotifications, 1, 'green-to-yellow notifies from the authoritative payload');
+    const beforeFinishedConfirmation = transitionToasts.length;
+    assert.equal(api.applyAutoApprovePayloadForTest(finishedPayload, {render: false}).workingAgentTransitionNotifications, 1, 'green-to-yellow schedules confirmation from the authoritative payload');
+    assert.equal(transitionToasts.length, beforeFinishedConfirmation, 'green-to-yellow does not notify on its first yellow sample');
+    advanceTransitionTimers(5000);
     assert.equal(transitionToasts.at(-1).title, 'Working AI finished', 'green-to-yellow dispatches the human-readable finished toast');
     assert.equal(typeof transitionToasts.at(-1).options.onClick, 'function', 'finished toast links to its shared Tab and window target');
     const twoWorkingWindowsPayload = {sessions: {'1': {agent_windows: [
@@ -7322,7 +7379,11 @@ async function runEditorPreviewSuite() {
       {kind: 'claude', state: 'idle', window_index: 12, window_label: '12:claude', working_stopped_ts: stoppedAt},
     ]}}};
     api.applyAutoApprovePayloadForTest(twoWorkingWindowsPayload, {render: false});
-    assert.equal(api.applyAutoApprovePayloadForTest(twoFinishedWindowsPayload, {render: false}).workingAgentTransitionNotifications, 2, 'same-kind windows that finish in one sample each notify through their shared per-window identity');
+    const beforeTwoFinishedConfirmations = transitionToasts.length;
+    assert.equal(api.applyAutoApprovePayloadForTest(twoFinishedWindowsPayload, {render: false}).workingAgentTransitionNotifications, 2, 'same-kind windows that finish in one sample each schedule through their shared per-window identity');
+    assert.equal(transitionToasts.length, beforeTwoFinishedConfirmations, 'simultaneous finished windows remain quiet during confirmation');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, beforeTwoFinishedConfirmations + 2, 'each stable finished window notifies after confirmation');
     const previousSessionInfo = api.transcriptInfoForTest('1');
     const canonicalWindowInfo = {panes: [{window: '17', pane_id: '%34', target: '%34', process_label: 'codex', window_name: 'node', window_active: true, active: true}]};
     const staleClaudeWorking = {kind: 'claude', state: 'working', window_index: 17, pane_target: '%34', observed_ts: stoppedAt - 5};
@@ -7338,13 +7399,16 @@ async function runEditorPreviewSuite() {
     api.setTabberActivityForTest({agent_windows: {'1': [{...staleClaudeWorking, state: 'idle', working_stopped_ts: stoppedAt}]}});
     const canonicalToastCount = transitionToasts.length;
     const canonicalFinished = api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{...liveCodexWorking, state: 'idle', working_stopped_ts: stoppedAt}]}}}, {render: false});
-    assert.equal(canonicalFinished.workingAgentTransitionNotifications, 1, 'stale Claude plus live Codex on one physical window emits one completion notification');
+    assert.equal(canonicalFinished.workingAgentTransitionNotifications, 1, 'stale Claude plus live Codex on one physical window schedules one completion notification');
+    assert.equal(transitionToasts.length, canonicalToastCount, 'the canonical physical-window transition does not notify before confirmation');
+    advanceTransitionTimers(5000);
     assert.equal(transitionToasts.length, canonicalToastCount + 1, 'the canonical physical-window transition cannot render duplicate Claude and Codex toasts');
     assert.equal(transitionToasts.at(-1).title, 'Working AI finished', 'the canonical Codex completion keeps the normal finished copy');
     api.setTabberActivityForTest({});
     api.setTranscriptInfoForTest('1', previousSessionInfo);
     const missedGreenFinishedPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 6, window_label: '6:claude', working_stopped_ts: stoppedAt}]}}};
-    assert.equal(api.applyAutoApprovePayloadForTest(missedGreenFinishedPayload, {render: false}).workingAgentTransitionNotifications, 1, 'a fresh server-observed stop also notifies when this browser missed the transient green snapshot');
+    assert.equal(api.applyAutoApprovePayloadForTest(missedGreenFinishedPayload, {render: false}).workingAgentTransitionNotifications, 1, 'a fresh server-observed stop schedules confirmation when this browser missed the transient green snapshot');
+    advanceTransitionTimers(5000);
     const staleFinishedPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 3, window_label: '3:claude', working_stopped_ts: stoppedAt - 61}]}}};
     assert.equal(api.applyAutoApprovePayloadForTest(staleFinishedPayload, {render: false}).workingAgentTransitionNotifications, 0, 'an old yellow marker does not notify a newly loaded browser');
     api.setClientSettingsPatchForTest({notifications: {notify_working_attention: false, notify_working_done: true}});
@@ -7354,25 +7418,65 @@ async function runEditorPreviewSuite() {
     ]}}};
     api.applyAutoApprovePayloadForTest(doneOnlyWorkingPayload, {render: false});
     assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 7, window_label: '7:claude', attention_key: 'done-only-attention'}]}}}, {render: false}).workingAgentTransitionNotifications, 0, 'the finished toggle does not enable green-to-red notifications');
-    assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 8, window_label: '8:claude', working_stopped_ts: stoppedAt}]}}}, {render: false}).workingAgentTransitionNotifications, 1, 'the finished toggle independently enables green-to-yellow notifications');
+    const doneOnlyToastCount = transitionToasts.length;
+    assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 8, window_label: '8:claude', working_stopped_ts: stoppedAt}]}}}, {render: false}).workingAgentTransitionNotifications, 1, 'the finished toggle independently schedules green-to-yellow notifications');
+    assert.equal(transitionToasts.length, doneOnlyToastCount, 'the independently enabled finished notification still waits for confirmation');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, doneOnlyToastCount + 1, 'the independently enabled finished notification fires after confirmation');
     api.setClientSettingsPatchForTest({notifications: {notify_working_attention: true, notify_working_done: false}});
     const attentionOnlyWorkingPayload = {sessions: {'1': {agent_windows: [
       {kind: 'claude', state: 'working', window_index: 9, window_label: '9:claude'},
       {kind: 'claude', state: 'working', window_index: 10, window_label: '10:claude'},
     ]}}};
     api.applyAutoApprovePayloadForTest(attentionOnlyWorkingPayload, {render: false});
-    assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 9, window_label: '9:claude', attention_key: 'attention-only'}]}}}, {render: false}).workingAgentTransitionNotifications, 1, 'the attention toggle independently enables green-to-red notifications');
+    const attentionOnlyToastCount = transitionToasts.length;
+    assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 9, window_label: '9:claude', attention_key: 'attention-only'}]}}}, {render: false}).workingAgentTransitionNotifications, 1, 'the attention toggle independently schedules green-to-red notifications');
+    assert.equal(transitionToasts.length, attentionOnlyToastCount, 'the independently enabled attention notification still waits for confirmation');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, attentionOnlyToastCount + 1, 'the independently enabled attention notification fires after confirmation');
     assert.equal(api.applyAutoApprovePayloadForTest({sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 10, window_label: '10:claude', working_stopped_ts: stoppedAt}]}}}, {render: false}).workingAgentTransitionNotifications, 0, 'the attention toggle does not enable green-to-yellow notifications');
     api.setClientSettingsPatchForTest({notifications: {notify_working_attention: true, notify_working_done: true}});
+    const cancelledAttentionToastCount = transitionToasts.length;
+    const cancelledAttentionWorking = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 17, window_label: '17:claude'}]}}};
+    const cancelledAttention = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 17, window_label: '17:claude', attention_key: 'cancelled-attention'}]}}};
+    api.applyAutoApprovePayloadForTest(cancelledAttentionWorking, {render: false});
+    assert.equal(api.applyAutoApprovePayloadForTest(cancelledAttention, {render: false}).workingAgentTransitionNotifications, 1, 'green-to-red starts one confirmation timer');
+    advanceTransitionTimers(3000);
+    api.applyAutoApprovePayloadForTest(cancelledAttentionWorking, {render: false});
+    advanceTransitionTimers(3000);
+    assert.equal(transitionToasts.length, cancelledAttentionToastCount, 'returning to RUN cancels a pending red notification');
+    const cancelledDoneToastCount = transitionToasts.length;
+    const cancelledDoneWorking = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 18, window_label: '18:claude'}]}}};
+    const cancelledDone = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 18, window_label: '18:claude', working_stopped_ts: stoppedAt}]}}};
+    api.applyAutoApprovePayloadForTest(cancelledDoneWorking, {render: false});
+    assert.equal(api.applyAutoApprovePayloadForTest(cancelledDone, {render: false}).workingAgentTransitionNotifications, 1, 'green-to-yellow starts one confirmation timer');
+    advanceTransitionTimers(3000);
+    api.applyAutoApprovePayloadForTest(cancelledDoneWorking, {render: false});
+    advanceTransitionTimers(3000);
+    assert.equal(transitionToasts.length, cancelledDoneToastCount, 'returning to RUN cancels a pending yellow notification');
+    const changedToneToastCount = transitionToasts.length;
+    const changedToneWorking = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 19, window_label: '19:claude'}]}}};
+    const changedToneAttention = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 19, window_label: '19:claude', attention_key: 'changed-tone-attention'}]}}};
+    const changedToneDone = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 19, window_label: '19:claude', working_stopped_ts: stoppedAt}]}}};
+    api.applyAutoApprovePayloadForTest(changedToneWorking, {render: false});
+    assert.equal(api.applyAutoApprovePayloadForTest(changedToneAttention, {render: false}).workingAgentTransitionNotifications, 1, 'green-to-red schedules before a non-RUN tone change');
+    advanceTransitionTimers(3000);
+    assert.equal(api.applyAutoApprovePayloadForTest(changedToneDone, {render: false}).workingAgentTransitionNotifications, 0, 'red-to-yellow cancels instead of converting the pending notification');
+    advanceTransitionTimers(3000);
+    assert.equal(transitionToasts.length, changedToneToastCount, 'a non-RUN tone change leaves both notifications quiet');
     api.setDocumentVisibilityForTest('hidden');
     const hiddenToastCount = transitionToasts.length;
     api.queueClientPushEventForTest('auto_approve_changed', {data: {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 13, window_label: '13:claude'}]}}}});
     api.queueClientPushEventForTest('auto_approve_changed', {data: {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 13, window_label: '13:claude', attention_key: 'hidden-attention'}]}}}});
-    assert.equal(transitionToasts.length, hiddenToastCount + 1, 'a hidden Chrome tab processes SSE green-to-red immediately instead of waiting on a paused animation frame');
+    assert.equal(transitionToasts.length, hiddenToastCount, 'a hidden Chrome tab ingests SSE green-to-red immediately but waits to notify');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, hiddenToastCount + 1, 'a hidden Chrome tab confirms green-to-red without waiting on a paused animation frame');
     const hiddenDoneToastCount = transitionToasts.length;
     api.queueClientPushEventForTest('auto_approve_changed', {data: {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 15, window_label: '15:claude'}]}}}});
     api.queueClientPushEventForTest('auto_approve_changed', {data: {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'idle', window_index: 15, window_label: '15:claude', working_stopped_ts: stoppedAt}]}}}});
-    assert.equal(transitionToasts.length, hiddenDoneToastCount + 1, 'a hidden Chrome tab processes SSE green-to-yellow immediately instead of waiting on a paused animation frame');
+    assert.equal(transitionToasts.length, hiddenDoneToastCount, 'a hidden Chrome tab ingests SSE green-to-yellow immediately but waits to notify');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, hiddenDoneToastCount + 1, 'a hidden Chrome tab confirms green-to-yellow without waiting on a paused animation frame');
     api.setClientSettingsPatchForTest({notifications: {notify_working_attention: false}});
     const disabledHiddenToastCount = transitionToasts.length;
     api.queueClientPushEventForTest('auto_approve_changed', {data: {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 14, window_label: '14:claude'}]}}}});
@@ -7391,7 +7495,10 @@ async function runEditorPreviewSuite() {
     api.applyAutoApprovePayloadForTest(disabledWorkingPayload, {render: false});
     assert.equal(api.applyAutoApprovePayloadForTest(disabledAttentionPayload, {render: false}).workingAgentTransitionNotifications, 0, 'green-to-red does not notify when its preference is off');
     assert.equal(api.applyAutoApprovePayloadForTest(disabledFinishedPayload, {render: false}).workingAgentTransitionNotifications, 0, 'green-to-yellow does not notify when its preference is off');
-    assert.ok(/function reconcileWorkingAgentTransitionNotifications\(session, payload = \{\}\)[\s\S]*sessionAgentWindowStatusPayloads\(session, transcriptMeta\.sessions\?\.\[session\], payload\)[\s\S]*workingAgentFinishedRecently\(agent\)[\s\S]*maybeNotifyWorkingAgentTransition/.test(notificationSource), 'one payload-level transition classifier uses the shared visible-status source plus fresh server stop timestamps for green-to-red/yellow notifications');
+    advanceTransitionTimers(5000);
+    assert.equal(transitionToasts.length, disabledHiddenDoneToastCount, 'disabled transition preferences do not leave timers that can notify later');
+    assert.ok(/const workingAgentTransitionNotificationConfirmMs = 5000;[\s\S]*function scheduleWorkingAgentTransitionNotification[\s\S]*setTimeout\([\s\S]*workingAgentTransitionNotificationConfirmMs/.test(notificationSource), 'attention and finished notifications share one five-second confirmation scheduler');
+    assert.ok(/function reconcileWorkingAgentTransitionNotifications\(session, payload = \{\}\)[\s\S]*sessionAgentWindowStatusPayloads\(session, transcriptMeta\.sessions\?\.\[session\], payload\)[\s\S]*workingAgentFinishedRecently\(agent\)[\s\S]*scheduleWorkingAgentTransitionNotification/.test(notificationSource), 'one payload-level transition classifier uses the shared visible-status source plus fresh server stop timestamps for delayed green-to-red/yellow notifications');
     assert.ok(/function maybeNotifyState\(session, state, options = \{\}\)[\s\S]*workingAgentTransitionOwnsSessionStateNotification\(session, state\)[\s\S]*function workingAgentTransitionSnapshot\(session, agent\)[\s\S]*function workingAgentTransitionOwnsSessionStateNotification/.test(notificationSource), 'green-to-red has one per-window notification owner instead of also firing the generic session-state alert');
     assert.ok(/renderAutoApproveStatusSurfaces\(result\);[\s\S]*workingAgentTransitionNotifications \+= reconcileWorkingAgentTransitionNotifications\(session, state\)/.test(autoApproveSource), 'auto-approve payload ingestion delivers transition notifications after status rendering preserves the toast container');
     assert.ok(/function queueClientPushEvent\(type, payload = \{\}\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*flushQueuedClientPushEvents\(\)[\s\S]*requestAnimationFrame/.test(autoApproveSource), 'hidden-tab SSE delivery bypasses requestAnimationFrame because Chrome pauses it in the background');

@@ -1535,6 +1535,7 @@ function clearSessionUiState(session) {
   autoApproveStates.delete(session);
   paneViewState.delete(session);
   deleteUploadResultRecord(session);
+  if (typeof clearWorkingAgentTransitionNotificationSession === 'function') clearWorkingAgentTransitionNotificationSession(session);
   sessionStatusRecords.delete(session);
   sessionRepoDisplayRoot.delete(session);
   tmuxStatusModes.delete(session);
@@ -1549,6 +1550,9 @@ function stopSessionUi(session) {
 }
 
 function replaceSessionMetadata(oldSession, newSession) {
+  if (typeof rekeyWorkingAgentTransitionNotificationSession === 'function') {
+    rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession);
+  }
   for (const map of [
     autoApproveStates,
     sessionStatusRecords,

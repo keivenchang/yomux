@@ -1493,7 +1493,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const sessionStatusRecords = new Map();'), 'session status, notification throttle, working tone, and badge pulse state share one session-keyed owner');
     assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);'), 'per-session notification signatures use the shared bounded-map helper');
     assert.ok(source.includes('setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);'), 'global watched-PR notification signatures use the same bounded-map helper without pretending to be session state');
-    assert.equal(/const (?:sessionStateKeys|notificationLastSent|workingAgentNotificationTones|metadataBadgePulseUntil) = new Map\(\)/.test(source), false, 'parallel session status maps cannot return');
+    assert.equal(/const (?:sessionStateKeys|notificationLastSent|workingAgentNotificationTones|workingAgentTransitionNotificationPending|metadataBadgePulseUntil) = new Map\(\)/.test(source), false, 'parallel session status maps cannot return');
     assert.ok(source.includes('const toastRecords = new Map();'), 'toast nodes and numeric-ID timers share one record owner');
     assert.equal(/const attentionAlertTimers = new Map\(\)|function replaceSessionMetadata[\s\S]*?toastRecords,/.test(source), false, 'toast records are not split into a parallel timer map or passed through session-key rekeying');
     assert.ok(source.includes('const attentionAcknowledgementRecords = new Map();'), 'acknowledgement cache, timer, and pending state share one key record');
@@ -2138,6 +2138,8 @@ async function runLayoutRestoreSuite() {
       trackedState: '',
       notificationCount: 0,
       toneCount: 0,
+      pendingTransitionCount: 0,
+      pendingTransitionSessions: '',
       pulseCount: 0,
       autoApprove: false,
       paneScrollTop: null,
@@ -2305,6 +2307,8 @@ async function runLayoutRestoreSuite() {
       trackedState: '',
       notificationCount: 0,
       toneCount: 0,
+      pendingTransitionCount: 0,
+      pendingTransitionSessions: '',
       pulseCount: 0,
       autoApprove: false,
       paneScrollTop: null,
@@ -2324,6 +2328,8 @@ async function runLayoutRestoreSuite() {
       trackedState: 'needs-input',
       notificationCount: 1,
       toneCount: 1,
+      pendingTransitionCount: 1,
+      pendingTransitionSessions: 'renamed',
       pulseCount: 1,
       autoApprove: true,
       paneScrollTop: 9,
