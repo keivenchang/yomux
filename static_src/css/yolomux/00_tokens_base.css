@@ -865,6 +865,8 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .info-tree-group-label,
 .file-editor-title-name,
 .file-tree-row.tabber-row .tabber-window-text,
+.repo-chip-menu .repo-chip-branch,
+.repo-chip-menu .repo-chip-status,
 .share-entry-heading strong,
 .share-url-primary-head > span,
 .share-users-row span,

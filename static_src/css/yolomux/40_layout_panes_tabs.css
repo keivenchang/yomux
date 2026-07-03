@@ -1130,10 +1130,17 @@ body.theme-light .drop-slot.drag-over {
   background: transparent;
   outline: 0;
 }
+.repo-chip-menu {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12ch, 1fr) max-content;
+  align-items: center;
+  gap: 2px 10px;
+}
 .repo-chip-menu .repo-chip-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
   width: 100%;
   color: var(--text);
   font: inherit;
@@ -1148,10 +1155,10 @@ body.theme-light .drop-slot.drag-over {
 .repo-chip-menu .repo-chip-row-primary .repo-chip-path {
   font-weight: 700;
 }
-.repo-chip-menu .repo-chip-meta {
+.repo-chip-menu .repo-chip-status {
   display: inline-flex;
   gap: 8px;
-  flex: 0 0 auto;
+  justify-content: flex-start;
 }
 .pane-tabs {
   position: relative;

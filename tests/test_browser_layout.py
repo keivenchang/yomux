@@ -620,6 +620,8 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
           titleWidth: titleRect.width,
           headingBottom: heading.bottom,
           legendTop: legend.top,
+          titleFontSize: Number.parseFloat(getComputedStyle(title).fontSize),
+          legendFontSize: Number.parseFloat(getComputedStyle(document.querySelector('.js-debug-legend-item')).fontSize),
         };
         """
     )
@@ -627,6 +629,7 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
     assert metrics["textOverflow"] != "ellipsis", metrics
     assert metrics["textWidth"] <= metrics["titleWidth"] + 0.5, metrics
     assert metrics["legendTop"] >= metrics["headingBottom"] - 0.5, metrics
+    assert abs(metrics["legendFontSize"] / metrics["titleFontSize"] - 0.85) <= 0.01, metrics
 
 
 def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browser, tmp_path):
@@ -640,7 +643,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
         </div>
       </div>
       <section id="chart" class="js-debug-chart" style="width:420px">
-        <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(sum of all client requests from displayed = 123.4k)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
+        <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(123.4k, Σ displayed reqs)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
         <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 93.333%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
       </section>
     """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
@@ -690,6 +693,57 @@ def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, t
     assert 72 <= metrics["body"]["height"] < 138, metrics
     assert metrics["axis"]["height"] >= 72 and metrics["plot"]["height"] >= 72, metrics
     assert metrics["cpu"]["bottom"] <= metrics["nextRow"]["top"] - 9, metrics
+
+
+def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap(browser, tmp_path):
+    page = tmp_path / "debug-graph-flow-layout.html"
+    chart = """
+      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span style="--js-debug-axis-y:6.667%">100%</span><span style="--js-debug-axis-y:93.333%">0%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
+    """
+    page.write_text(page_html(f"""
+      <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:300px">
+        <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}</div></div></div>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, left:value.left, right:value.right}; };
+        const view = document.getElementById('graph-view');
+        const graph = document.getElementById('graph');
+        const cards = [...document.querySelectorAll('.js-debug-chart')].map(rect);
+        const timeLabels = [...document.querySelectorAll('.js-debug-x-axis span')].map(node => ({...rect(node), card: rect(node.closest('.js-debug-chart'))}));
+        return {view: {scrollHeight:view.scrollHeight, clientHeight:view.clientHeight, overflow:getComputedStyle(view).overflowY}, graph: {border:getComputedStyle(graph).borderTopWidth, padding:getComputedStyle(graph).paddingTop}, cards, timeLabels};
+        """
+    )
+    assert metrics["view"]["overflow"] == "auto" and metrics["view"]["scrollHeight"] > metrics["view"]["clientHeight"], metrics
+    assert metrics["graph"] == {"border": "0px", "padding": "0px"}, metrics
+    assert metrics["cards"][0]["bottom"] <= metrics["cards"][2]["top"] - 9, metrics
+    assert metrics["cards"][1]["bottom"] <= metrics["cards"][3]["top"] - 9, metrics
+    assert all(label["top"] >= label["card"]["top"] and label["bottom"] <= label["card"]["bottom"] for label in metrics["timeLabels"]), metrics
+
+
+def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(browser, tmp_path):
+    page = tmp_path / "repo-chip-grid-columns.html"
+    page.write_text(page_html("""
+      <div class="terminal-context-menu repo-chip-menu" style="width:760px">
+        <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8001</span><span class="repo-chip-branch meta-branch">yolomux.dev8001</span><span class="repo-chip-status"><span class="meta-muted">51 dirty</span><span class="meta-muted">6 ahead</span></span></button>
+        <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8002</span><span class="repo-chip-branch meta-branch">yolomux.dev8002</span><span class="repo-chip-status"><span class="meta-muted">9 ahead</span></span></button>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const column = selector => [...document.querySelectorAll(selector)].map(node => {
+          const rect = node.getBoundingClientRect();
+          return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};
+        });
+        return {branches: column('.repo-chip-branch'), statuses: column('.repo-chip-status'), rows: column('.repo-chip-row')};
+        """
+    )
+    assert abs(metrics["branches"][0]["left"] - metrics["branches"][1]["left"]) <= 0.5, metrics
+    assert abs(metrics["statuses"][0]["left"] - metrics["statuses"][1]["left"]) <= 0.5, metrics
+    assert all(column["left"] >= row["left"] and column["right"] <= row["right"] for column, row in zip(metrics["branches"], metrics["rows"])), metrics
 
 
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
@@ -777,7 +831,8 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert with_client["chart"]["top"] >= with_client["client"]["bottom"], metrics
     assert with_client["rowGap"] <= 6, metrics
     without_client = metrics["withoutClientWork"]
-    assert without_client["chart"]["height"] > without_client["graph"]["height"] * 0.55, metrics
+    assert abs(with_client["chart"]["height"] - without_client["chart"]["height"]) <= 1, metrics
+    assert without_client["chart"]["bottom"] <= without_client["graph"]["bottom"], metrics
     empty = metrics["emptyWithClientWork"]
     assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
     assert empty["empty"]["height"] > empty["graph"]["height"] * 0.45, metrics
@@ -1501,6 +1556,17 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
           bar.dataset.jsDebugBarSeries,
           getComputedStyle(bar).opacity,
         ]));
+        const activitySvg = chart?.querySelector('.js-debug-line-chart');
+        const activityGrid = chart?.closest('[data-js-debug-graph]')?.querySelector('[data-js-debug-chart-grid]');
+        const activityRect = activitySvg?.getBoundingClientRect();
+        const hoverTime = (nowSeconds - 25) * 1000;
+        const hoverRatio = (hoverTime - Number(activityGrid?.dataset.jsDebugDomainStart)) / (Number(activityGrid?.dataset.jsDebugDomainEnd) - Number(activityGrid?.dataset.jsDebugDomainStart));
+        activitySvg?.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true,
+          clientX: activityRect.left + (activityRect.width * hoverRatio),
+          clientY: activityRect.top + (activityRect.height / 2),
+        }));
+        const hoverMax = chart?.querySelector('[data-js-debug-hover-max]')?.textContent || '';
         setDebugGraphRange(24 * 60 * 60);
         renderDebugPanels({force: true});
         const datedTicks = Array.from(document.querySelectorAll('[data-js-debug-chart="activity"] [data-js-debug-x-tick]')).map(tick => ({
@@ -1519,6 +1585,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
           barsPerX: Object.values(barsByX),
           fillBySeries,
           opacityBySeries,
+          hoverMax,
           datedTicks,
         };
         """
@@ -1538,6 +1605,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
         "transitionAgents": "0.82",
         "idleAgents": "0.3",
     }, metrics
+    assert metrics["hoverMax"] == "3", metrics
     assert [tick["name"] for tick in metrics["datedTicks"]] == ["start", "mid", "end"], metrics
     assert all(tick["date"] and len(tick["text"]) > 8 for tick in metrics["datedTicks"]), metrics
     assert metrics["datedTicks"][0]["date"] != metrics["datedTicks"][-1]["date"], metrics
@@ -1995,6 +2063,17 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const hoverFirstX = hoverFirst.getAttribute('x1');
         const hoverSecondX = hoverSecond.getAttribute('x1');
         const hoverOpacity = getComputedStyle(hoverFirst).opacity;
+        const hoverTooltip = first.closest('[data-js-debug-chart]')?.querySelector('[data-js-debug-hover-tooltip]');
+        const hoverTooltipRect = hoverTooltip?.getBoundingClientRect();
+        const firstChartRect = first.closest('[data-js-debug-chart]')?.getBoundingClientRect();
+        const hoverTooltipMetrics = {
+          hidden: hoverTooltip?.hidden,
+          max: hoverTooltip?.querySelector('[data-js-debug-hover-max]')?.textContent || '',
+          time: hoverTooltip?.querySelector('[data-js-debug-hover-time]')?.textContent || '',
+          rightOfCursor: hoverTooltipRect && firstChartRect ? hoverTooltipRect.left >= startX + 3 || hoverTooltipRect.right <= firstChartRect.right - 4 : false,
+          aboveCursor: hoverTooltipRect ? hoverTooltipRect.bottom <= y - 3 : false,
+          contained: hoverTooltipRect && firstChartRect ? hoverTooltipRect.left >= firstChartRect.left + 3 && hoverTooltipRect.right <= firstChartRect.right - 3 && hoverTooltipRect.top >= firstChartRect.top + 3 && hoverTooltipRect.bottom <= firstChartRect.bottom - 3 : false,
+        };
 
         first.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
         first.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
@@ -2037,6 +2116,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           hoverFirstX,
           hoverSecondX,
           hoverOpacity,
+          hoverTooltip: hoverTooltipMetrics,
           selecting,
           selectionOpacity,
           selectionWidth,
@@ -2064,6 +2144,12 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 28790 <= metrics["sliderInputSeconds"] <= 28810, metrics
     assert metrics["hoverFirstX"] == metrics["hoverSecondX"] == "150.0", metrics
     assert float(metrics["hoverOpacity"]) > 0.0, metrics
+    assert metrics["hoverTooltip"]["hidden"] is False, metrics
+    assert metrics["hoverTooltip"]["max"] == "0.0%", metrics
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", metrics["hoverTooltip"]["time"]), metrics
+    assert metrics["hoverTooltip"]["rightOfCursor"] is True, metrics
+    assert metrics["hoverTooltip"]["aboveCursor"] is True, metrics
+    assert metrics["hoverTooltip"]["contained"] is True, metrics
     assert metrics["selecting"] is True, metrics
     assert float(metrics["selectionOpacity"]) > 0.0, metrics
     assert 235 <= metrics["selectionWidth"] <= 245, metrics

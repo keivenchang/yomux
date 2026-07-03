@@ -155,7 +155,7 @@
   "state.working": "Working",
   "debug.graph.sumDisplayedTokens": "(sum of tokens from displayed = {count})",
   "debug.graph.sumDisplayedBandwidth": "(sum of bandwidth from displayed = {count})",
-  "debug.graph.sumDisplayedClientRequests": "(sum of all client requests from displayed = {count})",
+  "debug.graph.sumDisplayedClientRequests": "({count}, Σ displayed reqs)",
   "debug.graph.unit.tokens": "{count} tokens",
   "debug.graph.unit.tokensPerMinute": "{count} tokens/min",
   "debug.meta": "debug=1 - {count} events",

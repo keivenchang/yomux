@@ -198,6 +198,7 @@ const jsDebugGraphEventBuckets = new Map();
 const jsDebugGraphEventResponseBytes = new Map();
 const jsDebugGraphEventRefTimes = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
+const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => ({...metric, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphAllClientsId, clientAggregate: metric.aggregate, clientLinePattern: jsDebugGraphAllClientsLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
@@ -2271,19 +2272,32 @@ function debugGraphLocalDateKey(ms) {
     .join('-');
 }
 
-function debugGraphTimeLabel(ms, {includeDate = false} = {}) {
+function debugGraphTimeLabel(ms, {includeDate = false, includeSeconds = !includeDate} = {}) {
   if (!Number.isFinite(ms)) return '';
   if (typeof localizedDateTimeFormat === 'function') {
-    const localized = localizedDateTimeFormat(ms / 1000, includeDate
+    const options = includeDate
       ? {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}
-      : {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+      : {hour: '2-digit', minute: '2-digit'};
+    if (includeSeconds) options.second = '2-digit';
+    const localized = localizedDateTimeFormat(ms / 1000, options);
     if (localized) return localized;
   }
   const date = new Date(ms);
   const hours = String(date.getHours()).padStart(2, '0');
   const minutes = String(date.getMinutes()).padStart(2, '0');
   const seconds = String(date.getSeconds()).padStart(2, '0');
-  return includeDate ? `${debugGraphLocalDateKey(ms)} ${hours}:${minutes}` : `${hours}:${minutes}:${seconds}`;
+  const time = includeSeconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
+  return includeDate ? `${debugGraphLocalDateKey(ms)} ${time}` : time;
+}
+
+function debugGraphExactTimeLabel(ms) {
+  if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${debugGraphLocalDateKey(ms)} ${hours}:${minutes}:${seconds}`;
 }
 
 function debugGraphSeriesTimeMs(series, index) {
@@ -2799,9 +2813,47 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   return defaultBuckets;
 }
 
+function debugGraphHoverBucketIndex(buckets, timestamp) {
+  let low = 0;
+  let high = buckets.length - 1;
+  let index = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(buckets[middle]?.startMs) <= timestamp) {
+      index = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (index < 0) return -1;
+  const bucket = buckets[index];
+  const end = Number(bucket?.startMs) + Math.max(1, Number(bucket?.durationMs) || 0);
+  return timestamp < end ? index : -1;
+}
+
+function debugGraphHoverValueAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  if (index < 0) return debugGraphValueText(0, data.group.unit);
+  const series = data.group.key === 'activity'
+    ? data.groupSeries.filter(item => item.key !== 'idleAgents')
+    : data.groupSeries;
+  const values = series
+    .filter(item => !Array.isArray(item.hasDataValues) || item.hasDataValues[index] === true)
+    .map(item => Math.max(0, Number(item.values?.[index]) || 0));
+  const value = data.group.stacked === true
+    ? values.reduce((total, item) => total + item, 0)
+    : Math.max(0, ...values);
+  return debugGraphValueText(value, data.group.unit);
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
+  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true);
   const areaSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => series.hostMetric && series.hostProcessId) : [];
@@ -2822,7 +2874,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
     ? ''
     : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
@@ -2848,6 +2900,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>`}
+    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time></div>'}
   </section>`;
 }
 
@@ -3479,10 +3532,34 @@ function debugGraphSetInteractionLines(panel, ratio) {
   });
 }
 
+function debugGraphSetHoverTooltip(panel, event, ratio) {
+  const svg = event?.target?.closest?.('.js-debug-line-chart');
+  const chart = svg?.closest?.('[data-js-debug-chart]');
+  const tooltip = chart?.querySelector?.('[data-js-debug-hover-tooltip]');
+  if (!svg || !chart || !tooltip || ratio == null) return;
+  const domain = debugGraphGridDomain(panel);
+  const spanMs = Number(domain.endMs) - Number(domain.startMs);
+  if (!Number.isFinite(spanMs) || spanMs <= 0) return;
+  const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
+  tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
+  tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
+  tooltip.hidden = false;
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+  const chartRect = chart.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const left = Math.max(4, Math.min(chartRect.width - tooltipRect.width - 4, event.clientX - chartRect.left + 4));
+  const top = Math.max(4, Math.min(chartRect.height - tooltipRect.height - 4, event.clientY - chartRect.top - tooltipRect.height - 4));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
 function debugGraphClearInteractionLines(panel) {
   if (jsDebugGraphSelectionState) return;
   const graph = panel?.querySelector?.('[data-js-debug-graph]');
   if (graph) graph.classList.remove('js-debug-graph--hovering');
+  panel?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
 }
 
 function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
@@ -3545,12 +3622,14 @@ function handleDebugGraphPointerMove(event, panel) {
     if (ratio == null) return;
     jsDebugGraphSelectionState.currentRatio = ratio;
     debugGraphSetInteractionLines(panel, ratio);
+    debugGraphSetHoverTooltip(panel, event, ratio);
     debugGraphSetSelectionRects(panel, jsDebugGraphSelectionState.startRatio, ratio);
     return;
   }
   const ratio = debugGraphPointerRatioForEvent(event);
   if (ratio == null) return;
   debugGraphSetInteractionLines(panel, ratio);
+  debugGraphSetHoverTooltip(panel, event, ratio);
 }
 
 function handleDebugGraphPointerUp(event, panel) {

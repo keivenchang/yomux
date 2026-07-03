@@ -1332,15 +1332,15 @@ function activateRepoSelectorControl(event, button, panelSession) {
 // ahead/behind. Clicking a row scopes the Finder to that repo. Reuses the shared context-menu controller.
 function repoChipMenuRowHtml(repo) {
   const label = compactHomePath(repo.root || '');
-  const bits = [];
-  if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
-  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">${esc(t('git.dirty', {count: repo.dirty_count}))}</span>`);
-  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">${esc(t('git.ahead', {count: repo.ahead}))}</span>`);
-  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">${esc(t('git.behind', {count: repo.behind}))}</span>`);
+  const status = [];
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) status.push(`<span class="meta-muted">${esc(t('git.dirty', {count: repo.dirty_count}))}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) status.push(`<span class="meta-muted">${esc(t('git.ahead', {count: repo.ahead}))}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) status.push(`<span class="meta-muted">${esc(t('git.behind', {count: repo.behind}))}</span>`);
   const primary = repo.primary ? ' repo-chip-row-primary' : '';
   return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
     <span class="repo-chip-path">${esc(label)}</span>
-    <span class="repo-chip-meta">${bits.join('')}</span>
+    <span class="repo-chip-branch meta-branch">${esc(shortBranch(repo.branch || ''))}</span>
+    <span class="repo-chip-status">${status.join('')}</span>
   </button>`;
 }
 
