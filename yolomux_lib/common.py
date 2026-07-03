@@ -57,7 +57,10 @@ EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
 TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
-STATS_CLIENT_HISTORY_PATH = STATE_DIR / "stats-client-history.json"
+# Bucket layouts are not losslessly interchangeable during a rolling restart: an older process can
+# otherwise downsample a newer coarse bucket and make the next process count the same data again.
+STATS_CLIENT_HISTORY_VERSION = 3
+STATS_CLIENT_HISTORY_PATH = STATE_DIR / f"stats-client-history-v{STATS_CLIENT_HISTORY_VERSION}.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"

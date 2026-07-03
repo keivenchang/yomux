@@ -339,7 +339,7 @@ STATS_HISTORY_SHARED_BUCKET_FIELDS = (
     *STATS_HISTORY_SERVER_FIELDS,
     "agent_token_rates",
 )
-STATS_CLIENT_HISTORY_VERSION = 2
+STATS_CLIENT_HISTORY_VERSION = common.STATS_CLIENT_HISTORY_VERSION
 STATS_CLIENT_HISTORY_BUCKET_FIELDS = ("start", "duration", "sequence", "clients", "servers")
 STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
 STATS_AGENT_RUN_STATES = frozenset({"working"})
@@ -1960,6 +1960,33 @@ class TmuxWebtermApp:
             return None
         return dict(zip(STATS_CLIENT_HISTORY_BUCKET_FIELDS, snapshot, strict=True))
 
+    def stats_client_history_snapshot_compatible(self, snapshot: dict[str, Any]) -> bool:
+        try:
+            if int(snapshot.get("version") or 0) != STATS_CLIENT_HISTORY_VERSION:
+                return False
+        except (TypeError, ValueError):
+            return False
+        raw_buckets = snapshot.get("raw_buckets")
+        rollup_buckets = snapshot.get("rollup_buckets")
+        if not isinstance(raw_buckets, list) or not isinstance(rollup_buckets, list):
+            return False
+        expected_durations = {
+            "raw_buckets": frozenset({STATS_HISTORY_RAW_BUCKET_SECONDS}),
+            "rollup_buckets": frozenset({STATS_HISTORY_MIDDLE_BUCKET_SECONDS, STATS_HISTORY_ROLLUP_BUCKET_SECONDS}),
+        }
+        for key, buckets in (("raw_buckets", raw_buckets), ("rollup_buckets", rollup_buckets)):
+            for snapshot_bucket in buckets:
+                bucket = self.stats_client_history_bucket_from_snapshot(snapshot_bucket)
+                if bucket is None:
+                    return False
+                try:
+                    duration = int(bucket.get("duration") or 0)
+                except (TypeError, ValueError):
+                    return False
+                if duration not in expected_durations[key]:
+                    return False
+        return True
+
     def stats_client_history_snapshot_locked(self, now: float) -> dict[str, Any]:
         self.stats_history_compact_locked(now)
         raw_buckets = [
@@ -2037,6 +2064,8 @@ class TmuxWebtermApp:
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
     def stats_client_history_apply_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
+        if not self.stats_client_history_snapshot_compatible(snapshot):
+            return
         raw_value = snapshot.get("raw_buckets")
         rollup_value = snapshot.get("rollup_buckets")
         if not isinstance(raw_value, list) and not isinstance(rollup_value, list):

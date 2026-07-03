@@ -871,11 +871,7 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     (Number.isFinite(nextPid) && Number.isFinite(jsDebugStatsServerPid) && nextPid !== jsDebugStatsServerPid)
     || (Number.isFinite(nextStartedAt) && Number.isFinite(jsDebugStatsServerStartedAt) && nextStartedAt !== jsDebugStatsServerStartedAt)
   );
-  if (serverChanged) {
-    jsDebugStatsServerSequence = 0;
-    resetDebugGraphAgentTokenHistory();
-    jsDebugGraphPendingServerBuckets.clear();
-  }
+  if (serverChanged) clearJsDebugGraphData();
   if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
   if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
   if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
@@ -894,6 +890,9 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     armJsDebugStatsPolling();
   }
   debugGraphApplyServerHistory(payload.history);
+  // The restart response was requested with the previous process's sequence. Refetch from zero so
+  // stale high-water marks cannot hide the replacement process's durable history.
+  if (serverChanged) jsDebugStatsServerSequence = 0;
   if (payload.history && typeof payload.history === 'object') {
     scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
     return;

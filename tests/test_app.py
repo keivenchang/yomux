@@ -197,6 +197,52 @@ def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
     assert payload["history"]["sequence"] >= 20
 
 
+def test_stats_client_history_path_is_namespaced_by_bucket_schema():
+    assert app_module.STATS_CLIENT_HISTORY_VERSION == common.STATS_CLIENT_HISTORY_VERSION
+    assert common.STATS_CLIENT_HISTORY_PATH.name == f"stats-client-history-v{app_module.STATS_CLIENT_HISTORY_VERSION}.json"
+
+
+def test_stats_client_snapshot_rejects_an_incompatible_bucket_schema():
+    webapp = app_module.TmuxWebtermApp([])
+    incompatible = {
+        "version": app_module.STATS_CLIENT_HISTORY_VERSION - 1,
+        "sequence": 9,
+        "raw_buckets": [],
+        "rollup_buckets": [[120, 30, 9, {"client-a": {
+            "api_count": 1e121,
+            "sse_count": 1e121,
+            "latency_total_ms": 1e121,
+            "latency_count": 1e121,
+            "bandwidth_bytes": 1e121,
+            "disconnected_ms": 0.0,
+            "sequence": 9,
+        }}, {}]],
+    }
+    try:
+        with webapp.stats_history_lock:
+            webapp.stats_client_history_apply_snapshot_locked(incompatible)
+            history = webapp.stats_history_payload_locked(client_id="client-a")
+    finally:
+        webapp.control_server.stop()
+
+    assert history["records"] == []
+    assert webapp.stats_history_sequence == 0
+
+
+def test_stats_client_snapshot_rejects_unexpected_duration_with_current_version():
+    webapp = app_module.TmuxWebtermApp([])
+    incompatible = {
+        "version": app_module.STATS_CLIENT_HISTORY_VERSION,
+        "sequence": 1,
+        "raw_buckets": [],
+        "rollup_buckets": [[120, 30, 1, {}, {}]],
+    }
+    try:
+        assert webapp.stats_client_history_snapshot_compatible(incompatible) is False
+    finally:
+        webapp.control_server.stop()
+
+
 def test_stats_client_snapshot_replaces_fine_rows_before_applying_compacted_rows():
     webapp = app_module.TmuxWebtermApp([])
     now = 200000.0

@@ -3040,12 +3040,13 @@ async function runEditorPreviewSuite() {
       },
     });
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.serverSequence, 1, 'graph resets incremental history sequence after yolomux.py restarts with a new PID');
+    assert.equal(summary.serverSequence, 0, 'graph refetches replacement-process history from sequence zero after yolomux.py restarts');
+    assert.equal(summary.displayBuckets, 0, 'graph drops values retained from the previous process instead of max-merging stale outliers');
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
     assert.equal(summary.scaleSeconds, 5, 'changing range does not override the selected aggregate bucket size');
-    assert.ok(summary.displayBuckets > 0, 'two-hour range displays the retained two-hour bucket');
+    assert.equal(summary.displayBuckets, 0, 'changing range does not resurrect history discarded after a server restart');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 18,
       records: [{
@@ -3079,6 +3080,7 @@ async function runEditorPreviewSuite() {
         start: Math.floor((now - 500) / 1000),
         duration: 1,
         sequence: 20,
+        api_count: 2,
         sse_count: 1,
         latency_total_ms: 2.5,
         latency_count: 1,
