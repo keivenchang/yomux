@@ -7559,6 +7559,59 @@ class TmuxWebtermApp:
             "recent": records[-PERFORMANCE_RECENT_LIMIT:],
         }
 
+    def runtime_python_profile(self, duration_seconds: Any = 0.5, interval_seconds: Any = 0.01) -> dict[str, Any]:
+        duration = max(0.05, min(self.float_value(duration_seconds, 0.5), 1.0))
+        interval = max(0.005, min(self.float_value(interval_seconds, 0.01), 0.1))
+        deadline = time.monotonic() + duration
+        samples = 0
+        thread_rows: dict[int, dict[str, Any]] = {}
+        while True:
+            threads_by_ident = {
+                thread.ident: thread
+                for thread in threading.enumerate()
+                if thread.ident is not None and thread.native_id is not None
+            }
+            for ident, frame in sys._current_frames().items():
+                thread = threads_by_ident.get(ident)
+                if thread is None or thread.native_id is None:
+                    continue
+                stack = []
+                cursor = frame
+                while cursor is not None and len(stack) < 10:
+                    code = cursor.f_code
+                    stack.append(f"{Path(code.co_filename).name}:{code.co_name}:{cursor.f_lineno}")
+                    cursor = cursor.f_back
+                stack_text = " <- ".join(stack)
+                row = thread_rows.setdefault(thread.native_id, {
+                    "native_id": thread.native_id,
+                    "name": thread.name,
+                    "daemon": thread.daemon,
+                    "samples": 0,
+                    "stacks": {},
+                })
+                row["samples"] += 1
+                row["stacks"][stack_text] = int(row["stacks"].get(stack_text, 0)) + 1
+            samples += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+        rows = []
+        for row in thread_rows.values():
+            stack_rows = [
+                {"stack": stack, "samples": count}
+                for stack, count in sorted(row.pop("stacks").items(), key=lambda item: (-item[1], item[0]))[:5]
+            ]
+            row["top_stacks"] = stack_rows
+            rows.append(row)
+        rows.sort(key=lambda row: int(row["native_id"]))
+        return {
+            "duration_seconds": duration,
+            "interval_seconds": interval,
+            "sample_rounds": samples,
+            "threads": rows[:64],
+        }
+
     def runtime_cache_dir_stats(self, path: Path) -> dict[str, Any]:
         root = Path(path)
         stats = {"path": str(root), "exists": root.exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0}
@@ -8386,6 +8439,23 @@ class TmuxWebtermApp:
             with self.tabber_activity_cache_lock:
                 self.tabber_activity_cache_warmer_running = False
 
+    def empty_tabber_activity_payload(self, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
+        return {
+            "activity": {},
+            "agents": [],
+            "agent_windows": {},
+            "errors": [],
+            "session_scope": "configured",
+            "session_file_hours": bounded_hours,
+            "cache": {
+                "hit": False,
+                "stale": True,
+                "age_seconds": None,
+                "refresh_seconds": refresh_seconds,
+                **cache,
+            },
+        }
+
     def activity_payload(self, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
         visible_consumer = self.mark_tabber_activity_consumer(visible)
         refresh_seconds = self.tabber_activity_refresh_seconds()
@@ -8438,22 +8508,7 @@ class TmuxWebtermApp:
                         payload["cache"]["refreshing_elsewhere"] = True
             return payload, HTTPStatus.OK
         if not visible_consumer:
-            payload = {
-                "activity": {},
-                "agents": [],
-                "agent_windows": {},
-                "errors": [],
-                "session_scope": "configured",
-                "session_file_hours": bounded_hours,
-                "cache": {
-                    "hit": False,
-                    "stale": True,
-                    "age_seconds": None,
-                    "refresh_seconds": refresh_seconds,
-                    "idle_no_consumer": True,
-                },
-            }
-            return payload, HTTPStatus.OK
+            return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, idle_no_consumer=True), HTTPStatus.OK
         if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
             self.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
@@ -8469,33 +8524,9 @@ class TmuxWebtermApp:
                     "fallback": True,
                 }
                 return payload, HTTPStatus.OK
-            payload = {
-                "activity": {},
-                "agents": [],
-                "agent_windows": {},
-                "errors": [],
-                "session_scope": "configured",
-                "session_file_hours": bounded_hours,
-                "cache": {
-                    "hit": False,
-                    "stale": True,
-                    "age_seconds": None,
-                    "refresh_seconds": refresh_seconds,
-                    "refreshing_elsewhere": True,
-                },
-            }
-            return payload, HTTPStatus.OK
-        payload = self.build_activity_payload(hours=bounded_hours)
-        self.set_tabber_activity_cache(payload, source_signature=source_signature)
-        payload = copy.deepcopy(payload)
-        payload["cache"] = {
-            "hit": False,
-            "stale": False,
-            "age_seconds": 0,
-            "refresh_seconds": refresh_seconds,
-            "refreshing": False,
-        }
-        return payload, HTTPStatus.OK
+            return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing_elsewhere=True), HTTPStatus.OK
+        refreshing = self.start_tabber_activity_cache_refresh()
+        return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing=refreshing), HTTPStatus.OK
 
     def run_history_store_for_app(self) -> RunHistoryStore:
         store = getattr(self, "run_history_store", None)
@@ -8744,6 +8775,11 @@ class TmuxWebtermApp:
         if action == "background_status":
             payload, _status = self.background_owner_status_payload()
             return {"ok": True, "status": payload}
+        if action == "runtime_profile":
+            return {
+                "ok": True,
+                "profile": self.runtime_python_profile(request.get("duration_seconds"), request.get("interval_seconds")),
+            }
         if action == "background_ping":
             return {"ok": True, "status": self.background_owner.status_payload()}
         if action == "background_client_event":

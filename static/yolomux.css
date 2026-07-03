@@ -3285,7 +3285,8 @@ body.theme-light .branch-link {
   --js-debug-agent-attention: var(--bad);
   --js-debug-agent-working: var(--good);
   --js-debug-agent-transition: var(--accent-gold);
-  --js-debug-agent-area-opacity: 0.7;
+  --js-debug-agent-status-bar-opacity: 0.82;
+  --js-debug-agent-idle-bar-opacity: 0.3;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
@@ -3298,6 +3299,8 @@ body.theme-light .branch-link {
   --js-debug-agent-token-rose: #ff4f70;
   --js-debug-agent-token-violet: #9b6cff;
   --js-debug-agent-token-total: #ffe1a3;
+  --js-debug-agent-token-pattern-ink: #fff;
+  --js-debug-agent-token-pattern-ink-rgb: 255 255 255;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
 }
@@ -3307,7 +3310,6 @@ body.theme-light .js-debug-graph-view {
   --js-debug-agent-attention: #cf1625;
   --js-debug-agent-working: #17813a;
   --js-debug-agent-transition: #bf6a00;
-  --js-debug-agent-area-opacity: 0.78;
   --js-debug-agent-token-cyan: #0074a4;
   --js-debug-agent-token-orange: var(--icon-archive);
   --js-debug-agent-token-magenta: #b0009f;
@@ -3316,6 +3318,8 @@ body.theme-light .js-debug-graph-view {
   --js-debug-agent-token-rose: #c21f45;
   --js-debug-agent-token-violet: #5b21d1;
   --js-debug-agent-token-total: #8a5a20;
+  --js-debug-agent-token-pattern-ink: #000;
+  --js-debug-agent-token-pattern-ink-rgb: 0 0 0;
 }
 .js-debug-toolbar {
   display: flex;
@@ -3673,6 +3677,12 @@ body.theme-light .js-debug-graph-view {
 .js-debug-bar--agentToken {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
 }
+.js-debug-agent-token-pattern-ink {
+  fill: var(--js-debug-agent-token-pattern-ink);
+  stroke: var(--js-debug-agent-token-pattern-ink);
+  stroke-width: 0.45;
+  opacity: 0.32;
+}
 .js-debug-line--api {
   stroke: var(--js-debug-api-series);
 }
@@ -3709,21 +3719,21 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--agentTokenTotal {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-total));
 }
-.js-debug-area--askAgents {
+.js-debug-bar--askAgents {
   fill: var(--js-debug-agent-attention);
-  opacity: var(--js-debug-agent-area-opacity);
+  opacity: var(--js-debug-agent-status-bar-opacity);
 }
-.js-debug-area--workingAgents {
+.js-debug-bar--workingAgents {
   fill: var(--js-debug-agent-working);
-  opacity: var(--js-debug-agent-area-opacity);
+  opacity: var(--js-debug-agent-status-bar-opacity);
 }
-.js-debug-area--transitionAgents {
+.js-debug-bar--transitionAgents {
   fill: var(--js-debug-agent-transition);
-  opacity: var(--js-debug-agent-area-opacity);
+  opacity: var(--js-debug-agent-status-bar-opacity);
 }
-.js-debug-area--idleAgents {
+.js-debug-bar--idleAgents {
   fill: var(--js-debug-idle-agent-status);
-  opacity: var(--js-debug-agent-area-opacity);
+  opacity: var(--js-debug-agent-idle-bar-opacity);
 }
 .js-debug-area--tokensPerAgent {
   fill: var(--accent-sky-strong);
@@ -3823,6 +3833,27 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-legend-swatch--agentToken {
   color: var(--js-debug-series-color, var(--accent-sky-strong));
+  border-radius: 2px;
+  background-color: currentColor;
+}
+.js-debug-legend-item[data-js-debug-token-pattern="1"] .js-debug-legend-swatch--agentToken {
+  background-image: repeating-linear-gradient(135deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
+}
+.js-debug-legend-item[data-js-debug-token-pattern="2"] .js-debug-legend-swatch--agentToken {
+  background-image: repeating-linear-gradient(45deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
+}
+.js-debug-legend-item[data-js-debug-token-pattern="3"] .js-debug-legend-swatch--agentToken {
+  background-image: repeating-linear-gradient(0deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
+}
+.js-debug-legend-item[data-js-debug-token-pattern="4"] .js-debug-legend-swatch--agentToken {
+  background-image: repeating-linear-gradient(90deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
+}
+.js-debug-legend-item[data-js-debug-token-pattern="5"] .js-debug-legend-swatch--agentToken {
+  background-image: radial-gradient(circle, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.48) 0 1px, transparent 1.2px);
+  background-size: 4px 4px;
+}
+.js-debug-legend-item[data-js-debug-token-pattern="6"] .js-debug-legend-swatch--agentToken {
+  background-image: repeating-linear-gradient(0deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.38) 2px 3px), repeating-linear-gradient(90deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.38) 2px 3px);
 }
 .js-debug-legend-swatch--agentTokenTotal {
   width: 16px;

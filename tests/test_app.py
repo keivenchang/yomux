@@ -815,6 +815,26 @@ def test_performance_metrics_payload_ranks_response_bytes():
     assert payload["top_payload_bytes"][0]["count"] == 2
 
 
+def test_runtime_python_profile_reports_named_native_threads():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        response = webapp.handle_control_request({
+            "action": "runtime_profile",
+            "duration_seconds": 0.01,
+            "interval_seconds": 0.005,
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    profile = response["profile"]
+    assert profile["duration_seconds"] == 0.05
+    assert profile["sample_rounds"] >= 1
+    current = next(row for row in profile["threads"] if row["native_id"] == threading.get_native_id())
+    assert current["name"] == threading.current_thread().name
+    assert current["top_stacks"]
+
+
 def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcripts(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")
@@ -4171,6 +4191,27 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
         assert calls == ["snapshot"]
     finally:
         webapp.control_server.stop()
+
+
+def test_owner_activity_payload_without_cache_queues_one_shared_refresh(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["5"])
+    starts = iter([True, False])
+    try:
+        monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: next(starts))
+        monkeypatch.setattr(webapp, "build_activity_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cold requests must not rebuild synchronously")))
+
+        first, first_status = webapp.activity_payload()
+        second, second_status = webapp.activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.OK
+    assert second_status == HTTPStatus.OK
+    assert first["cache"]["refreshing"] is True
+    assert second["cache"]["refreshing"] is False
+    assert first["activity"] == second["activity"] == {}
 
 
 def test_activity_warm_takeover_reads_disk_cache_without_rebuild_or_rewrite(monkeypatch, tmp_path):

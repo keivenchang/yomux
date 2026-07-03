@@ -358,7 +358,7 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
       <section class="js-debug-graph-view">
         <div class="js-debug-y-axis">{labels_html}</div>
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
-          <rect class="js-debug-area js-debug-area--idleAgents" data-idle-fill x="0" y="8" width="600" height="104"></rect>
+          <rect class="js-debug-bar js-debug-bar--idleAgents" data-idle-fill x="0" y="8" width="600" height="104"></rect>
           {grid_html}
         </svg>
       </section>
@@ -1263,6 +1263,150 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
     assert metrics["renderedAfter"] > metrics["renderedBefore"], metrics
     assert metrics["redrawDelayMs"] < 1000, metrics
     assert metrics["pointCount"] >= 2, metrics
+
+
+def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof recordJsDebugStatsSample === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsFirstSampleReceived = true;
+        setDebugGraphRange(60 * 60);
+        const nowSeconds = Math.floor(Date.now() / 10000) * 10;
+        recordJsDebugStatsSample({history: {sequence: 2, records: [
+          {
+            start: nowSeconds - 30,
+            duration: 1,
+            sequence: 1,
+            ask_agent_total: 1,
+            run_agent_total: 1,
+            transition_agent_total: 1,
+            idle_agent_total: 1,
+            agent_activity_samples: 1,
+          },
+          {
+            start: nowSeconds - 20,
+            duration: 1,
+            sequence: 2,
+            ask_agent_total: 1,
+            run_agent_total: 1,
+            transition_agent_total: 1,
+            idle_agent_total: 1,
+            agent_activity_samples: 1,
+          },
+        ]}}, {forceGraphRefresh: true});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="activity"]');
+        const bars = Array.from(chart?.querySelectorAll('[data-js-debug-bar-series]') || []);
+        const barsByX = {};
+        for (const bar of bars) {
+          const x = bar.getAttribute('x');
+          barsByX[x] = (barsByX[x] || 0) + 1;
+        }
+        const fillBySeries = Object.fromEntries(bars.map(bar => [
+          bar.dataset.jsDebugBarSeries,
+          getComputedStyle(bar).fill,
+        ]));
+        const opacityBySeries = Object.fromEntries(bars.map(bar => [
+          bar.dataset.jsDebugBarSeries,
+          getComputedStyle(bar).opacity,
+        ]));
+        setDebugGraphRange(24 * 60 * 60);
+        renderDebugPanels({force: true});
+        const datedTicks = Array.from(document.querySelectorAll('[data-js-debug-chart="activity"] [data-js-debug-x-tick]')).map(tick => ({
+          name: tick.dataset.jsDebugXTick,
+          date: tick.dataset.jsDebugXDate || '',
+          text: tick.textContent || '',
+        }));
+        return {
+          kind: chart?.dataset.jsDebugChartKind || '',
+          bucketSeconds: Number(chart?.dataset.jsDebugChartBucketSeconds),
+          stacked: chart?.dataset.jsDebugChartStacked || '',
+          areaCount: chart?.querySelectorAll('[data-js-debug-area-series]').length || 0,
+          barCount: bars.length,
+          widths: bars.map(bar => Number(bar.getAttribute('width'))),
+          gaps: bars.map(bar => Number(bar.dataset.jsDebugBarGap)),
+          barsPerX: Object.values(barsByX),
+          fillBySeries,
+          opacityBySeries,
+          datedTicks,
+        };
+        """
+    )
+    assert metrics["kind"] == "bar", metrics
+    assert metrics["bucketSeconds"] == 10, metrics
+    assert metrics["stacked"] == "true", metrics
+    assert metrics["areaCount"] == 0, metrics
+    assert metrics["barCount"] == 8, metrics
+    assert all(1.5 <= width <= 1.7 for width in metrics["widths"]), metrics
+    assert set(metrics["gaps"]) == {0}, metrics
+    assert sorted(metrics["barsPerX"]) == [4, 4], metrics
+    assert len(set(metrics["fillBySeries"].values())) == 4, metrics
+    assert metrics["opacityBySeries"] == {
+        "askAgents": "0.82",
+        "workingAgents": "0.82",
+        "transitionAgents": "0.82",
+        "idleAgents": "0.3",
+    }, metrics
+    assert [tick["name"] for tick in metrics["datedTicks"]] == ["start", "mid", "end"], metrics
+    assert all(tick["date"] and len(tick["text"]) > 8 for tick in metrics["datedTicks"]), metrics
+    assert metrics["datedTicks"][0]["date"] != metrics["datedTicks"][-1]["date"], metrics
+
+
+def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsFirstSampleReceived = true;
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 4, records: [{
+          start: nowSeconds - 60,
+          duration: 60,
+          sequence: 4,
+          tokens_per_agent_total: 60,
+          agent_token_samples: 1,
+          agent_token_rates: [
+            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript'},
+            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript'},
+            {key: '2|0|codex', label: '2:0:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
+          ],
+        }]}}, {forceGraphRefresh: true});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+        const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
+        const legends = [...chart.querySelectorAll('[data-js-debug-legend^="agentToken:"]')];
+        return {
+          patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({id: node.id, pattern: node.dataset.jsDebugTokenPatternDef})),
+          bars: bars.map(bar => ({pattern: bar.dataset.jsDebugTokenPattern, gap: Number(bar.dataset.jsDebugBarGap), fill: getComputedStyle(bar).fill, style: bar.getAttribute('style') || ''})),
+          legends: legends.map(item => ({pattern: item.dataset.jsDebugTokenPattern, background: getComputedStyle(item.querySelector('.js-debug-legend-swatch')).backgroundImage})),
+        };
+        """
+    )
+    assert [item["pattern"] for item in metrics["patternDefs"]] == ["0", "1", "2"], metrics
+    assert len({item["id"] for item in metrics["patternDefs"]}) == 3, metrics
+    assert [item["pattern"] for item in metrics["bars"]] == ["0", "1", "2"], metrics
+    assert all(item["gap"] > 0 for item in metrics["bars"]), metrics
+    assert all("url(" in item["fill"] or "fill: url(" in item["style"] for item in metrics["bars"]), metrics
+    assert [item["pattern"] for item in metrics["legends"]] == ["0", "1", "2"], metrics
+    assert metrics["legends"][0]["background"] == "none", metrics
+    assert metrics["legends"][1]["background"] != metrics["legends"][2]["background"], metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -4111,7 +4255,7 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
                 <path id="working-line" class="js-debug-line--workingAgents"></path>
                 <path id="transition-line" class="js-debug-line--transitionAgents"></path>
                 <path id="idle-line" class="js-debug-line--idleAgents"></path>
-                <path id="ask-area" class="js-debug-area--askAgents"></path>
+                <rect id="ask-bar" class="js-debug-bar--askAgents"></rect>
               </svg>
               <span id="ask-legend" class="js-debug-legend-swatch--askAgents"></span>
               <span id="working-legend" class="js-debug-legend-swatch--workingAgents"></span>
@@ -4134,7 +4278,7 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
           askLegend: style('ask-legend').color,
           workingLegend: style('working-legend').color,
           transitionLegend: style('transition-legend').color,
-          askAreaOpacity: style('ask-area').opacity,
+          askBarOpacity: style('ask-bar').opacity,
         };
         """
     )
@@ -4142,7 +4286,7 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
     assert metrics["working"] == metrics["workingLegend"], metrics
     assert metrics["transition"] == metrics["transitionLegend"], metrics
     assert len({metrics["ask"], metrics["working"], metrics["transition"], metrics["idle"]}) == 4, metrics
-    assert metrics["askAreaOpacity"] == "0.78", metrics
+    assert metrics["askBarOpacity"] == "0.82", metrics
 
 
 def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):

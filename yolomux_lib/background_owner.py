@@ -162,8 +162,8 @@ class BackgroundOwnerRegistry:
         self.generations_dir.chmod(0o700)
         atomic_write_text(self.record_path, json.dumps(self.generation_record(), sort_keys=True) + "\n", mode=0o600)
 
-    def read_generation_records(self) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
+    def read_generation_record_items(self) -> list[tuple[Path, dict[str, Any]]]:
+        records: list[tuple[Path, dict[str, Any]]] = []
         try:
             paths = sorted(self.generations_dir.glob("*.json"))
         except OSError:
@@ -174,19 +174,26 @@ class BackgroundOwnerRegistry:
             except (OSError, json.JSONDecodeError):
                 continue
             if isinstance(record, dict):
-                records.append(record)
+                records.append((path, record))
         return records
+
+    def read_generation_records(self) -> list[dict[str, Any]]:
+        return [record for _path, record in self.read_generation_record_items()]
 
     def live_generation_records(self) -> list[dict[str, Any]]:
         now = self.clock()
         records = []
-        for record in self.read_generation_records():
+        for path, record in self.read_generation_record_items():
             try:
                 pid = int(record.get("pid") or 0)
                 heartbeat = float(record.get("last_heartbeat") or 0.0)
             except (TypeError, ValueError):
                 continue
             if not pid_is_alive(pid):
+                try:
+                    path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
                 continue
             if heartbeat and now - heartbeat > BACKGROUND_OWNER_STALE_SECONDS:
                 continue

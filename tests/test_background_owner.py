@@ -83,6 +83,22 @@ def test_background_owner_latest_generation_wins(monkeypatch, tmp_path):
     assert newer.is_latest_live_generation() is True
 
 
+def test_background_owner_prunes_dead_generation_records(monkeypatch, tmp_path):
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    registry.generations_dir.mkdir(parents=True)
+    dead_path = registry.generations_dir / "dead.json"
+    live_path = registry.generations_dir / "live.json"
+    dead_path.write_text(json.dumps({"generation_id": "dead", "pid": 99, "last_heartbeat": 100.0}), encoding="utf-8")
+    live_path.write_text(json.dumps({"generation_id": "live", "pid": 100, "last_heartbeat": 100.0}), encoding="utf-8")
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda pid: pid == 100)
+
+    records = registry.live_generation_records()
+
+    assert [record["generation_id"] for record in records] == ["live"]
+    assert dead_path.exists() is False
+    assert live_path.exists() is True
+
+
 def test_background_owner_takeover_requests_release_then_acquires(monkeypatch, tmp_path):
     registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
     registry.started_at_ns = 20

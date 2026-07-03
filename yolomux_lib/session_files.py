@@ -24,6 +24,7 @@ from .filesystem import git_root_for_path
 from .locales import message_descriptor
 from .locales import user_message_payload
 from .sessions import claude_transcript_family_paths
+from .sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
 from .types import RepoPayload
@@ -40,7 +41,11 @@ SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
 SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
-_TRANSCRIPT_SCAN_CACHE_MAX = 64
+# Historical attribution checks both the newest filename and newest-mtime candidate windows for
+# every live repo cwd. The old 64-entry cap was smaller than one candidate window, so each ordered
+# pass evicted the entries the next pass needed and reparsed every JSONL file from byte zero.
+_TRANSCRIPT_SCAN_CACHE_CWD_BUDGET = 16
+_TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2 * _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _CODEX_TRANSCRIPT_SCAN_VERSION = 3
 _CLAUDE_TRANSCRIPT_SCAN_VERSION = 3

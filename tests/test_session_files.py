@@ -12,6 +12,7 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib import session_files
+from yolomux_lib.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from yolomux_lib.types import RepoPayload
 from yolomux_lib.types import SessionFileEntry
 from yolomux_lib.types import SessionFilesPayload
@@ -260,6 +261,33 @@ def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypat
     assert parsed_top_level_lines == [second_line]
     assert second["changes"] == {str(tmp_path / "a.py"): {"M"}, str(tmp_path / "b.py"): {"M"}}
     assert second["usage"]["generated_tokens"] == 12
+
+
+def test_codex_transcript_scan_cache_holds_full_recent_candidate_window(tmp_path, monkeypatch):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    line = json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n"
+    transcripts = []
+    for index in range(CODEX_TRANSCRIPT_SCAN_LIMIT * 2):
+        transcript = tmp_path / f"rollout-{index:03d}.jsonl"
+        transcript.write_text(line, encoding="utf-8")
+        transcripts.append(transcript)
+
+    for transcript in transcripts:
+        session_files.scan_codex_transcript_details(transcript, str(tmp_path), include_patch_text=False)
+
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    for transcript in transcripts:
+        session_files.scan_codex_transcript_details(transcript, str(tmp_path), include_patch_text=False)
+
+    assert parsed_lines == []
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
 
 
 def test_codex_transcript_scan_restarts_after_truncation(tmp_path):

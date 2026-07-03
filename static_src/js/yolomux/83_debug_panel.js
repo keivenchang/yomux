@@ -117,6 +117,7 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-rose)',
   'var(--js-debug-agent-token-violet)',
 ]);
+const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenColors.length;
 const jsDebugGraphProcessCpuColors = Object.freeze({
   current: 'var(--active-accent-bright)',
   // Green is reserved for the server that is serving this browser. Peers must remain
@@ -141,7 +142,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['cpu', 'systemCpu'], unit: 'percent', fixedMax: 100},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'area', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, bucketSeconds: 10},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
@@ -1588,6 +1589,7 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       cssKey: 'agentToken',
       agentTokenSeries: true,
       agentTokenKey: key,
+      agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
     }));
   if (!agentSeries.length) return agentSeries;
@@ -1727,13 +1729,28 @@ function debugGraphControlsHtml(nowMs = Date.now()) {
   </div>`;
 }
 
-function debugGraphTimeLabel(ms) {
+function debugGraphLocalDateKey(ms) {
   if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+    .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, '0'))
+    .join('-');
+}
+
+function debugGraphTimeLabel(ms, {includeDate = false} = {}) {
+  if (!Number.isFinite(ms)) return '';
+  if (typeof localizedDateTimeFormat === 'function') {
+    const localized = localizedDateTimeFormat(ms / 1000, includeDate
+      ? {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}
+      : {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    if (localized) return localized;
+  }
   const date = new Date(ms);
   const hours = String(date.getHours()).padStart(2, '0');
   const minutes = String(date.getMinutes()).padStart(2, '0');
   const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${hours}:${minutes}:${seconds}`;
+  return includeDate ? `${debugGraphLocalDateKey(ms)} ${hours}:${minutes}` : `${hours}:${minutes}:${seconds}`;
 }
 
 function debugGraphSeriesTimeMs(series, index) {
@@ -1902,9 +1919,49 @@ function debugGraphSeriesClassKey(series) {
   return String(series?.cssKey || series?.key || '').replace(/[^A-Za-z0-9_-]/g, '-');
 }
 
-function debugGraphSeriesStyleAttr(series) {
+function debugGraphAgentTokenPatternIndex(series) {
+  if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return -1;
+  const index = Math.floor(Number(series.agentTokenPatternIndex));
+  return Number.isFinite(index) && index >= 0 ? index % jsDebugGraphAgentTokenPatternCount : 0;
+}
+
+function debugGraphAgentTokenPatternId(series) {
+  const patternIndex = debugGraphAgentTokenPatternIndex(series);
+  if (patternIndex < 0) return '';
+  const key = String(series?.agentTokenKey || series?.key || 'series')
+    .replace(/[^A-Za-z0-9_-]/g, '-')
+    .slice(-64);
+  return `js-debug-agent-token-pattern-${patternIndex}-${key || 'series'}`;
+}
+
+function debugGraphAgentTokenPatternShapeHtml(patternIndex) {
+  if (patternIndex === 1) return '<path d="M-2 2L0 0M0 2L2 0M2 2L4 0M4 2L6 0M6 2L8 0"></path>';
+  if (patternIndex === 2) return '<path d="M-2 0L0 2M0 0L2 2M2 0L4 2M4 0L6 2M6 0L8 2"></path>';
+  if (patternIndex === 3) return '<path d="M0 1H6"></path>';
+  if (patternIndex === 4) return '<path d="M3 0V2"></path>';
+  if (patternIndex === 5) return '<circle cx="1.5" cy="1" r="0.42"></circle><circle cx="4.5" cy="1" r="0.42"></circle>';
+  if (patternIndex === 6) return '<path d="M0 1H6M3 0V2"></path>';
+  return '';
+}
+
+function debugGraphAgentTokenPatternDefsHtml(seriesItems) {
+  const patterns = (seriesItems || [])
+    .filter(series => debugGraphAgentTokenPatternIndex(series) >= 0)
+    .map(series => {
+      const patternIndex = debugGraphAgentTokenPatternIndex(series);
+      const patternId = debugGraphAgentTokenPatternId(series);
+      const shape = debugGraphAgentTokenPatternShapeHtml(patternIndex);
+      return `<pattern id="${esc(patternId)}" data-js-debug-token-pattern-def="${esc(patternIndex)}" patternUnits="userSpaceOnUse" width="6" height="2"${debugGraphSeriesStyleAttr(series)}><rect width="6" height="2" fill="var(--js-debug-series-color, var(--accent-sky-strong))"></rect>${shape ? `<g class="js-debug-agent-token-pattern-ink">${shape}</g>` : ''}</pattern>`;
+    });
+  return patterns.length ? `<defs>${patterns.join('')}</defs>` : '';
+}
+
+function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
   const color = String(series?.color || '').trim();
-  return color ? ` style="--js-debug-series-color: ${esc(color)};"` : '';
+  const declarations = color ? [`--js-debug-series-color: ${color}`] : [];
+  const patternId = barPattern ? debugGraphAgentTokenPatternId(series) : '';
+  if (patternId) declarations.push(`fill: url(#${patternId})`);
+  return declarations.length ? ` style="${esc(`${declarations.join('; ')};`)}"` : '';
 }
 
 function debugGraphSeriesClientAttrs(series) {
@@ -1936,7 +1993,7 @@ function debugGraphSeriesLineClassName(series, extraClass = '') {
 
 function debugGraphSeriesTokenAgentAttrs(series) {
   if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return '';
-  return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}"`;
+  return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain) {
@@ -1993,12 +2050,15 @@ function debugGraphBarRectsHtml(series, chartMax, domain) {
     const durationMs = Math.max(1000, Number(durations[index] || jsDebugGraphAgentTokenBucketSeconds * 1000));
     const x1 = debugGraphXForTime(startMs, domain);
     const x2 = debugGraphXForTime(startMs + durationMs, domain);
-    const width = Math.max(0.75, x2 - x1 - 0.8);
+    const slotWidth = Math.max(0, x2 - x1);
+    const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(0.15, slotWidth * 0.05);
+    const x = x1 + gap / 2;
+    const width = Math.max(0, slotWidth - gap);
     const top = debugGraphPointForValue(topValue, startMs, chartMax, domain)[1];
     const bottom = debugGraphPointForValue(bottomValue, startMs, chartMax, domain)[1];
     const height = Math.max(0.75, Number(bottom) - Number(top));
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
-    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" x="${esc(x1.toFixed(1))}" y="${esc(top)}" width="${esc(width.toFixed(1))}" height="${esc(height.toFixed(1))}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></rect>`;
+    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(top)}" width="${esc(width.toFixed(2))}" height="${esc(height.toFixed(1))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
   }).join('');
 }
 
@@ -2103,8 +2163,9 @@ function debugGraphXAxisHtml(domain) {
     {name: 'mid', ms: startMs + ((endMs - startMs) / 2)},
     {name: 'end', ms: endMs},
   ];
+  const includeDate = debugGraphLocalDateKey(startMs) !== debugGraphLocalDateKey(endMs);
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
-    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}">${esc(debugGraphTimeLabel(tick.ms))}</span>`).join('')}
+    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate}))}</span>`).join('')}
   </div>`;
 }
 
@@ -2195,6 +2256,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
+          ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
