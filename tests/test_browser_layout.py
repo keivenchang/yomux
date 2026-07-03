@@ -1379,6 +1379,10 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript'},
             {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript'},
             {key: '2|0|codex', label: '2:0:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
+            {key: '3|0|codex', label: '3:0:codex', total: 40, samples: 1, tokens: 40, seconds: 60, source: 'transcript'},
+            {key: '4|0|codex', label: '4:0:codex', total: 50, samples: 1, tokens: 50, seconds: 60, source: 'transcript'},
+            {key: '5|0|codex', label: '5:0:codex', total: 60, samples: 1, tokens: 60, seconds: 60, source: 'transcript'},
+            {key: '6|0|codex', label: '6:0:codex', total: 70, samples: 1, tokens: 70, seconds: 60, source: 'transcript'},
           ],
         }]}}, {forceGraphRefresh: true});
         renderDebugPanels({force: true});
@@ -1386,20 +1390,33 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
         const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
         const legends = [...chart.querySelectorAll('[data-js-debug-legend^="agentToken:"]')];
         return {
-          patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({id: node.id, pattern: node.dataset.jsDebugTokenPatternDef})),
+          patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({
+            id: node.id,
+            pattern: node.dataset.jsDebugTokenPatternDef,
+            definition: node.innerHTML,
+            commands: [...node.querySelectorAll('.js-debug-agent-token-pattern-ink path')]
+              .flatMap(path => (path.getAttribute('d')?.match(/[A-Za-z]/g) || [])),
+          })),
           bars: bars.map(bar => ({pattern: bar.dataset.jsDebugTokenPattern, gap: Number(bar.dataset.jsDebugBarGap), fill: getComputedStyle(bar).fill, style: bar.getAttribute('style') || ''})),
-          legends: legends.map(item => ({pattern: item.dataset.jsDebugTokenPattern, background: getComputedStyle(item.querySelector('.js-debug-legend-swatch')).backgroundImage})),
+          legends: legends.map(item => {
+            const swatch = item.querySelector('.js-debug-legend-token-swatch');
+            const pattern = swatch?.querySelector('[data-js-debug-token-legend-pattern-def]');
+            const rect = [...(swatch?.children || [])].find(node => node.tagName?.toLowerCase() === 'rect');
+            return {pattern: item.dataset.jsDebugTokenPattern, fill: getComputedStyle(rect).fill, fillAttr: rect?.getAttribute('fill') || '', definition: pattern?.innerHTML || ''};
+          }),
         };
         """
     )
-    assert [item["pattern"] for item in metrics["patternDefs"]] == ["0", "1", "2"], metrics
-    assert len({item["id"] for item in metrics["patternDefs"]}) == 3, metrics
-    assert [item["pattern"] for item in metrics["bars"]] == ["0", "1", "2"], metrics
+    assert [item["pattern"] for item in metrics["patternDefs"]] == [str(index) for index in range(7)], metrics
+    assert len({item["id"] for item in metrics["patternDefs"]}) == 7, metrics
+    assert metrics["patternDefs"][0]["commands"] == [], metrics
+    assert all(item["commands"] and set(item["commands"]) <= {"M", "H"} for item in metrics["patternDefs"][1:]), metrics
+    assert [item["pattern"] for item in metrics["bars"]] == [str(index) for index in range(7)], metrics
     assert all(item["gap"] > 0 for item in metrics["bars"]), metrics
     assert all("url(" in item["fill"] or "fill: url(" in item["style"] for item in metrics["bars"]), metrics
-    assert [item["pattern"] for item in metrics["legends"]] == ["0", "1", "2"], metrics
-    assert metrics["legends"][0]["background"] == "none", metrics
-    assert metrics["legends"][1]["background"] != metrics["legends"][2]["background"], metrics
+    assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
+    assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
+    assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):

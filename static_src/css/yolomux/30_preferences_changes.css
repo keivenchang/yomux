@@ -650,29 +650,11 @@ body.theme-light .js-debug-graph-view {
 .js-debug-legend-swatch--tokensPerAgent {
   color: var(--accent-sky-strong);
 }
-.js-debug-legend-swatch--agentToken {
-  color: var(--js-debug-series-color, var(--accent-sky-strong));
-  border-radius: 2px;
-  background-color: currentColor;
-}
-.js-debug-legend-item[data-js-debug-token-pattern="1"] .js-debug-legend-swatch--agentToken {
-  background-image: repeating-linear-gradient(135deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
-}
-.js-debug-legend-item[data-js-debug-token-pattern="2"] .js-debug-legend-swatch--agentToken {
-  background-image: repeating-linear-gradient(45deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
-}
-.js-debug-legend-item[data-js-debug-token-pattern="3"] .js-debug-legend-swatch--agentToken {
-  background-image: repeating-linear-gradient(0deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
-}
-.js-debug-legend-item[data-js-debug-token-pattern="4"] .js-debug-legend-swatch--agentToken {
-  background-image: repeating-linear-gradient(90deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.42) 2px 3px);
-}
-.js-debug-legend-item[data-js-debug-token-pattern="5"] .js-debug-legend-swatch--agentToken {
-  background-image: radial-gradient(circle, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.48) 0 1px, transparent 1.2px);
-  background-size: 4px 4px;
-}
-.js-debug-legend-item[data-js-debug-token-pattern="6"] .js-debug-legend-swatch--agentToken {
-  background-image: repeating-linear-gradient(0deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.38) 2px 3px), repeating-linear-gradient(90deg, transparent 0 2px, rgb(var(--js-debug-agent-token-pattern-ink-rgb) / 0.38) 2px 3px);
+.js-debug-legend-token-swatch {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 .js-debug-legend-swatch--agentTokenTotal {
   width: 16px;

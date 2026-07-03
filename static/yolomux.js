@@ -35240,7 +35240,19 @@ const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-rose)',
   'var(--js-debug-agent-token-violet)',
 ]);
-const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenColors.length;
+// Horizontal-only strokes remain legible inside short stacked bars. Color is the primary identity;
+// these distinct horizontal cadences provide a second cue without vertical hatching disappearing
+// into the one-minute bar edges.
+const jsDebugGraphAgentTokenPatternShapes = Object.freeze([
+  '',
+  '<path d="M0 1H6"></path>',
+  '<path d="M0 1H2M3 1H5"></path>',
+  '<path d="M0 1H0.5M1.5 1H2M3 1H3.5M4.5 1H5"></path>',
+  '<path d="M0 1H3M4 1H4.5"></path>',
+  '<path d="M0 0.5H2M3 0.5H5M1 1.5H3M4 1.5H6"></path>',
+  '<path d="M0 0.5H6M0 1.5H6"></path>',
+]);
+const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes.length;
 const jsDebugGraphProcessCpuColors = Object.freeze({
   current: 'var(--active-accent-bright)',
   // Green is reserved for the server that is serving this browser. Peers must remain
@@ -36995,35 +37007,40 @@ function debugGraphAgentTokenPatternIndex(series) {
   return Number.isFinite(index) && index >= 0 ? index % jsDebugGraphAgentTokenPatternCount : 0;
 }
 
-function debugGraphAgentTokenPatternId(series) {
+function debugGraphAgentTokenPatternId(series, suffix = '') {
   const patternIndex = debugGraphAgentTokenPatternIndex(series);
   if (patternIndex < 0) return '';
   const key = String(series?.agentTokenKey || series?.key || 'series')
     .replace(/[^A-Za-z0-9_-]/g, '-')
     .slice(-64);
-  return `js-debug-agent-token-pattern-${patternIndex}-${key || 'series'}`;
+  return `js-debug-agent-token-pattern-${patternIndex}-${key || 'series'}${suffix}`;
 }
 
 function debugGraphAgentTokenPatternShapeHtml(patternIndex) {
-  if (patternIndex === 1) return '<path d="M-2 2L0 0M0 2L2 0M2 2L4 0M4 2L6 0M6 2L8 0"></path>';
-  if (patternIndex === 2) return '<path d="M-2 0L0 2M0 0L2 2M2 0L4 2M4 0L6 2M6 0L8 2"></path>';
-  if (patternIndex === 3) return '<path d="M0 1H6"></path>';
-  if (patternIndex === 4) return '<path d="M3 0V2"></path>';
-  if (patternIndex === 5) return '<circle cx="1.5" cy="1" r="0.42"></circle><circle cx="4.5" cy="1" r="0.42"></circle>';
-  if (patternIndex === 6) return '<path d="M0 1H6M3 0V2"></path>';
-  return '';
+  return jsDebugGraphAgentTokenPatternShapes[patternIndex] || '';
+}
+
+function debugGraphAgentTokenPatternDefinitionHtml(series, options = {}) {
+  const patternIndex = debugGraphAgentTokenPatternIndex(series);
+  if (patternIndex < 0) return '';
+  const legend = options.legend === true;
+  const patternId = debugGraphAgentTokenPatternId(series, legend ? '-legend' : '');
+  const shape = debugGraphAgentTokenPatternShapeHtml(patternIndex);
+  const dataAttr = legend ? 'data-js-debug-token-legend-pattern-def' : 'data-js-debug-token-pattern-def';
+  return `<pattern id="${esc(patternId)}" ${dataAttr}="${esc(patternIndex)}" patternUnits="userSpaceOnUse" width="6" height="2"${debugGraphSeriesStyleAttr(series)}><rect width="6" height="2" fill="var(--js-debug-series-color, var(--accent-sky-strong))"></rect>${shape ? `<g class="js-debug-agent-token-pattern-ink">${shape}</g>` : ''}</pattern>`;
 }
 
 function debugGraphAgentTokenPatternDefsHtml(seriesItems) {
   const patterns = (seriesItems || [])
     .filter(series => debugGraphAgentTokenPatternIndex(series) >= 0)
-    .map(series => {
-      const patternIndex = debugGraphAgentTokenPatternIndex(series);
-      const patternId = debugGraphAgentTokenPatternId(series);
-      const shape = debugGraphAgentTokenPatternShapeHtml(patternIndex);
-      return `<pattern id="${esc(patternId)}" data-js-debug-token-pattern-def="${esc(patternIndex)}" patternUnits="userSpaceOnUse" width="6" height="2"${debugGraphSeriesStyleAttr(series)}><rect width="6" height="2" fill="var(--js-debug-series-color, var(--accent-sky-strong))"></rect>${shape ? `<g class="js-debug-agent-token-pattern-ink">${shape}</g>` : ''}</pattern>`;
-    });
+    .map(series => debugGraphAgentTokenPatternDefinitionHtml(series));
   return patterns.length ? `<defs>${patterns.join('')}</defs>` : '';
+}
+
+function debugGraphAgentTokenLegendSwatchHtml(series) {
+  const patternId = debugGraphAgentTokenPatternId(series, '-legend');
+  if (!patternId) return '';
+  return `<svg class="js-debug-legend-token-swatch" viewBox="0 0 10 10" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}><defs>${debugGraphAgentTokenPatternDefinitionHtml(series, {legend: true})}</defs><rect width="10" height="10" rx="1.5" fill="url(#${esc(patternId)})"></rect></svg>`;
 }
 
 function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
@@ -37152,6 +37169,7 @@ function debugGraphLegendHtml(seriesItems) {
 }
 
 function debugGraphLegendSwatchHtml(series) {
+  if (series?.agentTokenSeries === true && series?.agentTokenTotalSeries !== true) return debugGraphAgentTokenLegendSwatchHtml(series);
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu') {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
