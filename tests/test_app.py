@@ -157,7 +157,13 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
         "bandwidth_bytes": 100 + i,
         "system_cpu_total_percent": 5,
         "system_cpu_count": 1,
-    } for age_start in (now - (90 * 60), now - (3 * 60 * 60)) for i in range(20)]
+    } for age_start in (
+        now - (90 * 60),
+        now - (3 * 60 * 60),
+        now - (6 * 60 * 60),
+        now - (10 * 60 * 60),
+        now - (18 * 60 * 60),
+    ) for i in range(20)]
     try:
         payload, status = webapp.record_stats_history_payload({"records": records})
         incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
@@ -170,16 +176,23 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert payload["history"]["middle_bucket_seconds"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS
     assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
     assert payload["history"]["tiers"] == [
-        {"max_age_seconds": 60 * 60, "bucket_seconds": 1},
+        {"max_age_seconds": 30 * 60, "bucket_seconds": 1},
         {"max_age_seconds": 2 * 60 * 60, "bucket_seconds": 10},
-        {"max_age_seconds": 24 * 60 * 60, "bucket_seconds": 60},
+        {"max_age_seconds": 4 * 60 * 60, "bucket_seconds": 60},
+        {"max_age_seconds": 8 * 60 * 60, "bucket_seconds": 2 * 60},
+        {"max_age_seconds": 12 * 60 * 60, "bucket_seconds": 5 * 60},
+        {"max_age_seconds": 24 * 60 * 60, "bucket_seconds": 10 * 60},
     ]
-    assert len(payload["history"]["records"]) <= 6
-    assert sum(record["api_count"] for record in payload["history"]["records"]) == 40
+    assert sum(
+        (tier["max_age_seconds"] - (payload["history"]["tiers"][index - 1]["max_age_seconds"] if index else 0))
+        // tier["bucket_seconds"]
+        for index, tier in enumerate(payload["history"]["tiers"])
+    ) == 2700
+    assert len(payload["history"]["records"]) <= 10
+    assert sum(record["api_count"] for record in payload["history"]["records"]) == 100
     assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
     assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
-    assert any(record["duration"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS for record in payload["history"]["records"])
-    assert any(record["duration"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS for record in payload["history"]["records"])
+    assert {record["duration"] for record in payload["history"]["records"]} == {10, 60, 120, 300, 600}
     assert incremental["history"]["records"] == []
 
 
@@ -200,6 +213,128 @@ def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
 def test_stats_client_history_path_is_namespaced_by_bucket_schema():
     assert app_module.STATS_CLIENT_HISTORY_VERSION == common.STATS_CLIENT_HISTORY_VERSION
     assert common.STATS_CLIENT_HISTORY_PATH.name == f"stats-client-history-v{app_module.STATS_CLIENT_HISTORY_VERSION}.json"
+
+
+def test_stats_client_history_migrates_and_compacts_previous_schema(monkeypatch, tmp_path):
+    current_path = tmp_path / f"stats-client-history-v{app_module.STATS_CLIENT_HISTORY_VERSION}.json"
+    previous_path = tmp_path / f"stats-client-history-v{app_module.STATS_CLIENT_HISTORY_VERSION - 1}.json"
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", current_path)
+    now = time.time()
+    start = int(now - (13 * 60 * 60)) // 60 * 60
+    previous = {
+        "version": app_module.STATS_CLIENT_HISTORY_VERSION - 1,
+        "rev": 7,
+        "sequence": 9,
+        "raw_buckets": [],
+        "rollup_buckets": [[start, 60, 9, {"client-a": {
+            "api_count": 7.0,
+            "sse_count": 0.0,
+            "latency_total_ms": 0.0,
+            "latency_count": 0.0,
+            "bandwidth_bytes": 0.0,
+            "disconnected_ms": 0.0,
+            "sequence": 9,
+        }}, {}]],
+    }
+    previous_path.write_text(json.dumps(previous), encoding="utf-8")
+    reader = app_module.TmuxWebtermApp([])
+    reader.background_owner = StatsRoleOwner(owner=False, port=9102)
+    try:
+        reader.merge_shared_stats_client_history()
+        with reader.stats_history_lock:
+            history = reader.stats_history_payload_locked(client_id="client-a")
+    finally:
+        reader.control_server.stop()
+
+    migrated = json.loads(current_path.read_text(encoding="utf-8"))
+    assert migrated["version"] == app_module.STATS_CLIENT_HISTORY_VERSION
+    assert migrated["rev"] == 8
+    assert [bucket[1] for bucket in migrated["rollup_buckets"]] == [600]
+    assert sum(record["api_count"] for record in history["records"]) == 7
+    assert json.loads(previous_path.read_text(encoding="utf-8"))["version"] == app_module.STATS_CLIENT_HISTORY_VERSION - 1
+
+
+def test_stats_client_history_combines_v2_v3_v4_without_overlap_or_corrupt_rows(monkeypatch, tmp_path):
+    current_path = tmp_path / "stats-client-history-v4.json"
+    v3_path = tmp_path / "stats-client-history-v3.json"
+    v2_path = tmp_path / "stats-client-history.json"
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", current_path)
+    now = time.time()
+
+    def client_row(api_count, sequence):
+        return {
+            "api_count": float(api_count),
+            "sse_count": 0.0,
+            "latency_total_ms": float(api_count * 10),
+            "latency_count": float(api_count),
+            "bandwidth_bytes": float(api_count * 100),
+            "disconnected_ms": 0.0,
+            "sequence": sequence,
+        }
+
+    def process_row(cpu_total, cpu_count, sequence):
+        return {
+            "cpu_total_percent": float(cpu_total),
+            "cpu_count": float(cpu_count),
+            "label": "yolomux.py :8003",
+            "pid": 8003,
+            "port": 8003,
+            "started_at": now - 100,
+            "sequence": sequence,
+        }
+
+    current_start = int(now - (60 * 60))
+    v3_start = int(now - (3 * 60 * 60)) // 60 * 60
+    v2_start = int(now - (16 * 60 * 60)) // 30 * 30
+    current_path.write_text(json.dumps({
+        "version": 4,
+        "rev": 5,
+        "sequence": 40,
+        "raw_buckets": [[current_start, 1, 40, {"client-a": client_row(4, 40)}, {}]],
+        "rollup_buckets": [],
+    }), encoding="utf-8")
+    v3_path.write_text(json.dumps({
+        "version": 3,
+        "rev": 7,
+        "sequence": 30,
+        "raw_buckets": [[current_start, 1, 30, {"client-a": client_row(100, 30)}, {}]],
+        "rollup_buckets": [[v3_start, 60, 20, {"client-a": client_row(3, 20)}, {}]],
+    }), encoding="utf-8")
+    v2_path.write_text(json.dumps({
+        "version": 2,
+        "rev": 100,
+        "sequence": 10,
+        "raw_buckets": [],
+        "rollup_buckets": [[v2_start, 30, 10, {
+            "client-a": client_row(2, 10),
+            "client-corrupt": client_row(1e120, 10),
+        }, {
+            "port:8003": process_row(1500, 30, 10),
+            "port:corrupt": process_row(1e120, 30, 10),
+        }]],
+    }), encoding="utf-8")
+    reader = app_module.TmuxWebtermApp([])
+    restarted = app_module.TmuxWebtermApp([])
+    reader.background_owner = StatsRoleOwner(owner=False, port=9102)
+    restarted.background_owner = StatsRoleOwner(owner=False, port=9103)
+    try:
+        reader.merge_shared_stats_client_history()
+        restarted.merge_shared_stats_client_history()
+        with restarted.stats_history_lock:
+            history = restarted.stats_history_payload_locked(client_id="client-a")
+    finally:
+        reader.control_server.stop()
+        restarted.control_server.stop()
+
+    migrated = json.loads(current_path.read_text(encoding="utf-8"))
+    assert migrated["migrated_versions"] == [2, 3]
+    assert migrated["rev"] == 101
+    assert sum(record["api_count"] for record in history["records"]) == 9
+    assert {record["duration"] for record in history["records"]} == {10, 60, 600}
+    assert all("client-corrupt" not in record["clients"] for record in history["records"])
+    old_processes = next(record["servers"] for record in history["records"] if record["duration"] == 600)
+    assert set(old_processes) == {"port:8003"}
+    assert old_processes["port:8003"]["cpu_total_percent"] == 1500
 
 
 def test_stats_client_snapshot_rejects_an_incompatible_bucket_schema():
@@ -568,6 +703,40 @@ def test_shared_stats_history_merges_missing_process_rows_when_bucket_is_already
     processes = next(record["servers"] for record in history["records"] if "port:9102" in record["servers"])
     assert set(processes) == {"port:9101", "port:9102"}
     assert processes["port:9102"]["cpu_total_percent"] == 20.0
+
+
+def test_shared_stats_history_unchanged_file_skips_json_parse_and_serializes_changed_merge(monkeypatch, tmp_path):
+    history_path = tmp_path / "stats-client-history.json"
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", history_path)
+    writer = app_module.TmuxWebtermApp([])
+    reader = app_module.TmuxWebtermApp([])
+    writer.background_owner = StatsRoleOwner(owner=False, port=9101)
+    reader.background_owner = StatsRoleOwner(owner=False, port=9102)
+    sample_time = time.time()
+    try:
+        writer.record_stats_history_payload({"client_id": "client-a", "records": [{"start": sample_time, "api_count": 1}]})
+        reader.merge_shared_stats_client_history()
+        real_read_text = Path.read_text
+        reads = 0
+
+        def tracking_read_text(path, *args, **kwargs):
+            nonlocal reads
+            if path == history_path:
+                reads += 1
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", tracking_read_text)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _index: reader.merge_shared_stats_client_history(), range(32)))
+        assert reads == 0
+
+        writer.record_stats_history_payload({"client_id": "client-a", "records": [{"start": sample_time + 1, "api_count": 1}]})
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _index: reader.merge_shared_stats_client_history(), range(32)))
+        assert reads == 1
+    finally:
+        writer.control_server.stop()
+        reader.control_server.stop()
 
 
 def test_stats_process_history_batches_disk_writes_without_losing_one_second_cpu_samples(monkeypatch):
@@ -9851,6 +10020,7 @@ def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("YOLOMUX_EXTRA_PATH", "/opt/yolomux-agents")
     monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    monkeypatch.setenv("MALLOC_ARENA_MAX", "2")
     monkeypatch.delenv("TERM", raising=False)
     monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
     _checkout_root, context = _self_restart_context(
@@ -9865,6 +10035,7 @@ def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch
     assert str(Path.home() / ".local" / "bin") in path_parts
     assert context.env["TERM"] == "xterm-256color"
     assert context.env["PYTHONUNBUFFERED"] == "1"
+    assert context.env["MALLOC_ARENA_MAX"] == "2"
     assert context.env["YOLOMUX_TEST_AUTH_BYPASS"] == "1"
 
 

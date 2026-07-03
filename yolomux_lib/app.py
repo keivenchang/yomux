@@ -275,11 +275,29 @@ SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
-STATS_HISTORY_RAW_WINDOW_SECONDS = 60 * 60
+STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
+STATS_HISTORY_MINUTE_WINDOW_SECONDS = 4 * 60 * 60
+STATS_HISTORY_TWO_MINUTE_WINDOW_SECONDS = 8 * 60 * 60
+STATS_HISTORY_FIVE_MINUTE_WINDOW_SECONDS = 12 * 60 * 60
 STATS_HISTORY_RAW_BUCKET_SECONDS = 1
 STATS_HISTORY_MIDDLE_BUCKET_SECONDS = 10
 STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 60
+STATS_HISTORY_TWO_MINUTE_BUCKET_SECONDS = 2 * 60
+STATS_HISTORY_FIVE_MINUTE_BUCKET_SECONDS = 5 * 60
+STATS_HISTORY_TEN_MINUTE_BUCKET_SECONDS = 10 * 60
+STATS_HISTORY_TIERS = (
+    (STATS_HISTORY_RAW_WINDOW_SECONDS, STATS_HISTORY_RAW_BUCKET_SECONDS),
+    (STATS_HISTORY_MIDDLE_WINDOW_SECONDS, STATS_HISTORY_MIDDLE_BUCKET_SECONDS),
+    (STATS_HISTORY_MINUTE_WINDOW_SECONDS, STATS_HISTORY_ROLLUP_BUCKET_SECONDS),
+    (STATS_HISTORY_TWO_MINUTE_WINDOW_SECONDS, STATS_HISTORY_TWO_MINUTE_BUCKET_SECONDS),
+    (STATS_HISTORY_FIVE_MINUTE_WINDOW_SECONDS, STATS_HISTORY_FIVE_MINUTE_BUCKET_SECONDS),
+    (STATS_HISTORY_RETENTION_SECONDS, STATS_HISTORY_TEN_MINUTE_BUCKET_SECONDS),
+)
+STATS_HISTORY_LEGACY_MAX_EVENTS_PER_SECOND = 10_000
+STATS_HISTORY_LEGACY_MAX_BANDWIDTH_BYTES_PER_SECOND = 1 << 30
+STATS_HISTORY_LEGACY_MAX_LATENCY_MS = 5 * 60 * 1000
+STATS_HISTORY_LEGACY_MAX_SAMPLES_PER_SECOND = 100
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
@@ -591,6 +609,7 @@ SELF_RESTART_ENV_KEYS = (
     "PATH",
     "TERM",
     "PYTHONUNBUFFERED",
+    "MALLOC_ARENA_MAX",
     "YOLOMUX_EXTRA_PATH",
     "YOLOMUX_CONFIG_DIR",
     "YOLOMUX_STATE_DIR",
@@ -1318,7 +1337,10 @@ class TmuxWebtermApp:
         self.stats_history_shared_loaded = False
         self.stats_history_shared_write_lock = threading.Lock()
         self.stats_history_shared_next_write_at = 0.0
+        self.stats_client_history_merge_lock = threading.Lock()
         self.stats_client_history_shared_rev = -1
+        self.stats_client_history_shared_signature: tuple[int, int, int, int] | None = None
+        self.stats_client_history_migrated_versions: set[int] = set()
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
         self.stats_agent_token_lock = threading.Lock()
@@ -1453,15 +1475,8 @@ class TmuxWebtermApp:
     def stats_history_bucket_locked(self, sample_time: float, now: float) -> dict[str, Any] | None:
         if not math.isfinite(sample_time) or sample_time < now - STATS_HISTORY_RETENTION_SECONDS:
             return None
-        if sample_time < now - STATS_HISTORY_MIDDLE_WINDOW_SECONDS:
-            bucket_seconds = STATS_HISTORY_ROLLUP_BUCKET_SECONDS
-            buckets = self.stats_history_rollup_buckets
-        elif sample_time < now - STATS_HISTORY_RAW_WINDOW_SECONDS:
-            bucket_seconds = STATS_HISTORY_MIDDLE_BUCKET_SECONDS
-            buckets = self.stats_history_rollup_buckets
-        else:
-            bucket_seconds = STATS_HISTORY_RAW_BUCKET_SECONDS
-            buckets = self.stats_history_raw_buckets
+        bucket_seconds = self.stats_history_bucket_seconds(sample_time, now)
+        buckets = self.stats_history_bucket_map_locked(bucket_seconds)
         start = int(math.floor(sample_time / bucket_seconds) * bucket_seconds)
         key = (start, bucket_seconds)
         bucket = buckets.get(key)
@@ -1592,7 +1607,15 @@ class TmuxWebtermApp:
                 target["sequence"] = max(int(target.get("sequence") or 0), int(target_process.get("sequence") or 0))
 
     def stats_history_bucket_map_locked(self, duration: int) -> dict[tuple[int, int], dict[str, Any]]:
-        return self.stats_history_raw_buckets if duration < STATS_HISTORY_MIDDLE_BUCKET_SECONDS else self.stats_history_rollup_buckets
+        return self.stats_history_raw_buckets if duration == STATS_HISTORY_RAW_BUCKET_SECONDS else self.stats_history_rollup_buckets
+
+    @staticmethod
+    def stats_history_bucket_seconds(sample_time: float, now: float) -> int:
+        age = max(0.0, now - sample_time)
+        for max_age_seconds, bucket_seconds in STATS_HISTORY_TIERS:
+            if age <= max_age_seconds:
+                return bucket_seconds
+        return STATS_HISTORY_TIERS[-1][1]
 
     def stats_history_merge_into_duration_locked(self, bucket: dict[str, Any], duration: int) -> None:
         start = int(math.floor(float(bucket.get("start") or 0.0) / duration) * duration)
@@ -1604,28 +1627,19 @@ class TmuxWebtermApp:
         self.stats_history_merge_bucket_locked(target, bucket)
 
     def stats_history_compact_locked(self, now: float) -> None:
-        raw_cutoff = now - STATS_HISTORY_RAW_WINDOW_SECONDS
-        for key, bucket in list(self.stats_history_raw_buckets.items()):
-            if float(bucket.get("start") or 0.0) >= raw_cutoff:
-                continue
-            self.stats_history_merge_into_duration_locked(bucket, STATS_HISTORY_MIDDLE_BUCKET_SECONDS)
-            self.stats_history_raw_buckets.pop(key, None)
-        middle_cutoff = now - STATS_HISTORY_MIDDLE_WINDOW_SECONDS
-        for key, bucket in list(self.stats_history_rollup_buckets.items()):
-            duration = int(bucket.get("duration") or 0)
-            if duration == STATS_HISTORY_ROLLUP_BUCKET_SECONDS:
-                continue
-            if duration == STATS_HISTORY_MIDDLE_BUCKET_SECONDS and float(bucket.get("start") or 0.0) >= middle_cutoff:
-                continue
-            self.stats_history_merge_into_duration_locked(bucket, STATS_HISTORY_ROLLUP_BUCKET_SECONDS)
-            self.stats_history_rollup_buckets.pop(key, None)
         retention_cutoff = now - STATS_HISTORY_RETENTION_SECONDS
-        for key, bucket in list(self.stats_history_raw_buckets.items()):
-            if float(bucket.get("start") or 0.0) < retention_cutoff:
-                self.stats_history_raw_buckets.pop(key, None)
-        for key, bucket in list(self.stats_history_rollup_buckets.items()):
-            if float(bucket.get("start") or 0.0) < retention_cutoff:
-                self.stats_history_rollup_buckets.pop(key, None)
+        for buckets in (self.stats_history_raw_buckets, self.stats_history_rollup_buckets):
+            for key, bucket in list(buckets.items()):
+                start = float(bucket.get("start") or 0.0)
+                if start < retention_cutoff:
+                    buckets.pop(key, None)
+                    continue
+                duration = int(bucket.get("duration") or 0)
+                target_duration = self.stats_history_bucket_seconds(start, now)
+                if duration >= target_duration:
+                    continue
+                self.stats_history_merge_into_duration_locked(bucket, target_duration)
+                buckets.pop(key, None)
 
     def stats_history_record_client_bucket_locked(self, bucket: dict[str, Any], client_id: str) -> dict[str, Any] | None:
         clients = bucket.get("clients")
@@ -1780,11 +1794,7 @@ class TmuxWebtermApp:
             "middle_window_seconds": STATS_HISTORY_MIDDLE_WINDOW_SECONDS,
             "middle_bucket_seconds": STATS_HISTORY_MIDDLE_BUCKET_SECONDS,
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
-            "tiers": [
-                {"max_age_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS, "bucket_seconds": STATS_HISTORY_RAW_BUCKET_SECONDS},
-                {"max_age_seconds": STATS_HISTORY_MIDDLE_WINDOW_SECONDS, "bucket_seconds": STATS_HISTORY_MIDDLE_BUCKET_SECONDS},
-                {"max_age_seconds": STATS_HISTORY_RETENTION_SECONDS, "bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS},
-            ],
+            "tiers": [{"max_age_seconds": max_age, "bucket_seconds": duration} for max_age, duration in STATS_HISTORY_TIERS],
             "client_id": stats_history_client_id(client_id),
         }
         if token_resolution_seconds > 0:
@@ -1972,7 +1982,7 @@ class TmuxWebtermApp:
             return False
         expected_durations = {
             "raw_buckets": frozenset({STATS_HISTORY_RAW_BUCKET_SECONDS}),
-            "rollup_buckets": frozenset({STATS_HISTORY_MIDDLE_BUCKET_SECONDS, STATS_HISTORY_ROLLUP_BUCKET_SECONDS}),
+            "rollup_buckets": frozenset(bucket_seconds for _max_age, bucket_seconds in STATS_HISTORY_TIERS[1:]),
         }
         for key, buckets in (("raw_buckets", raw_buckets), ("rollup_buckets", rollup_buckets)):
             for snapshot_bucket in buckets:
@@ -2003,6 +2013,7 @@ class TmuxWebtermApp:
             "version": STATS_CLIENT_HISTORY_VERSION,
             "updated_at": now,
             "sequence": self.stats_history_sequence,
+            "migrated_versions": sorted(self.stats_client_history_migrated_versions),
             "raw_buckets": sorted(raw_buckets, key=lambda item: (item[0], item[1])),
             "rollup_buckets": sorted(rollup_buckets, key=lambda item: (item[0], item[1])),
         }
@@ -2082,29 +2093,226 @@ class TmuxWebtermApp:
             self.stats_history_refresh_bucket_sequence_locked(bucket)
         for bucket in [*rollup_buckets, *raw_buckets]:
             self.stats_client_history_apply_bucket_locked(bucket)
+        migrated_versions = snapshot.get("migrated_versions")
+        if isinstance(migrated_versions, list):
+            for version in migrated_versions:
+                try:
+                    migrated_version = int(version)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < migrated_version < STATS_CLIENT_HISTORY_VERSION:
+                    self.stats_client_history_migrated_versions.add(migrated_version)
         try:
             self.stats_history_sequence = max(self.stats_history_sequence, int(snapshot.get("sequence") or 0))
         except (TypeError, ValueError):
             pass
 
-    def merge_shared_stats_client_history(self) -> None:
-        with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
+    @staticmethod
+    def stats_client_history_file_signature(path: Path | None = None) -> tuple[int, int, int, int] | None:
+        target = path or common.STATS_CLIENT_HISTORY_PATH
+        try:
+            stat = target.stat()
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    @staticmethod
+    def stats_client_history_legacy_paths() -> list[Path]:
+        match = re.fullmatch(r"stats-client-history-v(\d+)\.json", common.STATS_CLIENT_HISTORY_PATH.name)
+        if match is None:
+            return []
+        current_version = int(match.group(1))
+        paths = [common.STATS_CLIENT_HISTORY_PATH.with_name("stats-client-history.json")]
+        paths.extend(
+            common.STATS_CLIENT_HISTORY_PATH.with_name(f"stats-client-history-v{version}.json")
+            for version in range(3, current_version)
+        )
+        return paths
+
+    @staticmethod
+    def stats_client_history_snapshot_version(snapshot: dict[str, Any]) -> int:
+        try:
+            return max(0, int(snapshot.get("version") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def stats_client_history_snapshot_bounds(self, snapshot: dict[str, Any]) -> tuple[int, int] | None:
+        starts: list[int] = []
+        for key in ("raw_buckets", "rollup_buckets"):
+            raw_buckets = snapshot.get(key)
+            if not isinstance(raw_buckets, list):
+                continue
+            for raw_bucket in raw_buckets:
+                bucket = self.stats_client_history_bucket_from_snapshot(raw_bucket)
+                if bucket is None or not (bucket.get("clients") or bucket.get("servers")):
+                    continue
+                try:
+                    start = int(bucket.get("start") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if start > 0:
+                    starts.append(start)
+        return (min(starts), max(starts)) if starts else None
+
+    @staticmethod
+    def stats_client_history_legacy_numbers(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, float] | None:
+        values: dict[str, float] = {}
+        for field in fields:
             try:
-                snapshot = json.loads(common.STATS_CLIENT_HISTORY_PATH.read_text(encoding="utf-8"))
+                value = float(row.get(field) or 0.0)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or value < 0:
+                return None
+            values[field] = value
+        return values
+
+    def stats_client_history_legacy_client_valid(self, row: dict[str, Any], duration: int) -> bool:
+        values = self.stats_client_history_legacy_numbers(row, STATS_HISTORY_BROWSER_FIELDS)
+        if values is None:
+            return False
+        seconds = max(1, duration)
+        event_limit = seconds * STATS_HISTORY_LEGACY_MAX_EVENTS_PER_SECOND
+        latency_count = values["latency_count"]
+        return (
+            values["api_count"] + values["sse_count"] <= event_limit
+            and latency_count <= event_limit
+            and values["latency_total_ms"] <= latency_count * STATS_HISTORY_LEGACY_MAX_LATENCY_MS
+            and values["bandwidth_bytes"] <= seconds * STATS_HISTORY_LEGACY_MAX_BANDWIDTH_BYTES_PER_SECOND
+            and values["disconnected_ms"] <= seconds * 1000
+        )
+
+    def stats_client_history_legacy_server_valid(self, row: dict[str, Any], duration: int) -> bool:
+        values = self.stats_client_history_legacy_numbers(row, STATS_HISTORY_PROCESS_FIELDS)
+        if values is None:
+            return False
+        cpu_count = values["cpu_count"]
+        return (
+            cpu_count <= max(1, duration) * STATS_HISTORY_LEGACY_MAX_SAMPLES_PER_SECOND
+            and values["cpu_total_percent"] <= cpu_count * 100.001
+        )
+
+    def stats_client_history_apply_legacy_bucket_locked(self, raw_bucket: Any, version: int) -> None:
+        source = self.stats_client_history_bucket_from_snapshot(raw_bucket)
+        if source is None:
+            return
+        try:
+            duration = int(source.get("duration") or 0)
+        except (TypeError, ValueError):
+            return
+        if duration <= 0:
+            return
+        clients = source.get("clients") if isinstance(source.get("clients"), dict) else {}
+        servers = source.get("servers") if isinstance(source.get("servers"), dict) else {}
+        if version <= 2:
+            clients = {
+                client_id: row
+                for client_id, row in clients.items()
+                if isinstance(row, dict) and self.stats_client_history_legacy_client_valid(row, duration)
+            }
+            servers = {
+                process_id: row
+                for process_id, row in servers.items()
+                if isinstance(row, dict) and self.stats_client_history_legacy_server_valid(row, duration)
+            }
+        if not clients and not servers:
+            return
+        self.stats_client_history_apply_bucket_locked([
+            source.get("start"),
+            duration,
+            source.get("sequence"),
+            clients,
+            servers,
+        ])
+
+    def migrate_legacy_stats_client_history_locked(self, current_snapshot: dict[str, Any], now: float) -> tuple[bool, int]:
+        current_bounds = self.stats_client_history_snapshot_bounds(current_snapshot)
+        newer_min, newer_max = current_bounds if current_bounds is not None else (None, None)
+        snapshots: list[tuple[int, dict[str, Any]]] = []
+        max_rev = 0
+        for path in self.stats_client_history_legacy_paths():
+            try:
+                legacy = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                snapshot = {}
+                continue
+            if not isinstance(legacy, dict):
+                continue
+            version = self.stats_client_history_snapshot_version(legacy)
+            if not 0 < version < STATS_CLIENT_HISTORY_VERSION or version in self.stats_client_history_migrated_versions:
+                continue
+            snapshots.append((version, legacy))
+            try:
+                max_rev = max(max_rev, int(legacy.get("rev") or 0))
+            except (TypeError, ValueError):
+                pass
+        if not snapshots:
+            return False, max_rev
+        for version, legacy in sorted(snapshots, key=lambda item: item[0], reverse=True):
+            for key in ("rollup_buckets", "raw_buckets"):
+                raw_buckets = legacy.get(key)
+                if not isinstance(raw_buckets, list):
+                    continue
+                for raw_bucket in raw_buckets:
+                    bucket = self.stats_client_history_bucket_from_snapshot(raw_bucket)
+                    if bucket is None:
+                        continue
+                    try:
+                        start = int(bucket.get("start") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if newer_min is not None and newer_max is not None and newer_min <= start <= newer_max:
+                        continue
+                    self.stats_client_history_apply_legacy_bucket_locked(raw_bucket, version)
+            bounds = self.stats_client_history_snapshot_bounds(legacy)
+            if bounds is not None:
+                newer_min = bounds[0] if newer_min is None else min(newer_min, bounds[0])
+                newer_max = bounds[1] if newer_max is None else max(newer_max, bounds[1])
+            try:
+                self.stats_history_sequence = max(self.stats_history_sequence, int(legacy.get("sequence") or 0))
+            except (TypeError, ValueError):
+                pass
+            self.stats_client_history_migrated_versions.add(version)
+        self.stats_history_compact_locked(now)
+        return True, max_rev
+
+    def sync_shared_stats_client_history_locked(self) -> tuple[dict[str, Any], bool, bool]:
+        signature = self.stats_client_history_file_signature()
+        if signature is not None and signature == self.stats_client_history_shared_signature:
+            return {"rev": self.stats_client_history_shared_rev}, False, False
+        try:
+            snapshot = json.loads(common.STATS_CLIENT_HISTORY_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            snapshot = {}
         if not isinstance(snapshot, dict):
             snapshot = {}
         try:
             rev = max(0, int(snapshot.get("rev") or 0))
         except (TypeError, ValueError):
             rev = 0
-        if rev == self.stats_client_history_shared_rev:
-            return
         with self.stats_history_lock:
             self.stats_client_history_apply_snapshot_locked(snapshot)
-            self.stats_history_compact_locked(time.time())
+            now = time.time()
+            self.stats_history_compact_locked(now)
+            migrating, legacy_rev = self.migrate_legacy_stats_client_history_locked(snapshot, now)
+            rev = max(rev, legacy_rev)
+            if migrating:
+                snapshot["rev"] = rev
         self.stats_client_history_shared_rev = rev
+        self.stats_client_history_shared_signature = None if migrating else signature
+        return snapshot, True, migrating
+
+    def merge_shared_stats_client_history(self) -> None:
+        signature = self.stats_client_history_file_signature()
+        if signature is not None and signature == self.stats_client_history_shared_signature:
+            return
+        with self.stats_client_history_merge_lock:
+            signature = self.stats_client_history_file_signature()
+            if signature is not None and signature == self.stats_client_history_shared_signature:
+                return
+            with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
+                snapshot, _changed, migrating = self.sync_shared_stats_client_history_locked()
+                if migrating:
+                    self.write_shared_stats_client_history_locked(snapshot, time.time())
 
     def write_shared_stats_client_history_locked(self, previous: dict[str, Any], now: float) -> int:
         with self.stats_history_lock:
@@ -2120,7 +2328,17 @@ class TmuxWebtermApp:
             mode=0o600,
         )
         self.stats_client_history_shared_rev = rev
+        self.stats_client_history_shared_signature = self.stats_client_history_file_signature()
         return rev
+
+    def update_shared_stats_client_history(self, now: float, update: Callable[[], None]) -> None:
+        with self.stats_client_history_merge_lock:
+            with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
+                previous, _changed, _migrating = self.sync_shared_stats_client_history_locked()
+                with self.stats_history_lock:
+                    update()
+                    self.stats_history_compact_locked(now)
+                self.write_shared_stats_client_history_locked(previous, now)
 
     def record_stats_process_sample(self, sample: dict[str, Any]) -> None:
         now = float(sample.get("time") or time.time())
@@ -2152,23 +2370,13 @@ class TmuxWebtermApp:
         def merge_pending_samples() -> None:
             for persisted_sample in pending_samples:
                 merge_sample(persisted_sample)
-            self.stats_history_compact_locked(now)
 
         if self.stats_history_uses_shared_status():
-            with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
-                try:
-                    existing = json.loads(common.STATS_CLIENT_HISTORY_PATH.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    existing = {}
-                if not isinstance(existing, dict):
-                    existing = {}
-                with self.stats_history_lock:
-                    self.stats_client_history_apply_snapshot_locked(existing)
-                    merge_pending_samples()
-                self.write_shared_stats_client_history_locked(existing, now)
+            self.update_shared_stats_client_history(now, merge_pending_samples)
             return
         with self.stats_history_lock:
             merge_pending_samples()
+            self.stats_history_compact_locked(now)
 
     def stats_history_shared_agent_state_snapshot(self, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         snapshot: dict[str, dict[str, Any]] = {}
@@ -2459,23 +2667,13 @@ class TmuxWebtermApp:
             for record in records:
                 if isinstance(record, dict):
                     self.stats_history_merge_record_locked(record, now, client_id=client_id)
-            self.stats_history_compact_locked(now)
 
         if self.stats_history_uses_shared_status():
-            with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
-                try:
-                    existing = json.loads(common.STATS_CLIENT_HISTORY_PATH.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    existing = {}
-                if not isinstance(existing, dict):
-                    existing = {}
-                with self.stats_history_lock:
-                    self.stats_client_history_apply_snapshot_locked(existing)
-                    merge_records()
-                self.write_shared_stats_client_history_locked(existing, now)
+            self.update_shared_stats_client_history(now, merge_records)
         else:
             with self.stats_history_lock:
                 merge_records()
+                self.stats_history_compact_locked(now)
 
         with self.stats_history_lock:
             # The browser's POST only submits its local deltas; its regular GET poll receives the

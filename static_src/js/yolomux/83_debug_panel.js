@@ -43,11 +43,19 @@ const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 24 * 60 * 60, label: '24h'},
 ]);
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
-const jsDebugGraphRawWindowMs = 60 * 60 * 1000;
-const jsDebugGraphMiddleWindowMs = 2 * 60 * 60 * 1000;
-const jsDebugGraphRawBucketMs = 1000;
-const jsDebugGraphMiddleBucketMs = 10 * 1000;
-const jsDebugGraphRollupBucketMs = 60 * 1000;
+const jsDebugGraphTiers = Object.freeze([
+  Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
+  Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
+  Object.freeze({maxAgeMs: 4 * 60 * 60 * 1000, bucketMs: 60 * 1000}),
+  Object.freeze({maxAgeMs: 8 * 60 * 60 * 1000, bucketMs: 2 * 60 * 1000}),
+  Object.freeze({maxAgeMs: 12 * 60 * 60 * 1000, bucketMs: 5 * 60 * 1000}),
+  Object.freeze({maxAgeMs: jsDebugGraphRetentionMs, bucketMs: 10 * 60 * 1000}),
+]);
+const jsDebugGraphRawWindowMs = jsDebugGraphTiers[0].maxAgeMs;
+const jsDebugGraphMiddleWindowMs = jsDebugGraphTiers[1].maxAgeMs;
+const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
+const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
+const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2000;
 const jsDebugStatsPollMs = 30000;
@@ -509,9 +517,8 @@ function debugGraphLatencyMs(event) {
 }
 
 function debugGraphBucketDurationForTime(timeMs, nowMs = Date.now()) {
-  if (timeMs < nowMs - jsDebugGraphMiddleWindowMs) return jsDebugGraphRollupBucketMs;
-  if (timeMs < nowMs - jsDebugGraphRawWindowMs) return jsDebugGraphMiddleBucketMs;
-  return jsDebugGraphRawBucketMs;
+  const ageMs = Math.max(0, nowMs - timeMs);
+  return (jsDebugGraphTiers.find(tier => ageMs <= tier.maxAgeMs) || jsDebugGraphTiers[jsDebugGraphTiers.length - 1]).bucketMs;
 }
 
 function debugGraphBucketForTime(timeMs, nowMs = Date.now()) {
@@ -746,29 +753,21 @@ function debugGraphMergeBucket(target, source) {
 }
 
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
-  const rawCutoff = nowMs - jsDebugGraphRawWindowMs;
-  for (const [key, bucket] of [...jsDebugGraphRawBuckets.entries()]) {
-    if (bucket.startMs >= rawCutoff) continue;
-    const middleStartMs = Math.floor(bucket.startMs / jsDebugGraphMiddleBucketMs) * jsDebugGraphMiddleBucketMs;
-    const middle = debugGraphBucket(jsDebugGraphRollupBuckets, middleStartMs, jsDebugGraphMiddleBucketMs);
-    debugGraphMergeBucket(middle, bucket);
-    jsDebugGraphRawBuckets.delete(key);
-  }
-  const middleCutoff = nowMs - jsDebugGraphMiddleWindowMs;
-  for (const [key, bucket] of [...jsDebugGraphRollupBuckets.entries()]) {
-    if (bucket.durationMs === jsDebugGraphRollupBucketMs) continue;
-    if (bucket.durationMs === jsDebugGraphMiddleBucketMs && bucket.startMs >= middleCutoff) continue;
-    const rollupStartMs = Math.floor(bucket.startMs / jsDebugGraphRollupBucketMs) * jsDebugGraphRollupBucketMs;
-    const rollup = debugGraphBucket(jsDebugGraphRollupBuckets, rollupStartMs, jsDebugGraphRollupBucketMs);
-    debugGraphMergeBucket(rollup, bucket);
-    jsDebugGraphRollupBuckets.delete(key);
-  }
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
-  for (const [key, bucket] of [...jsDebugGraphRollupBuckets.entries()]) {
-    if (bucket.startMs < retentionCutoff) jsDebugGraphRollupBuckets.delete(key);
-  }
-  for (const [key, bucket] of [...jsDebugGraphRawBuckets.entries()]) {
-    if (bucket.startMs < retentionCutoff) jsDebugGraphRawBuckets.delete(key);
+  for (const buckets of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
+    for (const [key, bucket] of [...buckets.entries()]) {
+      if (bucket.startMs < retentionCutoff) {
+        buckets.delete(key);
+        continue;
+      }
+      const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
+      if (bucket.durationMs >= targetDurationMs) continue;
+      const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
+      const targetBuckets = targetDurationMs === jsDebugGraphRawBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
+      const target = debugGraphBucket(targetBuckets, targetStartMs, targetDurationMs);
+      debugGraphMergeBucket(target, bucket);
+      buckets.delete(key);
+    }
   }
   const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
   for (const [id, timeMs] of [...jsDebugGraphEventRefTimes.entries()]) {
@@ -2280,6 +2279,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     rollupBuckets: jsDebugGraphRollupBuckets.size,
     middleBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
     oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
+    tierBucketCounts: jsDebugGraphTiers.map(tier => [...jsDebugGraphRawBuckets.values(), ...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === tier.bucketMs).length),
     agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
@@ -2295,6 +2295,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     middleWindowSeconds: jsDebugGraphMiddleWindowMs / 1000,
     middleBucketSeconds: jsDebugGraphMiddleBucketMs / 1000,
     rollupBucketSeconds: jsDebugGraphRollupBucketMs / 1000,
+    tiers: jsDebugGraphTiers.map(tier => ({maxAgeSeconds: tier.maxAgeMs / 1000, bucketSeconds: tier.bucketMs / 1000})),
     serverSequence: jsDebugStatsServerSequence,
     pendingServerBuckets: jsDebugGraphPendingServerBuckets.size,
     disconnectedBuckets: buckets.filter(bucket => Number(bucket.disconnectedMs || 0) > 0).length,

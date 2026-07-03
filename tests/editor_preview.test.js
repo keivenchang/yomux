@@ -2961,7 +2961,7 @@ async function runEditorPreviewSuite() {
     }, 'debug=1 enables instrumentation without injecting Debug into an existing URL layout');
   });
 
-  test('YO!stats graph retains 1s, 10s, and 60s timing tiers for 24 hours', () => {
+  test('YO!stats graph graduates retained timing from 1 second through 10 minutes', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     api.clearJsDebugEventsForTest();
     const now = Date.now();
@@ -2987,16 +2987,27 @@ async function runEditorPreviewSuite() {
       requestBytes: 100,
       responseBytes: 100,
     });
-    api.recordJsDebugStatsSampleForTest({time: (now - (3 * 60 * 60 * 1000)) / 1000, cpu_percent: 42});
+    for (const [hours, cpuPercent] of [[3, 42], [6, 36], [10, 30], [18, 24]]) {
+      api.recordJsDebugStatsSampleForTest({time: (now - (hours * 60 * 60 * 1000)) / 1000, cpu_percent: cpuPercent});
+    }
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.retentionHours, 24, 'YO!stats graph keeps a 24 hour retention window');
-    assert.equal(summary.rawWindowSeconds, 3600, 'YO!stats graph keeps high-resolution raw buckets for the last hour');
+    assert.equal(summary.rawWindowSeconds, 1800, 'YO!stats graph keeps high-resolution raw buckets for the last thirty minutes');
     assert.equal(summary.middleWindowSeconds, 7200, 'YO!stats graph keeps the middle tier through two hours');
-    assert.equal(summary.middleBucketSeconds, 10, 'YO!stats graph rolls one-to-two-hour samples into ten-second timing buckets');
-    assert.equal(summary.rollupBucketSeconds, 60, 'YO!stats graph rolls samples older than two hours into sixty-second timing buckets');
+    assert.equal(summary.middleBucketSeconds, 10, 'YO!stats graph rolls thirty-minute-to-two-hour samples into ten-second timing buckets');
+    assert.equal(summary.rollupBucketSeconds, 60, 'YO!stats graph starts minute timing buckets after two hours');
+    assert.deepStrictEqual(canonical(summary.tiers), [
+      {maxAgeSeconds: 1800, bucketSeconds: 1},
+      {maxAgeSeconds: 7200, bucketSeconds: 10},
+      {maxAgeSeconds: 14400, bucketSeconds: 60},
+      {maxAgeSeconds: 28800, bucketSeconds: 120},
+      {maxAgeSeconds: 43200, bucketSeconds: 300},
+      {maxAgeSeconds: 86400, bucketSeconds: 600},
+    ], 'YO!stats exposes the complete graduated retention schedule');
     assert.equal(summary.rawBuckets, 0, 'older samples are no longer kept as one-second raw buckets');
     assert.ok(summary.middleBuckets > 0 && summary.middleBuckets <= 3, 'ninety-minute-old per-second samples compress into ten-second buckets');
     assert.equal(summary.oldBuckets, 1, 'three-hour-old samples compress into one sixty-second bucket');
+    assert.deepStrictEqual([...summary.tierBucketCounts].slice(2), [1, 1, 1, 1], 'older samples use the 1m, 2m, 5m, and 10m tiers');
     assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second aggregate buckets');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');

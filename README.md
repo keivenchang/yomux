@@ -115,7 +115,7 @@ python3 yolomux.py --port 8080 --self-signed --dang
 Background server:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
 Specific tmux sessions only, optional filter:

@@ -11,9 +11,11 @@ import os
 import re
 import shlex
 import time
+from collections.abc import Iterator
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 from .common import AgentInfo
 from .common import SessionInfo
@@ -47,9 +49,10 @@ SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET = 16
 _TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2 * _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
+_TRANSCRIPT_REVERSE_SCAN_BYTES = 64 * 1024
 _CODEX_TRANSCRIPT_SCAN_VERSION = 3
 _CLAUDE_TRANSCRIPT_SCAN_VERSION = 3
-_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool], dict[str, Any]] = {}
+_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool, bool], dict[str, Any]] = {}
 _CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str], dict[str, Any]] = {}
 
 
@@ -119,13 +122,7 @@ def scan_claude_transcript_details(path: Path, cwd: str | None = None) -> dict[s
         return claude_transcript_scan_state_details(state, cwd)
     try:
         offset = int(state.get("offset") or 0) if cache_key is not None else 0
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            chunk = handle.read()
-        lines, consumed = complete_transcript_lines(chunk)
-        for line in lines:
-            update_claude_transcript_scan_state(state, line)
-        update_transcript_scan_tail(state, chunk[:consumed])
+        consumed = scan_transcript_append(path, offset, lambda line: update_claude_transcript_scan_state(state, line), state)
         state["offset"] = offset + consumed
         state["size"] = current_size if cache_key is not None else offset + consumed
     except OSError:
@@ -147,11 +144,11 @@ def claude_transcript_scan_cache_key(path: Path) -> tuple[int, int, int, str] | 
 
 
 def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, set[str]]:
-    return copy_change_set(scan_codex_transcript_details(path, cwd, include_patch_text).get("changes", {}))
+    return copy_change_set(scan_codex_transcript_details(path, cwd, include_patch_text, include_usage=False).get("changes", {}))
 
 
-def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True) -> dict[str, Any]:
-    cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text)
+def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True, include_usage: bool = True) -> dict[str, Any]:
+    cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text, include_usage)
     state, current_size = incremental_transcript_scan_state(
         path,
         _CODEX_TRANSCRIPT_SCAN_CACHE,
@@ -163,13 +160,12 @@ def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_pa
         return codex_transcript_scan_state_details(state)
     try:
         offset = int(state.get("offset") or 0) if cache_key is not None else 0
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            chunk = handle.read()
-        lines, consumed = complete_transcript_lines(chunk)
-        for line in lines:
-            update_codex_transcript_scan_state(state, line, cwd, include_patch_text)
-        update_transcript_scan_tail(state, chunk[:consumed])
+        consumed = scan_transcript_append(
+            path,
+            offset,
+            lambda line: update_codex_transcript_scan_state(state, line, cwd, include_patch_text, include_usage),
+            state,
+        )
         state["offset"] = offset + consumed
         state["size"] = current_size if cache_key is not None else offset + consumed
     except OSError:
@@ -177,7 +173,7 @@ def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_pa
     return codex_transcript_scan_state_details(state)
 
 
-def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool) -> tuple[int, int, int, str, str, bool] | None:
+def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> tuple[int, int, int, str, str, bool, bool] | None:
     try:
         stat = path.stat()
     except OSError:
@@ -189,6 +185,7 @@ def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_t
         str(path.expanduser().resolve(strict=False)),
         str(cwd or ""),
         bool(include_patch_text),
+        bool(include_usage),
     )
 
 
@@ -252,18 +249,24 @@ def transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict
     return current_tail != parsed_tail[-len(current_tail):]
 
 
-def complete_transcript_lines(chunk: bytes) -> tuple[list[str], int]:
-    if not chunk:
-        return [], 0
-    lines = chunk.splitlines(keepends=True)
-    if lines and not (lines[-1].endswith(b"\n") or lines[-1].endswith(b"\r")):
-        lines = lines[:-1]
-    consumed = sum(len(line) for line in lines)
-    return [line.decode("utf-8", errors="replace") for line in lines], consumed
+def scan_transcript_append(path: Path, offset: int, update: Callable[[str], None], state: dict[str, Any]) -> int:
+    consumed = 0
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while raw_line := handle.readline():
+            if not (raw_line.endswith(b"\n") or raw_line.endswith(b"\r")):
+                break
+            update(raw_line.decode("utf-8", errors="replace"))
+            update_transcript_scan_tail(state, raw_line)
+            consumed += len(raw_line)
+    return consumed
 
 
 def update_transcript_scan_tail(state: dict[str, Any], parsed_chunk: bytes) -> None:
     if not parsed_chunk:
+        return
+    if len(parsed_chunk) >= _TRANSCRIPT_SCAN_TAIL_BYTES:
+        state["parsed_tail"] = parsed_chunk[-_TRANSCRIPT_SCAN_TAIL_BYTES:]
         return
     previous = state.get("parsed_tail")
     previous_tail = previous if isinstance(previous, bytes) else b""
@@ -271,6 +274,9 @@ def update_transcript_scan_tail(state: dict[str, Any], parsed_chunk: bytes) -> N
 
 
 def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> None:
+    is_assistant = '"type":"assistant"' in line or '"type": "assistant"' in line
+    if not is_assistant or ('"usage"' not in line and not any(tool in line for tool in CLAUDE_EDIT_TOOLS)):
+        return
     try:
         record = json.loads(line)
     except json.JSONDecodeError:
@@ -321,7 +327,7 @@ def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None)
     return transcript_scan_details(changes, numeric_token_value(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
 
 
-def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool) -> None:
+def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> None:
     changes = state.get("changes")
     if not isinstance(changes, dict):
         changes = {}
@@ -332,6 +338,14 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: st
             if resolved is None:
                 continue
             changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+    has_usage = include_usage and ('"total_token_usage"' in line or '"last_token_usage"' in line)
+    has_shell_call = (
+        ('"function_call"' in line or '"custom_tool_call"' in line)
+        and any(f'"{tool}"' in line for tool in CODEX_SHELL_TOOL_NAMES)
+    )
+    has_git_change = has_shell_call and codex_line_may_contain_git_change(line)
+    if not has_usage and not has_git_change:
+        return
     try:
         record = json.loads(line)
     except json.JSONDecodeError:
@@ -341,7 +355,7 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: st
         state["last_token_total"] = total_generated
     elif last_generated is not None:
         state["summed_last_generated_tokens"] = float(state.get("summed_last_generated_tokens") or 0.0) + last_generated
-    if not codex_line_may_contain_git_change(line):
+    if not has_git_change:
         return
     for path_text, markers in scan_codex_tool_call_changes_from_record(record, cwd).items():
         changes.setdefault(path_text, set()).update(markers)
@@ -441,6 +455,41 @@ def codex_record_usage_generated_tokens(record: Any) -> tuple[float | None, floa
     return None, last_generated if last_generated else None
 
 
+def reverse_transcript_lines(path: Path) -> Iterator[bytes]:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            position = size
+            suffix = b""
+            while position > 0:
+                chunk_size = min(position, _TRANSCRIPT_REVERSE_SCAN_BYTES)
+                position -= chunk_size
+                handle.seek(position)
+                parts = (handle.read(chunk_size) + suffix).split(b"\n")
+                suffix = parts[0]
+                for raw_line in reversed(parts[1:]):
+                    if raw_line:
+                        yield raw_line
+            if suffix:
+                yield suffix
+    except OSError:
+        return
+
+
+def latest_codex_total_generated_tokens(path: Path) -> float | None:
+    for raw_line in reverse_transcript_lines(path):
+        if b'"total_token_usage"' not in raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        total_generated, _last_generated = codex_record_usage_generated_tokens(record)
+        if total_generated is not None:
+            return total_generated
+    return None
+
+
 def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -> float | None:
     agent_kind = str(kind or "").strip().lower()
     if agent_kind == "claude":
@@ -451,9 +500,11 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
             for transcript_path in claude_transcript_family_paths(path)
         )
     elif agent_kind == "codex":
-        details = scan_codex_transcript_details(path, cwd)
-        usage = details.get("usage") if isinstance(details, dict) else {}
-        generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+        generated_tokens = latest_codex_total_generated_tokens(path)
+        if generated_tokens is None:
+            details = scan_codex_transcript_details(path, cwd)
+            usage = details.get("usage") if isinstance(details, dict) else {}
+            generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
     else:
         return None
     return generated_tokens if generated_tokens > 0 else None

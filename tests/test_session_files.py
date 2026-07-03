@@ -153,6 +153,32 @@ def test_generated_usage_tokens_treats_reasoning_as_output_subset():
     assert session_files.generated_usage_tokens({"outputTokens": 17, "completion_tokens": 17}) == 17
 
 
+def test_codex_generated_tokens_reads_latest_cumulative_usage_from_the_tail(tmp_path, monkeypatch):
+    transcript = tmp_path / "rollout.jsonl"
+
+    def usage_line(tokens):
+        return json.dumps({"payload": {"info": {"total_token_usage": {"output_tokens": tokens}}}}) + "\n"
+
+    transcript.write_text(
+        usage_line(11)
+        + json.dumps({"payload": "x" * (session_files._TRANSCRIPT_REVERSE_SCAN_BYTES * 3)}) + "\n"
+        + usage_line(17)
+        + '{"partial":',
+        encoding="utf-8",
+    )
+    real_loads = session_files.json.loads
+    parsed = []
+
+    def tracking_loads(value):
+        parsed.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", tracking_loads)
+
+    assert session_files.transcript_generated_tokens(transcript, "codex") == 17
+    assert len(parsed) == 1
+
+
 def test_transcript_usage_identity_changes_after_in_place_replacement(tmp_path):
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text('{"session":"first"}\n', encoding="utf-8")
@@ -588,6 +614,93 @@ def test_scan_claude_transcript_incrementally_scans_complete_appends_and_reuses_
     assert second["changes"] == {str(root_a / "a.py"): {"M"}, str(root_a / "b.py"): {"A"}}
     assert same_raw_parse["changes"] == {str(root_b / "a.py"): {"M"}, str(root_b / "b.py"): {"A"}}
     assert second["usage"]["generated_tokens"] == 12
+
+
+def test_transcript_scan_streams_complete_lines_without_reading_the_full_file(tmp_path, monkeypatch):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("".join(
+        json.dumps({
+            "payload": {"info": {"total_token_usage": {"output_tokens": index + 1}}},
+            "padding": "x" * 4096,
+        }) + "\n"
+        for index in range(256)
+    ), encoding="utf-8")
+    real_open = session_files.Path.open
+    readline_calls = 0
+
+    class TrackingFile:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def seek(self, *args):
+            return self.handle.seek(*args)
+
+        def readline(self, *args):
+            nonlocal readline_calls
+            readline_calls += 1
+            return self.handle.readline(*args)
+
+        def read(self, size=-1):
+            assert size >= 0, "transcript scans must not materialize the full unread file"
+            return self.handle.read(size)
+
+    def tracking_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        return TrackingFile(handle) if path == transcript and args and args[0] == "rb" else handle
+
+    monkeypatch.setattr(session_files.Path, "open", tracking_open)
+    details = session_files.scan_codex_transcript_details(transcript)
+
+    assert details["usage"]["generated_tokens"] == 256
+    assert readline_calls == 257
+
+
+def test_transcript_scanners_skip_json_for_records_without_usage_or_changes(monkeypatch):
+    def unexpected_loads(_value):
+        raise AssertionError("irrelevant transcript records must not be decoded into object trees")
+
+    monkeypatch.setattr(session_files.json, "loads", unexpected_loads)
+    claude_state = session_files.new_claude_transcript_scan_state()
+    codex_state = session_files.new_codex_transcript_scan_state()
+
+    session_files.update_claude_transcript_scan_state(claude_state, json.dumps({"type": "user", "message": "x" * 1000}))
+    session_files.update_codex_transcript_scan_state(codex_state, json.dumps({"type": "response_item", "payload": {"text": "please run git add big-file " + ("x" * 1000)}}), None, False)
+
+    assert claude_state["generated_tokens"] == 0
+    assert codex_state["last_token_total"] is None
+
+
+def test_codex_change_scan_does_not_parse_usage_only_records(tmp_path, monkeypatch):
+    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    usage_line = json.dumps({"payload": {"info": {"total_token_usage": {"output_tokens": 17}}}})
+    shell_line = json.dumps({
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "git add tracked.txt", "workdir": str(tmp_path)}),
+        },
+    })
+    transcript.write_text(usage_line + "\n" + shell_line + "\n", encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed = []
+
+    def tracking_loads(value):
+        parsed.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", tracking_loads)
+
+    assert session_files.scan_codex_transcript(transcript, str(tmp_path), include_patch_text=False) == {str(tmp_path / "tracked.txt"): {"M"}}
+    assert all("total_token_usage" not in str(value) for value in parsed)
 
 
 def test_scan_claude_transcript_waits_for_partial_lines_and_resets_after_replacement(tmp_path):

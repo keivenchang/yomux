@@ -33,6 +33,7 @@ def test_boot_print_command_defaults_to_prod_port():
     assert "--port 7777" in command
     assert "--dang --self-signed" in command
     assert "--dev" not in command
+    assert "MALLOC_ARENA_MAX=2" in command
 
 
 def test_boot_print_command_launches_dev_ports_in_dev_mode():

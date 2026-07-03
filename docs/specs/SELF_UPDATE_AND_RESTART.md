@@ -35,7 +35,7 @@ The toast text reports the restart outcome:
 
 The mechanism, when it does fire, is intentionally portable — no systemd, no broad `pkill`:
 
-- It records a restart context: resolved checkout root, effective Python argv, current PID, and the env values needed for agent discovery and stripped launchers (`PATH`, `TERM`, `PYTHONUNBUFFERED`, YOLOmux config/state overrides, test-auth bypass, and virtualenv when present).
+- It records a restart context: resolved checkout root, effective Python argv, current PID, and the env values needed for agent discovery and stripped launchers (`PATH`, `TERM`, `PYTHONUNBUFFERED`, `MALLOC_ARENA_MAX`, YOLOmux config/state overrides, test-auth bypass, and virtualenv when present).
 - It resolves `python3 yolomux.py ...`, `/abs/path/yolomux.py ...`, and `python3 -m yolomux ...` into a launcher that can be replayed after the request process exits. Script launchers use the resolved script path inside the checkout; module launchers stay `python -m yolomux` after the helper `cd`s into `PROJECT_ROOT`.
 - It runs a detached `nohup bash -lc` helper with stdio redirected to `/dev/null`, `start_new_session=True`, and output appended to `/tmp/yolomux-self-update-restart.log`.
 - The helper kills only the current server PID, waits, force-kills only that same PID if needed, then relaunches the preserved argv under `nohup env ... < /dev/null &`.

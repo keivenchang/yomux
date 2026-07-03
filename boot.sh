@@ -93,6 +93,7 @@ fi
 export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PATH:-}"
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 # YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
 # binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
@@ -161,7 +162,7 @@ supports_setsid_f() {
 
 shell_command_for() {
   local log_path="$1"
-  printf 'cd %q && exec env TERM=%q PYTHONUNBUFFERED=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$PATH"
+  printf 'cd %q && exec env TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
     printf ' %q' "$item"
   done
@@ -208,6 +209,7 @@ build_python_detach_args() {
     "$log_path"
     "TERM=$TERM"
     "PYTHONUNBUFFERED=$PYTHONUNBUFFERED"
+    "MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX"
     "PATH=$PATH"
   )
   for item in "${extra_env[@]}"; do
