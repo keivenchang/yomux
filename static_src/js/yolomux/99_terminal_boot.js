@@ -3897,9 +3897,16 @@ function applyAutoApprovePayload(payload, options = {}) {
     autoApproveStates.set(session, state);
     reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
-  const result = {applied: true, sessionsChanged, previousActive};
-  if (options.render === false) return result;
-  renderAutoApproveStatusSurfaces(result);
+  const result = {applied: true, sessionsChanged, previousActive, workingAgentTransitionNotifications: 0};
+  if (options.render !== false) renderAutoApproveStatusSurfaces(result);
+  // Deliver after the status render. Rendering may rebuild a pane and its toast stack; inserting a
+  // transition toast before that pass makes it disappear immediately even though classification ran.
+  if (typeof reconcileWorkingAgentTransitionNotifications === 'function') {
+    for (const session of sessions) {
+      const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
+      result.workingAgentTransitionNotifications += reconcileWorkingAgentTransitionNotifications(session, state);
+    }
+  }
   return result;
 }
 
@@ -5272,6 +5279,15 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 function queueClientPushEvent(type, payload = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
   clientPushEventQueue.set(key, {type, payload});
+  // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
+  // notification state there, otherwise a complete green->red/yellow transition can be missed
+  // before the user returns to YOLOmux.
+  if (document.visibilityState === 'hidden') {
+    if (clientPushEventFrame) cancelAnimationFrame(clientPushEventFrame);
+    clientPushEventFrame = 0;
+    flushQueuedClientPushEvents();
+    return;
+  }
   if (clientPushEventFrame) return;
   clientPushEventFrame = requestAnimationFrame(() => {
     clientPushEventFrame = 0;

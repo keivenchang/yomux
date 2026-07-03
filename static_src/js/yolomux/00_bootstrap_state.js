@@ -1394,6 +1394,7 @@ const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false})
 let notificationDelivery = {...notificationDeliveryDefaults};
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
+const workingAgentNotificationTones = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
 const sessionRepoDisplayRoot = new Map();

@@ -846,12 +846,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const acknowledging = acknowledgementVisualActive;
     const acknowledged = recordedAcknowledgement && !acknowledging;
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
-    if (previous.visualTone === STATE_KEY.working) {
-      maybeNotifyWorkingAgentTransition(options.session, agentKey, 'attention', {
-        attentionKey: ackKey,
-        attentionSignature: options.attention_signature || options.screen_text,
-      });
-    }
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {
@@ -905,9 +899,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const recordedAcknowledgement = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
     const acknowledged = recordedAcknowledgement && !acknowledging;
-    if (previous.visualTone === STATE_KEY.working) {
-      maybeNotifyWorkingAgentTransition(options.session, agentKey, 'cooldown', {stoppedAt});
-    }
     scheduleAgentWindowStatusGlowRefresh(transitionKey, cooldownTransitionStartedAt, options);
     if (transitionKey) {
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, cooldownTransitionStartedAt, options);

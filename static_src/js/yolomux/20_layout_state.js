@@ -4425,17 +4425,15 @@ function attentionToastTitle(session, state) {
   return windowLabel ? `[${sessionLabel(session)}] ${windowLabel}: ${state?.label || ''}` : sessionNotificationTitle(session, state, {inApp: true});
 }
 
-async function focusAttentionToastTarget(session, state) {
+async function focusAgentToastTarget(session, agent) {
   await selectSession(session, {userInitiated: true});
-  const windowIndex = agentWindowIndex(attentionToastAgent(session, state)?.agent);
+  const windowIndex = agentWindowIndex(agent);
   if (windowIndex === null) return;
   tmuxWindow(session, {windowIndex}, t('terminal.window.title', {name: windowIndex}));
 }
 
-function attentionToastLine(session, state) {
-  const attention = attentionToastAgent(session, state);
-  const agent = attention?.agent;
-  const reason = attentionToastReason(state, agent);
+function agentToastTargetLine(session, agent, options = {}) {
+  const reason = String(options.reason || '').trim();
   if (!agent || typeof tmuxWindowButtonHtml !== 'function' || typeof tmuxPaneTabTokenHtml !== 'function') return reason;
   const visibleName = String(agent.window_label || agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.kind)).trim();
   if (!visibleName) return reason;
@@ -4447,12 +4445,13 @@ function attentionToastLine(session, state) {
       marker.className = 'attention-toast-controls';
       const info = transcriptMeta.sessions?.[session];
       const auto = autoApproveStates.get(session)?.enabled === true;
+      const status = options.state || sessionState(session, info);
       const tabHtml = tmuxPaneTabTokenHtml(session, {
         tag: 'span',
         action: false,
         active: true,
         info,
-        state,
+        state: status,
         auto,
         classes: ['attention-toast-session-tab'],
       });
@@ -4470,7 +4469,7 @@ function attentionToastLine(session, state) {
         activityAnimate: false,
         activityIconHtml: agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
           ...agentWindowActivityOptionsForStatus(agent, session),
-          item: attention.item || undefined,
+          item: options.item || undefined,
           animate: false,
           statusBeforeAgent: true,
         }),
@@ -4484,13 +4483,33 @@ function attentionToastLine(session, state) {
   };
 }
 
+function attentionToastLine(session, state) {
+  const attention = attentionToastAgent(session, state);
+  return agentToastTargetLine(session, attention?.agent, {
+    reason: attentionToastReason(state, attention?.agent),
+    item: attention?.item,
+  });
+}
+
+function workingAgentTransitionNotificationTarget(agentKey, tone, options = {}) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : String(agentKey || '').trim().toLowerCase();
+  const state = tone === 'attention' ? STATE_KEY.needsInput : STATE_KEY.idle;
+  return {
+    ...options,
+    kind,
+    state,
+    window_index: options.window_index ?? options.windowIndex ?? options.window,
+    window_label: options.window_label || options.windowLabel || '',
+  };
+}
+
 function showAttentionAlert(session, state) {
   const node = showToast(
     attentionToastTitle(session, state),
     attentionToastLine(session, state),
     {
       container: displayToastContainer(session),
-      onClick: () => { void focusAttentionToastTarget(session, state); },
+      onClick: () => { void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent); },
     },
   );
   if (node) {
@@ -4572,6 +4591,10 @@ function trackSessionStateChanges() {
 function maybeNotifyState(session, state, options = {}) {
   if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyState(state)) return;
+  // A green->red agent transition belongs to the dedicated per-window notification path below.
+  // Letting the generic session-state path handle it too duplicates the popup and bypasses the
+  // user's working-AI attention preference when that preference is off.
+  if (workingAgentTransitionOwnsSessionStateNotification(session, state)) return;
   const key = `${session}:${stateSignature(state)}`;
   const now = Date.now();
   if (attentionAlreadyVisible(session)) {
@@ -4611,19 +4634,32 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
+const workingAgentTransitionNotificationDescriptors = Object.freeze({
+  attention: Object.freeze({settingPath: 'notifications.notify_working_attention', defaultEnabled: true, copyKey: 'attention'}),
+  cooldown: Object.freeze({settingPath: 'notifications.notify_working_done', defaultEnabled: false, copyKey: 'done'}),
+});
+
+function workingAgentTransitionNotificationDescriptor(tone) {
+  return workingAgentTransitionNotificationDescriptors[tone] || null;
+}
+
 function workingAgentTransitionNotificationEnabled(tone) {
-  if (tone === 'attention') return boolSetting('notifications.notify_working_attention', true);
-  if (tone === 'cooldown') return boolSetting('notifications.notify_working_done', false);
-  return false;
+  const descriptor = workingAgentTransitionNotificationDescriptor(tone);
+  return descriptor ? boolSetting(descriptor.settingPath, descriptor.defaultEnabled) : false;
 }
 
 function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {
-  if (!session || !workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) return false;
+  const descriptor = workingAgentTransitionNotificationDescriptor(tone);
+  if (!session || !descriptor || !workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) return false;
   const marker = tone === 'attention'
     ? String(options.attentionKey || options.attentionSignature || '').trim()
     : String(options.stoppedAt || '').trim();
   if (!marker) return false;
-  const key = `agent-window-transition:${session}:${agentKey}:${tone}:${marker}`;
+  const target = workingAgentTransitionNotificationTarget(agentKey, tone, options);
+  const targetKey = typeof agentWindowActivityTransitionKey === 'function'
+    ? agentWindowActivityTransitionKey(agentKey, {...target, session})
+    : `${session}:${target.window_index ?? target.window ?? ''}:${agentKey}`;
+  const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
   const lastSent = notificationLastSent.get(key) || 0;
@@ -4631,10 +4667,13 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
   const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
   const agent = kind ? agentLabel(kind) : t('common.agentLabel');
-  const title = t(`notify.working.${tone}.title`);
-  const body = t(`notify.working.${tone}.body`, {agent, session: sessionLabel(session)});
-  if (notificationDeliveryEnabled('inApp') && typeof HTMLElement !== 'undefined' && document.body instanceof HTMLElement) {
-    showToast(title, [body], {container: displayToastContainer(session)});
+  const title = t(`notify.working.${descriptor.copyKey}.title`);
+  const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
+  if (notificationDeliveryEnabled('inApp')) {
+    showToast(title, agentToastTargetLine(session, target, {reason: body}), {
+      container: displayToastContainer(session),
+      onClick: () => { void focusAgentToastTarget(session, target); },
+    });
   }
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
@@ -4645,6 +4684,80 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
   }
   return true;
+}
+
+function workingAgentNotificationTone(agent) {
+  const state = String(agent?.state || '').trim();
+  if (typeof agentWindowIsWorkingState === 'function' && agentWindowIsWorkingState(state)) return STATE_KEY.working;
+  if (typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state)) return 'attention';
+  const stoppedAt = Number(agent?.working_stopped_ts || agent?.workingStoppedTs || 0);
+  return Number.isFinite(stoppedAt) && stoppedAt > 0 ? 'cooldown' : '';
+}
+
+function workingAgentFinishedRecently(agent, nowSeconds = Date.now() / 1000) {
+  const stoppedAt = Number(agent?.working_stopped_ts || agent?.workingStoppedTs || 0);
+  if (!Number.isFinite(stoppedAt) || stoppedAt <= 0) return false;
+  const freshnessSeconds = Math.max(1, Number(workflowTransitionGlowSeconds) || 0);
+  return nowSeconds >= stoppedAt && nowSeconds - stoppedAt <= freshnessSeconds;
+}
+
+function workingAgentTransitionSnapshot(session, agent) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : '';
+  if (!session || !kind || typeof agentWindowActivityTransitionKey !== 'function') return null;
+  const options = typeof agentWindowActivityOptionsForStatus === 'function'
+    ? agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false})
+    : {...agent, session};
+  const key = agentWindowActivityTransitionKey(kind, options);
+  if (!key) return null;
+  const tone = workingAgentNotificationTone(agent);
+  return {agent, kind, options, key, tone, previousTone: workingAgentNotificationTones.get(key) || ''};
+}
+
+function workingAgentTransitionOwnsSessionStateNotification(session, state) {
+  const agent = attentionToastAgent(session, state)?.agent;
+  const transition = workingAgentTransitionSnapshot(session, agent);
+  return transition?.previousTone === STATE_KEY.working && transition.tone === 'attention';
+}
+
+// Notifications are driven by one authoritative auto-approve payload, never by a surface renderer.
+// A hidden tab, a rebuilt Info Bar, or a late popover must not change whether a live green->red/yellow
+// transition notifies the user.
+function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
+  if (!session || typeof agentWindowActivityTransitionKey !== 'function') return 0;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
+    : typeof agentWindowPayloadRows === 'function'
+      ? agentWindowPayloadRows(payload.agent_windows)
+      : [];
+  const nextKeys = new Set();
+  let notified = 0;
+  for (const agent of rows) {
+    const transition = workingAgentTransitionSnapshot(session, agent);
+    if (!transition) continue;
+    const {kind, options, key, tone, previousTone} = transition;
+    nextKeys.add(key);
+    const shouldNotify = (previousTone === STATE_KEY.working && (tone === 'attention' || tone === 'cooldown'))
+      // `working_stopped_ts` is written by the server only after it observes working->idle. Use that
+      // durable transition proof when a browser refresh missed its transient green snapshot.
+      || (tone === 'cooldown' && previousTone !== 'cooldown' && workingAgentFinishedRecently(agent));
+    if (shouldNotify) {
+      const attentionKey = tone === 'attention' && typeof agentWindowActivityAcknowledgementKey === 'function'
+        ? agentWindowActivityAcknowledgementKey(kind, agent.state, options, options.attention_signature || options.screen_text)
+        : '';
+      notified += Number(maybeNotifyWorkingAgentTransition(session, kind, tone, {
+        ...agent,
+        ...options,
+        attentionKey,
+        attentionSignature: options.attention_signature || options.screen_text,
+        stoppedAt: Number(options.working_stopped_ts || 0),
+      }));
+    }
+    workingAgentNotificationTones.set(key, tone);
+  }
+  for (const key of workingAgentNotificationTones.keys()) {
+    if (key.startsWith(`${session}:`) && !nextKeys.has(key)) workingAgentNotificationTones.delete(key);
+  }
+  return notified;
 }
 
 // a stable snapshot of the watched-PR status dimensions we diff for notifications.

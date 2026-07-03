@@ -1090,6 +1090,7 @@ globalThis.__layoutTestApi = {
   setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   setDocumentVisibilityForTest(value) { Object.defineProperty(document, 'visibilityState', {value: String(value || 'visible'), configurable: true}); },
+  queueClientPushEventForTest: queueClientPushEvent,
   commandPaletteItemScore,
   commandPaletteRankItems,
   commandPaletteCandidateItems,

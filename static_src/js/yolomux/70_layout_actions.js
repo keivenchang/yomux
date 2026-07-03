@@ -1517,6 +1517,7 @@ function replaceSessionMetadata(oldSession, newSession) {
     autoApproveStates,
     sessionStateKeys,
     notificationLastSent,
+    workingAgentNotificationTones,
     attentionAlertTimers,
     metadataBadgePulseUntil,
     uploadResultsBySession,
