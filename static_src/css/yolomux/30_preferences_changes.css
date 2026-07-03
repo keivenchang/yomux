@@ -439,13 +439,13 @@ body.theme-light .js-debug-graph-view {
 .js-debug-chart-body {
   display: grid;
   grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
-  grid-template-rows: minmax(104px, 1fr) minmax(16px, auto);
-  gap: 6px 8px;
+  grid-template-rows: minmax(104px, 1fr) minmax(20px, auto);
+  gap: 4px 8px;
   min-width: 0;
   min-height: 0;
 }
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
-  grid-template-rows: minmax(72px, 1fr) minmax(16px, auto);
+  grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
 }
 .js-debug-chart-unavailable {
   display: grid;
@@ -471,12 +471,6 @@ body.theme-light .js-debug-graph-view {
   inset-inline: 0;
   top: var(--js-debug-axis-y, 0%);
   transform: translateY(-50%);
-}
-.js-debug-y-axis:not(.js-debug-y-axis--integer) span[data-js-debug-axis-max] {
-  transform: translateY(0);
-}
-.js-debug-y-axis:not(.js-debug-y-axis--integer) span[data-js-debug-axis-zero] {
-  transform: translateY(-100%);
 }
 .js-debug-plot {
   display: grid;

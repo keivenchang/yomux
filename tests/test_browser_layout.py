@@ -641,22 +641,26 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
       </div>
       <section id="chart" class="js-debug-chart" style="width:420px">
         <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(sum of all client requests from displayed = 123.4k)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
-        <div class="js-debug-chart-body"><div class="js-debug-y-axis"><span data-js-debug-axis-max>100%</span><span data-js-debug-axis-zero>0%</span></div><div id="plot" class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
+        <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 93.333%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
       </section>
     """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
     browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
-        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width}; };
-        const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot');
+        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width, height:value.height}; };
+        const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot'); const svg = rect('svg');
         const chart = rect('chart'); const range = document.querySelector('[data-js-debug-range-control]').getBoundingClientRect();
-        return {heading, close, summary, axis, plot, chart, range, scale: rect('scale-group'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
+        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, scale: rect('scale-group'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
         """
     )
     assert metrics["close"]["right"] <= metrics["heading"]["right"] + 0.5, metrics
     assert metrics["close"]["left"] >= metrics["summary"]["right"] + 4, metrics
     assert metrics["axis"]["top"] >= metrics["plot"]["bottom"] + 4, metrics
     assert all(item["left"] >= metrics["axis"]["left"] - 0.5 and item["right"] <= metrics["axis"]["right"] + 0.5 for item in metrics["axisItems"]), metrics
+    assert all(item["top"] >= metrics["chart"]["top"] and item["bottom"] <= metrics["chart"]["bottom"] for item in metrics["axisItems"]), metrics
+    assert abs(((metrics["axisMax"]["top"] + metrics["axisMax"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 8 / 120))) <= 0.75, metrics
+    assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 112 / 120))) <= 0.75, metrics
+    assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5 and metrics["axisZero"]["bottom"] <= metrics["yAxis"]["bottom"] + 0.5, metrics
     assert metrics["rangeStart"]["left"] >= metrics["scale"]["right"] + 4, metrics
     assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["scale"]["right"] + metrics["rangeSlider"]["left"]) / 2)) <= 1.5, metrics
     assert metrics["rangeEnd"]["right"] <= metrics["range"]["right"] + 0.5, metrics
