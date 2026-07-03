@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (他のクライアントの平均)",
   "debug.graph.series.processCpu": "{process} の CPU 使用率 (%)",
   "debug.graph.series.systemCpu": "システム平均 CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (このクライアント)",
   "debug.graph.series.tokensPerAgent": "トークン/エージェント/分",
   "debug.graph.status.attention": "注意",

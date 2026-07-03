@@ -629,6 +629,65 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
     assert metrics["legendTop"] >= metrics["headingBottom"] - 0.5, metrics
 
 
+def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browser, tmp_path):
+    page = tmp_path / "debug-graph-header-geometry.html"
+    page.write_text(page_html("""
+      <div class="js-debug-graph-controls" style="width:720px">
+        <div id="scale-group" class="js-debug-graph-control-group"><button>1s</button><button>5s</button></div>
+        <span id="range-start" class="js-debug-range-label">15m</span>
+        <div class="js-debug-range-slider-control" data-js-debug-range-control>
+          <input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-end" class="js-debug-range-end-label">24h</span>
+        </div>
+      </div>
+      <section id="chart" class="js-debug-chart" style="width:420px">
+        <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(sum of all client requests from displayed = 123.4k)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
+        <div class="js-debug-chart-body"><div class="js-debug-y-axis"><span data-js-debug-axis-max>100%</span><span data-js-debug-axis-zero>0%</span></div><div id="plot" class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
+      </section>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width}; };
+        const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot');
+        const chart = rect('chart'); const range = document.querySelector('[data-js-debug-range-control]').getBoundingClientRect();
+        return {heading, close, summary, axis, plot, chart, range, scale: rect('scale-group'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
+        """
+    )
+    assert metrics["close"]["right"] <= metrics["heading"]["right"] + 0.5, metrics
+    assert metrics["close"]["left"] >= metrics["summary"]["right"] + 4, metrics
+    assert metrics["axis"]["top"] >= metrics["plot"]["bottom"] + 4, metrics
+    assert all(item["left"] >= metrics["axis"]["left"] - 0.5 and item["right"] <= metrics["axis"]["right"] + 0.5 for item in metrics["axisItems"]), metrics
+    assert metrics["rangeStart"]["left"] >= metrics["scale"]["right"] + 4, metrics
+    assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["scale"]["right"] + metrics["rangeSlider"]["left"]) / 2)) <= 1.5, metrics
+    assert metrics["rangeEnd"]["right"] <= metrics["range"]["right"] + 0.5, metrics
+    assert metrics["rangeSlider"]["left"] >= metrics["rangeStart"]["right"] + 4, metrics
+    assert metrics["rangeSlider"]["right"] <= metrics["rangeEnd"]["left"] - 4, metrics
+
+
+def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
+    page = tmp_path / "debug-graph-cpu-compact-row.html"
+    page.write_text(page_html("""
+      <div class="js-debug-chart-grid" style="width:690px">
+        <section id="cpu" class="js-debug-chart" data-js-debug-chart="cpu">
+          <div class="js-debug-chart-head"><div class="js-debug-chart-heading-row"><span class="js-debug-chart-title">CPU</span></div><div class="js-debug-legend"><span>system avg CPU %</span><span>yolomux.py :8101 CPU %</span><span>yolomux.py :8102 CPU %</span><span>yolomux.py :8103 CPU %</span></div></div>
+          <div id="cpu-body" class="js-debug-chart-body"><div id="cpu-axis" class="js-debug-y-axis"><span>100%</span></div><div class="js-debug-plot"><svg id="cpu-plot" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>07:56</span><span>08:26</span><span>08:56</span></div></div>
+        </section>
+        <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">System memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>125GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
+        <section id="next-row" class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">GPU memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>48GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
+        return {cpu: rect('cpu'), body: rect('cpu-body'), axis: rect('cpu-axis'), plot: rect('cpu-plot'), nextRow: rect('next-row')};
+        """
+    )
+    assert 72 <= metrics["body"]["height"] < 138, metrics
+    assert metrics["axis"]["height"] >= 72 and metrics["plot"]["height"] >= 72, metrics
+    assert metrics["cpu"]["bottom"] <= metrics["nextRow"]["top"] - 9, metrics
+
+
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     page = tmp_path / "debug-graph-client-work-layout.html"
     client_perf = """
@@ -1058,7 +1117,9 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
             const finder = panelNodes.get(fileExplorerItemId);
             const editor = panelNodes.get(editorItem);
             const terminal = panelNodes.get('1');
-            const expectedChartTitles = jsDebugGraphChartGroups.map(group => catalog[group.labelKey]);
+              const expectedChartTitles = jsDebugGraphChartGroups
+                .filter(group => debugGraphChartVisible(group.key))
+                .map(group => catalog[group.labelKey]);
             surfaceMatrix[locale] = {
               activeLocale: i18nActiveLocale,
               resolvedHelpHeading: t('common.keyboardShortcuts'),
@@ -1263,7 +1324,7 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
             state.waiting = graph.textContent.includes('Waiting for server stats');
             state.chartCount = graph.querySelectorAll('[data-js-debug-chart]').length;
             state.renderedAtAfter = renderedAt;
-                return !state.waiting && state.chartCount === 9;
+                return !state.waiting && state.chartCount === 6;
             """
         )
     )
@@ -1722,7 +1783,8 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
         "subTab": "events",
         "scaleSeconds": 30,
         "rangeSeconds": 14400,
-        "hiddenCharts": ["gpuMemory"],
+        "hiddenCharts": ["gpuMemory", "gpuUtil", "memory"],
+        "visibleCharts": ["cpu"],
     }, metrics
 
     browser.refresh()
@@ -1944,14 +2006,14 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const zoomStart = Number(zoomGrid?.dataset.jsDebugDomainStart);
         const zoomEnd = Number(zoomGrid?.dataset.jsDebugDomainEnd);
         const resetControl = reset?.closest('[data-js-debug-range-control]');
-        const label = resetControl?.querySelector('[data-js-debug-range-label]');
+        const label = document.querySelector('[data-js-debug-range-label]');
         const sliderAfterZoom = resetControl?.querySelector('[data-js-debug-range-slider]');
         const resetRect = reset?.getBoundingClientRect();
         const resetControlRect = resetControl?.getBoundingClientRect();
         const labelRect = label?.getBoundingClientRect();
         const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
         const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
-        const sliderLeftSpacer = labelRect && resetControlRect ? labelRect.left - resetControlRect.left : NaN;
+        const labelBeforeSliderGap = labelRect && sliderAfterZoomRect ? sliderAfterZoomRect.left - labelRect.right : NaN;
         reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
         const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
 
@@ -1978,7 +2040,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
           resetRightGap,
-          sliderLeftSpacer,
+          labelBeforeSliderGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
         };
         """
@@ -2005,7 +2067,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 118 <= metrics["zoomSeconds"] <= 122, metrics
     assert metrics["resetText"] == "Reset", metrics
     assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
-    assert metrics["sliderLeftSpacer"] >= 40, metrics
+    assert metrics["labelBeforeSliderGap"] >= 4, metrics
     assert metrics["resetZoomed"] is False, metrics
 
     slider = WebDriverWait(browser, 5).until(lambda driver: driver.find_element("css selector", "[data-js-debug-range-slider]"))
@@ -2257,19 +2319,27 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
               },
             }});
           };
-          try {
-            const initialPoll = pollJsDebugStatsSample();
-            await new Promise(resolve => requestAnimationFrame(resolve));
-            const loadingGraph = document.querySelector('[data-js-debug-graph]');
+              try {
+                const initialPoll = pollJsDebugStatsSample();
+                const requestDeadline = performance.now() + 3000;
+                while (typeof rejectInitial !== 'function' && performance.now() < requestDeadline) {
+                  await new Promise(resolve => setTimeout(resolve, 20));
+                }
+                if (typeof rejectInitial !== 'function') throw new Error('mocked stats request did not start');
+                const loadingGraph = document.querySelector('[data-js-debug-graph]');
             const loading = {
               busy: loadingGraph?.getAttribute('aria-busy'),
               phase: loadingGraph?.dataset.jsDebugHistoryState,
               chartCount: loadingGraph?.querySelectorAll('[data-js-debug-chart]').length,
               overlayHidden: loadingGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
-            };
-            rejectInitial(new Error('history unavailable'));
-            await initialPoll;
-            const errorGraph = document.querySelector('[data-js-debug-graph]');
+                };
+                rejectInitial(new Error('history unavailable'));
+                await initialPoll;
+                const errorDeadline = performance.now() + 3000;
+                while (jsDebugHistoryReadiness.phase !== 'error' && performance.now() < errorDeadline) {
+                  await new Promise(resolve => setTimeout(resolve, 20));
+                }
+                const errorGraph = document.querySelector('[data-js-debug-graph]');
             const error = {
               busy: errorGraph?.getAttribute('aria-busy'),
               phase: errorGraph?.dataset.jsDebugHistoryState,

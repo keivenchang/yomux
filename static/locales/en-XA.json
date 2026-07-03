@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "⟦{metric} (óťĥéř çłíéñťš áṽǧ)········⟧",
   "debug.graph.series.processCpu": "⟦{process} ÇƤÚ %··⟧",
   "debug.graph.series.systemCpu": "⟦šýšťéɱ áṽǧ ÇƤÚ %······⟧",
-  "debug.graph.series.systemMemory": "⟦šýšťéɱ ɱéɱóřý %······⟧",
+  "debug.graph.series.systemMemory": "⟦šýšťéɱ ɱéɱóřý·····⟧",
   "debug.graph.series.thisClient": "⟦{metric} (ťĥíš çłíéñť)······⟧",
   "debug.graph.series.tokensPerAgent": "⟦Ťóķéñš/áǧéñť/ɱíñ······⟧",
   "debug.graph.status.attention": "⟦Áťťéñťíóñ····⟧",

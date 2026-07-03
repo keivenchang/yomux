@@ -3049,6 +3049,9 @@ async function runEditorPreviewSuite() {
       hoverBottom: 116,
     }, 'YO!stats exposes one internally consistent SVG coordinate model');
     assert.ok(html.includes('viewBox="0 0 600 120"'), 'YO!stats chart viewBox consumes the shared SVG geometry');
+    for (const chart of ['memory', 'gpuUtil', 'gpuMemory']) {
+      assert.ok(html.includes(`data-js-debug-chart-restore="${chart}"`), `${chart} starts minimized in the top restore strip`);
+    }
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
     assert.ok(html.indexOf('data-js-debug-subtab="graph"') < html.indexOf('data-js-debug-subtab="events"'), 'YO!stats puts the Graph button left of API/SSE');
@@ -3717,7 +3720,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend has no current-versus-peer split');
   });
 
-  test('YO!stats graph renders top four host process areas and GPU device lines', () => {
+  test('YO!stats graph keeps CPU to YOLOmux and system lines and uses GPU device lines', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {locationPort: '8001'});
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -3727,10 +3730,13 @@ async function runEditorPreviewSuite() {
         start: Math.floor((now - 500) / 1000),
         duration: 1,
         sequence: 74,
+        cpu_total_percent: 7,
+        cpu_count: 1,
         system_cpu_total_percent: 40,
         system_cpu_count: 1,
         host_metrics: {
-          system_memory_total_percent: 55,
+          system_memory_used_total_bytes: 32 * 1024 * 1024 * 1024,
+          system_memory_capacity_total_bytes: 64 * 1024 * 1024 * 1024,
           system_memory_count: 1,
           cpu_processes: {
             'cpu:python': {label: 'python', total_percent: 30, samples: 1},
@@ -3740,25 +3746,31 @@ async function runEditorPreviewSuite() {
             'cpu:ignored': {label: 'ignored', total_percent: 1, samples: 1},
           },
           memory_processes: {
-            'memory:python': {label: 'python', total_percent: 20, samples: 1},
-            'memory:node': {label: 'node', total_percent: 10, samples: 1},
+            'memory:python': {label: 'python', total_bytes: 20 * 1024 * 1024 * 1024, samples: 1},
+            'memory:node': {label: 'node', total_bytes: 10 * 1024 * 1024 * 1024, samples: 1},
           },
           gpu_devices: {
-            'gpu:0': {label: 'GPU 0', util_total_percent: 70, memory_total_percent: 60, samples: 1},
-            'gpu:1': {label: 'GPU 1', util_total_percent: 40, memory_total_percent: 30, samples: 1},
+            'gpu:0': {label: 'GPU 0', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
+            'gpu:1': {label: 'GPU 1', util_total_percent: 0, memory_used_total_bytes: 30 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 48 * 1024 * 1024 * 1024, samples: 1},
           },
         },
       }],
     });
     const allSeries = api.debugGraphSeriesDataForTest(now);
-    const cpuSeries = allSeries.filter(series => series.hostMetric === 'cpu');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.label)], ['python', 'node', 'chrome', 'xterm'], 'CPU retains only the four largest process groups');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [30, 20, 10, 5], 'CPU process values are normalized to total host capacity');
-    assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:ignored'), false, 'smaller CPU groups do not create a fifth area');
+    assert.equal(allSeries.some(series => series.hostMetric === 'cpu'), false, 'CPU does not add generic host process-name groups');
+    assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:python'), false, 'CPU does not add generic python process lines');
     assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
+    api.setDebugGraphChartVisibleForTest('memory', true);
+    api.setDebugGraphChartVisibleForTest('gpuUtil', true);
+    api.setDebugGraphChartVisibleForTest('gpuMemory', true);
     const html = api.debugPanelHtmlForTest();
-    assert.match(html, /data-js-debug-chart="cpu" data-js-debug-chart-kind="area"[^>]*data-js-debug-chart-stacked="true"/, 'CPU renders cumulative process areas');
-    assert.match(html, /data-js-debug-area-series="host:cpu:cpu:python"[^>]*data-js-debug-area-stacked=/, 'CPU process areas expose stacked geometry');
+    assert.match(html, /data-js-debug-chart="cpu" data-js-debug-chart-kind="line"/, 'CPU renders only YOLOmux and system lines');
+    assert.match(html, /data-js-debug-series="cpu"[^>]*data-js-debug-line-pattern="solid"[^>]*--js-debug-series-color: var\(--active-accent-bright\)/, 'yolomux.py remains the theme-colored solid CPU line');
+    assert.doesNotMatch(html, /data-js-debug-series="host:cpu:/, 'generic host CPU process lines stay out of the CPU chart');
+    assert.match(html, /data-js-debug-axis-max="memory"[^>]*>64(?:\.0)?GB</, 'System memory uses the host capacity as an actual-memory axis');
+    assert.match(html, /data-js-debug-axis-mid="memory"[^>]*>32(?:\.0)?GB</, 'System memory midpoint shows actual gigabytes');
+    assert.match(html, /data-js-debug-axis-zero="memory"[^>]*>0GB</, 'System memory axis explicitly starts at 0GB');
+    assert.match(html, /data-js-debug-bar-series="gpu:gpuUtil:gpu:1"[^>]*data-js-debug-bar-total="0"/, 'a sampled 0% GPU still renders a visible utilization bar');
     assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
     assert.ok(html.includes('data-js-debug-chart-close="cpu"'), 'every chart has a compact X close control');
     const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
@@ -3813,7 +3825,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
-    assert.deepStrictEqual([...summary.charts], ['cpu', 'memory', 'gpuUtil', 'gpuMemory', 'latency', 'count', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats renders host CPU/memory and GPU/GPU-memory before client and agent charts');
+    assert.deepStrictEqual([...summary.charts], ['cpu', 'latency', 'count', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats keeps CPU open while System memory and both GPU charts start minimized');
 
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');

@@ -146,7 +146,7 @@
   "debug.graph.series.otherClientsAverage": "{metric}（其他用戶端平均）",
   "debug.graph.series.processCpu": "{process} 的 CPU %",
   "debug.graph.series.systemCpu": "系統平均 CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric}（此用戶端）",
   "debug.graph.series.tokensPerAgent": "權杖/代理/分鐘",
   "debug.graph.status.attention": "需要關注",

@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (เฉลี่ยไคลเอ็นต์อื่น) ระบบ",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "เฉลี่ย CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (ไคลเอนต์นี้)",
   "debug.graph.series.tokensPerAgent": "โทเค็น/ตัวแทน/นาที",
   "debug.graph.status.attention": "ความสนใจ",

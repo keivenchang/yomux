@@ -146,7 +146,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (other clients avg)",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "system avg CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (this client)",
   "debug.graph.series.tokensPerAgent": "Tokens/agent/min",
   "debug.graph.status.attention": "Attention",

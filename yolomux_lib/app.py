@@ -358,10 +358,7 @@ STATS_HISTORY_SERVER_FIELDS = (
     "tokens_per_agent_total",
     "agent_token_samples",
 )
-STATS_HOST_TOP_PROCESS_COUNT = 4
 STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
-STATS_HOST_PROCESS_CPU_LOCK = threading.Lock()
-STATS_HOST_PROCESS_CPU_PREVIOUS: dict[int, tuple[int, float]] = {}
 STATS_AGENT_TOKEN_HISTORY_FIELDS = frozenset({"tokens_per_agent_total", "agent_token_samples"})
 # Shared history uses this positional form only on disk. Keeping the field order in one place makes
 # the cross-process snapshot compact while readers still accept the older dictionary form.
@@ -498,75 +495,8 @@ def current_system_memory_percent() -> float | None:
     return clamp_cpu_percent((memory[1] / memory[0]) * 100.0)
 
 
-def stats_host_process_metrics() -> tuple[dict[str, dict[str, float | str]], dict[str, dict[str, float | str]]]:
-    """Return top CPU and RSS process groups as percentages of whole-host capacity."""
-    memory = current_system_memory_bytes()
-    memory_total = memory[0] if memory is not None else 0
-    try:
-        result = subprocess.run(
-            ["ps", "-A", "-o", "pid=,comm=,pcpu=,rss="],
-            capture_output=True,
-            text=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}, {}
-    if result.returncode != 0:
-        return {}, {}
-    cpu_by_name: dict[str, float] = {}
-    memory_by_name: dict[str, float] = {}
-    cpu_count = max(1, os.cpu_count() or 1)
-    now = time.perf_counter()
-    seen_pids: set[int] = set()
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        name = Path(parts[1]).name[:96] or "process"
-        try:
-            fallback_cpu_percent = max(0.0, float(parts[-2])) / cpu_count
-            rss_percent = max(0.0, float(parts[-1]) * 1024 / memory_total * 100.0) if memory_total > 0 else 0.0
-        except ValueError:
-            continue
-        cpu_percent = fallback_cpu_percent
-        if sys.platform != "darwin":
-            try:
-                after_name = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-                ticks = int(after_name[11]) + int(after_name[12])
-                with STATS_HOST_PROCESS_CPU_LOCK:
-                    previous = STATS_HOST_PROCESS_CPU_PREVIOUS.get(pid)
-                    STATS_HOST_PROCESS_CPU_PREVIOUS[pid] = (ticks, now)
-                if previous is not None and now > previous[1]:
-                    cpu_percent = clamp_cpu_percent(((ticks - previous[0]) / max(1, os.sysconf("SC_CLK_TCK"))) / (now - previous[1]) * 100.0 / cpu_count)
-                seen_pids.add(pid)
-            except (OSError, ValueError, IndexError):
-                pass
-        cpu_by_name[name] = cpu_by_name.get(name, 0.0) + cpu_percent
-        memory_by_name[name] = memory_by_name.get(name, 0.0) + rss_percent
-
-    if sys.platform != "darwin":
-        with STATS_HOST_PROCESS_CPU_LOCK:
-            for pid in list(STATS_HOST_PROCESS_CPU_PREVIOUS):
-                if pid not in seen_pids:
-                    STATS_HOST_PROCESS_CPU_PREVIOUS.pop(pid, None)
-
-    def top(values: dict[str, float], prefix: str) -> dict[str, dict[str, float | str]]:
-        return {
-            f"{prefix}:{name}": {"label": name, "value": round(clamp_cpu_percent(value), 4)}
-            for name, value in sorted(values.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
-            if value > 0
-        }
-
-    return top(cpu_by_name, "cpu"), top(memory_by_name, "memory")
-
-
 def stats_GPU_gpu_metrics() -> dict[str, Any]:
-    """Collect GPU device and process facts through the installed driver CLI, if present."""
+    """Collect aggregate GPU device facts through the installed driver CLI, if present."""
     try:
         devices_result = subprocess.run(
             ["gpu-info", "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -580,7 +510,6 @@ def stats_GPU_gpu_metrics() -> dict[str, Any]:
     if devices_result.returncode != 0:
         return {}
     devices: dict[str, dict[str, float | str]] = {}
-    device_by_uuid: dict[str, str] = {}
     for line in devices_result.stdout.splitlines():
         parts = [part.strip() for part in line.split(",")]
         if len(parts) != 5:
@@ -593,77 +522,15 @@ def stats_GPU_gpu_metrics() -> dict[str, Any]:
         except ValueError:
             continue
         key = f"gpu:{index}"
-        devices[key] = {"label": f"GPU {index}", "util_percent": util, "memory_percent": clamp_cpu_percent(memory_used / memory_total * 100.0) if memory_total else 0.0}
-        device_by_uuid[parts[1]] = key
+        devices[key] = {
+            "label": f"GPU {index}",
+            "util_percent": util,
+            "memory_used_bytes": int(memory_used * 1024 * 1024),
+            "memory_capacity_bytes": int(memory_total * 1024 * 1024),
+        }
     if not devices:
         return {}
-    gpu_memory_processes: dict[str, dict[str, float | str]] = {}
-    try:
-        apps_result = subprocess.run(
-            ["gpu-info", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        apps_result = None
-    if len(devices) == 1 and apps_result is not None and apps_result.returncode == 0:
-        # gpu-info does not include total memory on app rows. Re-read it from the device line.
-        device_total = 0.0
-        for line in devices_result.stdout.splitlines():
-            parts = [part.strip() for part in line.split(",")]
-            if len(parts) == 5:
-                try:
-                    device_total = float(parts[4])
-                except ValueError:
-                    pass
-        if device_total > 0:
-            grouped: dict[str, float] = {}
-            for line in apps_result.stdout.splitlines():
-                parts = [part.strip() for part in line.split(",")]
-                if len(parts) < 4 or parts[0] not in device_by_uuid:
-                    continue
-                try:
-                    value = max(0.0, float(parts[-1])) / device_total * 100.0
-                except ValueError:
-                    continue
-                name = Path(parts[2]).name[:96] or "process"
-                grouped[name] = grouped.get(name, 0.0) + value
-            gpu_memory_processes = {
-                f"gpu-memory:{name}": {"label": name, "value": round(value, 4)}
-                for name, value in sorted(grouped.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
-                if value > 0
-            }
-    gpu_util_processes: dict[str, dict[str, float | str]] = {}
-    try:
-        pmon_result = subprocess.run(
-            ["gpu-info", "pmon", "-c", "1", "-s", "um"],
-            capture_output=True,
-            text=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pmon_result = None
-    if len(devices) == 1 and pmon_result is not None and pmon_result.returncode == 0:
-        grouped: dict[str, float] = {}
-        for line in pmon_result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 8 or parts[0].startswith("#") or parts[1] == "-":
-                continue
-            try:
-                value = clamp_cpu_percent(float(parts[3]))
-            except ValueError:
-                continue
-            name = Path(parts[7]).name[:96] or "process"
-            grouped[name] = grouped.get(name, 0.0) + value
-        gpu_util_processes = {
-            f"gpu-util:{name}": {"label": name, "value": round(value, 4)}
-            for name, value in sorted(grouped.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
-            if value > 0
-        }
-    return {"devices": devices, "gpu_memory_processes": gpu_memory_processes, "gpu_util_processes": gpu_util_processes}
+    return {"devices": devices}
 
 
 def stats_macos_gpu_metrics() -> dict[str, Any]:
@@ -695,24 +562,29 @@ def stats_macos_gpu_metrics() -> dict[str, Any]:
         used = stats.get("In use system memory", stats.get("In use video memory", 0))
         try:
             util_percent = clamp_cpu_percent(float(util))
-            memory_percent = clamp_cpu_percent(float(used) / total_memory * 100.0) if total_memory > 0 else 0.0
+            memory_used_bytes = max(0, int(used))
         except (TypeError, ValueError):
             continue
-        devices[f"gpu:{index}"] = {"label": f"GPU {index}", "util_percent": util_percent, "memory_percent": memory_percent}
-    return {"devices": devices, "gpu_memory_processes": {}, "gpu_util_processes": {}} if devices else {}
+        devices[f"gpu:{index}"] = {
+            "label": f"GPU {index}",
+            "util_percent": util_percent,
+            "memory_used_bytes": memory_used_bytes,
+            "memory_capacity_bytes": total_memory,
+        }
+    return {"devices": devices} if devices else {}
 
 
 def stats_host_resource_metrics() -> dict[str, Any]:
-    cpu_processes, memory_processes = stats_host_process_metrics()
     gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics()
-    memory_percent = current_system_memory_percent()
+    memory = current_system_memory_bytes()
     return {
-        "system_memory_percent": memory_percent,
-        "cpu_processes": cpu_processes,
-        "memory_processes": memory_processes,
+        "system_memory_used_bytes": memory[1] if memory is not None else None,
+        "system_memory_capacity_bytes": memory[0] if memory is not None else None,
+        "cpu_processes": {},
+        "memory_processes": {},
         "gpu_devices": gpu.get("devices", {}),
-        "gpu_util_processes": gpu.get("gpu_util_processes", {}),
-        "gpu_memory_processes": gpu.get("gpu_memory_processes", {}),
+        "gpu_util_processes": {},
+        "gpu_memory_processes": {},
     }
 
 
@@ -750,7 +622,8 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
 
 def stats_history_empty_host_metrics() -> dict[str, Any]:
     return {
-        "system_memory_total_percent": 0.0,
+        "system_memory_used_total_bytes": 0.0,
+        "system_memory_capacity_total_bytes": 0.0,
         "system_memory_count": 0.0,
         "cpu_processes": {},
         "memory_processes": {},
@@ -1822,7 +1695,7 @@ class TmuxWebtermApp:
     def stats_history_host_metrics_snapshot(value: Any) -> dict[str, Any]:
         source = value if isinstance(value, dict) else {}
         result = stats_history_empty_host_metrics()
-        for field in ("system_memory_total_percent", "system_memory_count"):
+        for field in ("system_memory_used_total_bytes", "system_memory_capacity_total_bytes", "system_memory_count"):
             result[field] = max(0.0, float(source.get(field) or 0.0))
         for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
             items = source.get(field)
@@ -1835,10 +1708,11 @@ class TmuxWebtermApp:
                     continue
                 item = {"label": str(raw_item.get("label") or key)}
                 if field == "gpu_devices":
-                    for value_key in ("util_total_percent", "memory_total_percent", "samples"):
+                    for value_key in ("util_total_percent", "memory_used_total_bytes", "memory_capacity_total_bytes", "samples"):
                         item[value_key] = max(0.0, float(raw_item.get(value_key) or 0.0))
                 else:
-                    item["total_percent"] = max(0.0, float(raw_item.get("total_percent") or 0.0))
+                    value_key = "total_bytes" if field in ("memory_processes", "gpu_memory_processes") else "total_percent"
+                    item[value_key] = max(0.0, float(raw_item.get(value_key) or 0.0))
                     item["samples"] = max(0.0, float(raw_item.get("samples") or 0.0))
                 target[key] = item
             result[field] = target
@@ -1852,9 +1726,11 @@ class TmuxWebtermApp:
             target = stats_history_empty_host_metrics()
             bucket["host_metrics"] = target
         changed = False
-        memory_percent = metrics.get("system_memory_percent")
-        if isinstance(memory_percent, (int, float)) and math.isfinite(memory_percent):
-            target["system_memory_total_percent"] = float(target.get("system_memory_total_percent") or 0.0) + clamp_cpu_percent(float(memory_percent))
+        memory_used = metrics.get("system_memory_used_bytes")
+        memory_capacity = metrics.get("system_memory_capacity_bytes")
+        if isinstance(memory_used, (int, float)) and math.isfinite(memory_used):
+            target["system_memory_used_total_bytes"] = float(target.get("system_memory_used_total_bytes") or 0.0) + max(0.0, float(memory_used))
+            target["system_memory_capacity_total_bytes"] = float(target.get("system_memory_capacity_total_bytes") or 0.0) + max(0.0, float(memory_capacity or 0.0))
             target["system_memory_count"] = float(target.get("system_memory_count") or 0.0) + 1.0
             changed = True
         for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes"):
@@ -1867,12 +1743,13 @@ class TmuxWebtermApp:
                 if not key or not isinstance(raw_item, dict):
                     continue
                 try:
-                    value = clamp_cpu_percent(float(raw_item.get("value") or 0.0))
+                    value = max(0.0, float(raw_item.get("value") or 0.0))
                 except (TypeError, ValueError):
                     continue
-                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), "total_percent": 0.0, "samples": 0.0})
+                value_key = "total_bytes" if field in ("memory_processes", "gpu_memory_processes") else "total_percent"
+                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), value_key: 0.0, "samples": 0.0})
                 item["label"] = str(raw_item.get("label") or item.get("label") or key)
-                item["total_percent"] = float(item.get("total_percent") or 0.0) + value
+                item[value_key] = float(item.get(value_key) or 0.0) + value
                 item["samples"] = float(item.get("samples") or 0.0) + 1.0
                 changed = True
         devices = metrics.get("gpu_devices")
@@ -1884,13 +1761,15 @@ class TmuxWebtermApp:
                     continue
                 try:
                     util = clamp_cpu_percent(float(raw_item.get("util_percent") or 0.0))
-                    memory = clamp_cpu_percent(float(raw_item.get("memory_percent") or 0.0))
+                    memory_used = max(0.0, float(raw_item.get("memory_used_bytes") or 0.0))
+                    memory_capacity = max(0.0, float(raw_item.get("memory_capacity_bytes") or 0.0))
                 except (TypeError, ValueError):
                     continue
-                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), "util_total_percent": 0.0, "memory_total_percent": 0.0, "samples": 0.0})
+                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), "util_total_percent": 0.0, "memory_used_total_bytes": 0.0, "memory_capacity_total_bytes": 0.0, "samples": 0.0})
                 item["label"] = str(raw_item.get("label") or item.get("label") or key)
                 item["util_total_percent"] = float(item.get("util_total_percent") or 0.0) + util
-                item["memory_total_percent"] = float(item.get("memory_total_percent") or 0.0) + memory
+                item["memory_used_total_bytes"] = float(item.get("memory_used_total_bytes") or 0.0) + memory_used
+                item["memory_capacity_total_bytes"] = float(item.get("memory_capacity_total_bytes") or 0.0) + memory_capacity
                 item["samples"] = float(item.get("samples") or 0.0) + 1.0
                 changed = True
         return changed
@@ -1901,18 +1780,19 @@ class TmuxWebtermApp:
         if not isinstance(target, dict):
             target = stats_history_empty_host_metrics()
             target_bucket["host_metrics"] = target
-        for field in ("system_memory_total_percent", "system_memory_count"):
+        for field in ("system_memory_used_total_bytes", "system_memory_capacity_total_bytes", "system_memory_count"):
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
             destination = target.setdefault(field, {})
             for key, source_item in source[field].items():
                 if field == "gpu_devices":
-                    item = destination.setdefault(key, {"label": source_item["label"], "util_total_percent": 0.0, "memory_total_percent": 0.0, "samples": 0.0})
-                    for value_key in ("util_total_percent", "memory_total_percent", "samples"):
+                    item = destination.setdefault(key, {"label": source_item["label"], "util_total_percent": 0.0, "memory_used_total_bytes": 0.0, "memory_capacity_total_bytes": 0.0, "samples": 0.0})
+                    for value_key in ("util_total_percent", "memory_used_total_bytes", "memory_capacity_total_bytes", "samples"):
                         item[value_key] = float(item.get(value_key) or 0.0) + float(source_item.get(value_key) or 0.0)
                 else:
-                    item = destination.setdefault(key, {"label": source_item["label"], "total_percent": 0.0, "samples": 0.0})
-                    item["total_percent"] = float(item.get("total_percent") or 0.0) + float(source_item.get("total_percent") or 0.0)
+                    value_key = "total_bytes" if field in ("memory_processes", "gpu_memory_processes") else "total_percent"
+                    item = destination.setdefault(key, {"label": source_item["label"], value_key: 0.0, "samples": 0.0})
+                    item[value_key] = float(item.get(value_key) or 0.0) + float(source_item.get(value_key) or 0.0)
                     item["samples"] = float(item.get("samples") or 0.0) + float(source_item.get("samples") or 0.0)
                 item["label"] = str(source_item.get("label") or item.get("label") or key)
 
@@ -1925,9 +1805,9 @@ class TmuxWebtermApp:
             if source is None or source.get("_host_metrics_missing") is True:
                 continue
             metrics = self.stats_history_host_metrics_snapshot(source.get("host_metrics"))
-            if float(metrics.get("system_memory_count") or 0.0) > 0:
+            if float(metrics.get("system_memory_count") or 0.0) > 0 and float(metrics.get("system_memory_capacity_total_bytes") or 0.0) > 0:
                 return True
-            if any(bool(metrics.get(field)) for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices")):
+            if any(float(item.get("memory_capacity_total_bytes") or 0.0) > 0 for item in metrics.get("gpu_devices", {}).values()):
                 return True
         return False
 
@@ -3054,9 +2934,9 @@ class TmuxWebtermApp:
             metrics = bucket.get("host_metrics")
             if not isinstance(metrics, dict):
                 continue
-            if float(metrics.get("system_memory_count") or 0.0) > 0:
+            if float(metrics.get("system_memory_count") or 0.0) > 0 and float(metrics.get("system_memory_capacity_total_bytes") or 0.0) > 0:
                 return True
-            if any(bool(metrics.get(field)) for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices")):
+            if any(float(item.get("memory_capacity_total_bytes") or 0.0) > 0 for item in metrics.get("gpu_devices", {}).values()):
                 return True
         return False
 

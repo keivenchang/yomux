@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (अन्य ग्राहक औसत)",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "सिस्टम औसत CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (यह ग्राहक)",
   "debug.graph.series.tokensPerAgent": "टोकन/एजेंट/मिनट",
   "debug.graph.status.attention": "ध्यान दें",

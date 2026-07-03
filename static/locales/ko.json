@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "{metric}(다른 클라이언트 평균)",
   "debug.graph.series.processCpu": "{process}의 CPU %",
   "debug.graph.series.systemCpu": "시스템 평균 CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric}(이 클라이언트)",
   "debug.graph.series.tokensPerAgent": "토큰/에이전트/분",
   "debug.graph.status.attention": "주의",

@@ -226,7 +226,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (متوسط العملاء الآخرين)",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "نظام متوسط CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (هذا العميل)",
   "debug.graph.series.tokensPerAgent": "الرموز / الوكيل / دقيقة",
   "debug.graph.status.attention": "انتبه",

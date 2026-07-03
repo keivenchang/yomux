@@ -208,7 +208,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (media altri clienti)",
   "debug.graph.series.processCpu": "{process}: CPU %",
   "debug.graph.series.systemCpu": "media del sistema CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (questo cliente)",
   "debug.graph.series.tokensPerAgent": "Token/agente/min",
   "debug.graph.status.attention": "Attenzione",

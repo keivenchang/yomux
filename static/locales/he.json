@@ -208,7 +208,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (ממוצע לקוחות אחרים)",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "ממוצע מערכת CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (לקוח זה)",
   "debug.graph.series.tokensPerAgent": "אסימונים/סוכן/דקה",
   "debug.graph.status.attention": "תשומת לב",

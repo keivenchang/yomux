@@ -35631,6 +35631,7 @@ let jsDebugGraphZoomDomain = null;
 let jsDebugGraphSelectionState = null;
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphHiddenCharts = null;
+let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10, 30]);
 const jsDebugGraphRangeOptions = Object.freeze([
@@ -35670,6 +35671,7 @@ const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
@@ -35748,12 +35750,6 @@ const jsDebugGraphProcessCpuColors = Object.freeze({
   // distinguishable without being mistaken for the current YOLOmux process.
   peers: Object.freeze(['var(--bad)', 'var(--accent-gold)', 'var(--link-soft)']),
 });
-const jsDebugGraphHostProcessColors = Object.freeze([
-  'var(--active-accent-bright)',
-  'var(--accent-gold)',
-  'var(--link-soft)',
-  'var(--bad)',
-]);
 const jsDebugGraphGpuDeviceColors = Object.freeze([
   'var(--active-accent-bright)',
   'var(--bad)',
@@ -35772,13 +35768,13 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'percent', linePattern: 'solid'},
+  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid'},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['systemCpu'], unit: 'percent', fixedMax: 100, kind: 'area', stacked: true, hostMetric: 'cpu'},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', series: ['systemMemory'], unit: 'percent', fixedMax: 100, kind: 'area', stacked: true, hostMetric: 'memory'},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', series: [], unit: 'percent', fixedMax: 100, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', series: [], unit: 'percent', fixedMax: 100, hostMetric: 'gpuMemory'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
   {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
@@ -35829,7 +35825,12 @@ function loadJsDebugStatsUiPreferences() {
   jsDebugGraphRangeSeconds = jsDebugGraphRangeOptions.some(option => option.seconds === Number(saved.rangeSeconds))
     ? Number(saved.rangeSeconds)
     : jsDebugGraphDefaultRangeSeconds;
-  jsDebugGraphHiddenCharts = new Set(Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts.map(value => String(value || '')) : []);
+  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
+  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
+  for (const key of visible) hidden.delete(key);
+  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
+  jsDebugGraphHiddenCharts = hidden;
+  jsDebugGraphVisibleCharts = visible;
 }
 
 function saveJsDebugStatsUiPreferences() {
@@ -35840,6 +35841,7 @@ function saveJsDebugStatsUiPreferences() {
       scaleSeconds: jsDebugGraphScaleSeconds,
       rangeSeconds: jsDebugGraphRangeSeconds,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
+      visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
     }));
   } catch (_) {
   }
@@ -35848,6 +35850,7 @@ function saveJsDebugStatsUiPreferences() {
 function debugGraphHiddenChartKeys() {
   loadJsDebugStatsUiPreferences();
   if (!(jsDebugGraphHiddenCharts instanceof Set)) jsDebugGraphHiddenCharts = new Set();
+  if (!(jsDebugGraphVisibleCharts instanceof Set)) jsDebugGraphVisibleCharts = new Set();
   return jsDebugGraphHiddenCharts;
 }
 
@@ -35859,8 +35862,13 @@ function setDebugGraphChartVisible(key, visible) {
   const chartKey = String(key || '');
   if (!chartKey) return;
   const hidden = debugGraphHiddenChartKeys();
-  if (visible) hidden.delete(chartKey);
-  else hidden.add(chartKey);
+  if (visible) {
+    hidden.delete(chartKey);
+    jsDebugGraphVisibleCharts.add(chartKey);
+  } else {
+    hidden.add(chartKey);
+    jsDebugGraphVisibleCharts.delete(chartKey);
+  }
   saveJsDebugStatsUiPreferences();
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
 }
@@ -36386,7 +36394,8 @@ function debugGraphNewBucket(startMs, durationMs) {
 
 function debugGraphNewHostMetrics() {
   return {
-    systemMemoryTotalPercent: 0,
+    systemMemoryUsedTotalBytes: 0,
+    systemMemoryCapacityTotalBytes: 0,
     systemMemoryCount: 0,
     cpuProcesses: new Map(),
     memoryProcesses: new Map(),
@@ -36661,29 +36670,31 @@ function debugGraphMergeBucket(target, source) {
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());
-    targetHost.systemMemoryTotalPercent += Number(sourceHost.systemMemoryTotalPercent || 0);
+    targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0);
+    targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0);
     targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0);
-    for (const [targetMap, sourceMap] of [
-      [targetHost.cpuProcesses, sourceHost.cpuProcesses],
-      [targetHost.memoryProcesses, sourceHost.memoryProcesses],
-      [targetHost.gpuUtilProcesses, sourceHost.gpuUtilProcesses],
-      [targetHost.gpuMemoryProcesses, sourceHost.gpuMemoryProcesses],
+    for (const [targetMap, sourceMap, valueKey] of [
+      [targetHost.cpuProcesses, sourceHost.cpuProcesses, 'totalPercent'],
+      [targetHost.memoryProcesses, sourceHost.memoryProcesses, 'totalBytes'],
+      [targetHost.gpuUtilProcesses, sourceHost.gpuUtilProcesses, 'totalPercent'],
+      [targetHost.gpuMemoryProcesses, sourceHost.gpuMemoryProcesses, 'totalBytes'],
     ]) {
       if (!(sourceMap instanceof Map)) continue;
       for (const [key, sourceItem] of sourceMap.entries()) {
-        const item = targetMap.get(key) || {label: sourceItem.label || key, totalPercent: 0, samples: 0};
+        const item = targetMap.get(key) || {label: sourceItem.label || key, [valueKey]: 0, samples: 0};
         item.label = sourceItem.label || item.label;
-        item.totalPercent += Number(sourceItem.totalPercent || 0);
+        item[valueKey] += Number(sourceItem[valueKey] || 0);
         item.samples += Number(sourceItem.samples || 0);
         targetMap.set(key, item);
       }
     }
     if (sourceHost.gpuDevices instanceof Map) {
       for (const [key, sourceItem] of sourceHost.gpuDevices.entries()) {
-        const item = targetHost.gpuDevices.get(key) || {label: sourceItem.label || key, utilTotalPercent: 0, memoryTotalPercent: 0, samples: 0};
+        const item = targetHost.gpuDevices.get(key) || {label: sourceItem.label || key, utilTotalPercent: 0, memoryUsedTotalBytes: 0, memoryCapacityTotalBytes: 0, samples: 0};
         item.label = sourceItem.label || item.label;
         item.utilTotalPercent += Number(sourceItem.utilTotalPercent || 0);
-        item.memoryTotalPercent += Number(sourceItem.memoryTotalPercent || 0);
+        item.memoryUsedTotalBytes += Number(sourceItem.memoryUsedTotalBytes || 0);
+        item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0);
         item.samples += Number(sourceItem.samples || 0);
         targetHost.gpuDevices.set(key, item);
       }
@@ -36926,16 +36937,16 @@ function debugGraphApplyServerRecord(record) {
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
 }
 
-function debugGraphApplyHostMetricProcesses(target, source) {
+function debugGraphApplyHostMetricProcesses(target, source, valueKey = 'totalPercent') {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return;
   for (const [key, record] of Object.entries(source)) {
     if (!record || typeof record !== 'object') continue;
-    const totalPercent = Number(record.total_percent || 0);
+    const total = Number(valueKey === 'totalBytes' ? record.total_bytes : record.total_percent || 0);
     const samples = Number(record.samples || 0);
-    if (!Number.isFinite(totalPercent) || !Number.isFinite(samples) || samples <= 0) continue;
-    const item = target.get(key) || {label: String(record.label || key), totalPercent: 0, samples: 0};
+    if (!Number.isFinite(total) || !Number.isFinite(samples) || samples <= 0) continue;
+    const item = target.get(key) || {label: String(record.label || key), [valueKey]: 0, samples: 0};
     item.label = String(record.label || item.label || key);
-    item.totalPercent = Math.max(item.totalPercent, Math.max(0, totalPercent));
+    item[valueKey] = Math.max(item[valueKey], Math.max(0, total));
     item.samples = Math.max(item.samples, Math.max(0, samples));
     target.set(key, item);
   }
@@ -36944,21 +36955,23 @@ function debugGraphApplyHostMetricProcesses(target, source) {
 function debugGraphApplyHostMetrics(bucket, source) {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return;
   const target = bucket.hostMetrics || (bucket.hostMetrics = debugGraphNewHostMetrics());
-  target.systemMemoryTotalPercent = Math.max(target.systemMemoryTotalPercent, Number(source.system_memory_total_percent || 0));
+  target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
+  target.systemMemoryCapacityTotalBytes = Math.max(target.systemMemoryCapacityTotalBytes, Number(source.system_memory_capacity_total_bytes || 0));
   target.systemMemoryCount = Math.max(target.systemMemoryCount, Number(source.system_memory_count || 0));
   debugGraphApplyHostMetricProcesses(target.cpuProcesses, source.cpu_processes);
-  debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes);
+  debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes, 'totalBytes');
   debugGraphApplyHostMetricProcesses(target.gpuUtilProcesses, source.gpu_util_processes);
-  debugGraphApplyHostMetricProcesses(target.gpuMemoryProcesses, source.gpu_memory_processes);
+  debugGraphApplyHostMetricProcesses(target.gpuMemoryProcesses, source.gpu_memory_processes, 'totalBytes');
   if (!source.gpu_devices || typeof source.gpu_devices !== 'object' || Array.isArray(source.gpu_devices)) return;
   for (const [key, record] of Object.entries(source.gpu_devices)) {
     if (!record || typeof record !== 'object') continue;
     const samples = Number(record.samples || 0);
     if (!Number.isFinite(samples) || samples <= 0) continue;
-    const item = target.gpuDevices.get(key) || {label: String(record.label || key), utilTotalPercent: 0, memoryTotalPercent: 0, samples: 0};
+    const item = target.gpuDevices.get(key) || {label: String(record.label || key), utilTotalPercent: 0, memoryUsedTotalBytes: 0, memoryCapacityTotalBytes: 0, samples: 0};
     item.label = String(record.label || item.label || key);
     item.utilTotalPercent = Math.max(item.utilTotalPercent, Math.max(0, Number(record.util_total_percent || 0)));
-    item.memoryTotalPercent = Math.max(item.memoryTotalPercent, Math.max(0, Number(record.memory_total_percent || 0)));
+    item.memoryUsedTotalBytes = Math.max(item.memoryUsedTotalBytes, Math.max(0, Number(record.memory_used_total_bytes || 0)));
+    item.memoryCapacityTotalBytes = Math.max(item.memoryCapacityTotalBytes, Math.max(0, Number(record.memory_capacity_total_bytes || 0)));
     item.samples = Math.max(item.samples, Math.max(0, samples));
     target.gpuDevices.set(key, item);
   }
@@ -37296,7 +37309,7 @@ function debugGraphBucketValue(bucket, key) {
   }
   if (key === 'cpu') return bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0;
   if (key === 'systemCpu') return bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0;
-  if (key === 'systemMemory') return bucket.hostMetrics?.systemMemoryCount ? Math.min(100, bucket.hostMetrics.systemMemoryTotalPercent / bucket.hostMetrics.systemMemoryCount) : 0;
+  if (key === 'systemMemory') return bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0;
   return 0;
 }
 
@@ -37332,11 +37345,14 @@ function debugGraphHostMetricBucketValue(bucket, series) {
   if (series.hostProcessId) {
     const mapName = series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
     const item = host[mapName] instanceof Map ? host[mapName].get(series.hostProcessId) : null;
-    return Number(item?.samples || 0) > 0 ? Math.min(100, Number(item.totalPercent || 0) / Number(item.samples || 1)) : 0;
+    const total = series.hostMetric === 'memory' || series.hostMetric === 'gpuMemory'
+      ? Number(item?.totalBytes || 0)
+      : Number(item?.totalPercent || 0);
+    return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
   }
   const item = host.gpuDevices instanceof Map ? host.gpuDevices.get(series.gpuDeviceId) : null;
-  const total = series.hostMetric === 'gpuUtil' ? Number(item?.utilTotalPercent || 0) : Number(item?.memoryTotalPercent || 0);
-  return Number(item?.samples || 0) > 0 ? Math.min(100, total / Number(item.samples || 1)) : 0;
+  const total = series.hostMetric === 'gpuUtil' ? Number(item?.utilTotalPercent || 0) : Number(item?.memoryUsedTotalBytes || 0);
+  return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
 }
 
 function debugGraphSeriesBucketValue(bucket, series) {
@@ -37483,6 +37499,7 @@ function debugGraphTerseTimeText(milliseconds) {
 
 function debugGraphTerseBytesText(bytes) {
   const number = Math.max(0, Number(bytes) || 0);
+  if (number >= 1024 * 1024 * 1024) return `${(number / 1024 / 1024 / 1024).toFixed(number >= 100 * 1024 * 1024 * 1024 ? 0 : 1)}GB`;
   if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(number >= 100 * 1024 * 1024 ? 0 : 1)}MB`;
   if (number >= 1024) return `${(number / 1024).toFixed(number >= 100 * 1024 ? 0 : 1)}kB`;
   return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}B`;
@@ -37494,7 +37511,7 @@ function debugGraphAxisValueText(value, unit) {
     if (unit === 'count') return '0';
     if (unit === 'countPerSecond') return '0';
     if (unit === 'ms') return '0';
-    if (unit === 'bytes') return '0';
+    if (unit === 'bytes') return '0GB';
     if (unit === 'bytesPerSecond') return '0';
     if (unit === 'tokens') return '0';
     if (unit === 'tokensPerMinute') return '0';
@@ -37690,11 +37707,12 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
       processes.set(processId, String(process?.label || processId));
     }
   }
-  if (!processes.size) return [{key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid'}];
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
+  const fallbackSelf = {key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current};
+  if (!processes.size) return [fallbackSelf];
   let peerIndex = 0;
-  return [...processes.entries()]
+  const definitions = [...processes.entries()]
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .map(([processId, label]) => {
       const current = processId === currentProcessId;
@@ -37714,32 +37732,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         color,
       };
     });
-}
-
-function debugGraphHostProcessSeriesDefs(buckets, metric) {
-  const mapName = metric === 'cpu' ? 'cpuProcesses' : metric === 'memory' ? 'memoryProcesses' : metric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
-  const processes = new Map();
-  for (const bucket of buckets) {
-    const source = bucket.hostMetrics?.[mapName];
-    if (!(source instanceof Map)) continue;
-    for (const [key, item] of source.entries()) {
-      if (Number(item?.samples || 0) <= 0) continue;
-      const prior = processes.get(key) || {label: String(item.label || key), total: 0};
-      prior.total += Number(item.totalPercent || 0);
-      processes.set(key, prior);
-    }
-  }
-  return [...processes.entries()]
-    .sort((a, b) => (b[1].total - a[1].total) || a[1].label.localeCompare(b[1].label))
-    .slice(0, 4)
-    .map(([processId, item], index) => ({
-      key: `host:${metric}:${processId}`,
-      label: item.label,
-      unit: 'percent',
-      hostMetric: metric,
-      hostProcessId: processId,
-      color: jsDebugGraphHostProcessColors[index % jsDebugGraphHostProcessColors.length],
-    }));
+  return processes.has(currentProcessId) ? definitions : [fallbackSelf, ...definitions];
 }
 
 function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
@@ -37757,7 +37750,7 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     .map(([deviceId, label], index) => ({
       key: `gpu:${metric}:${deviceId}`,
       label,
-      unit: 'percent',
+      unit: metric === 'gpuMemory' ? 'bytes' : 'percent',
       hostMetric: metric,
       gpuDeviceId: deviceId,
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
@@ -37765,20 +37758,9 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
 }
 
 function debugGraphHostMetricSeriesDefs(buckets) {
-  const gpuDevices = new Set();
-  for (const bucket of buckets) {
-    if (bucket.hostMetrics?.gpuDevices instanceof Map) {
-      for (const key of bucket.hostMetrics.gpuDevices.keys()) gpuDevices.add(key);
-    }
-  }
-  const gpuUsesProcessNames = gpuDevices.size === 1;
-  const gpuUtilProcesses = gpuUsesProcessNames ? debugGraphHostProcessSeriesDefs(buckets, 'gpuUtil') : [];
-  const gpuMemoryProcesses = gpuUsesProcessNames ? debugGraphHostProcessSeriesDefs(buckets, 'gpuMemory') : [];
   return [
-    ...debugGraphHostProcessSeriesDefs(buckets, 'cpu'),
-    ...debugGraphHostProcessSeriesDefs(buckets, 'memory'),
-    ...(gpuUtilProcesses.length ? gpuUtilProcesses : debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil')),
-    ...(gpuMemoryProcesses.length ? gpuMemoryProcesses : debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory')),
+    ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil'),
+    ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory'),
   ];
 }
 
@@ -37818,7 +37800,6 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs))}</span>
     <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
@@ -37836,10 +37817,13 @@ function debugGraphHiddenChartsHtml() {
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
+  const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
+  const rangeLabel = debugGraphZoomDomainValid() ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-graph-controls">
     ${debugGraphScaleControlsHtml()}
-    ${debugGraphHiddenChartsHtml()}
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${debugGraphRangeControlsHtml(nowMs)}
+    ${debugGraphHiddenChartsHtml()}
   </div>`;
 }
 
@@ -38165,7 +38149,7 @@ function debugGraphBarRectsHtml(series, chartMax, domain) {
     if (hasDataValues && hasDataValues[index] !== true) return '';
     const topValue = Math.max(0, Number(value) || 0);
     const bottomValue = Math.max(0, Number(lowerValues?.[index] || 0));
-    if (topValue <= bottomValue) return '';
+    if (topValue <= bottomValue && series.zeroBar !== true) return '';
     const startMs = debugGraphSeriesTimeMs(series, index);
     const durationMs = Math.max(1000, Number(durations[index] || jsDebugGraphAgentTokenBucketSeconds * 1000));
     const x1 = debugGraphXForTime(startMs, domain);
@@ -38203,7 +38187,7 @@ function debugGraphLegendHtml(seriesItems) {
 
 function debugGraphLegendSwatchHtml(series) {
   if (series?.agentTokenSeries === true && series?.agentTokenTotalSeries !== true) return debugGraphAgentTokenLegendSwatchHtml(series);
-  if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu') {
+  if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
   return `<span class="js-debug-legend-swatch js-debug-legend-swatch--${esc(debugGraphSeriesClassKey(series))}"${debugGraphSeriesStyleAttr(series)}></span>`;
@@ -38292,8 +38276,11 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
+    if (group.hostMetric === 'cpu') {
+      return seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu');
+    }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
-      return [...hostSeries, ...seriesItems.filter(series => (group.hostMetric === 'cpu' && series.key === 'systemCpu') || (group.hostMetric === 'memory' && series.key === 'systemMemory'))];
+      return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
     }
     // Existing history predates host process sampling. Keep its per-YOLOmux CPU lines readable
     // until those one-second buckets age out instead of rendering an empty CPU chart.
@@ -38346,6 +38333,28 @@ function debugGraphChartAxisMax(group, rawMax) {
   return debugGraphNiceAxisMax(rawMax, group.unit);
 }
 
+function debugGraphChartCapacityMax(group, buckets) {
+  if (group.capacityMetric === 'systemMemory') {
+    return Math.max(0, ...(buckets || []).map(bucket => {
+      const host = bucket?.hostMetrics;
+      return Number(host?.systemMemoryCount || 0) > 0
+        ? Number(host.systemMemoryCapacityTotalBytes || 0) / Number(host.systemMemoryCount || 1)
+        : 0;
+    }));
+  }
+  if (group.capacityMetric === 'gpuMemory') {
+    return Math.max(0, ...(buckets || []).map(bucket => {
+      if (!(bucket?.hostMetrics?.gpuDevices instanceof Map)) return 0;
+      let total = 0;
+      for (const item of bucket.hostMetrics.gpuDevices.values()) {
+        if (Number(item?.samples || 0) > 0) total += Number(item.memoryCapacityTotalBytes || 0) / Number(item.samples || 1);
+      }
+      return total;
+    }));
+  }
+  return 0;
+}
+
 function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now()) {
   if (group?.key === 'agentTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
@@ -38366,7 +38375,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
-  const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0));
+  const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
   const max = debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
@@ -38377,6 +38386,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   const displayedSummaryHtml = displayedSummary === null
     ? ''
     : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
+  const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
@@ -38384,15 +38394,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
         ${displayedSummaryHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
-      ${debugGraphLegendHtml(legendSeries)}
+      ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
-    <div class="js-debug-chart-body">
+    ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml(group, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
+          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, debugGraphCommunicationSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
@@ -38402,7 +38412,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
         </svg>
       </div>
       ${debugGraphXAxisHtml(domain)}
-    </div>
+    </div>`}
   </section>`;
 }
 

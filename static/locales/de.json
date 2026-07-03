@@ -202,7 +202,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (andere Kunden im Durchschnitt)",
   "debug.graph.series.processCpu": "CPU-Auslastung von {process} (%)",
   "debug.graph.series.systemCpu": "Durchschnittliche System-CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (dieser Kunde)",
   "debug.graph.series.tokensPerAgent": "Tokens/Agent/min",
   "debug.graph.status.attention": "Achtung",

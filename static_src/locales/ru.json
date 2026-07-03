@@ -156,7 +156,7 @@
   "debug.graph.series.otherClientsAverage": "{metric} (среднее для других клиентов)",
   "debug.graph.series.processCpu": "{process} CPU %",
   "debug.graph.series.systemCpu": "системное среднее CPU %",
-  "debug.graph.series.systemMemory": "system memory %",
+  "debug.graph.series.systemMemory": "system memory",
   "debug.graph.series.thisClient": "{metric} (этот клиент)",
   "debug.graph.series.tokensPerAgent": "Токенов/агент/мин",
   "debug.graph.status.attention": "Внимание",

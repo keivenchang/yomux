@@ -98,33 +98,37 @@ def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch):
     } <= set(second["_endpoint_profile"])
 
 
-def test_stats_host_process_metrics_normalize_cpu_and_memory_to_the_whole_host(monkeypatch):
+def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
     monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1024 * 1024, 512 * 1024))
-    monkeypatch.setattr(app_module.os, "cpu_count", lambda: 4)
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="11 python 200.0 256\n12 node 100.0 128\n13 python 40.0 64\n"))
+    monkeypatch.setattr(app_module, "stats_GPU_gpu_metrics", lambda: {"devices": {"gpu:0": {"label": "GPU 0", "util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1024}}})
 
-    cpu, memory = app_module.stats_host_process_metrics()
+    metrics = app_module.stats_host_resource_metrics()
 
-    assert cpu["cpu:python"]["value"] == 60.0
-    assert cpu["cpu:node"]["value"] == 25.0
-    assert memory["memory:python"]["value"] == 31.25
-    assert memory["memory:node"]["value"] == 12.5
+    assert metrics["system_memory_used_bytes"] == 512 * 1024
+    assert metrics["system_memory_capacity_bytes"] == 1024 * 1024
+    assert metrics["cpu_processes"] == {}
+    assert metrics["memory_processes"] == {}
+    assert metrics["gpu_util_processes"] == {}
+    assert metrics["gpu_memory_processes"] == {}
 
 
-def test_stats_GPU_gpu_metrics_use_processes_for_single_gpu_and_devices_for_many(monkeypatch):
-    responses = iter([
-        SimpleNamespace(returncode=0, stdout="0, GPU-0, 75, 4000, 8000\n"),
-        SimpleNamespace(returncode=0, stdout="GPU-0, 99, python, 2000\nGPU-0, 98, node, 1000\n"),
-        SimpleNamespace(returncode=0, stdout="# gpu pid type sm mem enc dec command\n0 99 C 60 10 0 0 python\n0 98 C 30 10 0 0 node\n"),
-    ])
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: next(responses))
+def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monkeypatch):
+    responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU-0, 75, 4000, 8000\n")])
+    calls = []
+
+    def run(*args, **_kwargs):
+        calls.append(args[0])
+        return next(responses)
+
+    monkeypatch.setattr(app_module.subprocess, "run", run)
 
     metrics = app_module.stats_GPU_gpu_metrics()
 
     assert metrics["devices"]["gpu:0"]["util_percent"] == 75.0
-    assert metrics["devices"]["gpu:0"]["memory_percent"] == 50.0
-    assert metrics["gpu_memory_processes"]["gpu-memory:python"]["value"] == 25.0
-    assert metrics["gpu_util_processes"]["gpu-util:python"]["value"] == 60.0
+    assert metrics["devices"]["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
+    assert metrics["devices"]["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
+    assert metrics == {"devices": metrics["devices"]}
+    assert calls == [["gpu-info", "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
 def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
@@ -137,8 +141,8 @@ def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypa
 
     metrics = app_module.stats_macos_gpu_metrics()
 
-    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_percent": 25.0}
-    assert metrics["gpu_util_processes"] == {}
+    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 8 * 1024 * 1024}
+    assert metrics == {"devices": metrics["devices"]}
 
 
 def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(monkeypatch):
@@ -148,10 +152,11 @@ def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(mo
     with webapp.stats_agent_token_lock:
         webapp.stats_agent_token_consumer_until = time.time() + 60
     monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {
-        "system_memory_percent": 45,
-        "cpu_processes": {"cpu:python": {"label": "python", "value": 25}},
+        "system_memory_used_bytes": 45 * 1024,
+        "system_memory_capacity_bytes": 64 * 1024,
+        "cpu_processes": {},
         "memory_processes": {},
-        "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_percent": 50, "memory_percent": 40}},
+        "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_percent": 50, "memory_used_bytes": 40 * 1024, "memory_capacity_bytes": 64 * 1024}},
         "gpu_util_processes": {},
         "gpu_memory_processes": {},
     })
@@ -165,8 +170,9 @@ def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(mo
         webapp.control_server.stop()
 
     assert metrics["system_memory_count"] == 1
-    assert metrics["cpu_processes"]["cpu:python"]["total_percent"] == 25
+    assert metrics["system_memory_used_total_bytes"] == 45 * 1024
     assert metrics["gpu_devices"]["gpu:0"]["util_total_percent"] == 50
+    assert metrics["gpu_devices"]["gpu:0"]["memory_used_total_bytes"] == 40 * 1024
 
 
 def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
@@ -10288,11 +10294,14 @@ def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(mon
 
 def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):
     downloads = []
+    real_run = app_module.subprocess.run
 
     def fake_which(name):
         return "/usr/bin/curl" if name == "curl" else None
 
     def fake_run(args, **_kwargs):
+        if Path(args[0]).name != "curl":
+            return real_run(args, **_kwargs)
         downloads.append(args)
         output = Path(args[args.index("--output") + 1])
         output.write_text("asset", encoding="utf-8")
