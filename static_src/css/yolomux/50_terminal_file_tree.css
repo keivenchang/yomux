@@ -152,7 +152,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 150px;
   padding: 4px;
   color: var(--chrome-text-strong);
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: 1px solid var(--sep-muted);
   border-radius: 7px;
   box-shadow: var(--shadow-elevated);
@@ -171,7 +171,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   gap: 9px;
   padding: 12px;
   color: var(--chrome-text-strong);
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 7px;
   box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
@@ -287,7 +287,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   max-width: var(--file-image-preview-max-inline-size);
   max-height: var(--file-image-preview-max-block-size);
   padding: 6px;
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
   box-shadow: 10px 14px 32px rgb(var(--shadow-rgb) / 0.62);
@@ -607,8 +607,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
   overflow: hidden;
-}
-.summary-context-line {
 }
 .summary-context-label {
   color: var(--text);
@@ -1048,7 +1046,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 0;
   padding: 0 0 2px;
 }
-.yoagent-recent-agents-label {
+.yoagent-section-title {
   color: var(--muted);
   font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
   text-transform: uppercase;
@@ -1187,20 +1185,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-transcript-copy {
   flex: 0 0 auto;
 }
-.yoagent-chat-clear {
-  height: 24px;
-  padding: 0 8px;
-  color: var(--muted);
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.yoagent-chat-clear:hover:not(:disabled),
-.yoagent-chat-clear:focus-visible {
-  color: var(--text);
-  border-color: var(--active-control-soft-border);
-}
 .yoagent-chat-history {
   /* One normal vertical owner for YO!agent activity. The outer #yoagent-content only keeps horizontal
      overflow, so thinking/stream refreshes do not expose nested rails. */
@@ -1239,19 +1223,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
-.yoagent-waiting-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-waiting-list {
+.yoagent-compact-list {
   display: grid;
   gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.yoagent-waiting-item {
+.yoagent-compact-item {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1264,7 +1243,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   flex: 0 0 auto;
   font-size: 9px;
 }
-.yoagent-waiting-label {
+.yoagent-compact-label {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -1275,7 +1254,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   flex: 0 0 auto;
   color: var(--muted);
 }
-.yoagent-waiting-clear {
+.yoagent-compact-action {
   appearance: none;
   flex: 0 0 auto;
   border: 1px solid var(--line);
@@ -1286,8 +1265,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
   padding: 4px 7px;
 }
-.yoagent-waiting-clear:hover,
-.yoagent-waiting-clear:focus-visible {
+.yoagent-compact-action:hover,
+.yoagent-compact-action:focus-visible {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
   outline: 0;
@@ -1302,24 +1281,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
-.yoagent-chat-queue-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-chat-queue-items {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.yoagent-chat-queue-item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
 .yoagent-chat-queue-index {
   display: inline-flex;
   align-items: center;
@@ -1332,30 +1293,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 50%;
   font: 800 10px/1 var(--mono-font);
 }
-.yoagent-chat-queue-text {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.yoagent-chat-queue-cancel {
-  appearance: none;
-  flex: 0 0 auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  color: var(--muted);
-  cursor: pointer;
-  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
-  padding: 4px 7px;
-}
-.yoagent-chat-queue-cancel:hover,
-.yoagent-chat-queue-cancel:focus-visible {
-  border-color: var(--active-control-focus-ring);
-  color: var(--text);
-  outline: 0;
-}
 .yoagent-jobs-list {
   display: grid;
   gap: 5px;
@@ -1365,11 +1302,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
-}
-.yoagent-jobs-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
 }
 .yoagent-jobs-items {
   display: grid;
@@ -1981,8 +1913,7 @@ body.theme-light .yoagent-chat-queue {
   background: color-mix(in srgb, var(--active-control-soft-bg) 72%, #ffffff);
   border-color: var(--active-control-soft-border);
 }
-body.theme-light .yoagent-chat-queue-title,
-body.theme-light .yoagent-chat-queue-cancel {
+body.theme-light :is(.yoagent-section-title, .yoagent-compact-action) {
   color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
@@ -3195,7 +3126,7 @@ body.app-vw-lte-980 .tabs {
   width: var(--file-explorer-tree-inline-size);
   z-index: var(--z-file-tree-drag);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   background: var(--panel);
   border-inline-end: 1px solid var(--line);
   box-shadow: 4px 0 18px rgb(var(--shadow-rgb) / 0.35);
@@ -3371,12 +3302,12 @@ body.app-vw-lte-980 .tabs {
 .file-tree-row.selected {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -3384,7 +3315,7 @@ body.app-vw-lte-980 .tabs {
   box-shadow: inset 3px 0 0 var(--active-control-border);
 }
 .file-tree-row.renaming {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-tree-row.new-entry:not(.selected) {
   color: #f7ffdc;
@@ -3597,6 +3528,7 @@ body.app-vw-lte-980 .tabs {
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   position: relative;
+  color: var(--accent-lime);
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
   content: "";
@@ -3607,9 +3539,6 @@ body.app-vw-lte-980 .tabs {
   border-radius: 999px;
   animation: metadata-refresh-spin 0.7s linear infinite;
   opacity: 0.9;
-}
-.file-tree-row.kind-dir.loading-children > .file-tree-icon {
-  color: var(--accent-lime);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--accent-lime);
@@ -3670,15 +3599,7 @@ body.theme-light .server-update-banner-reload:focus-visible {
   color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
-}
-body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: var(--pc-control-fg);
-}
-body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: var(--file-selection-text);
-  background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #b06a00;
@@ -3687,10 +3608,6 @@ body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name,
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
   color: #3f6312;
-}
-body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: var(--brand-green);
-  text-shadow: none;
 }
 .file-tree-name {
   flex: 0 1 auto;
@@ -3821,6 +3738,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 }
 .file-tree-children {
   position: relative;
+  display: block;
 }
 .file-tree-children::before {
   content: "";
@@ -3830,9 +3748,6 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
   border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
-}
-.file-tree-children {
-  display: block;
 }
 body.theme-light .file-explorer,
 body.theme-light .file-explorer-tree-col {
@@ -3863,7 +3778,7 @@ body.theme-light .file-explorer-path-inline.invalid {
 body.theme-light .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -3913,13 +3828,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 body.theme-light .file-tree-children::before {
   border-left-color: rgba(100, 116, 139, 0.28);
 }
-/* File Explorer now contains a tree column (left) and an editor column
-   that grows when a file is opened. Aside is a flex row of the two. */
-.file-explorer {
-  display: flex;
-  flex-direction: row;
-  width: var(--file-explorer-tree-inline-size);
-}
+/* File Explorer contains a tree column (left) and an editor column that grows when a file is opened. */
 .file-explorer-tree-col {
   display: flex;
   flex-direction: column;

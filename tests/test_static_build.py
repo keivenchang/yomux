@@ -17,8 +17,10 @@ from tools.static_build import locale_key_errors
 from tools.static_build import plural_family_bases
 from tools.static_build import source_catalogs
 from tools.static_build import lint_duplicate_functions
+from tools.static_build import lint_css_structure
 from tools.static_build import lint_repeated_raw_component_literals
 from tools.static_build import lint_raw_window_viewport_reads
+from tools.static_build import lint_raw_literal_equals_token
 from tools.static_build import pseudo_value
 from tools.static_build import repo_path
 from tools.static_build import _color_luminance_alpha
@@ -403,6 +405,31 @@ def test_duplicate_declaration_lint_also_catches_top_level_const(monkeypatch, tm
     assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'DUP' in: first.js, second.js"]
 
 
+def test_css_structure_lint_tree_is_clean():
+    assert lint_css_structure() == []
+
+
+def test_css_structure_lint_flags_duplicate_property_selector_and_empty_rule(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    first = tmp_path / "first.css"
+    second = tmp_path / "second.css"
+    first.write_text(
+        ":root { --tone: red; --tone: blue; }\n"
+        ".empty { /* migration remnant */ }\n"
+        ".shared { color: red; }\n"
+        "@media (width < 10px) { .shared { color: blue; } }\n",
+        encoding="utf-8",
+    )
+    second.write_text(".shared { background: black; }\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["first.css", "second.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_css_structure() == [
+        "first.css:1: CSS rule ':root' declares '--tone' more than once",
+        "first.css:2: empty CSS rule '.empty'",
+        "duplicate CSS selector '.shared' in top level: first.css:3, second.css:1; merge it into one owner",
+    ]
+
+
 def test_undefined_css_var_lint_is_clean():
     # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
     from tools.static_build import lint_undefined_css_vars
@@ -425,6 +452,21 @@ def test_repeated_raw_component_literal_lint_flags_new_repeats(monkeypatch, tmp_
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_repeated_raw_component_literals() == [
         "raw component color #123456 repeats in bad.css:1, bad.css:2; move it to a CSS token or add a reviewed allowlist reason"
+    ]
+
+
+def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    component = tmp_path / "component.css"
+    component.write_text(".label { color: rgb(17, 24, 39); }\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#111827": ["--lt-text"]})
+    assert sb._canonical_opaque_color("#111827") == "#111827"
+    assert sb._canonical_opaque_color("rgb(17, 24, 39)") == "#111827"
+    assert sb._canonical_opaque_color("rgba(17, 24, 39, 0.5)") is None
+    assert lint_raw_literal_equals_token() == [
+        "component.css:1: raw color rgb(17, 24, 39) duplicates token value(s) --lt-text; use var(--token)"
     ]
 
 

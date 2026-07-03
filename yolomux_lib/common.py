@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import os
 import re
 import signal
@@ -28,6 +29,7 @@ from zoneinfo import ZoneInfo
 from . import auth as _auth
 from .cache import MISS as cache_MISS
 from .locales import user_message_payload
+from .runtime_env import healed_runtime_path
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import run_cmd
 from .tmux_utils import unique_session_names
@@ -146,26 +148,10 @@ _YOLOMUX_COMMIT_COUNT: int | None = None
 _AGENT_PATH_WARNING_KEYS: set[str] = set()
 
 
-def _path_entries(value: str) -> list[str]:
-    return [entry for entry in str(value or "").split(os.pathsep) if entry]
-
-
 def heal_server_path() -> str:
     """Make agent CLIs installed under ~/.local/bin visible under stripped service environments."""
-    current_entries = _path_entries(os.environ.get("PATH", ""))
-    candidates: list[str] = []
-    for entry in _path_entries(os.environ.get("YOLOMUX_EXTRA_PATH", "")):
-        candidates.append(str(Path(entry).expanduser()))
-    local_bin = Path.home() / ".local" / "bin"
-    if local_bin.is_dir():
-        candidates.append(str(local_bin))
-    additions: list[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in current_entries and candidate not in additions:
-            additions.append(candidate)
-    if additions:
-        os.environ["PATH"] = os.pathsep.join([*additions, *current_entries])
-    return os.environ.get("PATH", "")
+    os.environ["PATH"] = healed_runtime_path(os.environ, home=Path.home())
+    return os.environ["PATH"]
 
 
 def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
@@ -179,10 +165,9 @@ def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     if base_env is not None:
         env.update(base_env)
-    heal_server_path()
     codex_home = codex_home_from_env(env)
     codex_home.mkdir(parents=True, exist_ok=True)
-    env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
+    env["PATH"] = healed_runtime_path(env, home=Path.home())
     env["CODEX_HOME"] = str(codex_home)
     env["TERM"] = "xterm-256color"
     env["NO_COLOR"] = "1"
@@ -206,6 +191,15 @@ heal_server_path()
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def positive_finite_number(value: Any) -> float:
+    """Normalize counters and rates that cannot be negative, infinite, or NaN."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 def project_git(project: Any) -> dict[str, Any]:

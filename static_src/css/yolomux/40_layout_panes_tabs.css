@@ -889,6 +889,7 @@ body.theme-light .drop-slot.drag-over {
   right: 8px;
   width: auto;
   max-height: min(60vh, 520px);
+  white-space: normal;
 }
 .panel-popover-zone.popover-open > .session-popover {
   visibility: visible;
@@ -938,6 +939,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
   --panel-ring-color: var(--pane-ring-attention);
+  --attention-ring-border: 1px;
 }
 /* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
    .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
@@ -951,11 +953,6 @@ body.theme-light .drop-slot.drag-over {
   --panel-ring-color: var(--pane-ring-attention);
 }
 /* needs-* panes get the shared .attention-pulse class from syncAttentionAnimation. */
-.panel.needs-input-pane,
-.panel.needs-exec-pane,
-.panel.needs-blocked-pane {
-  --attention-ring-border: 1px;
-}
 .panel.active-pane .panel-head {
   /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
   color: var(--pane-tab-text);
@@ -1005,9 +1002,6 @@ body.theme-light .drop-slot.drag-over {
   gap: 6px;
   overflow: hidden;
   white-space: nowrap;
-}
-.panel-popover-zone > .session-popover {
-  white-space: normal;
 }
 .panel-session-label .session-button-name {
   color: inherit;
@@ -1198,8 +1192,6 @@ body.theme-light .drop-slot.drag-over {
 }
 .repo-chip-menu .repo-chip-row-primary .repo-chip-path {
   font-weight: 700;
-}
-.repo-chip-menu .repo-chip-path {
 }
 .repo-chip-menu .repo-chip-meta {
   display: inline-flex;

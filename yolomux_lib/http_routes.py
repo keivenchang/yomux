@@ -31,6 +31,10 @@ from .web import static_content_type
 RouteRole = str | Callable[[Any, Any], str]
 RouteHandler = Callable[[Any, Any, "Route"], bool | None]
 PUBLIC = "public"
+SHARE_ACCESS_NONE = "none"
+SHARE_ACCESS_READONLY = "readonly"
+SHARE_ACCESS_SCOPED_FILE = "scoped-file"
+SHARE_ACCESS_VALUES = frozenset({SHARE_ACCESS_NONE, SHARE_ACCESS_READONLY, SHARE_ACCESS_SCOPED_FILE})
 
 
 class RequestValidationError(str):
@@ -61,6 +65,11 @@ class Route:
     handler: RouteHandler
     body_limit: int | None = None
     group: str = "core"
+    share_access: str = SHARE_ACCESS_NONE
+
+    def __post_init__(self) -> None:
+        if self.share_access not in SHARE_ACCESS_VALUES:
+            raise ValueError(f"invalid share access policy: {self.share_access}")
 
 
 def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
@@ -173,12 +182,7 @@ def parse_repo_refs_param(raw: str | None) -> dict[str, dict[str, str]] | None:
     return result or None
 
 
-def get_share_status_role(request: Any, parsed: Any) -> str:
-    del parsed
-    return "readonly" if request.share_token_text() else "admin"
-
-
-def share_readonly_post_role(request: Any, parsed: Any) -> str:
+def share_token_readonly_role(request: Any, parsed: Any) -> str:
     del parsed
     return "readonly" if request.share_token_text() else "admin"
 
@@ -204,12 +208,19 @@ def routes_for_method(method: str) -> tuple[Route, ...]:
     return ROUTES_BY_METHOD.get(method.upper(), ())
 
 
+def route_for_request(method: str, path: str) -> Route | None:
+    for route in routes_for_method(method):
+        if route_matches(route, path):
+            return route
+    return None
+
+
 def dispatch_http_route(request: Any, method: str) -> None:
     parsed = urlparse(request.path)
     if request.redirect_plaintext_to_https_if_needed(parsed):
         return
 
-    route = _find_route(method, parsed.path)
+    route = route_for_request(method, parsed.path)
     if route is None:
         _write_not_found_after_default_auth(request, method)
         return
@@ -227,13 +238,6 @@ def dispatch_http_route(request: Any, method: str) -> None:
         request.reject_forbidden(request.auth_identity(), "admin")
         return
     route.handler(request, parsed, route)
-
-
-def _find_route(method: str, path: str) -> Route | None:
-    for route in routes_for_method(method):
-        if route_matches(route, path):
-            return route
-    return None
 
 
 def _write_not_found_after_default_auth(request: Any, method: str) -> None:
@@ -296,6 +300,7 @@ def get_ping(request: Any, parsed: Any, route: Route) -> None:
 
 def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     del route
+    started = time.perf_counter()
     qs = parse_qs(parsed.query)
     since, error = parse_query_int(qs, "since", 0, min_value=0)
     if error:
@@ -306,18 +311,32 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     token_since, token_since_error = parse_query_int(qs, "token_since", 0, min_value=0)
     token_resolution, token_resolution_error = parse_query_int(qs, "token_resolution", 0, min_value=0)
     history_start, history_start_error = parse_query_int(qs, "history_start", 0, min_value=0)
-    if token_since_error or token_resolution_error or history_start_error:
-        request_error = token_since_error or token_resolution_error or history_start_error
+    history_end, history_end_error = parse_query_int(qs, "history_end", 0, min_value=0)
+    history_resolution, history_resolution_error = parse_query_int(qs, "history_resolution", 0, min_value=0, max_value=24 * 60 * 60)
+    history_max_points, history_max_points_error = parse_query_int(qs, "history_max_points", 0, min_value=0, max_value=100_000)
+    if token_since_error or token_resolution_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
+        request_error = token_since_error or token_resolution_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
         request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
-    request.write_json(request.server.app.stats_sample_payload(
+    payload = request.server.app.stats_sample_payload(
         since=since or 0,
         client_id=client_id,
         token_consumer=token_consumer,
         token_since=token_since or 0,
         token_resolution_seconds=token_resolution or 0,
         history_start=history_start or 0,
-    ))
+        history_end=history_end or 0,
+        history_resolution_seconds=history_resolution or 0,
+        history_max_points=history_max_points or 0,
+    )
+    app_profile = payload.pop("_endpoint_profile", None)
+    build_ms = (time.perf_counter() - started) * 1000
+    setattr(request, "_http_response_compute_ms", build_ms)
+    details = {"stats_build_ms": round(build_ms, 3)}
+    if isinstance(app_profile, dict):
+        details.update(app_profile)
+    setattr(request, "_http_response_performance_details", details)
+    request.write_json(payload)
 
 
 def post_stats_history(request: Any, parsed: Any, route: Route) -> None:
@@ -1101,20 +1120,20 @@ def post_fs_mkdir(request: Any, parsed: Any, route: Route) -> None:
 
 
 CORE_ROUTES = (
-    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core"),
+    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, group="core"),
     Route("GET", "/login", PUBLIC, get_login, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, group="core"),
-    Route("GET", "/api/ping", "readonly", get_ping, group="core"),
+    Route("GET", "/api/ping", "readonly", get_ping, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/stats-sample", "readonly", get_stats_sample, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
-    Route("GET", "/", "readonly", get_home, group="core"),
+    Route("GET", "/", "readonly", get_home, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
     Route("GET", "/pane-popout", "readonly", get_pane_popout, group="core"),
-    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core"),
-    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
+    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
     Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
@@ -1126,9 +1145,9 @@ CORE_ROUTES = (
     Route("GET", "/api/events", "readonly", get_events, group="core"),
     Route("GET", "/api/search", "readonly", get_search, group="core"),
     Route("GET", "/api/run-history", "readonly", get_run_history, group="core"),
-    Route("GET", "/api/activity", "readonly", get_activity, group="core"),
-    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core"),
-    Route("GET", "/api/session-files", "readonly", get_session_files, group="core"),
+    Route("GET", "/api/activity", "readonly", get_activity, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/session-files", "readonly", get_session_files, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/summary", "readonly", get_summary, group="core"),
     Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, group="core"),
     Route("POST", "/login", PUBLIC, post_login, group="core"),
@@ -1152,15 +1171,15 @@ CORE_ROUTES = (
 )
 
 SHARE_ROUTES = (
-    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share"),
-    Route("GET", "/api/share", get_share_status_role, get_share_status, group="share"),
+    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/share", share_token_readonly_role, get_share_status, group="share", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/ws/share-host", "admin", get_share_host_websocket, group="share"),
-    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share"),
-    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share"),
+    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/share", "admin", post_share_create, body_limit=16 * 1024, group="share"),
     Route("POST", "/api/share/stop", "admin", post_share_stop, body_limit=4096, group="share"),
     Route("POST", "/api/share/extend", "admin", post_share_extend, body_limit=4096, group="share"),
-    Route("POST", "/api/share/debug-profile", share_readonly_post_role, post_share_debug_profile, body_limit=64 * 1024, group="share"),
+    Route("POST", "/api/share/debug-profile", share_token_readonly_role, post_share_debug_profile, body_limit=64 * 1024, group="share", share_access=SHARE_ACCESS_READONLY),
 )
 
 YOAGENT_ROUTES = (
@@ -1185,19 +1204,19 @@ YOAGENT_ROUTES = (
 )
 
 FILESYSTEM_ROUTES = (
-    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem"),
+    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/fs/search", "readonly", get_fs_search, group="filesystem"),
-    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem"),
-    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem"),
-    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem"),
-    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem"),
-    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem"),
+    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
-    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem"),
+    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
     Route("GET", "/api/fs/zip", "readonly", get_fs_zip, group="filesystem"),
     Route("GET", "/api/fs/count", "readonly", get_fs_count, group="filesystem"),
     Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),
-    Route("POST", "/api/fs/batch", share_readonly_post_role, post_fs_batch, body_limit=64 * 1024, group="filesystem"),
+    Route("POST", "/api/fs/batch", share_token_readonly_role, post_fs_batch, body_limit=64 * 1024, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/fs/write", "admin", post_fs_write, group="filesystem"),
     Route("POST", "/api/fs/delete", "admin", post_fs_delete, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, body_limit=4096, group="filesystem"),
@@ -1214,7 +1233,7 @@ TMUX_ROUTES = (
     Route("GET", "/api/context-items", "readonly", get_context_items, group="tmux"),
     Route("GET", "/api/context-stream", "readonly", get_context_stream, group="tmux"),
     Route("GET", "/api/summary-stream", "admin", get_summary_stream, group="tmux"),
-    Route("GET", "/ws", "readonly", get_websocket, group="tmux"),
+    Route("GET", "/ws", "readonly", get_websocket, group="tmux", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/tmux-next", "admin", post_tmux_next, group="tmux"),
     Route("POST", "/api/tmux-status", "admin", post_tmux_status, group="tmux"),
     Route("POST", "/api/tmux-window", "admin", post_tmux_window, group="tmux"),

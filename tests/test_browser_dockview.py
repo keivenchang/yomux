@@ -1,3 +1,4 @@
+import os
 import time
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
@@ -37,6 +38,148 @@ def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(bro
     assert result["fromJsonCalls"] == 0, result
     assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True and result["secondPanelConnected"] is True, result
     assert result["elapsedMs"] < 300, result
+
+
+def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_budget(browser, tmp_path):
+    sessions = [str(index) for index in range(1, 13)]
+    transcript_sessions = {
+        session: {
+            "panes": [
+                {"target": f"{session}:0.0", "window": 0, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+                {"target": f"{session}:1.0", "window": 1, "window_name": "bash", "window_active": False, "active": True, "process_label": "bash"},
+            ],
+            "agents": [{"kind": "codex", "pane_target": f"{session}:0.0"}],
+        }
+        for session in sessions
+    }
+    file_item = "file:/home/test/yolomux.dev/PERF.md"
+    encoded_file = "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FPERF.md"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1,2,3,4,{encoded_file}&layout=row@50(left,right)&tabs=left:1,2,{encoded_file};right:3,4",
+        sessions=sessions,
+        transcript_sessions=transcript_sessions,
+    )
+    wait_for_dockview(browser, min_tabs=5)
+    browser.execute_async_script(
+        """
+        const done = arguments[0];
+        openTabberActivityOverview()
+          .then(() => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))
+          .catch(error => done(String(error)));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return fileExplorerMode === 'tabber' && document.querySelectorAll('[data-tabber-tree] .file-tree-row').length >= 41"
+        )
+    )
+    setup = browser.execute_script(
+        """
+        clearClientPerfCounters();
+        const api = dockviewLayoutState.api;
+        const originalFromJson = api.fromJSON.bind(api);
+        let fromJsonCalls = 0;
+        api.fromJSON = (...args) => {
+          fromJsonCalls += 1;
+          return originalFromJson(...args);
+        };
+        const originalRefresh = refreshTabberPanels;
+        let fullRefreshCalls = 0;
+        refreshTabberPanels = (...args) => {
+          fullRefreshCalls += 1;
+          return originalRefresh(...args);
+        };
+        const firstPanel = panelNodes.get('1');
+        const secondPanel = panelNodes.get('2');
+        firstPanel.__tabSwitchSentinel = 'first';
+        secondPanel.__tabSwitchSentinel = 'second';
+        window.__tabSwitchPerf = {samples: [], immediate: [], fromJsonCalls: () => fromJsonCalls, fullRefreshCalls: () => fullRefreshCalls, firstPanel, secondPanel};
+        document.addEventListener('pointerdown', event => {
+          const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
+          const item = tab?.dataset?.paneTab || '';
+          if (!['1', '2'].includes(item)) return;
+          const slot = slotForItem(item);
+          const started = performance.now();
+          requestAnimationFrame(() => {
+            const active = activeItemForSide(slot) === item;
+            const activeClass = tab.classList.contains('active') || tab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+            window.__tabSwitchPerf.samples.push(performance.now() - started);
+            window.__tabSwitchPerf.immediate.push(active && activeClass);
+          });
+        }, true);
+        return {
+          initial: activeItemForSide(slotForItem('1')),
+          rows: document.querySelectorAll('[data-tabber-tree] .file-tree-row').length,
+          virtualRows: document.querySelectorAll('[data-tabber-tree] .file-tree-row[data-tabber-type="tab"]').length,
+          fileRow: Boolean(document.querySelector(`[data-tabber-item="${CSS.escape(arguments[0])}"]`)),
+        };
+        """,
+        file_item,
+    )
+    assert setup["rows"] >= 41, setup
+    assert setup["virtualRows"] >= 1 and setup["fileRow"] is True, setup
+
+    target = "2" if setup["initial"] == "1" else "1"
+    for index in range(30):
+        point = browser.execute_script(
+            """
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
+            const rect = tab.getBoundingClientRect();
+            return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+            """,
+            target,
+        )
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
+        expected_samples = index + 1
+        WebDriverWait(browser, 2).until(
+            lambda driver: driver.execute_script(
+                "return window.__tabSwitchPerf.samples.length >= arguments[0] && activeItemForSide(slotForItem(arguments[1])) === arguments[1]",
+                expected_samples,
+                target,
+            )
+        )
+        target = "1" if target == "2" else "2"
+
+    result = browser.execute_script(
+        """
+        const samples = window.__tabSwitchPerf.samples.slice().sort((left, right) => left - right);
+        const p95 = samples[Math.min(samples.length - 1, Math.floor((samples.length - 1) * 0.95))];
+        const counters = Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]));
+        return {
+          samples,
+          p95,
+          max: samples.at(-1),
+          immediate: window.__tabSwitchPerf.immediate.every(Boolean),
+          fromJsonCalls: window.__tabSwitchPerf.fromJsonCalls(),
+          fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
+          layoutSyncs: counters.tabberLayoutSync?.count || 0,
+          activationPaints: counters.tabActivationPaint?.count || 0,
+          activationPaintMax: counters.tabActivationPaint?.maxMs || 0,
+          firstPanelPreserved: panelNodes.get('1') === window.__tabSwitchPerf.firstPanel && panelNodes.get('1').__tabSwitchSentinel === 'first',
+          secondPanelPreserved: panelNodes.get('2') === window.__tabSwitchPerf.secondPanel && panelNodes.get('2').__tabSwitchSentinel === 'second',
+        };
+        """
+    )
+    assert result["fromJsonCalls"] == 0, result
+    assert result["fullRefreshCalls"] == 0, result
+    assert result["layoutSyncs"] <= 30, result
+    assert result["activationPaints"] == 30, result
+    assert result["immediate"] is True, result
+    assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True, result
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        # Shared browser workers can delay an animation frame even when activation does no extra
+        # product work. Keep only a multi-frame sanity ceiling here; the focused run below owns the
+        # user-facing p95/max budgets, while operation counts catch the original regression in both.
+        assert result["p95"] < 250, result
+        assert result["max"] < 500, result
+    else:
+        assert result["activationPaintMax"] < 100, result
+        assert result["p95"] < 50, result
+        assert result["max"] < 100, result
 
 
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):

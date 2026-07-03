@@ -33,24 +33,13 @@ from yolomux_lib import file_index
 
 
 SLOWEST_FIRST_TESTS = (
-    "tests/test_yoagent_stream_state.py::test_yoagent_stream_callback_truncates_oversized_auxiliary_history",
     "tests/test_browser_share.py::test_generated_share_link_mirrors_interactive_ui_surface_matrix",
-    "tests/test_browser_layout.py::test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry",
-    "tests/test_browser_layout.py::test_preview_popout_toolbar_and_state_sync",
-    "tests/test_browser_layout.py::test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes",
-    "tests/test_browser_layout.py::test_dockview_root_left_drag_shows_full_span_preview_before_drop",
-    "tests/test_browser_layout.py::test_preferences_scroll_defers_passive_rerender",
-    "tests/test_browser_layout.py::test_platform_controls_use_pc_glyphs",
-    "tests/test_browser_layout.py::test_dockview_tab_hover_shows_session_detail_popover",
-    "tests/test_browser_layout.py::test_sync_mode_quick_access_does_not_snap_back_until_explicit_input",
-    "tests/test_browser_layout.py::test_dockview_tab_container_background_swaps_whole_panes",
-    "tests/test_browser_layout.py::test_dockview_drag_reorders_tabs_in_same_pane",
-    "tests/test_browser_layout.py::test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll",
-    "tests/test_browser_layout.py::test_editor_search_button_toggles_pressed_state_with_codemirror_panel",
-    "tests/test_browser_layout.py::test_dockview_first_pinned_tab_drags_after_second_pinned_tab",
-    "tests/test_browser_layout.py::test_dockview_root_top_drag_preview_preserves_docked_finder_column",
-    "tests/test_browser_layout.py::test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs",
+    "tests/test_browser_dockview.py::test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid",
+    "tests/test_browser_dockview.py::test_differ_reopen_keeps_dragged_file_tab_home",
+    "tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+    "tests/test_browser_dockview.py::test_dockview_yellow_window_ball_click_switches_and_acknowledges",
     "tests/test_node_suite.py::test_node_layout_suite_passes",
+    "tests/test_yoagent_stream_state.py::test_yoagent_stream_callback_truncates_oversized_auxiliary_history",
 )
 
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}

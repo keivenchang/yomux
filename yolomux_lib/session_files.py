@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import shlex
@@ -22,7 +21,12 @@ from .common import SessionInfo
 from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
+from .common import positive_finite_number
 from .filesystem import git_root_for_path
+from .filesystem.git_ops import diff_refs
+from .filesystem.git_ops import git_ref_exists
+from .filesystem.git_ops import normal_ref
+from .filesystem.git_ops import refs_requested
 from .locales import message_descriptor
 from .locales import user_message_payload
 from .sessions import claude_transcript_family_paths
@@ -388,13 +392,7 @@ def copy_transcript_scan_details(details: dict[str, Any]) -> dict[str, Any]:
 
 
 def numeric_token_value(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(number) or number <= 0:
-        return 0.0
-    return number
+    return positive_finite_number(value)
 
 
 def generated_usage_tokens(usage: Any) -> float:
@@ -750,24 +748,6 @@ def git_diff_base(repo: Path) -> str:
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     return "HEAD"
-
-
-def normal_ref(value: str | None, default: str) -> str:
-    ref = str(value or "").strip()
-    return ref or default
-
-
-def refs_requested(from_ref: str | None = None, to_ref: str | None = None) -> bool:
-    return bool(str(from_ref or "").strip() or str(to_ref or "").strip())
-
-
-def diff_refs(from_ref: str | None = None, to_ref: str | None = None) -> tuple[str, str]:
-    return normal_ref(from_ref, "HEAD"), normal_ref(to_ref, "current")
-
-
-def git_ref_exists(repo: Path, ref: str) -> bool:
-    result = git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(repo), timeout=3.0)
-    return result.returncode == 0
 
 
 def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:

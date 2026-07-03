@@ -486,7 +486,7 @@ body.editor-theme-light .file-editor-image-panel {
   opacity: 0.8;
 }
 .file-editor-save:hover {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-editor-dialog-backdrop {
   z-index: var(--z-file-editor-dialog);
@@ -647,12 +647,6 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   background: transparent;
   border-color: #c69a15;
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
-}
-.file-editor-theme-panel.theme-vanilla {
-  color: var(--lt-text);
-  background: var(--lt-editor-bg);
-  border-color: var(--lt-line);
-  box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
 }
 .file-editor-wrap.active,
 .file-editor-gutter.active {
@@ -1135,7 +1129,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: #ffffff;
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
@@ -1151,7 +1145,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6 {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
@@ -1166,13 +1160,13 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 }
 .file-editor-preview-pane.vanilla-preview-body code,
 .file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body pre,
 .file-editor-preview-pane-panel.vanilla-preview-body pre {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -1250,9 +1244,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   font-size: var(--ui-font-size);
   font-weight: 700;
   white-space: nowrap;
-}
-.file-tree-name {
-  min-width: 0;
 }
 .file-tree-rename-input {
   width: min(280px, 100%);
@@ -1465,6 +1456,13 @@ body.resizing-file-explorer-changes {
   box-shadow: 0 0 0 1px var(--drop-outline-shadow);
 }
 .file-explorer-changes-panel {
+  --changes-row-hover-bg: var(--active-control-soft-bg);
+  --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
+  --changes-indent-line: rgba(148, 163, 184, 0.50);
+  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
+  --changes-folder-text: var(--accent-gold);
+  --changes-path-text: var(--muted);
+  --changes-icon-text: #a7c7ff;
   --pane-bar-bg: var(--panel2);
   flex: 1 1 auto;
   min-height: 0;
@@ -1729,41 +1727,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-explorer-hidden-toggle-panel,
 .file-explorer-root-mode-toggle-panel,
-.file-explorer-header-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
+.file-explorer-panel .file-explorer-header-action {
   height: 18px;
-  flex: 0 0 30px;
-  padding: 0 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-  line-height: 1;
-  white-space: nowrap;
-  font-weight: 700;
-  cursor: pointer;
-}
-.file-explorer-root-mode-toggle-panel {
-  width: auto;
-  min-width: 38px;
-  flex: 0 0 auto;
-}
-.file-explorer-header-action {
-  width: 20px;
-  flex-basis: 20px;
-  padding: 0;
-  line-height: 1;
-}
-.file-explorer-header-action.file-explorer-date-toggle {
-  width: auto;
-  min-width: 42px;
-  flex-basis: auto;
-  padding: 0 5px;
 }
 .file-explorer-folder-action {
   color: var(--muted);
@@ -1880,20 +1845,6 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-tree-row.file-tree-row--session-touched > .file-tree-name,
 .file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
   font-weight: 800;
-}
-.file-explorer-hidden-toggle-panel:hover,
-.file-explorer-root-mode-toggle-panel:hover,
-.file-explorer-header-action:hover,
-.file-explorer-header-action:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
-}
-.file-explorer-hidden-toggle-panel.active,
-.file-explorer-root-mode-toggle-panel.active,
-.file-explorer-quick-access-button.active {
-  color: var(--active-control-text);
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -2422,7 +2373,7 @@ body.editor-theme-light .file-editor-content {
   cursor: default;
 }
 .file-editor-save-panel:not(:disabled):hover {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-editor-panel-body {
   min-height: 0;
@@ -2502,7 +2453,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: #ffffff;
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
@@ -2510,7 +2461,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
@@ -2521,12 +2472,12 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -3426,10 +3377,7 @@ body.editor-theme-light .cm-content .md-code {
 }
 .file-editor-native-video {
   max-height: min(72vh, 720px);
-  background: #000;
-}
-body.editor-theme-light .file-editor-native-video {
-  background: #000;
+  background: var(--markdown-preview-bg);
 }
 .file-editor-image-panel {
   z-index: var(--z-file-editor-preview-layer);
@@ -3505,8 +3453,6 @@ body.editor-theme-light .file-editor-native-video {
    editor tabs use the same tab base as tmux sessions. */
 .pane-tab.file-explorer {
   border-color: rgba(120, 180, 255, 0.4);
-}
-.pane-tab.file-explorer {
   flex: 0 0 88px;
   min-width: 88px;
   max-width: 88px;
@@ -3695,7 +3641,7 @@ body.theme-light .file-tree-row.tabber-row {
   color: var(--tabber-detail-color);
   font-style: italic;
 }
-.file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
+.file-tree-row:is(.tabber-active-window, .tabber-active-tab):not(.selected) .file-tree-name {
   font-weight: 800;
 }
 /* Tabber rows keep recency visible at every width; the tree/path text truncates first. */

@@ -10,6 +10,7 @@ const suiteFiles = [
   'tests/drop_action_result.test.js',
   'tests/share_theme.test.js',
   'tests/editor_preview.test.js',
+  'tests/yostats_performance.test.js',
   'tests/tabber.test.js',
   'tests/layout_async.test.js',
 ];

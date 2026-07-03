@@ -127,7 +127,10 @@ def lanes() -> list[Lane]:
             "pytest browser",
             (
                 Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),
-                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e and not boot", "-q"]),
+                # Browser durations vary enough that xdist's initial load assignment leaves a long
+                # tail even with valid slow-first hints. Two same-code A/B pairs made work stealing
+                # repeatably faster, while boot smoke stays serial and separate above.
+                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]),
             ),
             True,
         ),

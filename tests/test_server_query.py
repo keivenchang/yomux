@@ -5,6 +5,7 @@ import os
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
@@ -107,17 +108,42 @@ def test_record_http_response_bytes_includes_route_compute_details():
 def test_get_stats_sample_uses_app_payload():
     writes = []
     calls = []
-    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, history_start)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
+    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, history_start, history_end, history_resolution_seconds, history_max_points)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
     request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
 
     http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&history_start=900"), None)
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&history_start=900&history_end=1200&history_resolution=10&history_max_points=60"), None)
 
-    assert calls == [(9, "client-a", False, 0, 0, 0), (10, "client-a", True, 7, 120, 900)]
+    assert calls == [
+        (9, "client-a", False, 0, 0, 0, 0, 0, 0),
+        (10, "client-a", True, 7, 120, 900, 1200, 10, 60),
+    ]
     assert writes == [
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
     ]
+
+
+def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_private_payload(monkeypatch):
+    writes = []
+    clock = iter([100.0, 100.025])
+    monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
+    app = SimpleNamespace(stats_sample_payload=lambda **_kwargs: {
+        "ok": True,
+        "history": {"records": []},
+        "_endpoint_profile": {"stats_history_encode_ms": 7.5, "stats_history_compact_ms": 1.25},
+    })
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+
+    http_routes.get_stats_sample(request, SimpleNamespace(query="history_start=900&history_end=1200"), None)
+
+    assert writes == [(HTTPStatus.OK, {"ok": True, "history": {"records": []}})]
+    assert request._http_response_compute_ms == pytest.approx(25.0)
+    assert request._http_response_performance_details == {
+        "stats_build_ms": 25.0,
+        "stats_history_encode_ms": 7.5,
+        "stats_history_compact_ms": 1.25,
+    }
 
 
 class FakeShareConnection:
@@ -603,7 +629,6 @@ def route_handler(path, app=None, readonly=False):
     handler.server = SimpleNamespace(app=app or SimpleNamespace(), dev=False)
     handler.close_connection = False
     handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or True
-    handler.require_auth_for_post = lambda path: calls.append(("require_auth_for_post", path)) or True
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
     handler.share_readonly_api_allowed = lambda parsed: False
@@ -663,11 +688,65 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
-    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
+    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_token_readonly_role
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
     assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
     assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
+
+
+def test_http_route_registry_owns_the_complete_share_policy_matrix():
+    expected = {
+        ("GET", "/static/*", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/ping", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-metadata", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/transcripts", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/activity", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-files-batch", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-files", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/share/*", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/share", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws/share-ui", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws/share-view", http_routes.SHARE_ACCESS_READONLY),
+        ("POST", "/api/share/debug-profile", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/list", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/index-status", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/read", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("GET", "/api/fs/info", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/diff", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("GET", "/api/fs/watch-diff", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/raw", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("POST", "/api/fs/batch", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws", http_routes.SHARE_ACCESS_READONLY),
+    }
+    actual = {
+        (route.method, route.path, route.share_access)
+        for route in http_routes.ALL_ROUTES
+        if route.share_access != http_routes.SHARE_ACCESS_NONE
+    }
+    assert actual == expected
+    assert len({(route.method, route.path) for route in http_routes.ALL_ROUTES}) == len(http_routes.ALL_ROUTES)
+
+    no_share = SimpleNamespace(share_token_text=lambda: "")
+    with_share = SimpleNamespace(share_token_text=lambda: "share-token")
+    for route in http_routes.ALL_ROUTES:
+        parsed = SimpleNamespace(path=route.path, query="")
+        assert http_routes.route_required_role(route, no_share, parsed) in {None, "readonly", "admin"}
+        assert http_routes.route_required_role(route, with_share, parsed) in {None, "readonly", "admin"}
+
+
+def test_share_policy_consumers_have_no_parallel_api_path_lists():
+    policy_source = "\n".join((
+        inspect.getsource(Handler.share_request_allowed),
+        inspect.getsource(Handler.share_readonly_api_allowed),
+        inspect.getsource(Handler.plaintext_share_scope_allowed),
+    ))
+    assert "/api/" not in policy_source
+    assert not hasattr(Handler, "SHARE_READONLY_GET_PATHS")
+    assert not hasattr(Handler, "SHARE_SCOPED_FILE_GET_PATHS")
+    assert not hasattr(Handler, "SHARE_READONLY_POST_PATHS")
+    assert not hasattr(Handler, "require_auth_for_post")
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -675,14 +754,14 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
-        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "history_start": history_start},
+        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "history_start": history_start, "history_end": history_end, "history_resolution_seconds": history_resolution_seconds, "history_max_points": history_max_points},
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120, "history_start": 0})]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120, "history_start": 0, "history_end": 0, "history_resolution_seconds": 0, "history_max_points": 0})]
 
     handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
     Handler.do_GET(handler)
@@ -866,18 +945,22 @@ def share_token_auth_handler(path, method="POST"):
     return handler, writes
 
 
-def test_share_token_post_auth_allows_only_readonly_fs_batch_and_debug_profile(monkeypatch):
+def test_share_token_post_auth_uses_registry_roles_for_readonly_and_mutating_routes(monkeypatch):
     monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
 
     allowed_handler, allowed_writes = share_token_auth_handler("/api/fs/batch")
-    assert Handler.require_auth_for_post(allowed_handler, "/api/fs/batch") is True
+    allowed_route = http_routes.route_for_request("POST", "/api/fs/batch")
+    assert http_routes.route_required_role(allowed_route, allowed_handler, urlparse(allowed_handler.path)) == "readonly"
+    assert Handler.require_auth(allowed_handler, "readonly") is True
     assert allowed_writes == []
     assert allowed_handler.auth_identity().role == "readonly"
     assert allowed_handler.share_token() == "share-token"
     assert allowed_handler.close_connection is False
 
     debug_handler, debug_writes = share_token_auth_handler("/api/share/debug-profile")
-    assert Handler.require_auth_for_post(debug_handler, "/api/share/debug-profile") is True
+    debug_route = http_routes.route_for_request("POST", "/api/share/debug-profile")
+    assert http_routes.route_required_role(debug_route, debug_handler, urlparse(debug_handler.path)) == "readonly"
+    assert Handler.require_auth(debug_handler, "readonly") is True
     assert debug_writes == []
     assert debug_handler.auth_identity().role == "readonly"
     assert debug_handler.share_token() == "share-token"
@@ -904,7 +987,12 @@ def test_share_token_post_auth_allows_only_readonly_fs_batch_and_debug_profile(m
     ]
     for path in mutating_paths:
         handler, writes = share_token_auth_handler(path)
-        assert Handler.require_auth_for_post(handler, path) is False, path
+        route = http_routes.route_for_request("POST", path)
+        assert route is not None, path
+        assert route.share_access == http_routes.SHARE_ACCESS_NONE, path
+        required_role = http_routes.route_required_role(route, handler, urlparse(path))
+        assert required_role in {"readonly", "admin"}, path
+        assert Handler.require_auth(handler, required_role) is False, path
         assert writes and writes[0][0] == "json" and writes[0][1] == HTTPStatus.FORBIDDEN, (path, writes)
         assert handler.close_connection is True, path
 
@@ -952,24 +1040,23 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
 
 def test_share_request_allowed_route_matrix(monkeypatch):
     monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
-    allowed_paths = [
-        "/",
-        "/share/abc",
-        "/static/yolomux.js",
-        "/api/ping",
-        "/api/activity",
-        "/api/fs/batch",
-        "/api/share/debug-profile",
-        "/api/fs/diff?path=/repo/README.md",
-        "/api/fs/watch-diff?since=old-token",
-        "/api/fs/read?path=/repo/README.md",
-        "/api/fs/raw?path=/repo/README.md",
-        "/api/share-stream",
-        "/api/session-metadata",
-        "/api/session-files",
-        "/api/transcripts",
-        "/ws/share-ui",
-        "/ws/share-view",
+    allowed_requests = [
+        ("GET", "/"),
+        ("GET", "/share/abc"),
+        ("GET", "/static/yolomux.js"),
+        ("GET", "/api/ping"),
+        ("GET", "/api/activity"),
+        ("POST", "/api/fs/batch"),
+        ("POST", "/api/share/debug-profile"),
+        ("GET", "/api/fs/diff?path=/repo/README.md"),
+        ("GET", "/api/fs/watch-diff?since=old-token"),
+        ("GET", "/api/fs/read?path=/repo/README.md"),
+        ("GET", "/api/fs/raw?path=/repo/README.md"),
+        ("GET", "/api/session-metadata"),
+        ("GET", "/api/session-files"),
+        ("GET", "/api/transcripts"),
+        ("GET", "/ws/share-ui"),
+        ("GET", "/ws/share-view"),
     ]
     denied_paths = [
         "/api/event",
@@ -987,12 +1074,15 @@ def test_share_request_allowed_route_matrix(monkeypatch):
         "/api/fs/unindex",
     ]
 
-    for path in allowed_paths:
-        handler, _writes = share_token_auth_handler(path, method="GET")
+    for method, path in allowed_requests:
+        handler, _writes = share_token_auth_handler(path, method=method)
         assert Handler.share_request_allowed(handler) is True, path
     for path in denied_paths:
         handler, _writes = share_token_auth_handler(path, method="POST")
         assert Handler.share_request_allowed(handler) is False, path
+
+    unknown_handler, _writes = share_token_auth_handler("/api/share-stream", method="GET")
+    assert Handler.share_request_allowed(unknown_handler) is False
 
 
 def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():

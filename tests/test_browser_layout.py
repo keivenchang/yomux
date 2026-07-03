@@ -14,6 +14,22 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
     assert browser_wait_timeout(5, worker="") == 5
 
 
+def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tmp_path):
+    page = tmp_path / "branch-list-title-theme.html"
+    page.write_text(page_html('<div class="branch-list-title">Branches</div>'), encoding="utf-8")
+    browser.get(page.as_uri())
+    colors = browser.execute_script(
+        """
+        const title = document.querySelector('.branch-list-title');
+        const dark = getComputedStyle(title).color;
+        document.body.classList.add('theme-light');
+        const light = getComputedStyle(title).color;
+        return {dark, light};
+        """
+    )
+    assert colors == {"dark": "rgb(226, 232, 240)", "light": "rgb(71, 85, 105)"}
+
+
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     metrics = browser.execute_script(
@@ -649,7 +665,7 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert empty["rowGap"] <= 6, metrics
 
 
-def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_path):
+def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -662,23 +678,37 @@ def test_debug_graph_waiting_meta_uses_shared_animated_ellipsis(browser, tmp_pat
     metrics = browser.execute_script(
         """
         clearJsDebugServerHistory();
-        const holder = document.createElement('div');
-        holder.innerHTML = debugGraphMetaHtml();
-        document.body.appendChild(holder);
-        const meta = holder.querySelector('.js-debug-graph-meta');
-        const dots = Array.from(meta.querySelectorAll('.moving-ellipsis > span'));
+        resetJsDebugHistoryReadiness();
+        setJsDebugHistoryReadiness('loading-initial', {
+          requestedRangeSeconds: 900,
+          targetStartSeconds: Math.floor(Date.now() / 1000) - 900,
+          targetEndSeconds: Math.floor(Date.now() / 1000),
+          requestedResolutionSeconds: 5,
+          generation: 1,
+        });
+        renderDebugPanels({force: true});
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const meta = graph.querySelector('.js-debug-graph-meta');
+        const overlay = graph.querySelector('[data-js-debug-history-overlay]');
+        const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
         return {
-          text: meta.textContent,
+          busy: graph.getAttribute('aria-busy'),
+          phase: graph.dataset.jsDebugHistoryState,
+          text: overlay.textContent,
+          waitingMeta: meta.textContent,
           dotCount: dots.length,
           animationNames: dots.map(dot => getComputedStyle(dot).animationName),
-          labelText: Array.from(meta.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
+          labelText: Array.from(overlay.querySelector('.js-debug-history-overlay-message > span').childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
         };
         """
     )
-    assert metrics["text"].startswith("Waiting for server stats"), metrics
+    assert metrics["busy"] == "true", metrics
+    assert metrics["phase"] == "loading-initial", metrics
+    assert metrics["text"].startswith("Loading history"), metrics
+    assert metrics["waitingMeta"] == "", metrics
     assert metrics["dotCount"] == 3, metrics
     assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
-    assert metrics["labelText"] == "Waiting for server stats", metrics
+    assert metrics["labelText"] == "Loading history", metrics
 
 
 @pytest.mark.boot
@@ -1135,6 +1165,17 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
                 system_cpu_total_percent: 22.5,
                 system_cpu_count: 1,
               }],
+              coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: 0,
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: Math.floor(now / 1000),
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              },
             },
           });
         };
@@ -1144,12 +1185,16 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
         });
         return {
           waiting: graph.textContent.includes('Waiting for server stats'),
+          loading: graph.textContent.includes('Loading history'),
+          busy: graph.getAttribute('aria-busy'),
           chartCount: graph.querySelectorAll('[data-js-debug-chart]').length,
           renderedAt: window.__firstStatsSample.renderedAt,
         };
         """
     )
-    assert initial["waiting"] is True, initial
+    assert initial["waiting"] is False, initial
+    assert initial["loading"] is True, initial
+    assert initial["busy"] == "true", initial
     assert initial["chartCount"] == 0, initial
     WebDriverWait(browser, 3).until(
         lambda driver: driver.execute_script(
@@ -1179,7 +1224,8 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
             """
             return typeof pollJsDebugStatsSample === 'function'
               && typeof renderDebugPanels === 'function'
-              && document.querySelector('[data-js-debug-graph]') !== null;
+              && document.querySelector('[data-js-debug-graph]') !== null
+              && jsDebugStatsPollInFlight === false;
             """
         )
     )
@@ -1202,6 +1248,12 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
             system_cpu_total_percent: 10,
             system_cpu_count: 1,
           }]}}, {forceGraphRefresh: true});
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: nowSeconds - 15 * 60,
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 5}],
+          });
           renderDebugPanels({force: true});
           const graph = document.querySelector('[data-js-debug-graph]');
           const renderedBefore = Number(graph.dataset.jsDebugGraphRenderedAt);
@@ -1211,13 +1263,27 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
             const url = new URL(String(input), location.href);
             if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
             requests += 1;
-            return Promise.resolve(new Response(JSON.stringify({history: {sequence: 2, records: [{
-              start: nowSeconds - 15,
-              duration: 1,
+            return Promise.resolve(new Response(JSON.stringify({history: {
               sequence: 2,
-              system_cpu_total_percent: 30,
-              system_cpu_count: 1,
-            }]}}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              records: [{
+                start: nowSeconds - 15,
+                duration: 1,
+                sequence: 2,
+                system_cpu_total_percent: 30,
+                system_cpu_count: 1,
+              }],
+              coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: Number(url.searchParams.get('history_end')),
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
           };
           try {
             Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
@@ -1595,6 +1661,88 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
     )
 
 
+def test_debug_graph_24_hour_range_change_avoids_multi_second_browser_task(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.ceil(Date.now() / 60_000) * 60_000;
+        const gapStart = now - (6 * 60 * 60 * 1000);
+        const gapEnd = gapStart + (5 * 60 * 1000);
+        const disconnectedStart = gapStart + (2 * 60 * 1000);
+        const records = [];
+        const appendTier = (startMs, count, durationSeconds) => {
+          for (let index = 0; index < count; index += 1) {
+            const bucketStartMs = startMs + (index * durationSeconds * 1000);
+            const hasClientData = bucketStartMs < gapStart || bucketStartMs >= gapEnd;
+            const record = {
+              start: bucketStartMs / 1000,
+              duration: durationSeconds,
+              sequence: records.length + 1,
+              cpu_total_percent: 12,
+              cpu_count: 1,
+              system_cpu_total_percent: 24,
+              system_cpu_count: 1,
+            };
+            if (hasClientData) Object.assign(record, {api_count: 2, sse_count: 1, latency_total_ms: 25, latency_count: 1, bandwidth_bytes: 2048});
+            if (bucketStartMs === disconnectedStart) record.disconnected_ms = durationSeconds * 1000;
+            records.push(record);
+          }
+        };
+        appendTier(now - (24 * 60 * 60 * 1000), 1320, 60);
+        appendTier(now - (2 * 60 * 60 * 1000), 360, 10);
+        appendTier(now - (60 * 60 * 1000), 3600, 1);
+        setDebugGraphScale(1);
+        setDebugGraphRange(15 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: records.length, records});
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: (now - (24 * 60 * 60 * 1000)) / 1000,
+          loadedEndSeconds: now / 1000,
+          resolutionSeconds: 1,
+          coverageIntervals: [{
+            startSeconds: 0,
+            endSeconds: Infinity,
+            resolutionSeconds: 1,
+          }],
+        });
+        renderDebugPanels({force: true});
+        const longTasks = [];
+        const observer = typeof PerformanceObserver === 'function' && PerformanceObserver.supportedEntryTypes?.includes('longtask')
+          ? new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration)))
+          : null;
+        observer?.observe({entryTypes: ['longtask']});
+        requestAnimationFrame(() => {
+          const started = performance.now();
+          setDebugGraphRange(24 * 60 * 60);
+          const syncElapsedMs = performance.now() - started;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            observer?.disconnect();
+            const noDataCounts = Object.fromEntries(['latency', 'count', 'bandwidth'].map(key => [
+              key,
+              document.querySelectorAll(`[data-js-debug-chart="${key}"] [data-js-debug-no-data-range]`).length,
+            ]));
+            done({syncElapsedMs, maxLongTaskMs: Math.max(0, ...longTasks), noDataCounts, records: records.length});
+          }));
+        });
+        """
+    )
+    assert metrics["records"] == 5280, metrics
+    assert all(count >= 2 for count in metrics["noDataCounts"].values()), metrics
+    assert metrics["syncElapsedMs"] < 1000, metrics
+    assert metrics["maxLongTaskMs"] < 1000, metrics
+
+
 def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
@@ -1628,6 +1776,12 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           });
         }
         debugGraphApplyServerHistory({sequence: 300, records});
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: 1,
+          loadedEndSeconds: Infinity,
+          resolutionSeconds: 1,
+          coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+        });
         setDebugGraphRange(300);
         renderDebugPanels({force: true});
 
@@ -1825,7 +1979,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
           jsDebugStatsPollInFlight = false;
           jsDebugStatsPollPending = false;
           jsDebugStatsServerSequence = 0;
-          jsDebugStatsHistoryStartSeconds = 0;
+          resetJsDebugHistoryReadiness();
           jsDebugGraphRangeSeconds = 15 * 60;
           const originalFetch = window.fetch;
           const requests = [];
@@ -1834,6 +1988,22 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
             status: 200,
             headers: {'Content-Type': 'application/json'},
           }));
+          const coverageFor = (url, overrides = {}) => {
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            const requestedEnd = Number(url.searchParams.get('history_end'));
+            return {
+              mode: requestedEnd === 0 ? 'live' : 'older',
+              requested_start: requestedStart,
+              requested_end: requestedEnd,
+              covered_start: requestedStart,
+              covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
+              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              complete: true,
+              has_more_older: false,
+              next_older_end: 0,
+              ...overrides,
+            };
+          };
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
@@ -1846,7 +2016,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
                 sequence: 100,
                 system_cpu_total_percent: 20,
                 system_cpu_count: 1,
-              }]}});
+              }], coverage: coverageFor(url)}});
             }
             if (requests.length === 2) {
               return new Promise(resolve => {
@@ -1859,15 +2029,29 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               sequence: 101,
               system_cpu_total_percent: 40,
               system_cpu_count: 1,
-            }]}});
+            }], coverage: coverageFor(url)}});
           };
           try {
             await pollJsDebugStatsSample();
             stopJsDebugStatsPolling();
             renderDebugPanels({force: true});
+            const retainedChartCount = document.querySelectorAll('[data-js-debug-chart]').length;
             const narrowPoll = pollJsDebugStatsSample();
             await Promise.resolve();
             setDebugGraphRange(30 * 60);
+            const loadingGraph = document.querySelector('[data-js-debug-graph]');
+            const beforeDelay = {
+              chartCount: loadingGraph.querySelectorAll('[data-js-debug-chart]').length,
+              busy: loadingGraph.getAttribute('aria-busy'),
+              phase: loadingGraph.dataset.jsDebugHistoryState,
+              overlayHidden: loadingGraph.querySelector('[data-js-debug-history-overlay]')?.hidden,
+            };
+            await new Promise(resolve => setTimeout(resolve, 160));
+            const delayedOverlay = loadingGraph.querySelector('[data-js-debug-history-overlay]');
+            const afterDelay = {
+              overlayHidden: delayedOverlay?.hidden,
+              overlayText: delayedOverlay?.textContent?.trim() || '',
+            };
             releaseIncremental();
             await narrowPoll;
             const deadline = performance.now() + 3000;
@@ -1883,13 +2067,25 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               .map(point => Number(point.split(',')[0]))
               .filter(Number.isFinite));
             const grid = document.querySelector('[data-js-debug-chart-grid]');
+            const finalGraph = document.querySelector('[data-js-debug-graph]');
+            const narrowUrl = new URL(requests[0]);
             return {
               requestCount: requests.length,
               since: wideUrl.searchParams.get('since'),
               historyStart: Number(wideUrl.searchParams.get('history_start')),
+              historyEnd: Number(wideUrl.searchParams.get('history_end')),
+              expectedHistoryEnd: Number(narrowUrl.searchParams.get('history_start')),
+              historyResolution: Number(wideUrl.searchParams.get('history_resolution')),
+              historyMaxPoints: Number(wideUrl.searchParams.get('history_max_points')),
               rangeSeconds: (Number(grid?.dataset.jsDebugDomainEnd) - Number(grid?.dataset.jsDebugDomainStart)) / 1000,
               minX: xValues.length ? Math.min(...xValues) : null,
               maxX: xValues.length ? Math.max(...xValues) : null,
+              retainedChartCount,
+              beforeDelay,
+              afterDelay,
+              finalBusy: finalGraph?.getAttribute('aria-busy'),
+              finalPhase: finalGraph?.dataset.jsDebugHistoryState,
+              finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
             };
           } finally {
             window.fetch = originalFetch;
@@ -1901,9 +2097,154 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert "error" not in metrics, metrics
     assert metrics["requestCount"] == 3, metrics
     assert metrics["since"] == "0", metrics
+    assert metrics["historyEnd"] == metrics["expectedHistoryEnd"], metrics
+    assert metrics["historyResolution"] == 5, metrics
+    assert metrics["historyMaxPoints"] == 6000, metrics
     assert 1790 <= metrics["rangeSeconds"] <= 1810, metrics
     assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
     assert metrics["maxX"] is not None and metrics["maxX"] > 500, metrics
+    assert metrics["retainedChartCount"] > 0, metrics
+    assert metrics["beforeDelay"] == {
+        "chartCount": metrics["retainedChartCount"],
+        "busy": "true",
+        "phase": "loading-older",
+        "overlayHidden": True,
+    }, metrics
+    assert metrics["afterDelay"]["overlayHidden"] is False, metrics
+    assert "Loading older data" in metrics["afterDelay"]["overlayText"], metrics
+    assert metrics["finalBusy"] == "false", metrics
+    assert metrics["finalPhase"] == "ready", metrics
+    assert metrics["finalOverlayHidden"] is True, metrics
+
+
+def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof retryJsDebugHistory === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          debugGraphApplyServerHistory({sequence: 1, records: [{
+            start: nowSeconds - 60,
+            duration: 1,
+            sequence: 1,
+            system_cpu_total_percent: 20,
+            system_cpu_count: 1,
+          }]});
+          renderDebugPanels({force: true});
+          const retainedChartCount = document.querySelectorAll('[data-js-debug-chart]').length;
+          const originalFetch = window.fetch;
+          let requestCount = 0;
+          let rejectInitial;
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requestCount += 1;
+            if (requestCount === 1) {
+              return new Promise((_resolve, reject) => { rejectInitial = reject; });
+            }
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            const requestedEnd = Number(url.searchParams.get('history_end'));
+            return response({history: {
+              sequence: 1,
+              latest_sequence: 1,
+              records: [],
+              coverage: {
+                mode: requestedEnd === 0 ? 'live' : 'older',
+                requested_start: requestedStart,
+                requested_end: requestedEnd,
+                covered_start: 0,
+                covered_end: 0,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: false,
+                has_more_older: false,
+                next_older_end: 0,
+              },
+            }});
+          };
+          try {
+            const initialPoll = pollJsDebugStatsSample();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const loadingGraph = document.querySelector('[data-js-debug-graph]');
+            const loading = {
+              busy: loadingGraph?.getAttribute('aria-busy'),
+              phase: loadingGraph?.dataset.jsDebugHistoryState,
+              chartCount: loadingGraph?.querySelectorAll('[data-js-debug-chart]').length,
+              overlayHidden: loadingGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+            };
+            rejectInitial(new Error('history unavailable'));
+            await initialPoll;
+            const errorGraph = document.querySelector('[data-js-debug-graph]');
+            const error = {
+              busy: errorGraph?.getAttribute('aria-busy'),
+              phase: errorGraph?.dataset.jsDebugHistoryState,
+              chartCount: errorGraph?.querySelectorAll('[data-js-debug-chart]').length,
+              text: errorGraph?.querySelector('[data-js-debug-history-overlay]')?.textContent?.trim() || '',
+              retry: Boolean(errorGraph?.querySelector('[data-js-debug-history-retry]')),
+            };
+            retryJsDebugHistory();
+            const deadline = performance.now() + 3000;
+            while ((requestCount < 2 || jsDebugStatsPollInFlight || jsDebugHistoryReadiness.phase !== 'ready') && performance.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            const readyGraph = document.querySelector('[data-js-debug-graph]');
+            return {
+              retainedChartCount,
+              requestCount,
+              loading,
+              failed: error,
+              ready: {
+                busy: readyGraph?.getAttribute('aria-busy'),
+                phase: readyGraph?.dataset.jsDebugHistoryState,
+                chartCount: readyGraph?.querySelectorAll('[data-js-debug-chart]').length,
+                overlayHidden: readyGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+                retry: Boolean(readyGraph?.querySelector('[data-js-debug-history-retry]')),
+              },
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["retainedChartCount"] > 0, metrics
+    assert metrics["loading"] == {
+        "busy": "true",
+        "phase": "loading-initial",
+        "chartCount": metrics["retainedChartCount"],
+        "overlayHidden": False,
+    }, metrics
+    assert metrics["failed"]["busy"] == "false", metrics
+    assert metrics["failed"]["phase"] == "error", metrics
+    assert metrics["failed"]["chartCount"] == metrics["retainedChartCount"], metrics
+    assert metrics["failed"]["retry"] is True, metrics
+    assert "history unavailable" in metrics["failed"]["text"], metrics
+    assert metrics["requestCount"] == 2, metrics
+    assert metrics["ready"] == {
+        "busy": "false",
+        "phase": "ready",
+        "chartCount": metrics["retainedChartCount"],
+        "overlayHidden": True,
+        "retry": False,
+    }, metrics
 
 
 def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(browser, tmp_path):
@@ -1927,7 +2268,7 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
           jsDebugStatsPollInFlight = false;
           jsDebugStatsPollPending = false;
           jsDebugStatsServerSequence = 0;
-          jsDebugStatsHistoryStartSeconds = 0;
+          resetJsDebugHistoryReadiness();
           jsDebugGraphRangeSeconds = 15 * 60;
           const originalFetch = window.fetch;
           const requests = [];
@@ -1952,7 +2293,17 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
                 sequence: 100,
                 system_cpu_total_percent: 20,
                 system_cpu_count: 1,
-              }]}});
+              }], coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: 0,
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              }}});
             }
             const since = Number(url.searchParams.get('since') || 0);
             const records = [{
@@ -4115,7 +4466,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                     });
                   });
                 }
-                if (/^\/api\/yoagent\/chat\/.+\/cancel$/.test(url.pathname)) {
+                if (/^\\/api\\/yoagent\\/chat\\/.+\\/cancel$/.test(url.pathname)) {
                   return Promise.resolve(new Response(JSON.stringify({ok: true, cancelled: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
                 }
                 return originalFetch(input, options);
@@ -5442,6 +5793,9 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
 
 def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof installTerminalFileReferenceUnderlines === 'function'")
+    )
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

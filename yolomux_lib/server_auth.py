@@ -26,6 +26,10 @@ from .common import error_payload
 from .common import test_auth_bypass_enabled
 from .locales import normalize_locale
 from .locales import resolve_locale_preference
+from .http_routes import route_for_request
+from .http_routes import SHARE_ACCESS_NONE
+from .http_routes import SHARE_ACCESS_READONLY
+from .http_routes import SHARE_ACCESS_SCOPED_FILE
 from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
@@ -35,25 +39,6 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
-    SHARE_READONLY_GET_PATHS = {
-        "/api/activity",
-        "/api/fs/index-status",
-        "/api/fs/info",
-        "/api/fs/list",
-        "/api/fs/watch-diff",
-        "/api/share",
-        "/api/session-metadata",
-        "/api/session-files-batch",
-        "/api/session-files",
-        "/api/transcripts",
-    }
-    SHARE_SCOPED_FILE_GET_PATHS = {
-        "/api/fs/diff",
-        "/api/fs/raw",
-        "/api/fs/read",
-    }
-    SHARE_READONLY_POST_PATHS = {"/api/fs/batch", "/api/share/debug-profile"}
-
     def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
         scheme, separator, encoded = header.partition(" ")
@@ -171,24 +156,22 @@ class AuthMixin:
 
     def share_request_allowed(self) -> bool:
         parsed = urlparse(self.path)
-        if parsed.path in {"/", "/ws", "/ws/share-ui", "/ws/share-view", "/api/ping", "/api/share-stream", *self.SHARE_READONLY_GET_PATHS, *self.SHARE_SCOPED_FILE_GET_PATHS, *self.SHARE_READONLY_POST_PATHS}:
-            return True
-        if parsed.path.startswith("/share/"):
-            return True
-        return parsed.path.startswith("/static/")
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
+        return bool(route and route.share_access != SHARE_ACCESS_NONE)
 
-    def share_readonly_api_allowed_path(self, path: str) -> bool:
-        return bool(self.share_token()) and path in (self.SHARE_READONLY_GET_PATHS | self.SHARE_READONLY_POST_PATHS)
-
-    def share_scoped_file_api_allowed(self, parsed: Any) -> bool:
-        if not self.share_token() or parsed.path not in self.SHARE_SCOPED_FILE_GET_PATHS:
+    def share_readonly_api_allowed(self, parsed: Any) -> bool:
+        if not self.share_token():
+            return False
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
+        if route is None:
+            return False
+        if route.share_access == SHARE_ACCESS_READONLY:
+            return True
+        if route.share_access != SHARE_ACCESS_SCOPED_FILE:
             return False
         raw_path = parse_qs(parsed.query).get("path", [""])[0].strip()
         checker = getattr(self.server.app, "share_record_allows_file_path", None)
         return callable(checker) and checker(self.share_record(), raw_path)
-
-    def share_readonly_api_allowed(self, parsed: Any) -> bool:
-        return self.share_readonly_api_allowed_path(parsed.path) or self.share_scoped_file_api_allowed(parsed)
 
     def reject_share_forbidden(self) -> None:
         self.close_after_unread_body()
@@ -351,13 +334,6 @@ class AuthMixin:
 
     def share_mode(self) -> str:
         return str(getattr(self, "_share_mode", "ro") or "ro")
-
-    def require_auth_for_post(self, path: str) -> bool:
-        if path == "/api/event" or (path in self.SHARE_READONLY_POST_PATHS and self.share_token_text()):
-            return self.require_auth("readonly")
-        if path == "/api/yoagent/chat" and not self.share_token_text():
-            return self.require_auth("readonly")
-        return self.require_auth("admin")
 
     def handle_login_page(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

@@ -1105,19 +1105,15 @@ function infoRecordLabel(record = {}, dimension = '') {
   return '';
 }
 
-function infoSearchText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
 function infoSearchField(kind, ...values) {
-  const text = values.map(infoSearchText).filter(Boolean).join(' ');
+  const text = values.map(singleLineText).filter(Boolean).join(' ');
   return text ? {kind, text} : null;
 }
 
 function infoSearchFields(kind, ...values) {
   const seen = new Set();
   return values
-    .map(infoSearchText)
+    .map(singleLineText)
     .filter(Boolean)
     .filter(value => {
       const key = value.toLowerCase();
@@ -2913,8 +2909,8 @@ function insertIntoTerminal(session, text) {
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
   const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  item.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  item.lastInputSentAt = performanceNow();
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
 }
@@ -2923,7 +2919,7 @@ function noteTerminalExplicitInput(session) {
   const item = terminals.get(session);
   if (item) {
     item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
-    item.lastExplicitInputAt = clientPerfNow();
+    item.lastExplicitInputAt = performanceNow();
   }
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
@@ -3236,7 +3232,7 @@ function handleTerminalData(session, data, options = {}) {
   try {
     return handleTerminalDataMeasured(session, data, options);
   } finally {
-    clientPerfEnd(perf, {bytes: jsDebugByteLength(data)});
+    clientPerfEnd(perf, {bytes: utf8ByteLength(data)});
   }
 }
 
@@ -3246,7 +3242,7 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   if (!filtered) return false;
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
-    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: jsDebugByteLength(filtered)});
+    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});
     current.lastExplicitInputMark = '';
   }
   if (shareReplayShellActive && shareWriteMode) {
@@ -3260,8 +3256,8 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  current.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  current.lastInputSentAt = performanceNow();
   return true;
 }
 
@@ -3385,7 +3381,6 @@ function updatePanelSlot(panel, session, slot) {
   if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
-  updatePanelInactiveOverlays();
 }
 
 function updatePaneExpandButton(panel, session) {
@@ -3545,10 +3540,10 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
-      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : jsDebugByteLength(event.data);
+      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : utf8ByteLength(event.data);
       const inputSentAt = Number(item.lastInputSentAt || 0);
       if (inputSentAt > 0) {
-        recordClientPerfCounter('echoToTermWrite', clientPerfNow() - inputSentAt, {bytes: dataBytes});
+        recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
         item.lastInputSentAt = 0;
       }
       const writePerf = clientPerfStart('xtermWrite');
@@ -5069,10 +5064,10 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
-  const dataBytes = jsDebugByteLength(rawData);
+  const dataBytes = utf8ByteLength(rawData);
   const dataLines = String(rawData || '').split(/\r?\n/);
-  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
-    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+  const frameBytes = utf8ByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + utf8ByteLength(`data: ${line}\n`), 0)
     + 1;
   const serverTimeMs = Number(envelope?.time) * 1000;
   const receiveLatencyMs = Number.isFinite(serverTimeMs)

@@ -34,6 +34,7 @@
   --neutral-text-strong: #52617a;
   --neutral-text-cool: #e2e8f0;
   --overlay-surface: #111820;
+  --overlay-surface-strong: rgba(17, 24, 32, 0.98);
   --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
@@ -60,6 +61,7 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --good: #52d273;
+  --success-soft-bg: rgba(82, 210, 115, 0.18);
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
@@ -130,6 +132,7 @@
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
   --pr-status-closed: #aeb8c7;
+  --pr-number-chip-bg: #000;
   --git-modified: var(--accent-gold);
   --git-modified-badge: var(--accent-gold);
   --git-untracked-name: #7ee787;
@@ -376,6 +379,7 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-selection-outline: var(--active-control-focus-ring);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #dcffa6;
@@ -391,7 +395,7 @@
   --lt-bg: #ffffff;
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
-  --lt-text: #111827;
+  --lt-text: var(--markdown-html-light-text);
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
   --lt-editor-bg: #ffffff;
@@ -440,7 +444,6 @@
   --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
-  --neutral-text-cool: var(--lt-muted-strong);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
@@ -525,6 +528,8 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
+  --neutral-text-cool: var(--lt-muted-strong);
+  --pr-number-chip-bg: #2b3242;
   --share-stage-bg: #000;
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
@@ -696,6 +701,7 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-selection-outline: rgba(63, 143, 45, 0.5);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #356f12;
@@ -1546,8 +1552,6 @@ body.app-vw-lte-760 .topbar-search {
     opacity 90ms ease,
     transform 90ms ease,
     visibility 0s linear 90ms;
-}
-.app-menu-popover {
   top: 100%;
   left: 0;
 }
@@ -2625,8 +2629,8 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 }
 .ci-indicator.pr-number-chip {
   color: #e9edf3;
-  background: #000;
-  border-color: #000;
+  background: var(--pr-number-chip-bg);
+  border-color: var(--pr-number-chip-bg);
   padding: 0 4px;
 }
 .popover-chip-link {
@@ -2701,8 +2705,8 @@ body.theme-light .ci-indicator {
 }
 body.theme-light .ci-indicator.pr-number-chip {
   color: #ffffff;
-  background: #2b3242;
-  border-color: #2b3242;
+  background: var(--pr-number-chip-bg);
+  border-color: var(--pr-number-chip-bg);
 }
 body.theme-light .ci-indicator.pr-status-passing,
 body.theme-light .ci-indicator.pr-review-approved {
@@ -2980,8 +2984,6 @@ body.theme-light .branch-link {
   min-width: 0;
   flex: 1;
   overflow-wrap: anywhere;
-}
-.popover-row.compact .popover-value {
 }
 .session-popover .meta-muted {
   color: var(--muted);
@@ -3551,12 +3553,42 @@ body.theme-light .js-debug-graph-view {
   white-space: nowrap;
 }
 .js-debug-chart-shell {
+  position: relative;
   display: grid;
   flex: 1 1 auto;
   grid-template-rows: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 0;
+}
+.js-debug-history-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  pointer-events: none;
+}
+.js-debug-history-overlay[hidden] {
+  display: none;
+}
+.js-debug-history-overlay-message {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  font: 700 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  text-align: center;
+}
+.js-debug-history-retry {
+  pointer-events: auto;
 }
 .js-debug-chart-grid {
   display: grid;
@@ -3940,15 +3972,6 @@ body.theme-light .js-debug-graph-view {
 }
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
-}
-.file-explorer-changes-panel {
-  --changes-row-hover-bg: var(--active-control-soft-bg);
-  --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: rgba(148, 163, 184, 0.50);
-  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
-  --changes-folder-text: var(--accent-gold);
-  --changes-path-text: var(--muted);
-  --changes-icon-text: #a7c7ff;
 }
 .changes-toolbar {
   display: flex;
@@ -4564,6 +4587,7 @@ body.theme-light .js-debug-graph-view {
   font-weight: 650;
 }
 .preferences-setting-help {
+  grid-column: 1 / -1;
   display: block;
   margin-top: 3px;
   color: var(--muted);
@@ -5092,11 +5116,6 @@ body.theme-light .changes-diff-add-neutral {
 body.theme-light .changes-diff-remove {
   color: var(--danger-strong-hover);
 }
-body.theme-light .keyboard-shortcut-row kbd {
-  color: var(--text);
-  background: var(--panel2);
-  border-color: var(--line);
-}
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
@@ -5185,14 +5204,9 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control textarea[data-setting-autosize="true"] {
   overflow-y: hidden;
 }
-.preferences-setting-suffix,
-.preferences-setting-help {
+.preferences-setting-suffix {
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
-}
-.preferences-setting-help {
-  grid-column: 1 / -1;
-  margin-top: 3px;
 }
 .preferences-status-pulse-example {
   display: inline-flex;
@@ -5257,8 +5271,6 @@ body.theme-light .preferences-inline-action {
   gap: 8px;
   padding: 4px 0;
   font: inherit;
-}
-.branch-name {
 }
 .branch-meta {
   color: var(--text-muted-strong);
@@ -6296,6 +6308,7 @@ body.theme-light .drop-slot.drag-over {
   right: 8px;
   width: auto;
   max-height: min(60vh, 520px);
+  white-space: normal;
 }
 .panel-popover-zone.popover-open > .session-popover {
   visibility: visible;
@@ -6345,6 +6358,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {
   --panel-ring-color: var(--pane-ring-attention);
+  --attention-ring-border: 1px;
 }
 /* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
    .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
@@ -6358,11 +6372,6 @@ body.theme-light .drop-slot.drag-over {
   --panel-ring-color: var(--pane-ring-attention);
 }
 /* needs-* panes get the shared .attention-pulse class from syncAttentionAnimation. */
-.panel.needs-input-pane,
-.panel.needs-exec-pane,
-.panel.needs-blocked-pane {
-  --attention-ring-border: 1px;
-}
 .panel.active-pane .panel-head {
   /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
   color: var(--pane-tab-text);
@@ -6412,9 +6421,6 @@ body.theme-light .drop-slot.drag-over {
   gap: 6px;
   overflow: hidden;
   white-space: nowrap;
-}
-.panel-popover-zone > .session-popover {
-  white-space: normal;
 }
 .panel-session-label .session-button-name {
   color: inherit;
@@ -6605,8 +6611,6 @@ body.theme-light .drop-slot.drag-over {
 }
 .repo-chip-menu .repo-chip-row-primary .repo-chip-path {
   font-weight: 700;
-}
-.repo-chip-menu .repo-chip-path {
 }
 .repo-chip-menu .repo-chip-meta {
   display: inline-flex;
@@ -7804,7 +7808,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 150px;
   padding: 4px;
   color: var(--chrome-text-strong);
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: 1px solid var(--sep-muted);
   border-radius: 7px;
   box-shadow: var(--shadow-elevated);
@@ -7823,7 +7827,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   gap: 9px;
   padding: 12px;
   color: var(--chrome-text-strong);
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: 7px;
   box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
@@ -7939,7 +7943,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   max-width: var(--file-image-preview-max-inline-size);
   max-height: var(--file-image-preview-max-block-size);
   padding: 6px;
-  background: rgba(17, 24, 32, 0.98);
+  background: var(--overlay-surface-strong);
   border: 1px solid #6f7b8d;
   border-radius: 7px;
   box-shadow: 10px 14px 32px rgb(var(--shadow-rgb) / 0.62);
@@ -8259,8 +8263,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
   overflow: hidden;
-}
-.summary-context-line {
 }
 .summary-context-label {
   color: var(--text);
@@ -8700,7 +8702,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 0;
   padding: 0 0 2px;
 }
-.yoagent-recent-agents-label {
+.yoagent-section-title {
   color: var(--muted);
   font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
   text-transform: uppercase;
@@ -8839,20 +8841,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-transcript-copy {
   flex: 0 0 auto;
 }
-.yoagent-chat-clear {
-  height: 24px;
-  padding: 0 8px;
-  color: var(--muted);
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-}
-.yoagent-chat-clear:hover:not(:disabled),
-.yoagent-chat-clear:focus-visible {
-  color: var(--text);
-  border-color: var(--active-control-soft-border);
-}
 .yoagent-chat-history {
   /* One normal vertical owner for YO!agent activity. The outer #yoagent-content only keeps horizontal
      overflow, so thinking/stream refreshes do not expose nested rails. */
@@ -8891,19 +8879,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
-.yoagent-waiting-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-waiting-list {
+.yoagent-compact-list {
   display: grid;
   gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.yoagent-waiting-item {
+.yoagent-compact-item {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -8916,7 +8899,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   flex: 0 0 auto;
   font-size: 9px;
 }
-.yoagent-waiting-label {
+.yoagent-compact-label {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -8927,7 +8910,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   flex: 0 0 auto;
   color: var(--muted);
 }
-.yoagent-waiting-clear {
+.yoagent-compact-action {
   appearance: none;
   flex: 0 0 auto;
   border: 1px solid var(--line);
@@ -8938,8 +8921,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
   padding: 4px 7px;
 }
-.yoagent-waiting-clear:hover,
-.yoagent-waiting-clear:focus-visible {
+.yoagent-compact-action:hover,
+.yoagent-compact-action:focus-visible {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
   outline: 0;
@@ -8954,24 +8937,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
-.yoagent-chat-queue-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-chat-queue-items {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.yoagent-chat-queue-item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
 .yoagent-chat-queue-index {
   display: inline-flex;
   align-items: center;
@@ -8984,30 +8949,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 50%;
   font: 800 10px/1 var(--mono-font);
 }
-.yoagent-chat-queue-text {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.yoagent-chat-queue-cancel {
-  appearance: none;
-  flex: 0 0 auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  color: var(--muted);
-  cursor: pointer;
-  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
-  padding: 4px 7px;
-}
-.yoagent-chat-queue-cancel:hover,
-.yoagent-chat-queue-cancel:focus-visible {
-  border-color: var(--active-control-focus-ring);
-  color: var(--text);
-  outline: 0;
-}
 .yoagent-jobs-list {
   display: grid;
   gap: 5px;
@@ -9017,11 +8958,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
-}
-.yoagent-jobs-title {
-  color: var(--muted);
-  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
 }
 .yoagent-jobs-items {
   display: grid;
@@ -9633,8 +9569,7 @@ body.theme-light .yoagent-chat-queue {
   background: color-mix(in srgb, var(--active-control-soft-bg) 72%, #ffffff);
   border-color: var(--active-control-soft-border);
 }
-body.theme-light .yoagent-chat-queue-title,
-body.theme-light .yoagent-chat-queue-cancel {
+body.theme-light :is(.yoagent-section-title, .yoagent-compact-action) {
   color: var(--lt-muted-strong);
 }
 body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
@@ -10847,7 +10782,7 @@ body.app-vw-lte-980 .tabs {
   width: var(--file-explorer-tree-inline-size);
   z-index: var(--z-file-tree-drag);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   background: var(--panel);
   border-inline-end: 1px solid var(--line);
   box-shadow: 4px 0 18px rgb(var(--shadow-rgb) / 0.35);
@@ -11023,12 +10958,12 @@ body.app-vw-lte-980 .tabs {
 .file-tree-row.selected {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -11036,7 +10971,7 @@ body.app-vw-lte-980 .tabs {
   box-shadow: inset 3px 0 0 var(--active-control-border);
 }
 .file-tree-row.renaming {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-tree-row.new-entry:not(.selected) {
   color: #f7ffdc;
@@ -11249,6 +11184,7 @@ body.app-vw-lte-980 .tabs {
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   position: relative;
+  color: var(--accent-lime);
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
   content: "";
@@ -11259,9 +11195,6 @@ body.app-vw-lte-980 .tabs {
   border-radius: 999px;
   animation: metadata-refresh-spin 0.7s linear infinite;
   opacity: 0.9;
-}
-.file-tree-row.kind-dir.loading-children > .file-tree-icon {
-  color: var(--accent-lime);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
   color: var(--accent-lime);
@@ -11322,15 +11255,7 @@ body.theme-light .server-update-banner-reload:focus-visible {
   color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
-}
-body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: var(--pc-control-fg);
-}
-body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: var(--file-selection-text);
-  background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #b06a00;
@@ -11339,10 +11264,6 @@ body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name,
 body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
   color: #3f6312;
-}
-body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: var(--brand-green);
-  text-shadow: none;
 }
 .file-tree-name {
   flex: 0 1 auto;
@@ -11473,6 +11394,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 }
 .file-tree-children {
   position: relative;
+  display: block;
 }
 .file-tree-children::before {
   content: "";
@@ -11482,9 +11404,6 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
   border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
-}
-.file-tree-children {
-  display: block;
 }
 body.theme-light .file-explorer,
 body.theme-light .file-explorer-tree-col {
@@ -11515,7 +11434,7 @@ body.theme-light .file-explorer-path-inline.invalid {
 body.theme-light .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -11565,13 +11484,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 body.theme-light .file-tree-children::before {
   border-left-color: rgba(100, 116, 139, 0.28);
 }
-/* File Explorer now contains a tree column (left) and an editor column
-   that grows when a file is opened. Aside is a flex row of the two. */
-.file-explorer {
-  display: flex;
-  flex-direction: row;
-  width: var(--file-explorer-tree-inline-size);
-}
+/* File Explorer contains a tree column (left) and an editor column that grows when a file is opened. */
 .file-explorer-tree-col {
   display: flex;
   flex-direction: column;
@@ -12248,7 +12161,7 @@ body.editor-theme-light .file-editor-image-panel {
   opacity: 0.8;
 }
 .file-editor-save:hover {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-editor-dialog-backdrop {
   z-index: var(--z-file-editor-dialog);
@@ -12409,12 +12322,6 @@ body.app-vw-lte-760 .file-editor-conflict-compare {
   background: transparent;
   border-color: #c69a15;
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
-}
-.file-editor-theme-panel.theme-vanilla {
-  color: var(--lt-text);
-  background: var(--lt-editor-bg);
-  border-color: var(--lt-line);
-  box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
 }
 .file-editor-wrap.active,
 .file-editor-gutter.active {
@@ -12897,7 +12804,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: #ffffff;
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
@@ -12913,7 +12820,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 .file-editor-preview-pane-panel.vanilla-preview-body h4,
 .file-editor-preview-pane-panel.vanilla-preview-body h5,
 .file-editor-preview-pane-panel.vanilla-preview-body h6 {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: transparent;
 }
 .file-editor-preview-pane.vanilla-preview-body a,
@@ -12928,13 +12835,13 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
 }
 .file-editor-preview-pane.vanilla-preview-body code,
 .file-editor-preview-pane-panel.vanilla-preview-body code {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 .file-editor-preview-pane.vanilla-preview-body pre,
 .file-editor-preview-pane-panel.vanilla-preview-body pre {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -13012,9 +12919,6 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   font-size: var(--ui-font-size);
   font-weight: 700;
   white-space: nowrap;
-}
-.file-tree-name {
-  min-width: 0;
 }
 .file-tree-rename-input {
   width: min(280px, 100%);
@@ -13227,6 +13131,13 @@ body.resizing-file-explorer-changes {
   box-shadow: 0 0 0 1px var(--drop-outline-shadow);
 }
 .file-explorer-changes-panel {
+  --changes-row-hover-bg: var(--active-control-soft-bg);
+  --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
+  --changes-indent-line: rgba(148, 163, 184, 0.50);
+  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
+  --changes-folder-text: var(--accent-gold);
+  --changes-path-text: var(--muted);
+  --changes-icon-text: #a7c7ff;
   --pane-bar-bg: var(--panel2);
   flex: 1 1 auto;
   min-height: 0;
@@ -13491,41 +13402,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-explorer-hidden-toggle-panel,
 .file-explorer-root-mode-toggle-panel,
-.file-explorer-header-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
+.file-explorer-panel .file-explorer-header-action {
   height: 18px;
-  flex: 0 0 30px;
-  padding: 0 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-  line-height: 1;
-  white-space: nowrap;
-  font-weight: 700;
-  cursor: pointer;
-}
-.file-explorer-root-mode-toggle-panel {
-  width: auto;
-  min-width: 38px;
-  flex: 0 0 auto;
-}
-.file-explorer-header-action {
-  width: 20px;
-  flex-basis: 20px;
-  padding: 0;
-  line-height: 1;
-}
-.file-explorer-header-action.file-explorer-date-toggle {
-  width: auto;
-  min-width: 42px;
-  flex-basis: auto;
-  padding: 0 5px;
 }
 .file-explorer-folder-action {
   color: var(--muted);
@@ -13642,20 +13520,6 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-tree-row.file-tree-row--session-touched > .file-tree-name,
 .file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
   font-weight: 800;
-}
-.file-explorer-hidden-toggle-panel:hover,
-.file-explorer-root-mode-toggle-panel:hover,
-.file-explorer-header-action:hover,
-.file-explorer-header-action:focus-visible {
-  color: var(--text);
-  border-color: var(--text);
-}
-.file-explorer-hidden-toggle-panel.active,
-.file-explorer-root-mode-toggle-panel.active,
-.file-explorer-quick-access-button.active {
-  color: var(--active-control-text);
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -14184,7 +14048,7 @@ body.editor-theme-light .file-editor-content {
   cursor: default;
 }
 .file-editor-save-panel:not(:disabled):hover {
-  background: rgba(82, 210, 115, 0.18);
+  background: var(--success-soft-bg);
 }
 .file-editor-panel-body {
   min-height: 0;
@@ -14264,7 +14128,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: #ffffff;
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
@@ -14272,7 +14136,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
@@ -14283,12 +14147,12 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: rgb(17, 24, 39);
+  color: var(--markdown-html-light-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
 }
@@ -15188,10 +15052,7 @@ body.editor-theme-light .cm-content .md-code {
 }
 .file-editor-native-video {
   max-height: min(72vh, 720px);
-  background: #000;
-}
-body.editor-theme-light .file-editor-native-video {
-  background: #000;
+  background: var(--markdown-preview-bg);
 }
 .file-editor-image-panel {
   z-index: var(--z-file-editor-preview-layer);
@@ -15267,8 +15128,6 @@ body.editor-theme-light .file-editor-native-video {
    editor tabs use the same tab base as tmux sessions. */
 .pane-tab.file-explorer {
   border-color: rgba(120, 180, 255, 0.4);
-}
-.pane-tab.file-explorer {
   flex: 0 0 88px;
   min-width: 88px;
   max-width: 88px;
@@ -15457,7 +15316,7 @@ body.theme-light .file-tree-row.tabber-row {
   color: var(--tabber-detail-color);
   font-style: italic;
 }
-.file-tree-row.tabber-active-window:not(.selected) .file-tree-name {
+.file-tree-row:is(.tabber-active-window, .tabber-active-tab):not(.selected) .file-tree-name {
   font-weight: 800;
 }
 /* Tabber rows keep recency visible at every width; the tree/path text truncates first. */

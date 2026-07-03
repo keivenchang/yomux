@@ -45,6 +45,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   } else {
     scheduleResponsiveLayoutPrune();
   }
+  updatePanelInactiveOverlays();
 }
 
 function movePanelsToPool() {
@@ -106,6 +107,7 @@ function syncActivePanelsInPlace() {
     renderAttachedPanelContent(item);
     restorePaneViewState(item, desired);
   }
+  updatePanelInactiveOverlays();
 }
 
 function renderAttachedPanelContent(item) {

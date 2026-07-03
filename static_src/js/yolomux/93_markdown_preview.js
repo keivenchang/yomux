@@ -441,14 +441,6 @@ function splitMarkdownResourceUrl(value) {
   };
 }
 
-function safeDecodeMarkdownUrlPath(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
 function markdownPreviewImageTarget(src, markdownPath) {
   const raw = String(src || '').trim();
   if (!raw || !markdownPath) return null;
@@ -460,7 +452,7 @@ function markdownPreviewImageTarget(src, markdownPath) {
   }
   const {path: rawPath} = splitMarkdownResourceUrl(raw);
   if (!rawPath) return null;
-  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
+  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeURIComponent(rawPath));
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 

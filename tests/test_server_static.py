@@ -1,5 +1,6 @@
 import gzip
 import io
+import json
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,6 +161,58 @@ def test_html_and_json_responses_remain_no_store():
     assert json_handler.wfile.getvalue() == b'{"ok":true}'
 
 
+def test_write_json_negotiates_gzip_and_wildcard_transparently():
+    payload = {"rows": [{"name": "stats", "value": "x" * 120} for _index in range(80)]}
+    for accept_encoding in ("br, gzip", "*;q=0.5"):
+        handler = static_handler("/api/stats-sample", accept_encoding)
+
+        handler.write_json(payload)
+
+        headers = response_headers(handler)
+        encoded = handler.wfile.getvalue()
+        assert handler.sent_status == HTTPStatus.OK
+        assert headers["content-encoding"] == "gzip"
+        assert headers["vary"] == "Accept-Encoding"
+        assert int(headers["content-length"]) == len(encoded)
+        assert len(encoded) < len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        assert json.loads(gzip.decompress(encoded)) == payload
+
+
+def test_write_json_keeps_small_and_explicit_gzip_q_zero_responses_uncompressed():
+    cases = [
+        ({"ok": True}, "gzip"),
+        ({"rows": ["x" * 120 for _index in range(80)]}, "gzip;q=0, *;q=1"),
+    ]
+    for payload, accept_encoding in cases:
+        handler = static_handler("/api/stats-sample", accept_encoding)
+
+        handler.write_json(payload)
+
+        headers = response_headers(handler)
+        assert "content-encoding" not in headers
+        assert headers["vary"] == "Accept-Encoding"
+        assert json.loads(handler.wfile.getvalue()) == payload
+
+
+def test_write_json_preserves_error_and_head_http_semantics_with_gzip():
+    payload = {"error": "history unavailable", "details": "x" * 5000}
+    error_handler = static_handler("/api/stats-sample", "gzip")
+    head_handler = static_handler("/api/stats-sample", "gzip", command="HEAD")
+
+    error_handler.write_json(payload, status=HTTPStatus.SERVICE_UNAVAILABLE)
+    head_handler.write_json(payload)
+
+    error_headers = response_headers(error_handler)
+    head_headers = response_headers(head_handler)
+    assert error_handler.sent_status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert error_headers["content-encoding"] == "gzip"
+    assert json.loads(gzip.decompress(error_handler.wfile.getvalue())) == payload
+    assert head_handler.sent_status == HTTPStatus.OK
+    assert head_headers["content-encoding"] == "gzip"
+    assert int(head_headers["content-length"]) > 0
+    assert head_handler.wfile.getvalue() == b""
+
+
 def test_response_writers_record_endpoint_response_bytes():
     records = []
     app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))
@@ -180,3 +233,29 @@ def test_response_writers_record_endpoint_response_bytes():
     assert kwargs["details"]["method"] == "GET"
     assert kwargs["details"]["path"] == "/api/session-files"
     assert kwargs["details"]["content_type"] == "application/json"
+    assert kwargs["details"]["uncompressed_bytes"] == len(handler.wfile.getvalue())
+    assert kwargs["details"]["wire_bytes"] == len(handler.wfile.getvalue())
+    assert kwargs["details"]["representation_bytes"] == len(handler.wfile.getvalue())
+    assert kwargs["details"]["content_encoding"] == "identity"
+    assert kwargs["details"]["json_encode_ms"] >= 0
+    assert kwargs["details"]["compression_ms"] == 0
+    assert kwargs["details"]["write_ms"] >= 0
+
+
+def test_gzipped_json_endpoint_profile_records_uncompressed_wire_compression_and_write_phases():
+    records = []
+    app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))
+    handler = static_handler("/api/stats-sample", "gzip", app=app)
+    payload = {"records": [{"value": "x" * 200} for _index in range(100)]}
+
+    handler.write_json(payload)
+
+    assert len(records) == 1
+    _args, kwargs = records[0]
+    details = kwargs["details"]
+    assert details["content_encoding"] == "gzip"
+    assert details["uncompressed_bytes"] > details["wire_bytes"] == len(handler.wfile.getvalue())
+    assert details["representation_bytes"] == details["wire_bytes"]
+    assert details["compression_ms"] >= 0
+    assert details["json_encode_ms"] >= 0
+    assert details["write_ms"] >= 0

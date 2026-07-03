@@ -583,8 +583,8 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 }
 .ci-indicator.pr-number-chip {
   color: #e9edf3;
-  background: #000;
-  border-color: #000;
+  background: var(--pr-number-chip-bg);
+  border-color: var(--pr-number-chip-bg);
   padding: 0 4px;
 }
 .popover-chip-link {
@@ -659,8 +659,8 @@ body.theme-light .ci-indicator {
 }
 body.theme-light .ci-indicator.pr-number-chip {
   color: #ffffff;
-  background: #2b3242;
-  border-color: #2b3242;
+  background: var(--pr-number-chip-bg);
+  border-color: var(--pr-number-chip-bg);
 }
 body.theme-light .ci-indicator.pr-status-passing,
 body.theme-light .ci-indicator.pr-review-approved {
@@ -938,8 +938,6 @@ body.theme-light .branch-link {
   min-width: 0;
   flex: 1;
   overflow-wrap: anywhere;
-}
-.popover-row.compact .popover-value {
 }
 .session-popover .meta-muted {
   color: var(--muted);

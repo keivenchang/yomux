@@ -1,7 +1,3 @@
-function domBuilderDataAttributeName(key) {
-  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
-}
-
 function setDomBuilderOptions(element, options = {}) {
   if (!element) return element;
   if (options.id) element.id = options.id;
@@ -48,7 +44,7 @@ function domBuilderSerializedAttributes(element) {
     for (const [name, value] of Object.entries(attrMap)) add(name, value);
   }
   if (element?.dataset && typeof element.dataset === 'object') {
-    for (const [key, value] of Object.entries(element.dataset)) add(domBuilderDataAttributeName(key), value);
+    for (const [key, value] of Object.entries(element.dataset)) add(domDataAttributeName(key), value);
   }
   if (element?.hidden === true) add('hidden', true);
   if (element?.disabled === true) add('disabled', true);

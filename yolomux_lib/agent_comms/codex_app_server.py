@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..runtime_env import healed_runtime_path
 from .json_rpc import json_rpc_notification
 from .json_rpc import json_rpc_request
 from .stream_events import ASSISTANT_DELTA
@@ -34,28 +35,12 @@ def _read_yolomux_version() -> str:
 YOLOMUX_VERSION = _read_yolomux_version()
 
 
-def _path_entries(value: str) -> list[str]:
-    return [entry for entry in str(value or "").split(os.pathsep) if entry]
-
-
 def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Build the Codex subprocess environment without importing server auth state."""
     env = dict(os.environ)
     if base_env is not None:
         env.update(base_env)
-    path_entries = _path_entries(env.get("PATH", ""))
-    additions: list[str] = []
-    for entry in _path_entries(env.get("YOLOMUX_EXTRA_PATH", "")):
-        expanded = str(Path(entry).expanduser())
-        if expanded and expanded not in path_entries and expanded not in additions:
-            additions.append(expanded)
-    local_bin = Path.home() / ".local" / "bin"
-    if local_bin.is_dir():
-        local_bin_text = str(local_bin)
-        if local_bin_text not in path_entries and local_bin_text not in additions:
-            additions.append(local_bin_text)
-    if additions:
-        env["PATH"] = os.pathsep.join([*additions, *path_entries])
+    env["PATH"] = healed_runtime_path(env, home=Path.home())
     configured_home = str(env.get("YOLOMUX_CODEX_HOME") or env.get("CODEX_HOME") or "").strip()
     codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
     codex_home.mkdir(parents=True, exist_ok=True)

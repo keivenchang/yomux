@@ -58,6 +58,8 @@ from .http_routes import parse_repo_refs_param
 from .http_routes import query_bool
 from .http_routes import query_list
 from .http_routes import query_one
+from .http_routes import route_for_request
+from .http_routes import SHARE_ACCESS_NONE
 from .tmux_utils import tmux
 from .tmux_utils import tmux_command
 from .tmux_utils import tmux_session_client_rows
@@ -220,7 +222,7 @@ TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
-STATIC_GZIP_MIN_BYTES = 1024
+RESPONSE_GZIP_MIN_BYTES = 1024
 STATIC_GZIP_CONTENT_TYPES = {
     "application/javascript",
     "application/json",
@@ -287,14 +289,18 @@ def static_asset_cache_control(request_path: str) -> str:
     return STATIC_CACHE_CONTROL_UNVERSIONED
 
 
-def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+def gzip_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
     if (
-        len(data) >= STATIC_GZIP_MIN_BYTES
+        len(data) >= RESPONSE_GZIP_MIN_BYTES
         and static_content_type_supports_gzip(content_type)
         and accept_encoding_allows_gzip(accept_encoding)
     ):
         return gzip.compress(data, compresslevel=6, mtime=0), "gzip"
     return data, None
+
+
+def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+    return gzip_response_body(data, content_type, accept_encoding)
 
 
 def clamp_pty_dimension(value: int) -> int:
@@ -953,7 +959,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
         return f"{method} {path}"[:120]
 
-    def record_http_response_bytes(self, status: HTTPStatus | int, body_bytes: int, content_type: str = "") -> None:
+    def record_http_response_bytes(
+        self,
+        status: HTTPStatus | int,
+        body_bytes: int,
+        content_type: str = "",
+        performance_details: dict[str, Any] | None = None,
+    ) -> None:
         app = getattr(getattr(self, "server", None), "app", None)
         recorder = getattr(app, "record_performance_sample", None)
         if not callable(recorder):
@@ -969,6 +981,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         extra_details = getattr(self, "_http_response_performance_details", None)
         if isinstance(extra_details, dict):
             details.update(extra_details)
+        if isinstance(performance_details, dict):
+            details.update(performance_details)
         recorder(
             "http-endpoint",
             endpoint,
@@ -986,33 +1000,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not getattr(self.server, "tls_context", None) or self.request_is_https():
             return True
         path = str(parsed.path or "")
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), path)
+        if route is None or route.share_access == SHARE_ACCESS_NONE:
+            return False
+
         def http_share_token_allowed() -> bool:
             verifier = getattr(self.server.app, "verify_share_token", None)
             record = verifier(self.share_token_text()) if callable(verifier) else None
             return bool(record and record.get("http_allowed"))
 
-        if path.startswith("/share/"):
+        if route.path == "/share/*":
             short_id = path.removeprefix("/share/").strip("/")
             finder = getattr(self.server.app, "share_record_for_short_id", None)
             record = finder(short_id) if short_id and "/" not in short_id and callable(finder) else None
             return bool(record and record.get("http_allowed"))
-        if path.startswith("/static/"):
+        if route.path == "/static/*":
             checker = getattr(self.server.app, "http_allowed_share_is_active", None)
             return bool(checker()) if callable(checker) else False
-        share_api_paths = {
-            "/",
-            "/ws/share-ui",
-            "/ws/share-view",
-            "/api/ping",
-            "/api/share",
-            "/api/share-stream",
-            *self.SHARE_READONLY_GET_PATHS,
-            *self.SHARE_SCOPED_FILE_GET_PATHS,
-            *self.SHARE_READONLY_POST_PATHS,
-        }
-        if path in share_api_paths:
-            return http_share_token_allowed()
-        return False
+        return http_share_token_allowed()
 
     def redirect_plaintext_to_https_if_needed(self, parsed: Any) -> bool:
         if not getattr(self.server, "tls_context", None) or self.request_is_https() or self.plaintext_share_scope_allowed(parsed):
@@ -2168,17 +2173,45 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        content_type = "application/json; charset=utf-8"
+        encode_started = time.perf_counter()
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json_encode_ms = (time.perf_counter() - encode_started) * 1000
+        compression_started = time.perf_counter()
+        body, content_encoding = gzip_response_body(data, content_type, self.headers.get("Accept-Encoding"))
+        compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
+        head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.record_http_response_bytes(status, len(data), "application/json; charset=utf-8")
+        write_started = time.perf_counter()
+        if not head_only:
+            self.wfile.write(body)
+        write_ms = (time.perf_counter() - write_started) * 1000
+        wire_bytes = 0 if head_only else len(body)
+        self.record_http_response_bytes(
+            status,
+            wire_bytes,
+            content_type,
+            {
+                "uncompressed_bytes": len(data),
+                "wire_bytes": wire_bytes,
+                "representation_bytes": len(body),
+                "content_encoding": content_encoding or "identity",
+                "json_encode_ms": round(json_encode_ms, 3),
+                "compression_ms": round(compression_ms, 3),
+                "write_ms": round(write_ms, 3),
+                "head_only": head_only,
+            },
+        )
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
         # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was

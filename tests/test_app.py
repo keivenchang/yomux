@@ -88,6 +88,14 @@ def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch):
     assert second["history"]["sequence"] >= 2
     assert second["history"]["records"]
     assert any(record["system_cpu_count"] for record in second["history"]["records"])
+    assert {
+        "stats_client_history_merge_ms",
+        "stats_token_consumer_ms",
+        "stats_sample_ms",
+        "stats_history_compact_ms",
+        "stats_history_encode_ms",
+        "stats_app_build_ms",
+    } <= set(second["_endpoint_profile"])
 
 
 def test_stats_host_process_metrics_normalize_cpu_and_memory_to_the_whole_host(monkeypatch):
@@ -520,6 +528,219 @@ def test_stats_history_wide_token_history_is_server_aggregated(monkeypatch):
     assert len(token_history["records"]) < 20
     assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 6000
     assert all(record["duration"] == 300 for record in token_history["records"])
+
+
+def test_stats_history_bounded_older_window_returns_only_missing_records_with_safe_cursor(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200000.0
+    start = int(now) - 30
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    try:
+        with webapp.stats_history_lock:
+            for offset in range(30):
+                webapp.stats_history_merge_record_locked(
+                    {"start": start + offset, "api_count": 1},
+                    now,
+                    client_id="client-a",
+                )
+            latest_sequence = webapp.stats_history_sequence
+            older = webapp.stats_history_payload_locked(
+                0,
+                client_id="client-a",
+                token_since=0,
+                token_resolution_seconds=60,
+                history_start=start,
+                history_end=start + 15,
+            )
+            live = webapp.stats_history_payload_locked(0, client_id="client-a", history_start=start + 15)
+    finally:
+        webapp.control_server.stop()
+
+    assert len(older["records"]) == 15
+    assert all(start <= record["start"] < start + 15 for record in older["records"])
+    assert older["sequence"] == 0
+    assert older["latest_sequence"] == latest_sequence
+    assert older["coverage"] == {
+        "mode": "older",
+        "requested_start": start,
+        "requested_end": start + 15,
+        "available_start": start,
+        "available_end": start + 30,
+        "covered_start": start,
+        "covered_end": start + 15,
+        "complete": True,
+        "has_more_older": False,
+        "next_older_end": 0,
+        "resolution_seconds": 0,
+        "max_points": 0,
+        "source_records": 15,
+        "returned_records": 15,
+        "cursor": 0,
+        "latest_cursor": latest_sequence,
+    }
+    assert older["agent_token_history"]["sequence"] == 0
+    assert older["agent_token_history"]["snapshot"] is False
+    assert len(live["records"]) == 15
+    assert live["sequence"] == latest_sequence
+
+
+def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_semantics(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    now = 200003.0
+    start = int(now) - 120
+    monkeypatch.setattr(app_module.time, "time", lambda: now)
+    try:
+        with webapp.stats_history_lock:
+            for offset in range(120):
+                sample_time = start + offset
+                webapp.stats_history_merge_record_locked(
+                    {
+                        "start": sample_time,
+                        "cpu_total_percent": 20,
+                        "cpu_count": 1,
+                        "system_cpu_total_percent": 30,
+                        "system_cpu_count": 1,
+                        "run_agent_total": 1,
+                        "active_agent_total": 1,
+                        "agent_activity_samples": 1,
+                        "tokens_per_agent_total": 2,
+                        "agent_token_samples": 1,
+                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "tokens": 2, "seconds": 1, "samples": 1}],
+                    },
+                    now,
+                    fields=app_module.STATS_HISTORY_SERVER_FIELDS,
+                    client_id=None,
+                )
+                webapp.stats_history_merge_record_locked(
+                    {
+                        "start": sample_time,
+                        "api_count": 1,
+                        "sse_count": 2,
+                        "latency_total_ms": 10,
+                        "latency_count": 1,
+                        "bandwidth_bytes": 100,
+                    },
+                    now,
+                    client_id="client-a",
+                )
+                bucket = webapp.stats_history_bucket_locked(sample_time, now)
+                assert bucket is not None
+                process = webapp.stats_history_process_bucket_locked(bucket, "port:9101")
+                process["label"] = "yolomux.py :9101"
+                process["port"] = 9101
+                process["cpu_total_percent"] += 25
+                process["cpu_count"] += 1
+                process["sequence"] = int(bucket["sequence"])
+                webapp.stats_history_refresh_bucket_sequence_locked(bucket)
+            history = webapp.stats_history_payload_locked(
+                0,
+                client_id="client-a",
+                token_resolution_seconds=60,
+                history_start=start,
+                history_end=start + 120,
+                history_resolution_seconds=5,
+                history_max_points=6,
+            )
+    finally:
+        webapp.control_server.stop()
+
+    records = history["records"]
+    assert len(records) <= 6
+    assert history["coverage"]["resolution_seconds"] == 20
+    assert all(record["duration"] == 20 for record in records)
+    assert sum(record["api_count"] for record in records) == 120
+    assert sum(record["sse_count"] for record in records) == 240
+    assert sum(record["latency_total_ms"] for record in records) == 1200
+    assert sum(record["latency_count"] for record in records) == 120
+    assert sum(record["bandwidth_bytes"] for record in records) == 12000
+    assert sum(record["cpu_total_percent"] for record in records) == 2400
+    assert sum(record["cpu_count"] for record in records) == 120
+    assert sum(record["run_agent_total"] for record in records) == 120
+    assert sum(record["agent_activity_samples"] for record in records) == 120
+    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 120
+    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 3000
+    assert all("tokens_per_agent_total" not in record and "agent_token_rates" not in record for record in records)
+    token_records = history["agent_token_history"]["records"]
+    assert sum(item["tokens"] for record in token_records for item in record["agent_token_rates"]) == 240
+
+
+def test_stats_history_display_encoder_preserves_full_mixed_duration_input_until_budget_requires_coarsening():
+    webapp = app_module.TmuxWebtermApp([])
+    end = 1_036_800
+    start = end - (24 * 60 * 60)
+    tier_specs = (
+        (start, 1320, 60, webapp.stats_history_rollup_buckets),
+        (start + (22 * 60 * 60), 360, 10, webapp.stats_history_rollup_buckets),
+        (start + (23 * 60 * 60), 3600, 1, webapp.stats_history_raw_buckets),
+    )
+    sequence = 0
+    try:
+        with webapp.stats_history_lock:
+            for tier_start, count, duration, destination in tier_specs:
+                for index in range(count):
+                    sequence += 1
+                    bucket_start = tier_start + (index * duration)
+                    bucket = app_module.stats_history_empty_bucket(bucket_start, duration)
+                    bucket.update({
+                        "sequence": sequence,
+                        "server_sequence": sequence,
+                        "cpu_total_percent": 20.0,
+                        "cpu_count": 1.0,
+                        "system_cpu_total_percent": 30.0,
+                        "system_cpu_count": 1.0,
+                        "run_agent_total": 1.0,
+                        "active_agent_total": 1.0,
+                        "agent_activity_samples": 1.0,
+                        "tokens_per_agent_total": 2.0,
+                        "agent_token_samples": 1.0,
+                        "agent_token_rates": {"1|0|codex": {"label": "1:0:codex", "total": 2.0, "samples": 1.0, "tokens": 2.0, "seconds": float(duration), "source": "transcript"}},
+                    })
+                    client = app_module.stats_history_empty_client_bucket()
+                    client.update({"sequence": sequence, "api_count": 1.0, "sse_count": 2.0, "latency_total_ms": 10.0, "latency_count": 1.0, "bandwidth_bytes": 100.0})
+                    bucket["clients"]["client-a"] = client
+                    process = app_module.stats_history_empty_process_bucket()
+                    process.update({"sequence": sequence, "label": "yolomux.py :9101", "port": 9101, "cpu_total_percent": 25.0, "cpu_count": 1.0})
+                    bucket["servers"]["port:9101"] = process
+                    destination[(bucket_start, duration)] = bucket
+            webapp.stats_history_sequence = sequence
+            preserved = webapp.stats_history_payload_locked(
+                0,
+                client_id="client-a",
+                history_start=start,
+                history_end=end,
+                history_resolution_seconds=1,
+                history_max_points=6000,
+            )
+            coarsened = webapp.stats_history_payload_locked(
+                0,
+                client_id="client-a",
+                history_start=start,
+                history_end=end,
+                history_resolution_seconds=1,
+                history_max_points=500,
+            )
+    finally:
+        webapp.control_server.stop()
+
+    assert len(preserved["records"]) == 5280
+    assert preserved["coverage"]["resolution_seconds"] == 1
+    assert preserved["coverage"]["returned_records"] == 5280
+    assert {duration: sum(record["duration"] == duration for record in preserved["records"]) for duration in (1, 10, 60)} == {1: 3600, 10: 360, 60: 1320}
+    records = coarsened["records"]
+    assert len(records) <= 500
+    assert coarsened["coverage"]["resolution_seconds"] > 60
+    assert sum(record["api_count"] for record in records) == 5280
+    assert sum(record["sse_count"] for record in records) == 10560
+    assert sum(record["latency_total_ms"] for record in records) == 52800
+    assert sum(record["latency_count"] for record in records) == 5280
+    assert sum(record["bandwidth_bytes"] for record in records) == 528000
+    assert sum(record["cpu_total_percent"] for record in records) == 105600
+    assert sum(record["cpu_count"] for record in records) == 5280
+    assert sum(record["run_agent_total"] for record in records) == 5280
+    assert sum(record["agent_activity_samples"] for record in records) == 5280
+    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 5280
+    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 132000
+    assert sum(item["tokens"] for record in records for item in record["agent_token_rates"]) == 10560
 
 
 def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared(monkeypatch):

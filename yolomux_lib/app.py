@@ -98,6 +98,7 @@ from .locales import user_message_payload
 from .common import as_dict
 from .common import next_numbered_session_name
 from .common import project_git
+from .common import positive_finite_number
 from .common import tail_file_lines
 from .common import truncate_text
 from .common import yolomux_client_revision
@@ -110,6 +111,7 @@ from .events import search_snippet
 from .events import read_yolomux_state
 from .events import update_yolomux_state
 from .agent_tui import classify_agent_pane
+from .agent_tui import normalized_prompt_state
 from .metadata import MetadataCache
 from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
@@ -170,6 +172,7 @@ from .types import SearchResult
 from .types import SessionFilesPayload
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
+from .web import bootstrap_agent_auth_status as cached_agent_auth_status_snapshot
 from .web import server_string
 from .workdir import agent_command
 from .workdir import AGENT_LOGIN_COMMANDS
@@ -207,7 +210,7 @@ from .yoagent.backends import resolve_yoagent_backend
 from .yoagent.backends import strip_yoagent_hidden_thinking
 from .yoagent.backends import strip_yoagent_stream_hidden_thinking
 from .yoagent.streaming import YoagentStreamPublisher
-from .yoagent.streaming import sanitized_stream_items as sanitized_yoagent_stream_items
+from .yoagent.conversation import sanitized_stream_items as sanitized_yoagent_stream_items
 from .yoagent.backends import yoagent_activity_payload_signature
 from .yoagent.backends import yoagent_cli_auth_failure
 from .yoagent.backends import yoagent_cli_fallback_reason
@@ -782,13 +785,7 @@ def stats_history_client_id(value: Any = "") -> str:
 
 
 def stats_history_positive_number(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(number) or number <= 0:
-        return 0.0
-    return number
+    return positive_finite_number(value)
 
 
 def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
@@ -1431,13 +1428,6 @@ def resolve_yoagent_backend(backend: str) -> str:
     return yoagent_backends.resolve_yoagent_backend(backend, auth_status=agent_auth_status())
 
 
-def cached_agent_auth_status_snapshot() -> dict[str, dict[str, object]]:
-    try:
-        return agent_auth_status(block=False, allow_stale=True, refresh=True)
-    except TypeError:
-        return agent_auth_status()
-
-
 def tmux_session_name_sanitize(name: str) -> str:
     # tmux's own session_check_name() silently rewrites "." and ":" to "_": a rename to
     # "dynamo-utils.dev" is stored by tmux as "dynamo-utils_dev". Mirror that here so the name we
@@ -1454,13 +1444,6 @@ def tmux_session_name_error(name: str) -> str | None:
     if not TMUX_SESSION_NAME_RE.fullmatch(name):
         return "session name may contain only letters, numbers, spaces, dot, dash, and underscore"
     return None
-
-
-def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
-    state = blank_prompt_state()
-    if prompt:
-        state.update(prompt)
-    return state
 
 
 def utc_iso_from_ts(value: Any) -> str:
@@ -2086,41 +2069,40 @@ class TmuxWebtermApp:
             records[clean_process_id] = record
         return records
 
-    def stats_history_records_locked(self, since: int = 0, client_id: str = "", history_start: int = 0) -> list[dict[str, Any]]:
-        records = []
+    def stats_history_record_from_bucket_locked(
+        self,
+        bucket: dict[str, Any],
+        client_id: str = "",
+        include_agent_tokens: bool = True,
+    ) -> dict[str, Any]:
         clean_client_id = stats_history_client_id(client_id)
-        for bucket in [*self.stats_history_rollup_buckets.values(), *self.stats_history_raw_buckets.values()]:
-            client_bucket = self.stats_history_record_client_bucket_locked(bucket, clean_client_id)
-            sequence = int(bucket.get("sequence") or 0)
-            if sequence <= since:
-                continue
-            start = int(bucket.get("start") or 0)
-            duration = int(bucket.get("duration") or 0)
-            if history_start > 0 and start + duration <= history_start:
-                continue
-            records.append({
-                "start": start,
-                "duration": duration,
-                "sequence": sequence,
-                "clients": self.stats_history_client_records_locked(bucket),
-                "servers": self.stats_history_process_records_locked(bucket),
-                "api_count": float(client_bucket.get("api_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "sse_count": float(client_bucket.get("sse_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "latency_total_ms": float(client_bucket.get("latency_total_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "latency_count": float(client_bucket.get("latency_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "bandwidth_bytes": float(client_bucket.get("bandwidth_bytes") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "disconnected_ms": float(client_bucket.get("disconnected_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
-                "cpu_total_percent": float(bucket.get("cpu_total_percent") or 0.0),
-                "cpu_count": float(bucket.get("cpu_count") or 0.0),
-                "system_cpu_total_percent": float(bucket.get("system_cpu_total_percent") or 0.0),
-                "system_cpu_count": float(bucket.get("system_cpu_count") or 0.0),
-                "ask_agent_total": float(bucket.get("ask_agent_total") or 0.0),
-                "run_agent_total": float(bucket.get("run_agent_total") or 0.0),
-                "transition_agent_total": float(bucket.get("transition_agent_total") or 0.0),
-                "idle_agent_total": float(bucket.get("idle_agent_total") or 0.0),
-                "active_agent_total": float(bucket.get("active_agent_total") or 0.0),
-                "inactive_agent_total": float(bucket.get("inactive_agent_total") or 0.0),
-                "agent_activity_samples": float(bucket.get("agent_activity_samples") or 0.0),
+        client_bucket = self.stats_history_record_client_bucket_locked(bucket, clean_client_id)
+        record = {
+            "start": int(bucket.get("start") or 0),
+            "duration": int(bucket.get("duration") or 0),
+            "sequence": int(bucket.get("sequence") or 0),
+            "clients": self.stats_history_client_records_locked(bucket),
+            "servers": self.stats_history_process_records_locked(bucket),
+            "api_count": float(client_bucket.get("api_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "sse_count": float(client_bucket.get("sse_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "latency_total_ms": float(client_bucket.get("latency_total_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "latency_count": float(client_bucket.get("latency_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "bandwidth_bytes": float(client_bucket.get("bandwidth_bytes") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "disconnected_ms": float(client_bucket.get("disconnected_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "cpu_total_percent": float(bucket.get("cpu_total_percent") or 0.0),
+            "cpu_count": float(bucket.get("cpu_count") or 0.0),
+            "system_cpu_total_percent": float(bucket.get("system_cpu_total_percent") or 0.0),
+            "system_cpu_count": float(bucket.get("system_cpu_count") or 0.0),
+            "ask_agent_total": float(bucket.get("ask_agent_total") or 0.0),
+            "run_agent_total": float(bucket.get("run_agent_total") or 0.0),
+            "transition_agent_total": float(bucket.get("transition_agent_total") or 0.0),
+            "idle_agent_total": float(bucket.get("idle_agent_total") or 0.0),
+            "active_agent_total": float(bucket.get("active_agent_total") or 0.0),
+            "inactive_agent_total": float(bucket.get("inactive_agent_total") or 0.0),
+            "agent_activity_samples": float(bucket.get("agent_activity_samples") or 0.0),
+        }
+        if include_agent_tokens:
+            record.update({
                 "tokens_per_agent_total": float(bucket.get("tokens_per_agent_total") or 0.0),
                 "agent_token_samples": float(bucket.get("agent_token_samples") or 0.0),
                 "agent_token_rates": [
@@ -2138,53 +2120,181 @@ class TmuxWebtermApp:
                 ],
                 "host_metrics": self.stats_history_host_metrics_snapshot(bucket.get("host_metrics")),
             })
-        return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
+        return record
 
-    def stats_history_agent_token_records_locked(self, since: int = 0, client_id: str = "", resolution_seconds: int = 0, history_start: int = 0) -> list[dict[str, Any]]:
-        resolution = max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(resolution_seconds or 0))
-        grouped: dict[int, dict[str, Any]] = {}
-        for record in self.stats_history_records_locked(0, client_id=client_id, history_start=history_start):
-            start = int(record["start"] // resolution * resolution)
-            target = grouped.setdefault(start, {
-                "start": start,
-                "duration": resolution,
-                "sequence": 0,
-                "tokens_per_agent_total": 0.0,
-                "agent_token_samples": 0.0,
-                "agent_token_rates": {},
-            })
-            target["sequence"] = max(int(target["sequence"]), int(record["sequence"]))
-            target["tokens_per_agent_total"] += float(record["tokens_per_agent_total"] or 0.0)
-            target["agent_token_samples"] += float(record["agent_token_samples"] or 0.0)
-            for item in record["agent_token_rates"]:
-                key = item["key"]
-                existing = target["agent_token_rates"].setdefault(key, {
-                    "key": key,
-                    "label": item["label"],
-                    "total": 0.0,
-                    "samples": 0.0,
-                    "tokens": 0.0,
-                    "seconds": 0.0,
-                    "source": item["source"],
-                })
-                for field in ("total", "samples", "tokens", "seconds"):
-                    existing[field] += float(item[field] or 0.0)
-                if item["source"]:
-                    existing["source"] = item["source"]
-        return [
-            {
-                **record,
-                "agent_token_rates": [record["agent_token_rates"][key] for key in sorted(record["agent_token_rates"])],
-            }
-            for _start, record in sorted(grouped.items())
-            if int(record["sequence"]) > since
+    def stats_history_encode_records_locked(
+        self,
+        since: int = 0,
+        client_id: str = "",
+        history_start: int = 0,
+        history_end: int = 0,
+        resolution_seconds: int = 0,
+        max_points: int = 0,
+        include_agent_tokens: bool = True,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        sources = sorted(
+            [*self.stats_history_rollup_buckets.values(), *self.stats_history_raw_buckets.values()],
+            key=lambda item: (int(item.get("start") or 0), int(item.get("duration") or 0)),
+        )
+        available_start = min((int(item.get("start") or 0) for item in sources), default=0)
+        available_end = max((int(item.get("start") or 0) + int(item.get("duration") or 0) for item in sources), default=0)
+        requested_start = max(0, int(history_start or 0))
+        requested_end = max(0, int(history_end or 0))
+        if requested_end and requested_start and requested_end < requested_start:
+            requested_end = requested_start
+        window_start = requested_start or available_start
+        window_end = requested_end or available_end
+        requested_resolution = max(0, int(resolution_seconds or 0))
+        effective_resolution = requested_resolution
+        point_budget = max(0, int(max_points or 0))
+
+        scoped_sources = [
+            source
+            for source in sources
+            if (not requested_start or int(source.get("start") or 0) + int(source.get("duration") or 0) > requested_start)
+            and (not requested_end or int(source.get("start") or 0) < requested_end)
         ]
 
-    def stats_history_payload_locked(self, since: int = 0, client_id: str = "", token_since: int = 0, token_resolution_seconds: int = 0, history_start: int = 0) -> dict[str, Any]:
+        def grouped_sources(resolution: int) -> dict[tuple[int, int], dict[str, Any]]:
+            grouped: dict[tuple[int, int], dict[str, Any]] = {}
+            for source in scoped_sources:
+                source_duration = max(1, int(source.get("duration") or 0))
+                source_start = int(source.get("start") or 0)
+                if not resolution or source_duration >= resolution:
+                    grouped[(source_start, source_duration)] = source
+                    continue
+                duration = resolution
+                if window_start:
+                    # Display buckets are anchored to the requested window, not the Unix epoch.
+                    # This makes max_points a hard cap even when the range starts off-grid.
+                    position = max(source_start, window_start)
+                    start = window_start + int(math.floor((position - window_start) / duration) * duration)
+                else:
+                    start = int(math.floor(source_start / duration) * duration)
+                key = (start, duration)
+                target = grouped.get(key)
+                if target is None:
+                    target = stats_history_empty_bucket(start, duration)
+                    grouped[key] = target
+                self.stats_history_merge_bucket_locked(target, source)
+            return grouped
+
+        grouped = grouped_sources(effective_resolution)
+        returned_group_count = sum(int(bucket.get("sequence") or 0) > max(0, int(since or 0)) for bucket in grouped.values())
+        if point_budget and returned_group_count > point_budget:
+            span = max(1, window_end - window_start)
+            effective_resolution = max(requested_resolution, math.ceil(span / point_budget), 1)
+            grouped = grouped_sources(effective_resolution)
+            returned_group_count = sum(int(bucket.get("sequence") or 0) > max(0, int(since or 0)) for bucket in grouped.values())
+            while returned_group_count > point_budget:
+                # Durable tier boundaries can add a small number of edge buckets. Increase from the
+                # observed overage until the encoded response, not a time-span estimate, meets the cap.
+                effective_resolution = max(effective_resolution + 1, math.ceil(effective_resolution * returned_group_count / point_budget))
+                grouped = grouped_sources(effective_resolution)
+                returned_group_count = sum(int(bucket.get("sequence") or 0) > max(0, int(since or 0)) for bucket in grouped.values())
+
+        records = [
+            self.stats_history_record_from_bucket_locked(bucket, client_id=client_id, include_agent_tokens=include_agent_tokens)
+            for _key, bucket in sorted(grouped.items())
+            if int(bucket.get("sequence") or 0) > max(0, int(since or 0))
+        ]
+        covered_start = max(window_start, available_start) if window_start and available_start else 0
+        covered_end = min(window_end, available_end) if window_end and available_end else 0
+        if covered_end <= covered_start:
+            covered_start = 0
+            covered_end = 0
+        bounded_older = requested_end > 0
+        safe_sequence = max(0, int(since or 0)) if bounded_older else self.stats_history_sequence
+        coverage = {
+            "mode": "older" if bounded_older else "live",
+            "requested_start": requested_start,
+            "requested_end": requested_end,
+            "available_start": available_start,
+            "available_end": available_end,
+            "covered_start": covered_start,
+            "covered_end": covered_end,
+            "complete": bool(covered_start and covered_end and (not requested_start or covered_start <= requested_start) and (not requested_end or covered_end >= requested_end)),
+            "has_more_older": bool(available_start and covered_start and available_start < covered_start),
+            "next_older_end": covered_start if available_start and covered_start and available_start < covered_start else 0,
+            "resolution_seconds": effective_resolution,
+            "max_points": point_budget,
+            "source_records": len(scoped_sources),
+            "returned_records": len(records),
+            "cursor": safe_sequence,
+            "latest_cursor": self.stats_history_sequence,
+        }
+        return records, coverage
+
+    def stats_history_records_locked(
+        self,
+        since: int = 0,
+        client_id: str = "",
+        history_start: int = 0,
+        history_end: int = 0,
+        resolution_seconds: int = 0,
+        max_points: int = 0,
+    ) -> list[dict[str, Any]]:
+        records, _coverage = self.stats_history_encode_records_locked(
+            since,
+            client_id=client_id,
+            history_start=history_start,
+            history_end=history_end,
+            resolution_seconds=resolution_seconds,
+            max_points=max_points,
+        )
+        return records
+
+    def stats_history_agent_token_records_locked(
+        self,
+        since: int = 0,
+        client_id: str = "",
+        resolution_seconds: int = 0,
+        history_start: int = 0,
+        history_end: int = 0,
+        max_points: int = 0,
+    ) -> list[dict[str, Any]]:
+        records, _coverage = self.stats_history_encode_records_locked(
+            since,
+            client_id=client_id,
+            history_start=history_start,
+            history_end=history_end,
+            resolution_seconds=max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(resolution_seconds or 0)),
+            max_points=max_points,
+        )
+        return [
+            {
+                key: record[key]
+                for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates")
+            }
+            for record in records
+        ]
+
+    def stats_history_payload_locked(
+        self,
+        since: int = 0,
+        client_id: str = "",
+        token_since: int = 0,
+        token_resolution_seconds: int = 0,
+        history_start: int = 0,
+        history_end: int = 0,
+        history_resolution_seconds: int = 0,
+        history_max_points: int = 0,
+    ) -> dict[str, Any]:
+        records, coverage = self.stats_history_encode_records_locked(
+            since,
+            client_id=client_id,
+            history_start=history_start,
+            history_end=history_end,
+            resolution_seconds=history_resolution_seconds,
+            max_points=history_max_points,
+            include_agent_tokens=token_resolution_seconds <= 0,
+        )
         payload = {
-            "sequence": self.stats_history_sequence,
+            "sequence": coverage["cursor"],
+            "latest_sequence": self.stats_history_sequence,
             "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
-            "records": self.stats_history_records_locked(since, client_id=client_id, history_start=history_start),
+            "records": records,
+            "coverage": coverage,
             "retention_seconds": STATS_HISTORY_RETENTION_SECONDS,
             "raw_window_seconds": STATS_HISTORY_RAW_WINDOW_SECONDS,
             "middle_window_seconds": STATS_HISTORY_MIDDLE_WINDOW_SECONDS,
@@ -2195,11 +2305,27 @@ class TmuxWebtermApp:
         }
         if token_resolution_seconds > 0:
             resolution = max(int(STATS_AGENT_TOKEN_BUCKET_SECONDS), int(token_resolution_seconds))
+            token_records, token_coverage = self.stats_history_encode_records_locked(
+                token_since,
+                client_id=client_id,
+                history_start=history_start,
+                history_end=history_end,
+                resolution_seconds=resolution,
+                max_points=history_max_points,
+            )
             payload["agent_token_history"] = {
-                "sequence": self.stats_history_sequence,
-                "records": self.stats_history_agent_token_records_locked(token_since, client_id=client_id, resolution_seconds=resolution, history_start=history_start),
+                "sequence": token_coverage["cursor"],
+                "latest_sequence": self.stats_history_sequence,
+                "records": [
+                    {
+                        key: record[key]
+                        for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates")
+                    }
+                    for record in token_records
+                ],
                 "resolution_seconds": resolution,
-                "snapshot": token_since == 0,
+                "snapshot": token_since == 0 and history_end <= 0,
+                "coverage": token_coverage,
             }
         return payload
 
@@ -3573,16 +3699,34 @@ class TmuxWebtermApp:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
-    def stats_sample_payload(self, since: int = 0, client_id: str = "", token_consumer: bool = False, token_since: int = 0, token_resolution_seconds: int = 0, history_start: int = 0) -> dict[str, Any]:
+    def stats_sample_payload(
+        self,
+        since: int = 0,
+        client_id: str = "",
+        token_consumer: bool = False,
+        token_since: int = 0,
+        token_resolution_seconds: int = 0,
+        history_start: int = 0,
+        history_end: int = 0,
+        history_resolution_seconds: int = 0,
+        history_max_points: int = 0,
+    ) -> dict[str, Any]:
+        build_started = time.perf_counter()
+        endpoint_profile: dict[str, Any] = {}
         shared_enabled = self.stats_history_uses_shared_status()
+        phase_started = time.perf_counter()
         if shared_enabled:
             self.merge_shared_stats_client_history()
+        endpoint_profile["stats_client_history_merge_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
+        phase_started = time.perf_counter()
         if token_consumer:
             consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
             with self.stats_agent_token_lock:
                 self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, consumer_until)
             if shared_enabled:
                 self.write_shared_stats_token_consumer_until(consumer_until)
+        endpoint_profile["stats_token_consumer_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
+        phase_started = time.perf_counter()
         if shared_enabled and not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
             shared = self.merge_shared_stats_history(max_age_seconds=STATS_SHARED_FRESH_SECONDS)
             sample = shared.get("sample") if isinstance(shared.get("sample"), dict) else {}
@@ -3590,37 +3734,48 @@ class TmuxWebtermApp:
                 self.record_background_follower_stale_read(BACKGROUND_ROLE_STATS_SAMPLER)
             if not sample:
                 sample, _record_cpu_sample = self.current_stats_sample()
-            with self.stats_history_lock:
-                self.stats_history_compact_locked(float(sample.get("time") or time.time()))
-                history = self.stats_history_payload_locked(max(0, since), client_id=client_id, token_since=max(0, token_since), token_resolution_seconds=max(0, token_resolution_seconds), history_start=max(0, history_start))
-            return {
-                "ok": True,
-                **sample,
-                "history": history,
-                "shared_stats": {
-                    "enabled": True,
-                    "fresh": bool(shared.get("fresh")),
-                    "updated_at": float(shared.get("updated_at") or 0.0),
-                    "rev": int(shared.get("rev") or 0),
-                    "role": "follower",
-                },
+            shared_stats = {
+                "enabled": True,
+                "fresh": bool(shared.get("fresh")),
+                "updated_at": float(shared.get("updated_at") or 0.0),
+                "rev": int(shared.get("rev") or 0),
+                "role": "follower",
             }
-        sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer, defer_token_scan=True)
-        with self.stats_history_lock:
-            self.stats_history_compact_locked(float(sample.get("time") or time.time()))
-            history = self.stats_history_payload_locked(max(0, since), client_id=client_id, token_since=max(0, token_since), token_resolution_seconds=max(0, token_resolution_seconds), history_start=max(0, history_start))
-        return {
-            "ok": True,
-            **sample,
-            "history": history,
-            "shared_stats": {
+        else:
+            sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer, defer_token_scan=True)
+            shared_stats = {
                 "enabled": shared_enabled,
                 "fresh": True,
                 "updated_at": float(sample.get("time") or time.time()),
                 "rev": self.stats_history_shared_rev,
                 "role": "owner" if shared_enabled else "local",
-            },
+            }
+        endpoint_profile["stats_sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
+        compact_started = time.perf_counter()
+        with self.stats_history_lock:
+            self.stats_history_compact_locked(float(sample.get("time") or time.time()))
+            endpoint_profile["stats_history_compact_ms"] = round((time.perf_counter() - compact_started) * 1000, 3)
+            encode_started = time.perf_counter()
+            history = self.stats_history_payload_locked(
+                max(0, since),
+                client_id=client_id,
+                token_since=max(0, token_since),
+                token_resolution_seconds=max(0, token_resolution_seconds),
+                history_start=max(0, history_start),
+                history_end=max(0, history_end),
+                history_resolution_seconds=max(0, history_resolution_seconds),
+                history_max_points=max(0, history_max_points),
+            )
+            endpoint_profile["stats_history_encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 3)
+        payload = {
+            "ok": True,
+            **sample,
+            "history": history,
+            "shared_stats": shared_stats,
         }
+        endpoint_profile["stats_app_build_ms"] = round((time.perf_counter() - build_started) * 1000, 3)
+        payload["_endpoint_profile"] = endpoint_profile
+        return payload
 
     def start_background_owner(self, port: int | None = None) -> bool:
         self.background_owner = BackgroundOwnerRegistry(
@@ -5028,7 +5183,7 @@ class TmuxWebtermApp:
         return payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.SERVICE_UNAVAILABLE
 
     def tmux_signal_signature_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.stable_signature_payload(payload)
+        return self.stable_client_event_signature_payload(payload)
 
     def recent_tmux_signal_removal_event(self, generated_at: Any = None) -> dict[str, Any]:
         with self.client_watch_lock:

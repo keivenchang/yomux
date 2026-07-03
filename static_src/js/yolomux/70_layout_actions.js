@@ -1897,16 +1897,12 @@ function terminalIsVisible(session, container) {
 const terminalAttentionQuestionRowClass = 'terminal-attention-question-row';
 const terminalAttentionQuestionOverlayClass = 'terminal-attention-question-overlay';
 
-function terminalAttentionTextPart(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
 function terminalAttentionRawText(value) {
   return String(value || '').replace(/\u00a0/g, ' ');
 }
 
 function terminalAttentionQuestionChromeHintText(value) {
-  const text = terminalAttentionTextPart(value).replace(/^[>❯$#\s]+/, '').trim();
+  const text = singleLineText(value).replace(/^[>❯$#\s]+/, '').trim();
   return /^[?？]\s+for\s+(?:shortcuts|help|commands)\b/i.test(text);
 }
 
@@ -1936,7 +1932,7 @@ function terminalAttentionQuestionTexts(session) {
   const seen = new Set();
   const texts = [];
   for (const candidate of candidates) {
-    const text = terminalAttentionTextPart(candidate);
+    const text = singleLineText(candidate);
     if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) continue;
     seen.add(text);
     texts.push(text);
@@ -1948,7 +1944,7 @@ function terminalAttentionRowTexts(item) {
   const rows = Array.from(item?.container?.querySelector?.('.xterm-rows')?.children || [])
     .map((row, index) => {
       const rawText = terminalAttentionRawText(row?.textContent || '');
-      return {index, row, rawText, text: terminalAttentionTextPart(rawText)};
+      return {index, row, rawText, text: singleLineText(rawText)};
     })
     .filter(record => record.text);
   if (rows.length) return rows;
@@ -1962,7 +1958,7 @@ function terminalAttentionRowTexts(item) {
   for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
     const line = buffer.getLine(lineIndex);
     const rawText = terminalAttentionRawText(typeof line?.translateToString === 'function' ? line.translateToString(true) : '');
-    const text = terminalAttentionTextPart(rawText);
+    const text = singleLineText(rawText);
     if (text) records.push({index: lineIndex - start, row: null, rawText, text});
   }
   return records;
@@ -2112,7 +2108,7 @@ function terminalAttentionQuestionSentenceStart(source, questionIndex) {
 }
 
 function terminalAttentionQuestionSentenceRanges(text) {
-  const source = terminalAttentionTextPart(text);
+  const source = singleLineText(text);
   if (!source || !/[?？]/.test(source)) return [];
   const ranges = [];
   for (let questionIndex = 0; questionIndex < source.length; questionIndex += 1) {
@@ -2167,13 +2163,13 @@ function terminalAttentionQuestionCandidateTexts(questionTexts) {
   const seen = new Set();
   const candidates = [];
   const add = value => {
-    const text = terminalAttentionTextPart(value);
+    const text = singleLineText(value);
     if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) return;
     seen.add(text);
     candidates.push(text);
   };
   for (const candidate of questionTexts) {
-    const text = terminalAttentionTextPart(candidate);
+    const text = singleLineText(candidate);
     for (const range of terminalAttentionQuestionSentenceRanges(text)) add(range.text);
     add(text);
   }
@@ -2181,12 +2177,12 @@ function terminalAttentionQuestionCandidateTexts(questionTexts) {
 }
 
 function terminalAttentionSingleRowSpan(record, candidate) {
-  const needle = terminalAttentionTextPart(candidate);
+  const needle = singleLineText(candidate);
   if (!needle) return null;
   const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
   const directStart = rawText.indexOf(needle);
   if (directStart >= 0) return {highlightStart: directStart, highlightLength: needle.length, highlightText: needle};
-  const normalized = terminalAttentionTextPart(rawText);
+  const normalized = singleLineText(rawText);
   const normalizedStart = normalized.indexOf(needle);
   if (normalizedStart >= 0) {
     const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
@@ -2200,7 +2196,7 @@ function terminalAttentionSingleRowSpan(record, candidate) {
 }
 
 function terminalAttentionSpanSegments(item, rows, candidate) {
-  const needle = terminalAttentionTextPart(candidate);
+  const needle = singleLineText(candidate);
   if (!needle) return [];
   for (const separator of ['', ' ']) {
     const context = terminalAttentionJoinedContext(rows, separator);
@@ -2288,7 +2284,7 @@ function placeTerminalAttentionOverlay(session, item, record, index = 0) {
   const height = rowRect?.height || Math.max(1, Number(cell.height || 0));
   const leftBase = Number((rowRect || screenRect)?.left || 0) - Number(containerRect.left || 0);
   const start = Math.max(0, Number(record.highlightStart || 0));
-  const length = Math.max(1, Number(record.highlightLength || terminalAttentionTextPart(record.text).length || 1));
+  const length = Math.max(1, Number(record.highlightLength || singleLineText(record.text).length || 1));
   const left = Math.max(0, leftBase + start * cellWidth);
   const maxWidth = Math.max(cellWidth, Number(containerRect.width || 0) - left);
   const width = Math.max(cellWidth, Math.min(maxWidth, length * cellWidth));

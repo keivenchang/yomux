@@ -617,6 +617,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
     atob,
     btoa,
+    TextEncoder,
     TextDecoder,
     Uint8Array,
   };
@@ -625,6 +626,11 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   vm.createContext(context);
   vm.runInContext(`${source.slice(0, bootStart)}
 globalThis.__layoutTestApi = {
+  safeDecodeURIComponent,
+  utf8ByteLength,
+  performanceNow,
+  domDataAttributeName,
+  singleLineText,
   activeItemForSide,
   agentErrorIsBlocking,
   appModifier,
@@ -881,6 +887,10 @@ globalThis.__layoutTestApi = {
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
+  debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
+  debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
+  debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
+  debugGraphInnerHtmlForTest: debugGraphInnerHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {
@@ -888,9 +898,18 @@ globalThis.__layoutTestApi = {
       inFlight: jsDebugStatsPollInFlight,
       pending: jsDebugStatsPollPending,
       pendingForceGraphRefresh: jsDebugStatsPollPendingForceGraphRefresh,
-      historyStartSeconds: jsDebugStatsHistoryStartSeconds,
+      historyStartSeconds: jsDebugHistoryReadiness.loadedStartSeconds,
+      historyReadiness: jsDebugHistoryReadinessSnapshot(),
     };
   },
+  jsDebugHistoryReadinessForTest: jsDebugHistoryReadinessSnapshot,
+  setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
+  applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
+  jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,
+  jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
+  debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
+  resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
+  retryJsDebugHistoryForTest: retryJsDebugHistory,
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
@@ -1634,6 +1653,7 @@ globalThis.__layoutTestApi = {
   handleFileExplorerArrowNavForTest: handleFileExplorerArrowNav,
   activeTabberRowPathForTest: activeTabberRowPath,
   syncTabberTreeActiveSelectionForTest: syncTabberTreeActiveSelection,
+  syncTabberTreeLayoutStateForTest: syncTabberTreeLayoutState,
   tabberTreeSelectionForTest() {
     return {
       paths: Array.from(tabberTreeSelectedPaths).sort(),
@@ -1886,6 +1906,8 @@ globalThis.__layoutTestApi = {
     tabberActivityPayload = payload;
     tabberActivityRequestGeneration = 0;
     tabberActivityAppliedRequestGeneration = 0;
+    tabberActivityLoaded = true;
+    tabberActivityFetchPromise = null;
   },
   applyTabberActivityPayloadForTest: applyTabberActivityPayload,
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },

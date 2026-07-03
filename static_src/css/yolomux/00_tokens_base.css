@@ -33,6 +33,7 @@
   --neutral-text-strong: #52617a;
   --neutral-text-cool: #e2e8f0;
   --overlay-surface: #111820;
+  --overlay-surface-strong: rgba(17, 24, 32, 0.98);
   --success-text-strong: #064e3b;
   /* The stronger/cooler muted shade (darker than --muted) — one owner for what was the bare #8b95a5
      repeated across the editor scheme, code comments, and several muted-text component rules. */
@@ -59,6 +60,7 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --good: #52d273;
+  --success-soft-bg: rgba(82, 210, 115, 0.18);
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
@@ -129,6 +131,7 @@
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
   --pr-status-closed: #aeb8c7;
+  --pr-number-chip-bg: #000;
   --git-modified: var(--accent-gold);
   --git-modified-badge: var(--accent-gold);
   --git-untracked-name: #7ee787;
@@ -375,6 +378,7 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-selection-outline: var(--active-control-focus-ring);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #dcffa6;
@@ -390,7 +394,7 @@
   --lt-bg: #ffffff;
   --lt-panel: #f6f8fa;
   --lt-panel2: #eef2f6;
-  --lt-text: #111827;
+  --lt-text: var(--markdown-html-light-text);
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
   --lt-editor-bg: #ffffff;
@@ -439,7 +443,6 @@
   --lt-muted-strong: #475569;
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
-  --neutral-text-cool: var(--lt-muted-strong);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
@@ -524,6 +527,8 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
+  --neutral-text-cool: var(--lt-muted-strong);
+  --pr-number-chip-bg: #2b3242;
   --share-stage-bg: #000;
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
@@ -695,6 +700,7 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-selection-outline: rgba(63, 143, 45, 0.5);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
   --file-tree-recency-fresh: #356f12;

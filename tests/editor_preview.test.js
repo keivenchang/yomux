@@ -37,6 +37,26 @@ const {
 const DEBUG_AGENT_STATUS_SERIES = ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'];
 const DEBUG_AGENT_STATUS_LEGEND_SERIES = ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'];
 
+function statsHistoryCoverageForRequest(url, overrides = {}) {
+  const requestUrl = new URL(String(url), 'http://localhost');
+  const requestedStart = Number(requestUrl.searchParams.get('history_start'));
+  const requestedEnd = Number(requestUrl.searchParams.get('history_end'));
+  const resolutionSeconds = Number(requestUrl.searchParams.get('history_resolution'));
+  const live = requestedEnd === 0;
+  return {
+    mode: live ? 'live' : 'older',
+    requested_start: requestedStart,
+    requested_end: requestedEnd,
+    covered_start: requestedStart,
+    covered_end: live ? Math.floor(Date.now() / 1000) : requestedEnd,
+    resolution_seconds: resolutionSeconds,
+    complete: true,
+    has_more_older: false,
+    next_older_end: 0,
+    ...overrides,
+  };
+}
+
 function tmuxWindowButtonElement(session, index, active = false) {
   const button = new TestElement(`tmux-window-${session}-${index}`, 'button');
   button.className = `tab tmux-window-button${active ? ' active' : ''}`;
@@ -70,6 +90,38 @@ function tmuxWindowButtonFromElement(root, index) {
 }
 
 async function runEditorPreviewSuite() {
+  test('frontend primitives have one shared core owner', () => {
+    const api = loadYolomux('', ['1']);
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const allSource = fs.readdirSync('static_src/js/yolomux')
+      .filter(name => name.endsWith('.js'))
+      .map(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8'))
+      .join('\n');
+    for (const name of ['safeDecodeURIComponent', 'utf8ByteLength', 'performanceNow', 'domDataAttributeName', 'singleLineText']) {
+      assert.equal((allSource.match(new RegExp(`^function ${name}\\(`, 'gm')) || []).length, 1, `${name} has one declaration`);
+      assert.ok(coreSource.includes(`function ${name}(`), `${name} is owned by the earliest shared core partial`);
+    }
+    for (const removed of ['readableParamComponentDecode', 'safeDecodePathComponent', 'safeDecodeMarkdownUrlPath', 'shareSerializedByteLength', 'shareReplayHostPerfNow', 'domBuilderDataAttributeName', 'dataAttributeName', 'terminalAttentionTextPart', 'infoSearchText', 'jsDebugByteLength', 'clientPerfNow']) {
+      assert.equal(new RegExp(`^function ${removed}\\(`, 'm').test(allSource), false, `${removed} duplicate is removed`);
+    }
+    assert.equal(api.safeDecodeURIComponent('hello%20world'), 'hello world');
+    assert.equal(api.safeDecodeURIComponent('%E0%A4%A'), '%E0%A4%A', 'malformed URI input returns the original text');
+    assert.equal(api.utf8ByteLength('A優'), 4, 'UTF-8 byte length counts multibyte text');
+    assert.equal(api.domDataAttributeName('windowIndex'), 'data-window-index');
+    assert.equal(api.singleLineText('  one\n\t two  '), 'one two');
+    assert.equal(Number.isFinite(api.performanceNow()), true);
+  });
+
+  test('YO!agent waiting and queued rows share one compact component style', () => {
+    const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    for (const selector of ['yoagent-section-title', 'yoagent-compact-list', 'yoagent-compact-item', 'yoagent-compact-label', 'yoagent-compact-action']) {
+      assert.equal((css.match(new RegExp(`\\.${selector}\\s*\\{`, 'g')) || []).length, 1, `${selector} has one CSS owner`);
+    }
+    for (const staleSelector of ['yoagent-waiting-title', 'yoagent-chat-queue-title', 'yoagent-jobs-title', 'yoagent-waiting-list', 'yoagent-chat-queue-items', 'yoagent-waiting-item', 'yoagent-chat-queue-item', 'yoagent-waiting-label', 'yoagent-chat-queue-text', 'yoagent-waiting-clear', 'yoagent-chat-queue-cancel']) {
+      assert.equal(new RegExp(`\\.${staleSelector}\\s*\\{`).test(css), false, `${staleSelector} remains a behavior hook, not a parallel style owner`);
+    }
+  });
+
   test('Preferences identity and YO!agent job labels use shared locale-neutral classifiers', () => {
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     const preferencesSource = fs.readFileSync('static_src/js/yolomux/82_preferences_panel.js', 'utf8');
@@ -3920,8 +3972,10 @@ async function runEditorPreviewSuite() {
     assert.equal(api.jsDebugStatsPanelVisibleForTest(), true, 'YO!stats stats polling is enabled when the Debug pane is the active visible tab');
     api.clearJsDebugEventsForTest();
     api.setFetchForTest((url, options = {}) => {
-      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
-      return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: []}}));
+      const requestUrl = String(url);
+      requests.push({url: requestUrl, method: String(options.method || 'GET'), body: options.body || ''});
+      const coverage = requestUrl.startsWith('/api/stats-sample?') ? statsHistoryCoverageForRequest(requestUrl) : null;
+      return Promise.resolve(jsonResponse({ok: true, history: {sequence: 0, records: [], ...(coverage ? {coverage} : {})}}));
     });
 
     await api.pollJsDebugStatsSampleForTest();
@@ -3942,6 +3996,9 @@ async function runEditorPreviewSuite() {
     assert.equal(historyRequest.method, 'POST', 'YO!stats history uses POST');
     assert.equal(sampleUrl.searchParams.get('since'), '0', 'YO!stats sample keeps incremental since state');
     assert.ok(sampleUrl.searchParams.has('history_start'), `YO!stats initial sample requests a bounded visible-history range: ${sampleRequest.url}`);
+    assert.equal(sampleUrl.searchParams.get('history_end'), '0', 'YO!stats initial sample keeps the live-history end sentinel');
+    assert.equal(sampleUrl.searchParams.get('history_resolution'), '5', 'YO!stats initial sample requests the current graph resolution');
+    assert.equal(sampleUrl.searchParams.get('history_max_points'), '6000', 'YO!stats bounds the server response size');
     assert.ok(sampleUrl.searchParams.get('client_id'), 'YO!stats sample includes the per-tab client id');
 	    assert.equal(sampleUrl.searchParams.get('token_consumer'), '1', 'visible YO!stats polling opts into slower server token scans');
 	    assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
@@ -3954,6 +4011,197 @@ async function runEditorPreviewSuite() {
 	    assert.ok(/function recordSseDebugEvent\(eventType, envelope = \{\}, rawEvent = null\) \{[\s\S]*if \(!jsDebugCollectionEnabled\) return;[\s\S]*const payload = clientEventPayloadFromEnvelope\(envelope\)/.test(terminalBootSource), 'SSE debug recording returns before payload extraction when collection is disabled');
 	  });
 
+  test('YO!stats history readiness owns empty success, interval resolution, and retained loading UI', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const targetStart = nowSeconds - 900;
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {
+      requestedRangeSeconds: 900,
+      targetStartSeconds: targetStart,
+      targetEndSeconds: nowSeconds,
+      requestedStartSeconds: targetStart,
+      requestedEndSeconds: 0,
+      requestedResolutionSeconds: 5,
+      generation: 1,
+      loadingStartedAtMs: 1,
+    });
+    const loadingHtml = api.debugPanelHtmlForTest();
+    assert.ok(loadingHtml.includes('data-js-debug-history-state="loading-initial"') && loadingHtml.includes('aria-busy="true"'), 'cold history exposes one busy state before fetch');
+    assert.ok(loadingHtml.includes('data-js-debug-history-overlay') && loadingHtml.includes('Loading history') && loadingHtml.includes('moving-ellipsis'), 'cold history creates the in-grid localized moving-ellipsis overlay');
+    assert.equal((loadingHtml.match(/Loading history/g) || []).length, 1, 'cold history renders one visible loading message');
+    assert.equal(loadingHtml.includes('Waiting for server stats'), false, 'the initial overlay suppresses the redundant waiting metadata');
+
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: targetStart, requestedEnd: 0, coveredStart: 0, coveredEnd: 0,
+      resolutionSeconds: 5, complete: false, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    api.setJsDebugHistoryReadinessForTest('ready');
+    const emptyReady = api.jsDebugHistoryReadinessForTest();
+    assert.equal(emptyReady.loadedStartSeconds, 0, 'successful empty history does not invent or regress a loaded start');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(targetStart, nowSeconds, 5), false, 'successful empty history marks the requested domain satisfied');
+    assert.equal(api.debugPanelHtmlForTest().includes('aria-busy="true"'), false, 'successful empty history clears busy state');
+
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {targetStartSeconds: 100, targetEndSeconds: 1000});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: 100, requestedEnd: 0, coveredStart: 100, coveredEnd: 1000,
+      resolutionSeconds: 5, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    api.setJsDebugHistoryReadinessForTest('loading-older', {targetStartSeconds: 203, targetEndSeconds: 297});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'older', requestedStart: 200, requestedEnd: 300, coveredStart: 200, coveredEnd: 300,
+      resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(203, 297, 1), false, 'the first fine zoom is covered at one-second resolution');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(503, 597, 1), true, 'a disjoint zoom does not inherit another window\'s fine resolution');
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      coverageIntervals: [
+        {startSeconds: 100, endSeconds: 1000, resolutionSeconds: 5},
+        {startSeconds: 200, endSeconds: 300, resolutionSeconds: 1},
+        {startSeconds: 400, endSeconds: 500, resolutionSeconds: 1},
+      ],
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 250, 1), true, 'a later interval does not conceal a leading coverage gap');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(250, 450, 1), true, 'two fine intervals do not conceal an interior coverage gap');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(400, 500, 1), false, 'a separately covered fine zoom remains satisfied');
+    assert.deepStrictEqual(
+      canonical(api.jsDebugHistoryRequestWindowForTest(503, 597, 1)),
+      {startSeconds: 500, endSeconds: 600},
+      'a disjoint fine zoom aligns its bounded replacement to the retained five-second bucket edges',
+    );
+  });
+
+  test('YO!stats finer replacement preserves coarse bucket portions outside unaligned coverage', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const start = Math.floor(Date.now() / 1000 / 10) * 10 - 20;
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({sequence: 5, records: [
+      {start, duration: 10, sequence: 4, api_count: 10},
+      {start: start + 10, duration: 10, sequence: 5, api_count: 10},
+    ]});
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start + 5, start + 15, 1), 0, 'unaligned refinement does not delete partially covered coarse buckets');
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start, start + 10, 1), 1, 'aligned refinement removes the one fully replaced coarse bucket');
+  });
+
+  await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    let releaseFirst;
+    let releaseSecond;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      return new Promise(resolve => {
+        if (requests.length === 1) releaseFirst = resolve;
+        else releaseSecond = resolve;
+      });
+    });
+
+    const firstPoll = api.pollJsDebugStatsSampleForTest();
+    await flushAsyncWork();
+    api.setDebugGraphRangeForTest(30 * 60);
+    const firstUrl = requests[0];
+    releaseFirst(jsonResponse({history: {
+      sequence: 10,
+      records: [{start: Math.floor(Date.now() / 1000) - 60, duration: 1, sequence: 10, api_count: 999}],
+      coverage: statsHistoryCoverageForRequest(firstUrl),
+    }}));
+    await firstPoll;
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(requests.length, 2, 'the changed domain starts a replacement request after the obsolete request settles');
+    assert.equal(api.jsDebugHistoryReadinessForTest().loadedStartSeconds, 0, 'the obsolete response applies neither coverage nor loaded bounds');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'loading-initial', 'the replacement request remains the readiness owner');
+    const secondUrl = requests[1];
+    releaseSecond(jsonResponse({history: {
+      sequence: 11,
+      records: [{start: Math.floor(Date.now() / 1000) - (25 * 60), duration: 1, sequence: 11, api_count: 2}],
+      coverage: statsHistoryCoverageForRequest(secondUrl),
+    }}));
+    for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'the replacement response owns final readiness');
+    assert.equal(api.jsDebugHistoryReadinessForTest().loadedStartSeconds, Number(new URL(secondUrl, 'http://localhost').searchParams.get('history_start')), 'only the replacement response advances loaded coverage');
+  });
+
+  await testAsync('YO!stats retains the chart on error and Retry reaches ready with phase counters', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      if (requests.length === 1) return Promise.reject(new Error('history unavailable'));
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 1,
+        records: [],
+        coverage: statsHistoryCoverageForRequest(url, {covered_start: 0, covered_end: 0}),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    const errorHtml = api.debugPanelHtmlForTest();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'error', 'a current request failure enters the explicit error state');
+    assert.ok(errorHtml.includes('history unavailable') && errorHtml.includes('data-js-debug-history-retry'), 'the retained chart overlay exposes the failure and Retry action');
+    assert.equal((errorHtml.match(/>Retry</g) || []).length, 1, 'the error overlay renders one shared Retry label');
+
+    assert.equal(api.retryJsDebugHistoryForTest(), true, 'Retry starts a new request for the current domain');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'retrying', 'Retry exposes its distinct in-progress state');
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'a successful retry clears the error state after paint');
+    assert.equal(api.debugPanelHtmlForTest().includes('data-js-debug-history-retry'), false, 'the Retry action disappears after success');
+    const counters = new Set(api.clientPerfSummaryForTest().map(counter => counter.name));
+    for (const counter of ['statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryPaint', 'statsHistoryLoading']) {
+      assert.ok(counters.has(counter), `${counter} records its readiness phase`);
+    }
+    const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(debugSource.includes("clientPerfStart('statsHistoryRender')"), 'retained chart rendering uses the shared phase counter owner');
+  });
+
+  await testAsync('YO!stats follows has-more coverage until the requested history window is complete', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      const requestUrl = String(url);
+      requests.push(requestUrl);
+      const parsed = new URL(requestUrl, 'http://localhost');
+      const requestedStart = Number(parsed.searchParams.get('history_start'));
+      if (requests.length === 1) {
+        const coveredStart = requestedStart + 300;
+        return Promise.resolve(jsonResponse({history: {
+          sequence: 1,
+          records: [],
+          coverage: statsHistoryCoverageForRequest(requestUrl, {
+            covered_start: coveredStart,
+            has_more_older: true,
+            next_older_end: coveredStart,
+          }),
+        }}));
+      }
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 2,
+        records: [],
+        coverage: statsHistoryCoverageForRequest(requestUrl),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    assert.equal(requests.length, 2, 'has_more_older schedules the next bounded page without user input');
+    const firstUrl = new URL(requests[0], 'http://localhost');
+    const secondUrl = new URL(requests[1], 'http://localhost');
+    assert.equal(firstUrl.searchParams.get('history_end'), '0', 'the first page uses the live-history sentinel');
+    assert.equal(secondUrl.searchParams.get('history_end'), String(Number(firstUrl.searchParams.get('history_start')) + 300), 'the continuation stops at the backend next-older cursor');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'readiness clears only after the final page paints');
+  });
+
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
@@ -3962,17 +4210,28 @@ async function runEditorPreviewSuite() {
     api.stopJsDebugStatsPollingForTest();
     api.clearJsDebugEventsForTest();
     api.setFetchForTest((url) => {
-      requests.push(String(url));
+      const requestUrl = String(url);
+      requests.push(requestUrl);
       if (requests.length === 1) {
         return Promise.resolve(jsonResponse({
-          history: {sequence: 100, records: [{start: Math.floor(Date.now() / 1000) - 60, duration: 1, sequence: 100, api_count: 1}]},
+          history: {
+            sequence: 100,
+            records: [{start: Math.floor(Date.now() / 1000) - 60, duration: 1, sequence: 100, api_count: 1}],
+            coverage: statsHistoryCoverageForRequest(requestUrl),
+          },
         }));
       }
       if (requests.length === 2) {
         return new Promise(resolve => { releaseIncrementalPoll = resolve; });
       }
       return Promise.resolve(jsonResponse({
-        history: {sequence: 102, records: [{start: Math.floor(Date.now() / 1000) - (25 * 60), duration: 1, sequence: 101, api_count: 7}]},
+        history: {
+          sequence: requests.length === 3 ? 102 : 103,
+          records: requests.length === 3
+            ? [{start: Math.floor(Date.now() / 1000) - (25 * 60), duration: 1, sequence: 101, api_count: 7}]
+            : [],
+          ...(requests.length === 3 ? {coverage: statsHistoryCoverageForRequest(requestUrl)} : {}),
+        },
       }));
     });
 
@@ -3992,9 +4251,16 @@ async function runEditorPreviewSuite() {
     const narrowUrl = new URL(requests[0], 'http://localhost');
     const wideUrl = new URL(requests[2], 'http://localhost');
     assert.ok(Number(wideUrl.searchParams.get('history_start')) < Number(narrowUrl.searchParams.get('history_start')), 'the follow-up poll requests the newly exposed older half');
+    assert.equal(wideUrl.searchParams.get('history_end'), narrowUrl.searchParams.get('history_start'), 'the wider request stops at the already loaded left edge');
     assert.equal(wideUrl.searchParams.get('since'), '0', 'the wider request resets the incremental sequence so older retained records are returned');
+    assert.equal(wideUrl.searchParams.get('history_resolution'), '5', 'the wider request keeps the active graph resolution');
+    assert.equal(wideUrl.searchParams.get('history_max_points'), '6000', 'the wider request keeps the server response bound');
     assert.equal(api.jsDebugStatsPollingStateForTest().historyStartSeconds, Number(wideUrl.searchParams.get('history_start')), 'loaded-history coverage advances only after the wider response succeeds');
     assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 2, 'the widened graph contains both the old and recent records without visiting 1h first');
+    await api.pollJsDebugStatsSampleForTest();
+    const nextLiveUrl = new URL(requests[3], 'http://localhost');
+    assert.equal(nextLiveUrl.searchParams.get('since'), '101', 'the bounded older response does not advance the live history cursor');
+    assert.equal(nextLiveUrl.searchParams.get('history_end'), '0', 'the next incremental sample returns to the live-history end sentinel');
   });
 
   await testAsync('YO!stats preserves a forced Chrome refocus redraw behind an in-flight poll', async () => {
@@ -4022,7 +4288,9 @@ async function runEditorPreviewSuite() {
     assert.equal(pending.pending, true, 'refocus queues a follow-up while the old poll is still running');
     assert.equal(pending.pendingForceGraphRefresh, true, 'the queued refocus poll retains its forced-redraw requirement');
 
-    releaseInFlightPoll(jsonResponse({history: {sequence: 1, records: []}}));
+    releaseInFlightPoll(jsonResponse({
+      history: {sequence: 1, records: [], coverage: statsHistoryCoverageForRequest(requests[0])},
+    }));
     await inFlightPoll;
     await flushAsyncWork();
     await flushAsyncWork();
@@ -4085,7 +4353,11 @@ async function runEditorPreviewSuite() {
       const sampleUrl = new URL(request.url, 'http://localhost');
       const since = Number(sampleUrl.searchParams.get('since') || 0);
       if (requests.filter(item => item.url.startsWith('/api/stats-sample?')).length === 1) {
-        return Promise.resolve(jsonResponse({history: {sequence: 100, records: [{start: nowSeconds - 600, duration: 1, sequence: 100, system_cpu_total_percent: 20, system_cpu_count: 1}]}}));
+        return Promise.resolve(jsonResponse({history: {
+          sequence: 100,
+          records: [{start: nowSeconds - 600, duration: 1, sequence: 100, system_cpu_total_percent: 20, system_cpu_count: 1}],
+          coverage: statsHistoryCoverageForRequest(request.url),
+        }}));
       }
       const records = [{start: nowSeconds - 60, duration: 1, sequence: 201, system_cpu_total_percent: 30, system_cpu_count: 1}];
       if (since <= 100) records.unshift({start: nowSeconds - 300, duration: 1, sequence: 150, system_cpu_total_percent: 25, system_cpu_count: 1});
@@ -4133,7 +4405,7 @@ async function runEditorPreviewSuite() {
     api.stopJsDebugStatsPollingForTest();
     let requests = 0;
     let abortSignal = null;
-    api.setFetchForTest((_url, options = {}) => {
+    api.setFetchForTest((url, options = {}) => {
       requests += 1;
       if (requests === 1) {
         abortSignal = options.signal;
@@ -4145,12 +4417,13 @@ async function runEditorPreviewSuite() {
         uptime_seconds: 12,
         rss_bytes: 1024,
         cpu_percent: 1,
-        history: {sequence: 1, records: []},
+        history: {sequence: 1, records: [], coverage: statsHistoryCoverageForRequest(url)},
       }));
     });
 
     api.syncJsDebugStatsPollingForTest({pollNow: true});
     const coldInterval = [...activeIntervals].map(id => ({id, ...intervals.get(id)})).at(-1);
+    await flushAsyncWork();
     const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 5000).at(-1);
     assert.equal(coldInterval.ms, 2000, 'cold-start polling uses the two-second retry cadence');
     assert.ok(abortSignal, 'the cold-start stats request receives an abort signal');
@@ -4173,11 +4446,6 @@ async function runEditorPreviewSuite() {
 
     const waitingHtml = api.debugGraphMetaHtmlForTest();
     assert.equal(waitingHtml.includes('Waiting for server stats'), false, 'server metadata replaces the waiting state after a successful sample');
-    const waitingApi = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const waitingHtmlBeforeSample = waitingApi.debugGraphMetaHtmlForTest();
-    assert.ok(waitingHtmlBeforeSample.includes('Waiting for server stats') && waitingHtmlBeforeSample.includes('moving-ellipsis'), 'the localized empty state uses the shared animated dots before the first sample');
-    const coldGraphHtml = waitingApi.debugPanelHtmlForTest();
-    assert.equal(coldGraphHtml.includes('Waiting for server stats') && coldGraphHtml.includes('No events yet'), false, 'cold YO!stats renders only the waiting metadata, never a stacked second empty state');
     const emptyAfterSampleHtml = api.debugPanelHtmlForTest();
     assert.ok(emptyAfterSampleHtml.includes('No events yet'), 'after the first server sample, an empty selected range keeps its independent graph-body empty state');
   });
@@ -4330,6 +4598,26 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('No client communication data collected'), 'no-data overlays explain that client communication collection was absent');
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
     assert.ok(/\.js-debug-no-data-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.12\)/.test(debugPaneCss), 'generic no-data overlays use a very light red opacity');
+  });
+
+  test('YO!stats computes variable-duration no-data gaps with one interval complement sweep', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const domain = {startMs: 0, endMs: 100_000};
+    const buckets = [
+      {startMs: 90_000, durationMs: 20_000, apiCount: 1},
+      {startMs: 30_000, durationMs: 10_000, disconnectedMs: 10_000},
+      {startMs: -10_000, durationMs: 20_000, apiCount: 1},
+      {startMs: 40_000, durationMs: 20_000, apiCount: 1},
+      {startMs: 20_000, durationMs: 10_000, apiCount: 1},
+    ];
+    const runs = canonical(api.debugGraphNoDataRunsForTest(buckets, domain, [{key: 'api'}]));
+    assert.deepStrictEqual(runs, [
+      {startMs: 10_000, endMs: 20_000},
+      {startMs: 60_000, endMs: 90_000},
+    ], 'the complement preserves clipped leading/trailing coverage, variable buckets, an interior disconnect, and both remaining gaps');
+    const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.equal(debugSource.includes('debugGraphOverlayStepMs'), false, 'the one-second domain walker is removed');
+    assert.equal(debugSource.includes('debugGraphStepHasSeriesData'), false, 'the nested full bucket rescan is removed');
   });
 
   test('session popover lists agent windows with working durations and idle recency', () => {
@@ -5712,6 +6000,7 @@ async function runEditorPreviewSuite() {
     assert.ok(transcriptHtml.includes('~/.local/state/yolomux/yoagent/conversation.jsonl'), 'YO!agent transcript row uses the compact display path');
     assert.ok(transcriptHtml.includes('data-copy-path="/home/test/.local/state/yolomux/yoagent/conversation.jsonl"'), 'YO!agent transcript path can be copied');
     assert.equal(transcriptHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), true, 'persisted YO!agent messages keep the one-shot Recent agents block visible');
+    assert.ok(transcriptHtml.includes('class="yoagent-recent-agents-label yoagent-section-title"'), 'Recent agents uses the shared YO!agent section title');
     api.applyYoagentConversationPayloadForTest({
       messages: [{role: 'user', content: 'ask 6 and 7 for status', createdAt: '2026-06-13T17:39:00Z'}],
       pending_waits: [
@@ -5721,7 +6010,11 @@ async function runEditorPreviewSuite() {
     });
     const pendingWaitsHtml = api.yoagentChatHtml();
     assert.ok(pendingWaitsHtml.includes('yoagent-waiting-queue'), 'pending result waits render as a visible queue');
-    assert.equal((pendingWaitsHtml.match(/class="yoagent-waiting-item"/g) || []).length, 2, 'multiple pending waits render as separate rows');
+    assert.equal((pendingWaitsHtml.match(/class="yoagent-waiting-item yoagent-compact-item"/g) || []).length, 2, 'multiple pending waits render through the shared compact row');
+    assert.ok(pendingWaitsHtml.includes('class="yoagent-waiting-title yoagent-section-title"'), 'pending wait heading uses the shared YO!agent section title');
+    assert.ok(pendingWaitsHtml.includes('class="yoagent-waiting-list yoagent-compact-list"'), 'pending waits use the shared compact list');
+    assert.ok(pendingWaitsHtml.includes('class="yoagent-waiting-label yoagent-compact-label"'), 'pending wait text uses the shared compact label');
+    assert.ok(pendingWaitsHtml.includes('class="yoagent-waiting-clear btn-base yoagent-compact-action"'), 'pending wait action uses the shared button and compact action parents');
     assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-6"'), 'pending waits expose a clear control');
     assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-7"'), 'each pending wait can be cleared independently');
     assert.ok(/data-yoagent-chat-input[^>]*placeholder="Ask anything…"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent composer input');
@@ -5748,6 +6041,7 @@ async function runEditorPreviewSuite() {
     });
     const jobsHtml = api.yoagentChatHtml();
     assert.ok(jobsHtml.includes('yoagent-jobs-list'), 'YO!agent jobs render as a visible queue in the chat history');
+    assert.ok(jobsHtml.includes('class="yoagent-jobs-title yoagent-section-title"'), 'YO!agent jobs use the shared section title');
     assert.equal((jobsHtml.match(/class="yoagent-job-item/g) || []).length, 5, 'queued, pending, fired, failed, and cancelled jobs render as separate rows');
     for (const status of ['pending confirmation', 'queued', 'fired', 'failed', 'cancelled']) {
       assert.ok(jobsHtml.includes(`class="yoagent-job-status">${status}</span>`), `YO!agent localizes the ${status} job status`);
@@ -6017,6 +6311,12 @@ async function runEditorPreviewSuite() {
     await api.sendYoagentChatMessageForTest('second ask');
     assert.deepStrictEqual(chatPosts, [], 'pending target-agent waits keep later asks in the local queue');
     assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest().map(item => item.text)), ['second ask'], 'later ask is visible as queued text');
+    const queuedHtml = api.yoagentChatHtml();
+    assert.ok(queuedHtml.includes('class="yoagent-chat-queue-title yoagent-section-title"'), 'queued chat heading uses the shared section title');
+    assert.ok(queuedHtml.includes('class="yoagent-chat-queue-items yoagent-compact-list"'), 'queued chats use the shared compact list');
+    assert.ok(queuedHtml.includes('class="yoagent-chat-queue-item yoagent-compact-item"'), 'queued chats use the shared compact item');
+    assert.ok(queuedHtml.includes('class="yoagent-chat-queue-text yoagent-compact-label"'), 'queued chat text uses the shared compact label');
+    assert.ok(queuedHtml.includes('class="yoagent-chat-queue-cancel btn-base yoagent-compact-action"'), 'queued chat cancel uses the shared button and compact action parents');
 
     api.applyYoagentConversationPayloadForTest({
       messages: [{role: 'assistant', kind: 'agent_result', session: 'alpha', content: 'alpha result', createdAt: '2026-06-13T17:39:00Z'}],

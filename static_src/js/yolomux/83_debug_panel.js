@@ -4,6 +4,28 @@
 
 const jsDebugGraphDefaultScaleSeconds = 5;
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
+const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
+const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
+const jsDebugHistoryOlderOverlayDelayMs = 120;
+const jsDebugHistoryReadiness = {
+  phase: 'idle',
+  requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
+  targetStartSeconds: 0,
+  targetEndSeconds: 0,
+  requestedStartSeconds: 0,
+  requestedEndSeconds: 0,
+  requestedResolutionSeconds: jsDebugGraphDefaultScaleSeconds,
+  loadedStartSeconds: 0,
+  loadedEndSeconds: 0,
+  resolutionSeconds: 0,
+  coverageIntervals: [],
+  attemptCount: 0,
+  error: '',
+  generation: 0,
+  loadingStartedAtMs: 0,
+  overlayVisible: false,
+  overlayTimer: null,
+};
 let jsDebugSubTab = 'graph';
 let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
@@ -22,7 +44,6 @@ let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
 let jsDebugStatsServerRssBytes = null;
-let jsDebugStatsHistoryStartSeconds = 0;
 let jsDebugStatsClientId = '';
 let jsDebugStatsClientConnected = null;
 let jsDebugStatsDisconnectStartedAtMs = null;
@@ -64,6 +85,7 @@ const jsDebugStatsPollMs = 30000;
 const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30000;
+const jsDebugStatsHistoryMaxPoints = 6000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
@@ -275,6 +297,251 @@ function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date
   return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
 }
 
+function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
+  return jsDebugHistoryLoadingPhases.has(String(state?.phase || ''));
+}
+
+function jsDebugHistoryReadinessSnapshot() {
+  const state = jsDebugHistoryReadiness;
+  return {
+    phase: state.phase,
+    requestedRangeSeconds: state.requestedRangeSeconds,
+    targetStartSeconds: state.targetStartSeconds,
+    targetEndSeconds: state.targetEndSeconds,
+    requestedStartSeconds: state.requestedStartSeconds,
+    requestedEndSeconds: state.requestedEndSeconds,
+    requestedResolutionSeconds: state.requestedResolutionSeconds,
+    loadedStartSeconds: state.loadedStartSeconds,
+    loadedEndSeconds: state.loadedEndSeconds,
+    resolutionSeconds: state.resolutionSeconds,
+    coverageIntervals: state.coverageIntervals.map(interval => ({...interval})),
+    attemptCount: state.attemptCount,
+    error: state.error,
+    generation: state.generation,
+    overlayVisible: state.overlayVisible,
+    busy: jsDebugHistoryReadinessBusy(state),
+  };
+}
+
+function clearJsDebugHistoryOverlayTimer() {
+  if (jsDebugHistoryReadiness.overlayTimer !== null && typeof clearTimeout === 'function') {
+    clearTimeout(jsDebugHistoryReadiness.overlayTimer);
+  }
+  jsDebugHistoryReadiness.overlayTimer = null;
+}
+
+function syncJsDebugHistoryReadinessSurfaces() {
+  const state = jsDebugHistoryReadiness;
+  const busy = jsDebugHistoryReadinessBusy(state);
+  const content = debugGraphHistoryOverlayContentHtml(state);
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.setAttribute('aria-busy', busy ? 'true' : 'false');
+    graph.dataset.jsDebugHistoryState = state.phase;
+    let overlay = graph.querySelector('[data-js-debug-history-overlay]');
+    if (!overlay && (busy || state.phase === 'error')) {
+      refreshDebugGraphElement(graph, {force: true});
+      overlay = graph.querySelector('[data-js-debug-history-overlay]');
+    }
+    if (!overlay) continue;
+    overlay.hidden = state.overlayVisible !== true;
+    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+  }
+}
+
+function setJsDebugHistoryReadiness(phase, updates = {}) {
+  const nextPhase = String(phase || 'idle');
+  if (!jsDebugHistoryReadinessPhases.includes(nextPhase)) throw new Error(`unknown YO!stats history state: ${nextPhase}`);
+  const state = jsDebugHistoryReadiness;
+  const previousPhase = state.phase;
+  const wasBusy = jsDebugHistoryReadinessBusy(state);
+  const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
+  clearJsDebugHistoryOverlayTimer();
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs']) {
+    if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
+  }
+  state.phase = nextPhase;
+  const busy = jsDebugHistoryReadinessBusy(state);
+  state.overlayVisible = nextPhase === 'loading-initial' || nextPhase === 'retrying' || nextPhase === 'error';
+  if (nextPhase === 'loading-older' && typeof setTimeout === 'function') {
+    const generation = state.generation;
+    state.overlayTimer = setTimeout(() => {
+      state.overlayTimer = null;
+      if (state.phase !== 'loading-older' || state.generation !== generation) return;
+      state.overlayVisible = true;
+      syncJsDebugHistoryReadinessSurfaces();
+    }, jsDebugHistoryOlderOverlayDelayMs);
+  }
+  if (wasBusy && !busy) {
+    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: nextPhase, previousState: previousPhase});
+    state.loadingStartedAtMs = 0;
+  }
+  syncJsDebugHistoryReadinessSurfaces();
+  return jsDebugHistoryReadinessSnapshot();
+}
+
+function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = jsDebugGraphScaleSeconds, retry = false} = {}) {
+  const state = jsDebugHistoryReadiness;
+  const generation = Number(state.generation || 0) + 1;
+  const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
+  return setJsDebugHistoryReadiness(phase, {
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
+    targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
+    requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
+    requestedEndSeconds: Math.max(0, Math.floor(Number(requestedEndSeconds) || 0)),
+    requestedResolutionSeconds: Math.max(1, Math.floor(Number(requestedResolutionSeconds) || jsDebugGraphDefaultScaleSeconds)),
+    attemptCount: retry ? Math.max(1, Number(state.attemptCount) + 1) : 1,
+    error: '',
+    generation,
+    loadingStartedAtMs: performanceNow(),
+  });
+}
+
+function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds) {
+  const state = jsDebugHistoryReadiness;
+  return Number(state.generation) === Number(generation)
+    && Number(state.requestedRangeSeconds) === Number(requestedRangeSeconds)
+    && Number(state.requestedStartSeconds) === Number(requestedStartSeconds);
+}
+
+function normalizedJsDebugHistoryCoverage(history = {}) {
+  const raw = history?.coverage;
+  if (!raw || typeof raw !== 'object') return null;
+  const coverage = {
+    mode: raw.mode === 'older' ? 'older' : 'live',
+    requestedStart: Number(raw.requested_start),
+    requestedEnd: Number(raw.requested_end),
+    coveredStart: Number(raw.covered_start),
+    coveredEnd: Number(raw.covered_end),
+    resolutionSeconds: Number(raw.resolution_seconds),
+    complete: raw.complete === true,
+    hasMoreOlder: raw.has_more_older === true,
+    nextOlderEnd: Number(raw.next_older_end),
+  };
+  if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
+  if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = jsDebugGraphScaleSeconds;
+  return coverage;
+}
+
+function mergeJsDebugHistoryCoverageIntervals(intervals) {
+  const grouped = new Map();
+  for (const interval of intervals || []) {
+    const resolution = Number(interval?.resolutionSeconds);
+    const start = Number(interval?.startSeconds);
+    const end = Number(interval?.endSeconds);
+    if (!Number.isFinite(resolution) || resolution <= 0 || !Number.isFinite(start) || end <= start) continue;
+    if (!grouped.has(resolution)) grouped.set(resolution, []);
+    grouped.get(resolution).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution});
+  }
+  const output = [];
+  for (const [resolution, items] of grouped.entries()) {
+    items.sort((left, right) => left.startSeconds - right.startSeconds || right.endSeconds - left.endSeconds);
+    for (const item of items) {
+      const previous = output.at(-1);
+      if (previous?.resolutionSeconds === resolution && item.startSeconds <= previous.endSeconds) {
+        previous.endSeconds = Math.max(previous.endSeconds, item.endSeconds);
+      } else {
+        output.push({...item});
+      }
+    }
+  }
+  return output;
+}
+
+function applyJsDebugHistoryCoverage(coverage) {
+  if (!coverage) return jsDebugHistoryReadinessSnapshot();
+  const state = jsDebugHistoryReadiness;
+  if (coverage.coveredStart > 0) {
+    state.loadedStartSeconds = Number(state.loadedStartSeconds) > 0
+      ? Math.min(Number(state.loadedStartSeconds), coverage.coveredStart)
+      : coverage.coveredStart;
+  }
+  if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
+  state.resolutionSeconds = coverage.resolutionSeconds;
+  const satisfiedStart = coverage.hasMoreOlder
+    ? coverage.coveredStart
+    : Math.max(0, Number(state.targetStartSeconds) || coverage.requestedStart || coverage.coveredStart);
+  const satisfiedEnd = coverage.mode === 'live'
+    ? Infinity
+    : Math.max(satisfiedStart, coverage.coveredEnd, Number(state.targetEndSeconds) || coverage.requestedEnd || 0);
+  if (satisfiedEnd > satisfiedStart) {
+    state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
+      ...state.coverageIntervals,
+      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds},
+    ]);
+  }
+  if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd)) {
+    state.requestedEndSeconds = coverage.nextOlderEnd;
+  }
+  return jsDebugHistoryReadinessSnapshot();
+}
+
+function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
+  const intervals = jsDebugHistoryReadiness.coverageIntervals
+    .filter(interval => Number(interval.resolutionSeconds) <= maxResolutionSeconds)
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
+  let cursor = startSeconds;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return false;
+    cursor = Math.max(cursor, intervalEnd);
+    if (cursor >= endSeconds) return true;
+  }
+  return false;
+}
+
+function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
+  const resolutions = [...new Set(jsDebugHistoryReadiness.coverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
+    .filter(resolution => Number.isFinite(resolution) && resolution > 0)
+    .sort((left, right) => left - right);
+  return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
+}
+
+function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
+  if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
+  return !jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds);
+}
+
+function jsDebugRequestedHistoryResolutionSeconds() {
+  return debugGraphZoomDomainValid() ? 1 : Math.max(1, Math.floor(jsDebugGraphScaleSeconds));
+}
+
+function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resolutionSeconds) {
+  const existingResolution = jsDebugHistoryCoverageResolutionForRange(targetStartSeconds, targetEndSeconds);
+  if (Number.isFinite(existingResolution) && resolutionSeconds < existingResolution) {
+    return {
+      startSeconds: Math.max(0, Math.floor(targetStartSeconds / existingResolution) * existingResolution),
+      endSeconds: Math.ceil(targetEndSeconds / existingResolution) * existingResolution,
+    };
+  }
+  const loadedStart = Number(jsDebugHistoryReadiness.loadedStartSeconds) || 0;
+  return {
+    startSeconds: targetStartSeconds,
+    endSeconds: loadedStart > targetStartSeconds ? loadedStart : 0,
+  };
+}
+
+function resetJsDebugHistoryReadiness() {
+  return setJsDebugHistoryReadiness('idle', {
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    targetStartSeconds: 0,
+    targetEndSeconds: 0,
+    requestedStartSeconds: 0,
+    requestedEndSeconds: 0,
+    requestedResolutionSeconds: jsDebugGraphScaleSeconds,
+    loadedStartSeconds: 0,
+    loadedEndSeconds: 0,
+    resolutionSeconds: 0,
+    coverageIntervals: [],
+    attemptCount: 0,
+    error: '',
+    generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
+    loadingStartedAtMs: 0,
+  });
+}
+
 function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
@@ -285,6 +552,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
   if (!render) return;
+  if (requestJsDebugHistoryForCurrentDomain()) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
@@ -987,7 +1255,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   scheduleJsDebugPanelRefresh();
 }
 
-function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}) {
+function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, scheduleRefresh = true, advanceHistoryCursor = true, replaceCoverage = null} = {}) {
   if (!jsDebugCollectionEnabled || !payload || typeof payload !== 'object') return;
   const nextPid = Number(payload.pid);
   const nextStartedAt = Number(payload.started_at);
@@ -1013,12 +1281,12 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     jsDebugStatsFirstSampleReceived = true;
     armJsDebugStatsPolling();
   }
-  debugGraphApplyServerHistory(payload.history);
+  debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: advanceHistoryCursor, replaceCoverage});
   // The restart response was requested with the previous process's sequence. Refetch from zero so
   // stale high-water marks cannot hide the replacement process's durable history.
   if (serverChanged) jsDebugStatsServerSequence = 0;
   if (payload.history && typeof payload.history === 'object') {
-    scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
+    if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
     return;
   }
   const cpuPercent = Number(payload.cpu_percent);
@@ -1031,7 +1299,7 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     systemCpuPercent: Number.isFinite(systemCpuPercent) ? systemCpuPercent : 0,
   });
   compactJsDebugGraphBuckets();
-  scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
+  if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
 
 function clearJsDebugGraphData() {
@@ -1210,8 +1478,34 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
   }
 }
 
-function debugGraphApplyServerHistory(history = {}) {
+function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resolutionSeconds) {
+  const startMs = Number(startSeconds) * 1000;
+  const endMs = Number(endSeconds) * 1000;
+  const resolutionMs = Number(resolutionSeconds) * 1000;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(resolutionMs) || resolutionMs <= 0) return 0;
+  let removed = 0;
+  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
+    for (const [key, bucket] of map.entries()) {
+      const bucketStart = Number(bucket?.startMs);
+      const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+      const bucketEnd = bucketStart + bucketDuration;
+      if (bucketDuration <= resolutionMs || bucketStart < startMs || bucketEnd > endMs) continue;
+      map.delete(key);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, replaceCoverage = null} = {}) {
   if (!history || typeof history !== 'object') return;
+  if (replaceCoverage) {
+    debugGraphRemoveCoarserServerBuckets(
+      replaceCoverage.covered_start,
+      replaceCoverage.covered_end,
+      replaceCoverage.resolution_seconds,
+    );
+  }
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
   compactJsDebugGraphBuckets();
@@ -1220,22 +1514,22 @@ function debugGraphApplyServerHistory(history = {}) {
     clearDebugGraphAgentTokenData();
     jsDebugStatsAgentTokenSchemaVersion = tokenSchemaVersion;
   }
-  const sequence = Number(history.sequence);
-  if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
+  const sequence = Number(history.latest_sequence ?? history.sequence);
+  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
-  debugGraphApplyServerAgentTokenHistory(history.agent_token_history);
+  debugGraphApplyServerAgentTokenHistory(history.agent_token_history, {advanceLiveCursor});
   compactJsDebugGraphBuckets();
 }
 
-function debugGraphApplyServerAgentTokenHistory(history = {}) {
+function debugGraphApplyServerAgentTokenHistory(history = {}, {advanceLiveCursor = true} = {}) {
   if (!history || typeof history !== 'object') return;
   const resolutionSeconds = Number(history.resolution_seconds);
   if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
   if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
   jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
   const sequence = Number(history.sequence);
-  if (Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
+  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   for (const record of records) {
     const startSeconds = Number(record?.start);
@@ -1676,7 +1970,7 @@ function debugRemovalLatencyMetaText() {
 
 function debugClientPerfRows() {
   if (typeof clientPerfSummary !== 'function') return [];
-  const preferred = ['focusSet', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
+  const preferred = ['focusSet', 'tabActivationPaint', 'tabberFullRefresh', 'tabberLayoutSync', 'statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryRender', 'statsHistoryPaint', 'statsHistoryLoading', 'statsNoDataSweep', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
   const order = new Map(preferred.map((name, index) => [name, index]));
   return clientPerfSummary()
     .filter(row => Number(row.count || 0) > 0)
@@ -1736,8 +2030,38 @@ function debugGraphWaitingForServerStats() {
 
 function debugGraphMetaHtml() {
   const items = debugGraphMetaItems();
-  const metaHtml = items.length ? esc(items.join(' | ')) : textWithMovingEllipsisHtml(t('debug.waitingForServerStats'));
+  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
+    && jsDebugHistoryReadiness.overlayVisible === true;
+  const metaHtml = items.length
+    ? esc(items.join(' | '))
+    : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
+}
+
+function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
+  const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
+  if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
+  if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
+  if (state.phase === 'retrying') return t('debug.graph.history.retrying', {range});
+  if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
+  return '';
+}
+
+function debugGraphHistoryOverlayContentHtml(state = jsDebugHistoryReadiness) {
+  const text = debugGraphHistoryOverlayText(state);
+  if (!text) return '';
+  const message = jsDebugHistoryReadinessBusy(state)
+    ? textWithMovingEllipsisHtml(text, 'js-debug-history-loading-dots')
+    : esc(text);
+  const retry = state.phase === 'error'
+    ? `<button type="button" class="preferences-inline-action js-debug-history-retry" data-js-debug-history-retry>${esc(t('common.retry'))}</button>`
+    : '';
+  return `<div class="js-debug-history-overlay-message"><span>${message}</span>${retry}</div>`;
+}
+
+function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
+  const hidden = state.overlayVisible === true ? '' : ' hidden';
+  return `<div class="js-debug-history-overlay" data-js-debug-history-overlay aria-live="polite" aria-atomic="true"${hidden}>${debugGraphHistoryOverlayContentHtml(state)}</div>`;
 }
 
 function debugGraphAgentTokenSeriesDefs(buckets) {
@@ -2027,15 +2351,10 @@ function debugGraphDisconnectedRanges(buckets, domain) {
     const rangeStart = Math.max(domainStart, startMs);
     const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
     if (rangeEnd <= rangeStart) continue;
-    const previous = ranges.at(-1);
-    if (previous && rangeStart <= previous.endMs + 1) {
-      previous.endMs = Math.max(previous.endMs, rangeEnd);
-      previous.disconnectedMs += disconnectedMs;
-    } else {
-      ranges.push({startMs: rangeStart, endMs: rangeEnd, disconnectedMs});
-    }
+    ranges.push({startMs: rangeStart, endMs: rangeEnd});
   }
-  return ranges;
+  return debugGraphMergeTimeRanges(ranges, domain)
+    .map(range => ({...range, disconnectedMs: range.endMs - range.startMs}));
 }
 
 function debugGraphDisconnectedRectsHtml(buckets, domain) {
@@ -2059,24 +2378,42 @@ function debugGraphBucketRanges(buckets) {
     .sort((a, b) => a.startMs - b.startMs);
 }
 
-function debugGraphOverlayStepMs(bucketRanges) {
-  const durations = (bucketRanges || [])
-    .map(item => Number(item.durationMs))
-    .filter(value => Number.isFinite(value) && value > 0);
-  return durations.length ? Math.max(1000, Math.min(...durations)) : jsDebugGraphRawBucketMs;
+function debugGraphMergeTimeRanges(ranges, domain = null) {
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  const hasDomain = Number.isFinite(domainStart) && Number.isFinite(domainEnd) && domainEnd > domainStart;
+  const normalized = (ranges || [])
+    .map(range => {
+      const rawStart = Number(range?.startMs);
+      const rawEnd = Number(range?.endMs);
+      if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawEnd <= rawStart) return null;
+      const startMs = hasDomain ? Math.max(domainStart, rawStart) : rawStart;
+      const endMs = hasDomain ? Math.min(domainEnd, rawEnd) : rawEnd;
+      return endMs > startMs ? {startMs, endMs} : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+  const merged = [];
+  for (const range of normalized) {
+    const previous = merged.at(-1);
+    if (previous && range.startMs <= previous.endMs + 1) previous.endMs = Math.max(previous.endMs, range.endMs);
+    else merged.push({...range});
+  }
+  return merged;
 }
 
-function debugGraphRangesOverlap(aStart, aEnd, bStart, bEnd) {
-  return Number(aStart) < Number(bEnd) && Number(bStart) < Number(aEnd);
-}
-
-function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesItems) {
-  return bucketRanges.some(item => debugGraphRangesOverlap(startMs, endMs, item.startMs, item.endMs)
-    && seriesItems.some(series => debugGraphSeriesBucketHasData(item.bucket, series)));
-}
-
-function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs) {
-  return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
+function debugGraphComplementTimeRanges(ranges, domain) {
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
+  const gaps = [];
+  let cursor = domainStart;
+  for (const range of debugGraphMergeTimeRanges(ranges, domain)) {
+    if (range.startMs > cursor) gaps.push({startMs: cursor, endMs: range.startMs});
+    cursor = Math.max(cursor, range.endMs);
+  }
+  if (cursor < domainEnd) gaps.push({startMs: cursor, endMs: domainEnd});
+  return gaps;
 }
 
 function debugGraphCommunicationSeriesItems(seriesItems) {
@@ -2089,22 +2426,16 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   const domainStart = Number(domain?.startMs);
   const domainEnd = Number(domain?.endMs);
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
-  const bucketRanges = debugGraphBucketRanges(buckets);
-  const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
-  const stepMs = debugGraphOverlayStepMs(bucketRanges);
-  const runs = [];
-  for (let startMs = domainStart; startMs < domainEnd;) {
-    const endMs = Math.min(domainEnd, startMs + stepMs);
-    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, items);
-    const coveredByDisconnect = debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs);
-    if (!hasData && !coveredByDisconnect) {
-      const previous = runs.at(-1);
-      if (previous && startMs <= previous.endMs + 1) previous.endMs = endMs;
-      else runs.push({startMs, endMs});
-    }
-    startMs = endMs;
+  const perf = clientPerfStart('statsNoDataSweep');
+  try {
+    const dataRanges = debugGraphBucketRanges(buckets)
+      .filter(item => items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
+      .map(item => ({startMs: item.startMs, endMs: item.endMs}));
+    const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
+    return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain);
+  } finally {
+    clientPerfEnd(perf, {rows: (buckets || []).length});
   }
-  return runs;
 }
 
 function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
@@ -2502,15 +2833,21 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   </section>`;
 }
 
+function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
+  return `<div class="js-debug-chart-shell">
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    ${debugGraphHistoryOverlayHtml()}
+  </div>`;
+}
+
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
-  return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${chartGroups.map(group => {
+  const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
       return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets);
-    }).join('')}</div>
-  </div>`;
+    }).join('');
+  return debugGraphChartShellHtml(gridHtml, domain);
 }
 
 function debugGraphClassName(nowMs = Date.now()) {
@@ -2526,7 +2863,10 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
     const empty = debugGraphWaitingForServerStats() ? '' : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
-    return `${controls}${meta}${clientPerf}${empty}`;
+    const loadingShell = jsDebugHistoryReadiness.overlayVisible === true || jsDebugHistoryReadinessBusy()
+      ? debugGraphChartShellHtml('', debugGraphDomain(nowMs))
+      : '';
+    return `${controls}${meta}${clientPerf}${empty}${loadingShell}`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
@@ -2535,7 +2875,7 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
 
 function debugGraphHtml() {
   const nowMs = Date.now();
-  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
+  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
 }
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
@@ -2606,15 +2946,36 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
 
 async function fetchJsDebugStatsJson(url, options = {}) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const phaseTimings = {};
   let timeoutId = null;
   try {
     if (controller && typeof setTimeout === 'function') {
       timeoutId = setTimeout(() => controller.abort(), jsDebugStatsPollTimeoutMs);
     }
-    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})});
+    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})}, phaseTimings);
   } finally {
     if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+    if (Number.isFinite(phaseTimings.fetchMs)) recordClientPerfCounter('statsHistoryFetch', phaseTimings.fetchMs);
+    if (Number.isFinite(phaseTimings.parseMs)) recordClientPerfCounter('statsHistoryParse', phaseTimings.parseMs);
   }
+}
+
+async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, requestedStartSeconds) {
+  await nextAnimationFrame();
+  if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    refreshDebugGraphElement(graph, {force: true});
+  }
+  const paintStartedAt = performanceNow();
+  await nextAnimationFrame();
+  recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
+  if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  setJsDebugHistoryReadiness('ready', {
+    requestedRangeSeconds,
+    requestedStartSeconds,
+    error: '',
+  });
+  return true;
 }
 
 async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
@@ -2631,24 +2992,74 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   if (typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollPending = false;
   jsDebugStatsPollInFlight = true;
+  let readinessRequest = null;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
     const tokenResolution = debugGraphAgentTokenResolution();
-    const historyStart = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
-    const expandsHistory = !jsDebugStatsHistoryStartSeconds || historyStart < jsDebugStatsHistoryStartSeconds;
-    if (expandsHistory) {
-      jsDebugStatsServerSequence = 0;
-      resetDebugGraphAgentTokenHistory();
+    const domain = debugGraphDomain();
+    const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
+    const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
+    const historyResolution = jsDebugRequestedHistoryResolutionSeconds();
+    const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, historyResolution);
+    if (needsHistoryCoverage) {
+      const state = jsDebugHistoryReadiness;
+      const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+        && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+        && Number(state.targetStartSeconds) === Number(targetStart)
+        && Number(state.targetEndSeconds) === Number(targetEnd)
+        && Number(state.requestedResolutionSeconds) === Number(historyResolution);
+      if (!currentRequestMatches) {
+        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, historyResolution);
+        beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+          targetStartSeconds: targetStart,
+          targetEndSeconds: targetEnd,
+          requestedEndSeconds: requestWindow.endSeconds,
+          requestedResolutionSeconds: historyResolution,
+          retry: state.phase === 'error',
+        });
+      }
+      readinessRequest = jsDebugHistoryReadinessSnapshot();
+      await nextAnimationFrame();
+      if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     }
+    const historyEnd = readinessRequest
+      ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
+      : 0;
+    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : targetStart;
     if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
     const tokenHistory = tokenResolution
-      ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
+      ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}${tokenHistory}`, {cache: 'no-store'});
-    if (expandsHistory) jsDebugStatsHistoryStartSeconds = historyStart;
-    recordJsDebugStatsSample(payload, {forceGraphRefresh: forceGraphRefresh || expandsHistory});
-  } catch (_error) {
+    const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${tokenHistory}`, {cache: 'no-store'});
+    if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
+    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
+    if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
+    const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
+      ? payload.history.coverage
+      : null;
+    const applyStartedAt = performanceNow();
+    recordJsDebugStatsSample(payload, {
+      forceGraphRefresh: forceGraphRefresh || needsHistoryCoverage,
+      scheduleRefresh: !readinessRequest,
+      advanceHistoryCursor: coverage?.mode !== 'older',
+      replaceCoverage,
+    });
+    if (coverage) applyJsDebugHistoryCoverage(coverage);
+    recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
+    if (readinessRequest) {
+      if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
+        jsDebugStatsPollPending = true;
+        jsDebugStatsPollPendingForceGraphRefresh = true;
+        return;
+      }
+      await paintJsDebugHistoryResponse(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds);
+    }
+  } catch (error) {
+    if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
+      setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
+    }
   } finally {
     jsDebugStatsPollInFlight = false;
     if (jsDebugStatsPollPending) {
@@ -2718,7 +3129,7 @@ function clearJsDebugServerHistory() {
   jsDebugStatsServerPid = null;
   jsDebugStatsServerStartedAt = null;
   jsDebugStatsServerRssBytes = null;
-  jsDebugStatsHistoryStartSeconds = 0;
+  resetJsDebugHistoryReadiness();
   if (jsDebugStatsHistoryFlushTimer) {
     clearTimeout(jsDebugStatsHistoryFlushTimer);
     jsDebugStatsHistoryFlushTimer = null;
@@ -2899,9 +3310,16 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   const nowMs = Date.now();
   const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
-  graph.className = debugGraphClassName(nowMs);
-  graph.innerHTML = debugGraphInnerHtml(nowMs);
-  graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
+  const perf = clientPerfStart('statsHistoryRender');
+  try {
+    graph.className = debugGraphClassName(nowMs);
+    graph.innerHTML = debugGraphInnerHtml(nowMs);
+    graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
+    graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
+  } finally {
+    clientPerfEnd(perf);
+  }
   return true;
 }
 
@@ -2925,10 +3343,38 @@ function setDebugSubTab(tab) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
 }
 
+function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
+  if (!jsDebugStatsPanelVisible()) return false;
+  const domain = debugGraphDomain();
+  const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
+  const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
+  const requestedResolutionSeconds = jsDebugRequestedHistoryResolutionSeconds();
+  if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds)) return false;
+  const state = jsDebugHistoryReadiness;
+  const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+    && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
+    && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
+    && Number(state.requestedResolutionSeconds) === Number(requestedResolutionSeconds);
+  if (!currentRequestMatches || retry) {
+    const requestWindow = jsDebugHistoryRequestWindow(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds);
+    beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+      targetStartSeconds: requestedStartSeconds,
+      targetEndSeconds: requestedDomainEndSeconds,
+      requestedEndSeconds: requestWindow.endSeconds,
+      requestedResolutionSeconds,
+      retry,
+    });
+  }
+  armJsDebugStatsPolling({pollNow: true, forceGraphRefresh});
+  return true;
+}
+
 function setDebugGraphScale(value) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(value);
   saveJsDebugStatsUiPreferences();
+  if (requestJsDebugHistoryForCurrentDomain()) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
@@ -2941,13 +3387,26 @@ function setDebugGraphRange(value, {render = true} = {}) {
   saveJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds();
   if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
-  if (render && jsDebugStatsPanelVisible() && (!jsDebugStatsHistoryStartSeconds || Math.floor(debugGraphDomain().startMs / 1000) < jsDebugStatsHistoryStartSeconds)) {
-    armJsDebugStatsPolling({pollNow: true});
-  }
   if (!render) return;
+  const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
+  if (requestJsDebugHistoryForCurrentDomain()) return;
+  if (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error') {
+    setJsDebugHistoryReadiness('ready', {
+      requestedRangeSeconds: jsDebugGraphRangeSeconds,
+      requestedStartSeconds,
+      attemptCount: 0,
+      error: '',
+      generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
+    });
+  }
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
+}
+
+function retryJsDebugHistory() {
+  if (jsDebugHistoryReadiness.phase !== 'error' || !jsDebugStatsPanelVisible()) return false;
+  return requestJsDebugHistoryForCurrentDomain({retry: true});
 }
 
 function debugGraphRangeSliderIndex(slider, options = debugGraphAvailableRangeOptions()) {
@@ -3095,6 +3554,7 @@ function handleDebugGraphPointerUp(event, panel) {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
+    if (requestJsDebugHistoryForCurrentDomain()) return;
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
       refreshDebugGraphElement(graph, {force: true});
     }
@@ -3120,6 +3580,12 @@ function handleDebugGraphControlEvent(event, panel) {
   if (chartRestore && panel.contains(chartRestore)) {
     event.preventDefault();
     setDebugGraphChartVisible(chartRestore.dataset.jsDebugChartRestore, true);
+    return true;
+  }
+  const retry = event.target.closest('[data-js-debug-history-retry]');
+  if (retry && panel.contains(retry)) {
+    event.preventDefault();
+    retryJsDebugHistory();
     return true;
   }
   const reset = event.target.closest('[data-js-debug-zoom-reset]');

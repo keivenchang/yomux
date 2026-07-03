@@ -756,8 +756,6 @@ body.app-vw-lte-760 .topbar-search {
     opacity 90ms ease,
     transform 90ms ease,
     visibility 0s linear 90ms;
-}
-.app-menu-popover {
   top: 100%;
   left: 0;
 }

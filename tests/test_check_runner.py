@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e and not boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
@@ -85,6 +86,8 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "tests",
         "-n",
         "auto",
+        "--dist",
+        "worksteal",
         "-m",
         "browser and not e2e and not boot",
         "-q",
@@ -98,6 +101,24 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
+
+
+def test_every_slowest_first_base_node_id_resolves_in_collection():
+    test_config = sys.modules["conftest"]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    collected = {
+        line.split("[", 1)[0]
+        for line in result.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    }
+    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected]
+    assert missing == []
 
 
 def test_active_yolomux_server_records_uses_generation_heartbeats(monkeypatch, tmp_path):

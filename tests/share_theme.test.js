@@ -154,7 +154,7 @@ async function runShareThemeSuite() {
     assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
     const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
-    assert.ok(/setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'auto-switching Differ sessions shows loading only when no loaded cached payload is available while Finder Sync updates immediately');
+    assert.ok(/scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*?if \(fileExplorerMode === 'tabber'\) \{[\s\S]*?scheduleTabberTreeLayoutStateSync\(\);[\s\S]*?return;[\s\S]*?setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'explicit session changes use only the lightweight Tabber state path while Differ shows cached/loading data and refreshes it');
     assert.ok(/const backgroundRefresh = options\.background === true;[\s\S]*if \(!backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, true\);[\s\S]*if \(current && !backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, false\);/.test(sessionSwitchSource), 'background Differ refreshes do not replace cached content with the foreground loading state');
     api.setSessionFilesLoadingForTest(false);
     api.setFileExplorerModeForTest('diff');
@@ -1438,7 +1438,7 @@ async function runShareThemeSuite() {
     assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before the forced refresh');
-    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);/.test(appSource), 'Finder session switches sync the root from tmux metadata immediately while session-files refreshes');
+    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(fileExplorerMode === 'tabber'\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
     assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
     assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
     const stalePushApi = loadYolomux('', ['1']);
@@ -1785,7 +1785,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-tree-repo-meta\s*\{[^}]*font-size: var\(--ui-font-size-2xs\)/.test(preferencesCss), '#37: the Finder repo/branch label is condensed to a smaller font so more files fit');
     assert.ok(/\.file-explorer-hidden-toggle,\s*\n\.file-explorer-root-mode-toggle,\s*\n\.file-explorer-header-action\s*\{[\s\S]*white-space:\s*nowrap/.test(preferencesCss), 'Finder toolbar text buttons never wrap localized labels vertically');
     assert.ok(/\.file-explorer-root-mode-toggle\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder root-mode button sizes to localized label content');
-    assert.ok(/\.file-explorer-root-mode-toggle-panel\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder panel root-mode button sizes to localized label content');
+    assert.ok(/class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel/.test(preferencesJs), 'Finder panel root-mode button inherits the shared root-mode control class');
+    assert.equal(/\.file-explorer-root-mode-toggle-panel\s*\{[^}]*?(?:width|min-width|flex):/.test(preferencesCss), false, 'Finder panel root-mode modifier does not duplicate shared sizing declarations');
     assert.ok(/\.file-explorer-toolbar\s*\{[\s\S]*flex-direction:\s*column[\s\S]*justify-content:\s*flex-start/.test(preferencesCss), 'Finder toolbar is a deliberate stacked-row column instead of one wrapping row');
     assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
     assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
@@ -4125,8 +4126,12 @@ async function runShareThemeSuite() {
     assert.equal(source.includes("editorPanel.classList.add('preview-linked')"), false, 'old pure-preview pane ring marker is removed');
     const focusStart = source.indexOf('function setFocusedPanelItem(');
     const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
-    assert.ok(source.slice(focusStart, focusEnd).includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
-    assert.ok(source.slice(focusStart, focusEnd).includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'));
+    const userFocusStart = source.indexOf('function applyUserInitiatedPanelFocus(');
+    const userFocusEnd = source.indexOf('function setFocusedPanelItem(', userFocusStart);
+    const userFocusBody = source.slice(userFocusStart, userFocusEnd);
+    assert.ok(userFocusBody.includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
+    assert.ok(userFocusBody.includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'));
+    assert.ok(source.slice(focusStart, focusEnd).includes('applyUserInitiatedPanelFocus(item, previousItem, options);'), 'new and already-focused interactions share one user-focus side-effect owner');
     const finderSyncStart = source.indexOf('function scheduleFileExplorerActiveTabSync(');
     const finderSyncEnd = source.indexOf('function cancelPendingFileExplorerActiveSync(', finderSyncStart);
     const finderSyncBody = source.slice(finderSyncStart, finderSyncEnd);

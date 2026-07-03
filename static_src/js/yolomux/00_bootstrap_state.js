@@ -667,6 +667,8 @@ let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
 let tabberActivityRequestGeneration = 0;
 let tabberActivityAppliedRequestGeneration = 0;
+let tabberActivityLoaded = false;
+let tabberActivityFetchPromise = null;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};

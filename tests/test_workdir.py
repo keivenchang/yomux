@@ -6,6 +6,7 @@ import pytest
 
 from yolomux_lib import common
 from yolomux_lib import workdir
+from yolomux_lib.agent_comms import codex_app_server
 from yolomux_lib.workdir import agent_auth_status
 from yolomux_lib.workdir import agent_command
 from yolomux_lib.workdir import available_agent_commands
@@ -78,6 +79,43 @@ def test_codex_runtime_env_respects_yolomux_codex_home_override(monkeypatch, tmp
 
     assert env["CODEX_HOME"] == str(codex_home)
     assert codex_home.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("path", "extra", "with_local_bin", "expected_suffixes"),
+    [
+        ("", "", False, []),
+        ("/usr/bin", "/opt/agents:/opt/agents", False, ["/opt/agents", "/usr/bin"]),
+        ("/opt/agents:/usr/bin", "/opt/agents:/opt/other", False, ["/opt/other", "/opt/agents", "/usr/bin"]),
+        ("/usr/bin", "", True, [".local/bin", "/usr/bin"]),
+        ("/usr/bin", "~/agents:relative", False, ["agents", "relative", "/usr/bin"]),
+    ],
+)
+def test_server_and_codex_app_server_share_runtime_path_order(monkeypatch, tmp_path, path, extra, with_local_bin, expected_suffixes):
+    if with_local_bin:
+        (tmp_path / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_app_server.Path, "home", lambda: tmp_path)
+    base_env = {
+        "PATH": path,
+        "YOLOMUX_EXTRA_PATH": extra,
+        "YOLOMUX_CODEX_HOME": str(tmp_path / "codex-home"),
+    }
+
+    server_env = common.codex_runtime_env(base_env)
+    app_server_env = codex_app_server.codex_runtime_env(base_env)
+
+    assert server_env["PATH"] == app_server_env["PATH"]
+    entries = server_env["PATH"].split(os.pathsep) if server_env["PATH"] else []
+    expected = []
+    for suffix in expected_suffixes:
+        if suffix == ".local/bin":
+            expected.append(str(tmp_path / suffix))
+        elif suffix == "agents":
+            expected.append(str(tmp_path / suffix))
+        else:
+            expected.append(suffix)
+    assert entries == expected
 
 
 def test_agent_auth_status_probes_codex_with_runtime_env(monkeypatch, tmp_path):

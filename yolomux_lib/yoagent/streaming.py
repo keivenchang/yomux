@@ -37,16 +37,6 @@ YOAGENT_STREAM_STATE_LIMIT = 50
 YOAGENT_STREAM_STATE_PRUNE_COUNT = 10
 
 
-def sanitized_stream_items(value: Any) -> list[dict[str, Any]]:
-    items, _truncated = bounded_stream_items(value)
-    return items
-
-
-def copy_stream_items(value: Any) -> list[dict[str, Any]]:
-    items, _truncated = bounded_stream_items(value)
-    return items
-
-
 class YoagentStreamStateStore:
     def __init__(
         self,

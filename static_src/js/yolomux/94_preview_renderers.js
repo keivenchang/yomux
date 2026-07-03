@@ -539,14 +539,6 @@ function applyMarkdownFenceFallbackHighlight(block) {
   block.classList.add('editor-highlight-code');
 }
 
-function safeDecodePathComponent(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
 function localPathFromFileHref(href) {
   const raw = String(href || '').trim();
   if (!/^file:/i.test(raw)) return '';
@@ -554,10 +546,10 @@ function localPathFromFileHref(href) {
     const base = globalThis.location?.href || 'http://localhost/';
     const url = new URL(raw, base);
     if (url.protocol !== 'file:') return '';
-    return safeDecodePathComponent(url.pathname || '');
+    return safeDecodeURIComponent(url.pathname || '');
   } catch (_) {
     const match = raw.match(/^file:\/\/(?:localhost)?(\/[^?#]*)/i);
-    return match ? safeDecodePathComponent(match[1]) : '';
+    return match ? safeDecodeURIComponent(match[1]) : '';
   }
 }
 

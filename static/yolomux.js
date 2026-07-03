@@ -668,6 +668,8 @@ let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
 let tabberActivityRequestGeneration = 0;
 let tabberActivityAppliedRequestGeneration = 0;
+let tabberActivityLoaded = false;
+let tabberActivityFetchPromise = null;
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
@@ -1854,7 +1856,7 @@ async function apiFetchJson(url, options = {}) {
   return apiJsonResponse(await apiFetch(url, options));
 }
 
-async function apiFetchJsonQuiet(url, options = {}) {
+async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   if (shareToken) {
@@ -1866,7 +1868,19 @@ async function apiFetchJsonQuiet(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  return apiJsonResponse(await fetch(url, requestOptions));
+  const fetchStartedAt = performanceNow();
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
+  }
+  const parseStartedAt = performanceNow();
+  try {
+    return await apiJsonResponse(response);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.parseMs = performanceNow() - parseStartedAt;
+  }
 }
 
 function messageDescriptorText(descriptor, fallback = '') {
@@ -1983,27 +1997,47 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
-function jsDebugPerformanceNow() {
-  if (!jsDebugCollectionEnabled) return 0;
+function performanceNow() {
   const value = globalThis.performance?.now?.();
   return Number.isFinite(value) ? value : Date.now();
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function utf8ByteLength(text) {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function domDataAttributeName(key) {
+  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function singleLineText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function jsDebugPerformanceNow() {
+  if (!jsDebugCollectionEnabled) return 0;
+  return performanceNow();
 }
 
 function jsDebugRequestMethod(options = {}) {
   return String(options?.method || 'GET').toUpperCase();
 }
 
-function jsDebugByteLength(text) {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
-}
-
 function jsDebugRequestBytes(url, options = {}) {
   if (!jsDebugCollectionEnabled) return 0;
-  let bytes = jsDebugByteLength(jsDebugUrlText(url));
+  let bytes = utf8ByteLength(jsDebugUrlText(url));
   const body = options?.body;
-  if (typeof body === 'string') bytes += jsDebugByteLength(body);
+  if (typeof body === 'string') bytes += utf8ByteLength(body);
   else if (body instanceof ArrayBuffer) bytes += body.byteLength;
   else if (body?.byteLength) bytes += Number(body.byteLength) || 0;
   return bytes;
@@ -2077,11 +2111,6 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
-function clientPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function clientPerfMark(name) {
   if (!name || typeof globalThis.performance?.mark !== 'function') return '';
   const mark = `yolomux:${String(name)}`;
@@ -2109,7 +2138,7 @@ function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
       ? globalThis.performance.getEntriesByName(markName)
       : [];
     const startedAt = Number(entries?.at?.(-1)?.startTime);
-    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+    if (Number.isFinite(startedAt)) durationMs = performanceNow() - startedAt;
   }
   globalThis.performance?.clearMarks?.(markName);
   if (endMark) globalThis.performance?.clearMarks?.(endMark);
@@ -2151,12 +2180,12 @@ function recordClientPerfCounter(name, durationMs = null, details = {}) {
 }
 
 function clientPerfStart(name) {
-  return {name: String(name || ''), startedAt: clientPerfNow()};
+  return {name: String(name || ''), startedAt: performanceNow()};
 }
 
 function clientPerfEnd(token, details = {}) {
   if (!token?.name) return null;
-  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+  return recordClientPerfCounter(token.name, performanceNow() - Number(token.startedAt || 0), details);
 }
 
 function clientPerfMeasure(name, fn, details = {}) {
@@ -3530,6 +3559,14 @@ function setFocusedTerminal(session, options = {}) {
   }
 }
 
+function updateFocusOnlyChrome() {
+  // Focus does not change pane-tab content. Dockview/classic layout activation owns active-tab
+  // chrome, while acknowledgement updates arrive through their existing status-render path.
+  updateTopbarActivityStatus();
+  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
+}
+
 function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
   const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
@@ -3553,9 +3590,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
     acknowledgeTerminalAttentionFromUserAction(session, null, options);
@@ -3570,13 +3605,35 @@ function clearFocusedTerminal(session) {
   if (focusedTerminal !== session) return;
   focusedTerminal = null;
   focusedPanelItem = null;
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
+}
+
+function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
+  if (isTmuxSession(item)) {
+    acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
+    rememberFileExplorerExplicitSyncSession(item);
+  }
+  if (isFileEditorItem(item)) {
+    activeFile = fileItemPath(item);
+    scheduleFileExplorerActiveFileReveal(activeFile);
+  }
+  const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
+  if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
+  if (previousItem !== item) recordFocusNavTransition(previousItem, item);
 }
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedPanelItem === item;
+  if (alreadyFocused) {
+    rememberActivePaneItem(item);
+    if (isTmuxSession(item)) lastFocusedTmuxSession = item;
+    if (options.userInitiated === true) {
+      if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
+      applyUserInitiatedPanelFocus(item, previousItem, options);
+    }
+    return;
+  }
   if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
@@ -3586,20 +3643,10 @@ function setFocusedPanelItem(item, options = {}) {
     lastFocusedTmuxSession = item;
     dismissAttentionAlertsForSession(item);
   }
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item});
   if (options.userInitiated === true) {
-    if (isTmuxSession(item)) acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
-    if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
-    if (isFileEditorItem(item)) {
-      activeFile = fileItemPath(item);
-      scheduleFileExplorerActiveFileReveal(activeFile);
-    }
-    const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
-    if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
-    recordFocusNavTransition(previousItem, item);
+    applyUserInitiatedPanelFocus(item, previousItem, options);
   }
   else recordAutoFocusNav(item, previousItem);
 }
@@ -3675,7 +3722,8 @@ function updatePanelInactiveOverlays() {
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
-  if (typeof refreshTabberPanelsForFocusChange === 'function') refreshTabberPanelsForFocusChange();
+  if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
+  else if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
 }
 
 function esc(value) {
@@ -5988,7 +6036,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   if (!tabStates.size) return null;
   const slotNames = String(raw || '')
     .split(',')
-    .map(value => layoutSlotName(readableParamComponentDecode(value.trim())))
+    .map(value => layoutSlotName(safeDecodeURIComponent(value.trim())))
     .filter(Boolean);
   if (!slotNames.length) return null;
   const next = emptyLayoutSlots();
@@ -6077,7 +6125,7 @@ function parseCompactLayoutNode(parser) {
     if (children.length < 2) return children[0] || null;
     return splitNode(splitMatch[1] === 'row' ? 'row' : 'column', children[0], children[1], splitMatch[2]);
   }
-  const slot = layoutSlotName(readableParamComponentDecode(name));
+  const slot = layoutSlotName(safeDecodeURIComponent(name));
   return slot ? leafNode(slot) : null;
 }
 
@@ -6143,7 +6191,7 @@ function layoutTabStatesFromParam(raw) {
     if (!part.trim()) continue;
     const separator = part.indexOf(':');
     if (separator <= 0) continue;
-    const slot = layoutSlotName(readableParamComponentDecode(part.slice(0, separator)));
+    const slot = layoutSlotName(safeDecodeURIComponent(part.slice(0, separator)));
     if (!slot) continue;
     const tabs = [];
     let active = null;
@@ -6153,7 +6201,7 @@ function layoutTabStatesFromParam(raw) {
       if (!token) continue;
       const activeToken = token.endsWith('*');
       if (activeToken) token = token.slice(0, -1);
-      const decoded = readableParamComponentDecode(token);
+      const decoded = safeDecodeURIComponent(token);
       if (decoded === emptyPaneParam) {
         placeholder = true;
         continue;
@@ -6175,14 +6223,6 @@ function readableItemParam(item) {
 
 function readableParamComponent(value) {
   return encodeURIComponent(String(value)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function readableParamComponentDecode(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
 }
 
 // Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
@@ -10537,7 +10577,9 @@ function performLayoutRender(request = {}) {
     // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
     // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
     syncActivePanelsInPlace();
-    renderPaneTabStrips();
+    // Dockview's in-place sync already refreshes its tab renderers and mounted panels. Running the
+    // generic strip pass again repeats that same work during every active-tab adoption.
+    if (!dockviewLayoutActive()) renderPaneTabStrips();
     syncPanelVisibility(previousActive);
     return;
   }
@@ -15557,6 +15599,8 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
 let tabberRefreshDeferredTimer = null;
+let tabberLayoutStateSignature = '';
+let tabberLayoutStateFrame = 0;
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
@@ -15671,6 +15715,7 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
+  tabberActivityLoaded = true;
   // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
   if (!refreshPlaceholder && generation > tabberActivityAppliedRequestGeneration) {
@@ -15682,18 +15727,25 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
 async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
+  if (tabberActivityFetchPromise) return tabberActivityFetchPromise;
   const requestGeneration = ++tabberActivityRequestGeneration;
-  try {
-    const params = new URLSearchParams();
-    params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
-    params.set('visible', visible ? '1' : '0');
-    const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-    applyTabberActivityPayload(payload, requestGeneration);
-  } catch (_) {
-    // keep the last snapshot; recency just goes stale until the next tick
-  }
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
-  return true;
+  tabberActivityFetchPromise = (async () => {
+    try {
+      const params = new URLSearchParams();
+      params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+      params.set('visible', visible ? '1' : '0');
+      const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
+      applyTabberActivityPayload(payload, requestGeneration);
+    } catch (_) {
+      // Keep the last snapshot; the interval retries without a render-triggered request loop.
+    } finally {
+      tabberActivityLoaded = true;
+      tabberActivityFetchPromise = null;
+    }
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    return true;
+  })();
+  return tabberActivityFetchPromise;
 }
 
 function warmTabberDataOnLaunch() {
@@ -15844,7 +15896,7 @@ function tabberAgentSessions() {
 function ensureTabberSessionFilesFetches() {
   // Agent-window paths now come from the cached /api/activity agent_windows payload.
   // The session-files fetchers remain for the modified-files UI and focused tests.
-  if (!tabberActivityPayload?.agent_windows) fetchTabberActivity();
+  if (!tabberActivityLoaded && !tabberActivityFetchPromise) fetchTabberActivity();
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -15969,7 +16021,7 @@ function renderTabberTree(groupsEl) {
     treeSortMode: tabberSortMode(),
     includeHidden: true,
   });
-  syncTabberTreeActiveSelection(container);
+  syncTabberTreeLayoutState(container, {force: true});
 }
 
 function tabberSessionPopoverRefreshIsUnsafe() {
@@ -16005,24 +16057,30 @@ function scheduleDeferredTabberRefresh() {
 }
 
 function refreshTabberPanels() {
+  const perf = clientPerfStart('tabberFullRefresh');
   if (tabberSessionPopoverRefreshIsUnsafe()) {
     scheduleDeferredTabberRefresh();
+    clientPerfEnd(perf, {skipped: 1});
     return;
   }
   if (tabberRefreshDeferredTimer) {
     clearTimeout(tabberRefreshDeferredTimer);
     tabberRefreshDeferredTimer = null;
   }
+  let panels = 0;
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
-    if (groups) renderTabberTree(groups);
+    if (groups) {
+      panels += 1;
+      renderTabberTree(groups);
+    }
   }
+  clientPerfEnd(perf, {nodes: panels});
 }
 
 function refreshTabberPanelsForFocusChange() {
   if (fileExplorerMode !== 'tabber') return;
-  refreshTabberPanels();
-  syncTabberTreeActiveSelection();
+  scheduleTabberTreeLayoutStateSync();
 }
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
@@ -16457,6 +16515,48 @@ function syncTabberTreeActiveSelection(panel = document, options = {}) {
     return false;
   }
   return tabberTreeInteractionController.syncCurrent(panel, options);
+}
+
+function syncTabberTreeLayoutState(panel = document, options = {}) {
+  if (fileExplorerMode !== 'tabber') return false;
+  const currentPath = activeTabberRowPath();
+  const rows = Array.from(panel.querySelectorAll?.('.file-tree-row[data-tabber-type]') || []);
+  if (!rows.length) return syncTabberTreeActiveSelection(panel, options);
+  const visibleItems = new Set(activePaneItems());
+  const focusedItem = visualActivePaneItem();
+  const signature = `${Array.from(visibleItems).sort().join('\u001f')}\u001e${focusedItem || ''}\u001e${currentPath}`;
+  if (options.force !== true && tabberLayoutStateSignature === signature) return false;
+  tabberLayoutStateSignature = signature;
+  const perf = clientPerfStart('tabberLayoutSync');
+  for (const row of rows) {
+    const type = row.dataset.tabberType || '';
+    const session = row.dataset.tabberSession || '';
+    const item = row.dataset.tabberItem || '';
+    const activeSession = type === 'session' && visibleItems.has(session);
+    const activeTab = type === 'tab' && visibleItems.has(item);
+    const current = Boolean(currentPath && row.dataset.path === currentPath);
+    row.classList.toggle('tabber-active-session', activeSession);
+    row.classList.toggle('tabber-active-tab', activeTab);
+    row.querySelector?.('.tabber-session-tab')?.classList?.toggle(CLS.active, activeSession);
+    if (current || activeSession || activeTab) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  }
+  const synced = syncTabberTreeActiveSelection(panel, options);
+  clientPerfEnd(perf, {rows: rows.length});
+  return synced;
+}
+
+function scheduleTabberTreeLayoutStateSync() {
+  if (fileExplorerMode !== 'tabber') return false;
+  // Keep keyboard selection synchronous while folding all DOM state changes from one Dockview
+  // transaction into the next paint.
+  syncTabberTreeActiveSelection();
+  if (tabberLayoutStateFrame) return false;
+  tabberLayoutStateFrame = requestAnimationFrame(() => {
+    tabberLayoutStateFrame = 0;
+    syncTabberTreeLayoutState();
+  });
+  return true;
 }
 
 function bindTabberPanel(panel) {
@@ -26479,16 +26579,12 @@ function terminalIsVisible(session, container) {
 const terminalAttentionQuestionRowClass = 'terminal-attention-question-row';
 const terminalAttentionQuestionOverlayClass = 'terminal-attention-question-overlay';
 
-function terminalAttentionTextPart(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
 function terminalAttentionRawText(value) {
   return String(value || '').replace(/\u00a0/g, ' ');
 }
 
 function terminalAttentionQuestionChromeHintText(value) {
-  const text = terminalAttentionTextPart(value).replace(/^[>❯$#\s]+/, '').trim();
+  const text = singleLineText(value).replace(/^[>❯$#\s]+/, '').trim();
   return /^[?？]\s+for\s+(?:shortcuts|help|commands)\b/i.test(text);
 }
 
@@ -26518,7 +26614,7 @@ function terminalAttentionQuestionTexts(session) {
   const seen = new Set();
   const texts = [];
   for (const candidate of candidates) {
-    const text = terminalAttentionTextPart(candidate);
+    const text = singleLineText(candidate);
     if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) continue;
     seen.add(text);
     texts.push(text);
@@ -26530,7 +26626,7 @@ function terminalAttentionRowTexts(item) {
   const rows = Array.from(item?.container?.querySelector?.('.xterm-rows')?.children || [])
     .map((row, index) => {
       const rawText = terminalAttentionRawText(row?.textContent || '');
-      return {index, row, rawText, text: terminalAttentionTextPart(rawText)};
+      return {index, row, rawText, text: singleLineText(rawText)};
     })
     .filter(record => record.text);
   if (rows.length) return rows;
@@ -26544,7 +26640,7 @@ function terminalAttentionRowTexts(item) {
   for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
     const line = buffer.getLine(lineIndex);
     const rawText = terminalAttentionRawText(typeof line?.translateToString === 'function' ? line.translateToString(true) : '');
-    const text = terminalAttentionTextPart(rawText);
+    const text = singleLineText(rawText);
     if (text) records.push({index: lineIndex - start, row: null, rawText, text});
   }
   return records;
@@ -26694,7 +26790,7 @@ function terminalAttentionQuestionSentenceStart(source, questionIndex) {
 }
 
 function terminalAttentionQuestionSentenceRanges(text) {
-  const source = terminalAttentionTextPart(text);
+  const source = singleLineText(text);
   if (!source || !/[?？]/.test(source)) return [];
   const ranges = [];
   for (let questionIndex = 0; questionIndex < source.length; questionIndex += 1) {
@@ -26749,13 +26845,13 @@ function terminalAttentionQuestionCandidateTexts(questionTexts) {
   const seen = new Set();
   const candidates = [];
   const add = value => {
-    const text = terminalAttentionTextPart(value);
+    const text = singleLineText(value);
     if (!text || terminalAttentionQuestionChromeHintText(text) || seen.has(text)) return;
     seen.add(text);
     candidates.push(text);
   };
   for (const candidate of questionTexts) {
-    const text = terminalAttentionTextPart(candidate);
+    const text = singleLineText(candidate);
     for (const range of terminalAttentionQuestionSentenceRanges(text)) add(range.text);
     add(text);
   }
@@ -26763,12 +26859,12 @@ function terminalAttentionQuestionCandidateTexts(questionTexts) {
 }
 
 function terminalAttentionSingleRowSpan(record, candidate) {
-  const needle = terminalAttentionTextPart(candidate);
+  const needle = singleLineText(candidate);
   if (!needle) return null;
   const rawText = terminalAttentionRawText(record?.rawText || record?.text || '');
   const directStart = rawText.indexOf(needle);
   if (directStart >= 0) return {highlightStart: directStart, highlightLength: needle.length, highlightText: needle};
-  const normalized = terminalAttentionTextPart(rawText);
+  const normalized = singleLineText(rawText);
   const normalizedStart = normalized.indexOf(needle);
   if (normalizedStart >= 0) {
     const leading = rawText.match(/^\s*/)?.[0]?.length || 0;
@@ -26782,7 +26878,7 @@ function terminalAttentionSingleRowSpan(record, candidate) {
 }
 
 function terminalAttentionSpanSegments(item, rows, candidate) {
-  const needle = terminalAttentionTextPart(candidate);
+  const needle = singleLineText(candidate);
   if (!needle) return [];
   for (const separator of ['', ' ']) {
     const context = terminalAttentionJoinedContext(rows, separator);
@@ -26870,7 +26966,7 @@ function placeTerminalAttentionOverlay(session, item, record, index = 0) {
   const height = rowRect?.height || Math.max(1, Number(cell.height || 0));
   const leftBase = Number((rowRect || screenRect)?.left || 0) - Number(containerRect.left || 0);
   const start = Math.max(0, Number(record.highlightStart || 0));
-  const length = Math.max(1, Number(record.highlightLength || terminalAttentionTextPart(record.text).length || 1));
+  const length = Math.max(1, Number(record.highlightLength || singleLineText(record.text).length || 1));
   const left = Math.max(0, leftBase + start * cellWidth);
   const maxWidth = Math.max(cellWidth, Number(containerRect.width || 0) - left);
   const width = Math.max(cellWidth, Math.min(maxWidth, length * cellWidth));
@@ -27841,7 +27937,31 @@ const dockviewLayoutState = {
   tabDropHandledAt: 0,
   panePointerDrag: null,
   panePointerDragSuppressedUntil: 0,
+  tabActivationPerf: null,
 };
+
+function dockviewBeginTabActivationPerf(item) {
+  const previous = dockviewLayoutState.tabActivationPerf;
+  if (previous?.frame) cancelAnimationFrame(previous.frame);
+  dockviewLayoutState.tabActivationPerf = {
+    item: String(item || ''),
+    token: clientPerfStart('tabActivationPaint'),
+    frame: 0,
+  };
+}
+
+function dockviewFinishTabActivationPerf(item) {
+  const state = dockviewLayoutState.tabActivationPerf;
+  if (!state || state.item !== String(item || '') || state.frame) return;
+  state.frame = requestAnimationFrame(() => {
+    if (dockviewLayoutState.tabActivationPerf !== state) return;
+    const slot = slotForItem(state.item);
+    if (slot && activeItemForSide(slot) === state.item) {
+      clientPerfEnd(state.token, {nodes: document.querySelectorAll?.('.file-tree-row[data-tabber-type]')?.length || 0});
+    }
+    dockviewLayoutState.tabActivationPerf = null;
+  });
+}
 
 function dockviewCore() {
   return window['dockview-core'] || null;
@@ -28728,6 +28848,7 @@ function dockviewInit() {
       const item = panel?.id || '';
       if (!item) return;
       setFocusedPanelItem(item);
+      dockviewFinishTabActivationPerf(item);
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
@@ -28816,6 +28937,8 @@ function dockviewDispose() {
   dockviewLayoutState.api = null;
   dockviewLayoutState.host = null;
   if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
+  if (dockviewLayoutState.tabActivationPerf?.frame) cancelAnimationFrame(dockviewLayoutState.tabActivationPerf.frame);
+  dockviewLayoutState.tabActivationPerf = null;
   dockviewLayoutState.hostLayoutFrame = 0;
   dockviewLayoutState.lastHostLayoutSignature = '';
   dockviewLayoutState.lastAppliedLayoutSignature = '';
@@ -28833,16 +28956,18 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   api.updateOptions?.({theme: dockviewThemeForApp()});
   dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
+  let activeOnlyChange = false;
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
     const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       dockviewLoadLayout(layoutSlots);
     } else {
       dockviewLayoutState.lastAppliedLayoutSignature = signature;
+      activeOnlyChange = true;
     }
   }
   dockviewRefreshTabs();
-  dockviewSyncMountedPanels();
+  dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
   scheduleAgentWindowActivityAnimationSync();
@@ -28895,7 +29020,6 @@ function dockviewActivateLayoutTabs(slots = layoutSlots) {
   const panels = activeItems.map(item => api.getPanel?.(item));
   if (panels.some(panel => typeof panel?.api?.setActive !== 'function')) return false;
   for (const panel of panels) panel.api.setActive();
-  dockviewSyncMountedPanels();
   return true;
 }
 
@@ -29206,7 +29330,6 @@ function createDockviewPanelRenderer() {
     element.replaceChildren(panel);
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
-    updatePanelInactiveOverlays();
     dockviewEnsureMountedTerminal(item, panel);
   };
   const pool = () => {
@@ -29414,6 +29537,7 @@ function createDockviewTabRenderer() {
     dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
+      dockviewBeginTabActivationPerf(item);
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewBeginTabPointerDrag(event, item);
     }
@@ -29444,6 +29568,7 @@ function createDockviewTabRenderer() {
     }
     captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
+    dockviewFinishTabActivationPerf(item);
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
@@ -29527,14 +29652,14 @@ function syncDockviewTabActiveClass(tab, api = null) {
   tab?.classList?.toggle(CLS.active, api?.isActive === true || dockviewActive);
 }
 
-function dockviewSyncMountedPanels() {
+function dockviewSyncMountedPanels(options = {}) {
   if (!dockviewLayoutActive()) return;
   for (const item of activePaneItems()) {
     const panel = panelNodes.get(item);
     if (!panel?.isConnected) continue;
     const slot = slotForItem(item);
     if (slot) updatePanelSlot(panel, item, slot);
-    renderAttachedPanelContent(item);
+    if (options.renderAttached !== false) renderAttachedPanelContent(item);
   }
   updatePanelInactiveOverlays();
 }
@@ -29576,10 +29701,6 @@ function hideDockviewInnerPaneTabs(panel) {
   }
   return true;
 }
-function domBuilderDataAttributeName(key) {
-  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
-}
-
 function setDomBuilderOptions(element, options = {}) {
   if (!element) return element;
   if (options.id) element.id = options.id;
@@ -29626,7 +29747,7 @@ function domBuilderSerializedAttributes(element) {
     for (const [name, value] of Object.entries(attrMap)) add(name, value);
   }
   if (element?.dataset && typeof element.dataset === 'object') {
-    for (const [key, value] of Object.entries(element.dataset)) add(domBuilderDataAttributeName(key), value);
+    for (const [key, value] of Object.entries(element.dataset)) add(domDataAttributeName(key), value);
   }
   if (element?.hidden === true) add('hidden', true);
   if (element?.disabled === true) add('disabled', true);
@@ -29776,6 +29897,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   } else {
     scheduleResponsiveLayoutPrune();
   }
+  updatePanelInactiveOverlays();
 }
 
 function movePanelsToPool() {
@@ -29837,6 +29959,7 @@ function syncActivePanelsInPlace() {
     renderAttachedPanelContent(item);
     restorePaneViewState(item, desired);
   }
+  updatePanelInactiveOverlays();
 }
 
 function renderAttachedPanelContent(item) {
@@ -33085,18 +33208,18 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
-    return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
+    return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
       <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
-      <span class="yoagent-waiting-label">${esc(label)}</span>
+      <span class="yoagent-waiting-label yoagent-compact-label">${esc(label)}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
     </li>`;
   }).join('');
   return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
-    <div class="yoagent-waiting-title">${esc(title)}</div>
-    <ul class="yoagent-waiting-list">${rows}</ul>
+    <div class="yoagent-waiting-title yoagent-section-title">${esc(title)}</div>
+    <ul class="yoagent-waiting-list yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
@@ -33184,7 +33307,7 @@ function yoagentJobsHtml() {
   const rows = yoagentJobRowsHtml();
   if (!rows) return '';
   return `<div class="yoagent-jobs-list" aria-live="polite" aria-label="${esc(t('yoagent.jobs.title'))}">
-    <div class="yoagent-jobs-title">${esc(t('yoagent.jobs.title'))}</div>
+    <div class="yoagent-jobs-title yoagent-section-title">${esc(t('yoagent.jobs.title'))}</div>
     <ul class="yoagent-jobs-items">${rows}</ul>
   </div>`;
 }
@@ -33196,15 +33319,15 @@ function yoagentChatQueueHtml() {
     const id = String(item?.id || '');
     const text = String(item?.text || '');
     const label = text.length > 180 ? `${text.slice(0, 177)}...` : text;
-    return `<li class="yoagent-chat-queue-item" data-yoagent-chat-queue-row="${esc(id)}">
+    return `<li class="yoagent-chat-queue-item yoagent-compact-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
-      <span class="yoagent-chat-queue-text">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
+      <span class="yoagent-chat-queue-text yoagent-compact-label">${esc(label)}</span>
+      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
-    <div class="yoagent-chat-queue-title">${esc(t('yoagent.queue.title'))}</div>
-    <ul class="yoagent-chat-queue-items">${rows}</ul>
+    <div class="yoagent-chat-queue-title yoagent-section-title">${esc(t('yoagent.queue.title'))}</div>
+    <ul class="yoagent-chat-queue-items yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
@@ -33479,7 +33602,7 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
     </li>`;
   }).join('');
   return `<div class="yoagent-recent-agents" aria-label="${esc(t('yoagent.recentAgents.label'))}">
-    <span class="yoagent-recent-agents-label">${esc(t('yoagent.recentAgents.label'))}</span>
+    <span class="yoagent-recent-agents-label yoagent-section-title">${esc(t('yoagent.recentAgents.label'))}</span>
     <ul class="yoagent-recent-agents-list">${rows}</ul>
   </div>`;
 }
@@ -33671,7 +33794,7 @@ function yoagentChatHtml() {
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
-    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
+    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
   const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
@@ -35128,6 +35251,28 @@ function bindPreferencesPanel(panel) {
 
 const jsDebugGraphDefaultScaleSeconds = 5;
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
+const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
+const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
+const jsDebugHistoryOlderOverlayDelayMs = 120;
+const jsDebugHistoryReadiness = {
+  phase: 'idle',
+  requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
+  targetStartSeconds: 0,
+  targetEndSeconds: 0,
+  requestedStartSeconds: 0,
+  requestedEndSeconds: 0,
+  requestedResolutionSeconds: jsDebugGraphDefaultScaleSeconds,
+  loadedStartSeconds: 0,
+  loadedEndSeconds: 0,
+  resolutionSeconds: 0,
+  coverageIntervals: [],
+  attemptCount: 0,
+  error: '',
+  generation: 0,
+  loadingStartedAtMs: 0,
+  overlayVisible: false,
+  overlayTimer: null,
+};
 let jsDebugSubTab = 'graph';
 let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
@@ -35146,7 +35291,6 @@ let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
 let jsDebugStatsServerRssBytes = null;
-let jsDebugStatsHistoryStartSeconds = 0;
 let jsDebugStatsClientId = '';
 let jsDebugStatsClientConnected = null;
 let jsDebugStatsDisconnectStartedAtMs = null;
@@ -35188,6 +35332,7 @@ const jsDebugStatsPollMs = 30000;
 const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30000;
+const jsDebugStatsHistoryMaxPoints = 6000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
@@ -35399,6 +35544,251 @@ function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date
   return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
 }
 
+function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
+  return jsDebugHistoryLoadingPhases.has(String(state?.phase || ''));
+}
+
+function jsDebugHistoryReadinessSnapshot() {
+  const state = jsDebugHistoryReadiness;
+  return {
+    phase: state.phase,
+    requestedRangeSeconds: state.requestedRangeSeconds,
+    targetStartSeconds: state.targetStartSeconds,
+    targetEndSeconds: state.targetEndSeconds,
+    requestedStartSeconds: state.requestedStartSeconds,
+    requestedEndSeconds: state.requestedEndSeconds,
+    requestedResolutionSeconds: state.requestedResolutionSeconds,
+    loadedStartSeconds: state.loadedStartSeconds,
+    loadedEndSeconds: state.loadedEndSeconds,
+    resolutionSeconds: state.resolutionSeconds,
+    coverageIntervals: state.coverageIntervals.map(interval => ({...interval})),
+    attemptCount: state.attemptCount,
+    error: state.error,
+    generation: state.generation,
+    overlayVisible: state.overlayVisible,
+    busy: jsDebugHistoryReadinessBusy(state),
+  };
+}
+
+function clearJsDebugHistoryOverlayTimer() {
+  if (jsDebugHistoryReadiness.overlayTimer !== null && typeof clearTimeout === 'function') {
+    clearTimeout(jsDebugHistoryReadiness.overlayTimer);
+  }
+  jsDebugHistoryReadiness.overlayTimer = null;
+}
+
+function syncJsDebugHistoryReadinessSurfaces() {
+  const state = jsDebugHistoryReadiness;
+  const busy = jsDebugHistoryReadinessBusy(state);
+  const content = debugGraphHistoryOverlayContentHtml(state);
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    graph.setAttribute('aria-busy', busy ? 'true' : 'false');
+    graph.dataset.jsDebugHistoryState = state.phase;
+    let overlay = graph.querySelector('[data-js-debug-history-overlay]');
+    if (!overlay && (busy || state.phase === 'error')) {
+      refreshDebugGraphElement(graph, {force: true});
+      overlay = graph.querySelector('[data-js-debug-history-overlay]');
+    }
+    if (!overlay) continue;
+    overlay.hidden = state.overlayVisible !== true;
+    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+  }
+}
+
+function setJsDebugHistoryReadiness(phase, updates = {}) {
+  const nextPhase = String(phase || 'idle');
+  if (!jsDebugHistoryReadinessPhases.includes(nextPhase)) throw new Error(`unknown YO!stats history state: ${nextPhase}`);
+  const state = jsDebugHistoryReadiness;
+  const previousPhase = state.phase;
+  const wasBusy = jsDebugHistoryReadinessBusy(state);
+  const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
+  clearJsDebugHistoryOverlayTimer();
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs']) {
+    if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
+  }
+  state.phase = nextPhase;
+  const busy = jsDebugHistoryReadinessBusy(state);
+  state.overlayVisible = nextPhase === 'loading-initial' || nextPhase === 'retrying' || nextPhase === 'error';
+  if (nextPhase === 'loading-older' && typeof setTimeout === 'function') {
+    const generation = state.generation;
+    state.overlayTimer = setTimeout(() => {
+      state.overlayTimer = null;
+      if (state.phase !== 'loading-older' || state.generation !== generation) return;
+      state.overlayVisible = true;
+      syncJsDebugHistoryReadinessSurfaces();
+    }, jsDebugHistoryOlderOverlayDelayMs);
+  }
+  if (wasBusy && !busy) {
+    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: nextPhase, previousState: previousPhase});
+    state.loadingStartedAtMs = 0;
+  }
+  syncJsDebugHistoryReadinessSurfaces();
+  return jsDebugHistoryReadinessSnapshot();
+}
+
+function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = jsDebugGraphScaleSeconds, retry = false} = {}) {
+  const state = jsDebugHistoryReadiness;
+  const generation = Number(state.generation || 0) + 1;
+  const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
+  return setJsDebugHistoryReadiness(phase, {
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
+    targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
+    requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
+    requestedEndSeconds: Math.max(0, Math.floor(Number(requestedEndSeconds) || 0)),
+    requestedResolutionSeconds: Math.max(1, Math.floor(Number(requestedResolutionSeconds) || jsDebugGraphDefaultScaleSeconds)),
+    attemptCount: retry ? Math.max(1, Number(state.attemptCount) + 1) : 1,
+    error: '',
+    generation,
+    loadingStartedAtMs: performanceNow(),
+  });
+}
+
+function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds) {
+  const state = jsDebugHistoryReadiness;
+  return Number(state.generation) === Number(generation)
+    && Number(state.requestedRangeSeconds) === Number(requestedRangeSeconds)
+    && Number(state.requestedStartSeconds) === Number(requestedStartSeconds);
+}
+
+function normalizedJsDebugHistoryCoverage(history = {}) {
+  const raw = history?.coverage;
+  if (!raw || typeof raw !== 'object') return null;
+  const coverage = {
+    mode: raw.mode === 'older' ? 'older' : 'live',
+    requestedStart: Number(raw.requested_start),
+    requestedEnd: Number(raw.requested_end),
+    coveredStart: Number(raw.covered_start),
+    coveredEnd: Number(raw.covered_end),
+    resolutionSeconds: Number(raw.resolution_seconds),
+    complete: raw.complete === true,
+    hasMoreOlder: raw.has_more_older === true,
+    nextOlderEnd: Number(raw.next_older_end),
+  };
+  if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
+  if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = jsDebugGraphScaleSeconds;
+  return coverage;
+}
+
+function mergeJsDebugHistoryCoverageIntervals(intervals) {
+  const grouped = new Map();
+  for (const interval of intervals || []) {
+    const resolution = Number(interval?.resolutionSeconds);
+    const start = Number(interval?.startSeconds);
+    const end = Number(interval?.endSeconds);
+    if (!Number.isFinite(resolution) || resolution <= 0 || !Number.isFinite(start) || end <= start) continue;
+    if (!grouped.has(resolution)) grouped.set(resolution, []);
+    grouped.get(resolution).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution});
+  }
+  const output = [];
+  for (const [resolution, items] of grouped.entries()) {
+    items.sort((left, right) => left.startSeconds - right.startSeconds || right.endSeconds - left.endSeconds);
+    for (const item of items) {
+      const previous = output.at(-1);
+      if (previous?.resolutionSeconds === resolution && item.startSeconds <= previous.endSeconds) {
+        previous.endSeconds = Math.max(previous.endSeconds, item.endSeconds);
+      } else {
+        output.push({...item});
+      }
+    }
+  }
+  return output;
+}
+
+function applyJsDebugHistoryCoverage(coverage) {
+  if (!coverage) return jsDebugHistoryReadinessSnapshot();
+  const state = jsDebugHistoryReadiness;
+  if (coverage.coveredStart > 0) {
+    state.loadedStartSeconds = Number(state.loadedStartSeconds) > 0
+      ? Math.min(Number(state.loadedStartSeconds), coverage.coveredStart)
+      : coverage.coveredStart;
+  }
+  if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
+  state.resolutionSeconds = coverage.resolutionSeconds;
+  const satisfiedStart = coverage.hasMoreOlder
+    ? coverage.coveredStart
+    : Math.max(0, Number(state.targetStartSeconds) || coverage.requestedStart || coverage.coveredStart);
+  const satisfiedEnd = coverage.mode === 'live'
+    ? Infinity
+    : Math.max(satisfiedStart, coverage.coveredEnd, Number(state.targetEndSeconds) || coverage.requestedEnd || 0);
+  if (satisfiedEnd > satisfiedStart) {
+    state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
+      ...state.coverageIntervals,
+      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds},
+    ]);
+  }
+  if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd)) {
+    state.requestedEndSeconds = coverage.nextOlderEnd;
+  }
+  return jsDebugHistoryReadinessSnapshot();
+}
+
+function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
+  const intervals = jsDebugHistoryReadiness.coverageIntervals
+    .filter(interval => Number(interval.resolutionSeconds) <= maxResolutionSeconds)
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
+  let cursor = startSeconds;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return false;
+    cursor = Math.max(cursor, intervalEnd);
+    if (cursor >= endSeconds) return true;
+  }
+  return false;
+}
+
+function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
+  const resolutions = [...new Set(jsDebugHistoryReadiness.coverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
+    .filter(resolution => Number.isFinite(resolution) && resolution > 0)
+    .sort((left, right) => left - right);
+  return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
+}
+
+function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
+  if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
+  return !jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds);
+}
+
+function jsDebugRequestedHistoryResolutionSeconds() {
+  return debugGraphZoomDomainValid() ? 1 : Math.max(1, Math.floor(jsDebugGraphScaleSeconds));
+}
+
+function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resolutionSeconds) {
+  const existingResolution = jsDebugHistoryCoverageResolutionForRange(targetStartSeconds, targetEndSeconds);
+  if (Number.isFinite(existingResolution) && resolutionSeconds < existingResolution) {
+    return {
+      startSeconds: Math.max(0, Math.floor(targetStartSeconds / existingResolution) * existingResolution),
+      endSeconds: Math.ceil(targetEndSeconds / existingResolution) * existingResolution,
+    };
+  }
+  const loadedStart = Number(jsDebugHistoryReadiness.loadedStartSeconds) || 0;
+  return {
+    startSeconds: targetStartSeconds,
+    endSeconds: loadedStart > targetStartSeconds ? loadedStart : 0,
+  };
+}
+
+function resetJsDebugHistoryReadiness() {
+  return setJsDebugHistoryReadiness('idle', {
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    targetStartSeconds: 0,
+    targetEndSeconds: 0,
+    requestedStartSeconds: 0,
+    requestedEndSeconds: 0,
+    requestedResolutionSeconds: jsDebugGraphScaleSeconds,
+    loadedStartSeconds: 0,
+    loadedEndSeconds: 0,
+    resolutionSeconds: 0,
+    coverageIntervals: [],
+    attemptCount: 0,
+    error: '',
+    generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
+    loadingStartedAtMs: 0,
+  });
+}
+
 function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
@@ -35409,6 +35799,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
   if (!render) return;
+  if (requestJsDebugHistoryForCurrentDomain()) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
@@ -36111,7 +36502,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   scheduleJsDebugPanelRefresh();
 }
 
-function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}) {
+function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, scheduleRefresh = true, advanceHistoryCursor = true, replaceCoverage = null} = {}) {
   if (!jsDebugCollectionEnabled || !payload || typeof payload !== 'object') return;
   const nextPid = Number(payload.pid);
   const nextStartedAt = Number(payload.started_at);
@@ -36137,12 +36528,12 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     jsDebugStatsFirstSampleReceived = true;
     armJsDebugStatsPolling();
   }
-  debugGraphApplyServerHistory(payload.history);
+  debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: advanceHistoryCursor, replaceCoverage});
   // The restart response was requested with the previous process's sequence. Refetch from zero so
   // stale high-water marks cannot hide the replacement process's durable history.
   if (serverChanged) jsDebugStatsServerSequence = 0;
   if (payload.history && typeof payload.history === 'object') {
-    scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
+    if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
     return;
   }
   const cpuPercent = Number(payload.cpu_percent);
@@ -36155,7 +36546,7 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false} = {}
     systemCpuPercent: Number.isFinite(systemCpuPercent) ? systemCpuPercent : 0,
   });
   compactJsDebugGraphBuckets();
-  scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
+  if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
 
 function clearJsDebugGraphData() {
@@ -36334,8 +36725,34 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
   }
 }
 
-function debugGraphApplyServerHistory(history = {}) {
+function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resolutionSeconds) {
+  const startMs = Number(startSeconds) * 1000;
+  const endMs = Number(endSeconds) * 1000;
+  const resolutionMs = Number(resolutionSeconds) * 1000;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(resolutionMs) || resolutionMs <= 0) return 0;
+  let removed = 0;
+  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
+    for (const [key, bucket] of map.entries()) {
+      const bucketStart = Number(bucket?.startMs);
+      const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+      const bucketEnd = bucketStart + bucketDuration;
+      if (bucketDuration <= resolutionMs || bucketStart < startMs || bucketEnd > endMs) continue;
+      map.delete(key);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, replaceCoverage = null} = {}) {
   if (!history || typeof history !== 'object') return;
+  if (replaceCoverage) {
+    debugGraphRemoveCoarserServerBuckets(
+      replaceCoverage.covered_start,
+      replaceCoverage.covered_end,
+      replaceCoverage.resolution_seconds,
+    );
+  }
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
   compactJsDebugGraphBuckets();
@@ -36344,22 +36761,22 @@ function debugGraphApplyServerHistory(history = {}) {
     clearDebugGraphAgentTokenData();
     jsDebugStatsAgentTokenSchemaVersion = tokenSchemaVersion;
   }
-  const sequence = Number(history.sequence);
-  if (Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
+  const sequence = Number(history.latest_sequence ?? history.sequence);
+  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
-  debugGraphApplyServerAgentTokenHistory(history.agent_token_history);
+  debugGraphApplyServerAgentTokenHistory(history.agent_token_history, {advanceLiveCursor});
   compactJsDebugGraphBuckets();
 }
 
-function debugGraphApplyServerAgentTokenHistory(history = {}) {
+function debugGraphApplyServerAgentTokenHistory(history = {}, {advanceLiveCursor = true} = {}) {
   if (!history || typeof history !== 'object') return;
   const resolutionSeconds = Number(history.resolution_seconds);
   if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
   if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
   jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
   const sequence = Number(history.sequence);
-  if (Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
+  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
   const records = Array.isArray(history.records) ? history.records : [];
   for (const record of records) {
     const startSeconds = Number(record?.start);
@@ -36800,7 +37217,7 @@ function debugRemovalLatencyMetaText() {
 
 function debugClientPerfRows() {
   if (typeof clientPerfSummary !== 'function') return [];
-  const preferred = ['focusSet', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
+  const preferred = ['focusSet', 'tabActivationPaint', 'tabberFullRefresh', 'tabberLayoutSync', 'statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryRender', 'statsHistoryPaint', 'statsHistoryLoading', 'statsNoDataSweep', 'keydownToTermData', 'term.onData', 'wsSend', 'echoToTermWrite', 'xtermWrite', 'terminalUnderlineRender', 'terminalAttentionScan', 'terminalBlankProbe', 'finderRefresh', 'sessionFilesRefresh', 'sessionFilesRender', 'renderInfoPanel', 'renderSessionButtons', 'renderPaneTabStrips', 'renderPanels', 'sseEvent', 'autoStatusRender', 'longTask'];
   const order = new Map(preferred.map((name, index) => [name, index]));
   return clientPerfSummary()
     .filter(row => Number(row.count || 0) > 0)
@@ -36860,8 +37277,38 @@ function debugGraphWaitingForServerStats() {
 
 function debugGraphMetaHtml() {
   const items = debugGraphMetaItems();
-  const metaHtml = items.length ? esc(items.join(' | ')) : textWithMovingEllipsisHtml(t('debug.waitingForServerStats'));
+  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
+    && jsDebugHistoryReadiness.overlayVisible === true;
+  const metaHtml = items.length
+    ? esc(items.join(' | '))
+    : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
+}
+
+function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
+  const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
+  if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
+  if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
+  if (state.phase === 'retrying') return t('debug.graph.history.retrying', {range});
+  if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
+  return '';
+}
+
+function debugGraphHistoryOverlayContentHtml(state = jsDebugHistoryReadiness) {
+  const text = debugGraphHistoryOverlayText(state);
+  if (!text) return '';
+  const message = jsDebugHistoryReadinessBusy(state)
+    ? textWithMovingEllipsisHtml(text, 'js-debug-history-loading-dots')
+    : esc(text);
+  const retry = state.phase === 'error'
+    ? `<button type="button" class="preferences-inline-action js-debug-history-retry" data-js-debug-history-retry>${esc(t('common.retry'))}</button>`
+    : '';
+  return `<div class="js-debug-history-overlay-message"><span>${message}</span>${retry}</div>`;
+}
+
+function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
+  const hidden = state.overlayVisible === true ? '' : ' hidden';
+  return `<div class="js-debug-history-overlay" data-js-debug-history-overlay aria-live="polite" aria-atomic="true"${hidden}>${debugGraphHistoryOverlayContentHtml(state)}</div>`;
 }
 
 function debugGraphAgentTokenSeriesDefs(buckets) {
@@ -37151,15 +37598,10 @@ function debugGraphDisconnectedRanges(buckets, domain) {
     const rangeStart = Math.max(domainStart, startMs);
     const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
     if (rangeEnd <= rangeStart) continue;
-    const previous = ranges.at(-1);
-    if (previous && rangeStart <= previous.endMs + 1) {
-      previous.endMs = Math.max(previous.endMs, rangeEnd);
-      previous.disconnectedMs += disconnectedMs;
-    } else {
-      ranges.push({startMs: rangeStart, endMs: rangeEnd, disconnectedMs});
-    }
+    ranges.push({startMs: rangeStart, endMs: rangeEnd});
   }
-  return ranges;
+  return debugGraphMergeTimeRanges(ranges, domain)
+    .map(range => ({...range, disconnectedMs: range.endMs - range.startMs}));
 }
 
 function debugGraphDisconnectedRectsHtml(buckets, domain) {
@@ -37183,24 +37625,42 @@ function debugGraphBucketRanges(buckets) {
     .sort((a, b) => a.startMs - b.startMs);
 }
 
-function debugGraphOverlayStepMs(bucketRanges) {
-  const durations = (bucketRanges || [])
-    .map(item => Number(item.durationMs))
-    .filter(value => Number.isFinite(value) && value > 0);
-  return durations.length ? Math.max(1000, Math.min(...durations)) : jsDebugGraphRawBucketMs;
+function debugGraphMergeTimeRanges(ranges, domain = null) {
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  const hasDomain = Number.isFinite(domainStart) && Number.isFinite(domainEnd) && domainEnd > domainStart;
+  const normalized = (ranges || [])
+    .map(range => {
+      const rawStart = Number(range?.startMs);
+      const rawEnd = Number(range?.endMs);
+      if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawEnd <= rawStart) return null;
+      const startMs = hasDomain ? Math.max(domainStart, rawStart) : rawStart;
+      const endMs = hasDomain ? Math.min(domainEnd, rawEnd) : rawEnd;
+      return endMs > startMs ? {startMs, endMs} : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+  const merged = [];
+  for (const range of normalized) {
+    const previous = merged.at(-1);
+    if (previous && range.startMs <= previous.endMs + 1) previous.endMs = Math.max(previous.endMs, range.endMs);
+    else merged.push({...range});
+  }
+  return merged;
 }
 
-function debugGraphRangesOverlap(aStart, aEnd, bStart, bEnd) {
-  return Number(aStart) < Number(bEnd) && Number(bStart) < Number(aEnd);
-}
-
-function debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, seriesItems) {
-  return bucketRanges.some(item => debugGraphRangesOverlap(startMs, endMs, item.startMs, item.endMs)
-    && seriesItems.some(series => debugGraphSeriesBucketHasData(item.bucket, series)));
-}
-
-function debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs) {
-  return disconnectedRanges.some(range => debugGraphRangesOverlap(startMs, endMs, range.startMs, range.endMs));
+function debugGraphComplementTimeRanges(ranges, domain) {
+  const domainStart = Number(domain?.startMs);
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
+  const gaps = [];
+  let cursor = domainStart;
+  for (const range of debugGraphMergeTimeRanges(ranges, domain)) {
+    if (range.startMs > cursor) gaps.push({startMs: cursor, endMs: range.startMs});
+    cursor = Math.max(cursor, range.endMs);
+  }
+  if (cursor < domainEnd) gaps.push({startMs: cursor, endMs: domainEnd});
+  return gaps;
 }
 
 function debugGraphCommunicationSeriesItems(seriesItems) {
@@ -37213,22 +37673,16 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   const domainStart = Number(domain?.startMs);
   const domainEnd = Number(domain?.endMs);
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
-  const bucketRanges = debugGraphBucketRanges(buckets);
-  const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
-  const stepMs = debugGraphOverlayStepMs(bucketRanges);
-  const runs = [];
-  for (let startMs = domainStart; startMs < domainEnd;) {
-    const endMs = Math.min(domainEnd, startMs + stepMs);
-    const hasData = debugGraphStepHasSeriesData(bucketRanges, startMs, endMs, items);
-    const coveredByDisconnect = debugGraphStepHasDisconnectedOverlay(disconnectedRanges, startMs, endMs);
-    if (!hasData && !coveredByDisconnect) {
-      const previous = runs.at(-1);
-      if (previous && startMs <= previous.endMs + 1) previous.endMs = endMs;
-      else runs.push({startMs, endMs});
-    }
-    startMs = endMs;
+  const perf = clientPerfStart('statsNoDataSweep');
+  try {
+    const dataRanges = debugGraphBucketRanges(buckets)
+      .filter(item => items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
+      .map(item => ({startMs: item.startMs, endMs: item.endMs}));
+    const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
+    return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain);
+  } finally {
+    clientPerfEnd(perf, {rows: (buckets || []).length});
   }
-  return runs;
 }
 
 function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
@@ -37626,15 +38080,21 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
   </section>`;
 }
 
+function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
+  return `<div class="js-debug-chart-shell">
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    ${debugGraphHistoryOverlayHtml()}
+  </div>`;
+}
+
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
-  return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${chartGroups.map(group => {
+  const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
       return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets);
-    }).join('')}</div>
-  </div>`;
+    }).join('');
+  return debugGraphChartShellHtml(gridHtml, domain);
 }
 
 function debugGraphClassName(nowMs = Date.now()) {
@@ -37650,7 +38110,10 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
     const empty = debugGraphWaitingForServerStats() ? '' : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
-    return `${controls}${meta}${clientPerf}${empty}`;
+    const loadingShell = jsDebugHistoryReadiness.overlayVisible === true || jsDebugHistoryReadinessBusy()
+      ? debugGraphChartShellHtml('', debugGraphDomain(nowMs))
+      : '';
+    return `${controls}${meta}${clientPerf}${empty}${loadingShell}`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
@@ -37659,7 +38122,7 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
 
 function debugGraphHtml() {
   const nowMs = Date.now();
-  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
+  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
 }
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
@@ -37730,15 +38193,36 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
 
 async function fetchJsDebugStatsJson(url, options = {}) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const phaseTimings = {};
   let timeoutId = null;
   try {
     if (controller && typeof setTimeout === 'function') {
       timeoutId = setTimeout(() => controller.abort(), jsDebugStatsPollTimeoutMs);
     }
-    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})});
+    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})}, phaseTimings);
   } finally {
     if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+    if (Number.isFinite(phaseTimings.fetchMs)) recordClientPerfCounter('statsHistoryFetch', phaseTimings.fetchMs);
+    if (Number.isFinite(phaseTimings.parseMs)) recordClientPerfCounter('statsHistoryParse', phaseTimings.parseMs);
   }
+}
+
+async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, requestedStartSeconds) {
+  await nextAnimationFrame();
+  if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    refreshDebugGraphElement(graph, {force: true});
+  }
+  const paintStartedAt = performanceNow();
+  await nextAnimationFrame();
+  recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
+  if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  setJsDebugHistoryReadiness('ready', {
+    requestedRangeSeconds,
+    requestedStartSeconds,
+    error: '',
+  });
+  return true;
 }
 
 async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
@@ -37755,24 +38239,74 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   if (typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollPending = false;
   jsDebugStatsPollInFlight = true;
+  let readinessRequest = null;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
     const tokenResolution = debugGraphAgentTokenResolution();
-    const historyStart = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
-    const expandsHistory = !jsDebugStatsHistoryStartSeconds || historyStart < jsDebugStatsHistoryStartSeconds;
-    if (expandsHistory) {
-      jsDebugStatsServerSequence = 0;
-      resetDebugGraphAgentTokenHistory();
+    const domain = debugGraphDomain();
+    const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
+    const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
+    const historyResolution = jsDebugRequestedHistoryResolutionSeconds();
+    const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, historyResolution);
+    if (needsHistoryCoverage) {
+      const state = jsDebugHistoryReadiness;
+      const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+        && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+        && Number(state.targetStartSeconds) === Number(targetStart)
+        && Number(state.targetEndSeconds) === Number(targetEnd)
+        && Number(state.requestedResolutionSeconds) === Number(historyResolution);
+      if (!currentRequestMatches) {
+        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, historyResolution);
+        beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+          targetStartSeconds: targetStart,
+          targetEndSeconds: targetEnd,
+          requestedEndSeconds: requestWindow.endSeconds,
+          requestedResolutionSeconds: historyResolution,
+          retry: state.phase === 'error',
+        });
+      }
+      readinessRequest = jsDebugHistoryReadinessSnapshot();
+      await nextAnimationFrame();
+      if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     }
+    const historyEnd = readinessRequest
+      ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
+      : 0;
+    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : targetStart;
     if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
     const tokenHistory = tokenResolution
-      ? `&token_since=${encodeURIComponent(String(jsDebugStatsAgentTokenSequence || 0))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
+      ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(jsDebugStatsServerSequence || 0))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}${tokenHistory}`, {cache: 'no-store'});
-    if (expandsHistory) jsDebugStatsHistoryStartSeconds = historyStart;
-    recordJsDebugStatsSample(payload, {forceGraphRefresh: forceGraphRefresh || expandsHistory});
-  } catch (_error) {
+    const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${tokenHistory}`, {cache: 'no-store'});
+    if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
+    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
+    if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
+    const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
+      ? payload.history.coverage
+      : null;
+    const applyStartedAt = performanceNow();
+    recordJsDebugStatsSample(payload, {
+      forceGraphRefresh: forceGraphRefresh || needsHistoryCoverage,
+      scheduleRefresh: !readinessRequest,
+      advanceHistoryCursor: coverage?.mode !== 'older',
+      replaceCoverage,
+    });
+    if (coverage) applyJsDebugHistoryCoverage(coverage);
+    recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
+    if (readinessRequest) {
+      if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
+        jsDebugStatsPollPending = true;
+        jsDebugStatsPollPendingForceGraphRefresh = true;
+        return;
+      }
+      await paintJsDebugHistoryResponse(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds);
+    }
+  } catch (error) {
+    if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
+      setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
+    }
   } finally {
     jsDebugStatsPollInFlight = false;
     if (jsDebugStatsPollPending) {
@@ -37842,7 +38376,7 @@ function clearJsDebugServerHistory() {
   jsDebugStatsServerPid = null;
   jsDebugStatsServerStartedAt = null;
   jsDebugStatsServerRssBytes = null;
-  jsDebugStatsHistoryStartSeconds = 0;
+  resetJsDebugHistoryReadiness();
   if (jsDebugStatsHistoryFlushTimer) {
     clearTimeout(jsDebugStatsHistoryFlushTimer);
     jsDebugStatsHistoryFlushTimer = null;
@@ -38023,9 +38557,16 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   const nowMs = Date.now();
   const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
-  graph.className = debugGraphClassName(nowMs);
-  graph.innerHTML = debugGraphInnerHtml(nowMs);
-  graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
+  const perf = clientPerfStart('statsHistoryRender');
+  try {
+    graph.className = debugGraphClassName(nowMs);
+    graph.innerHTML = debugGraphInnerHtml(nowMs);
+    graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
+    graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
+  } finally {
+    clientPerfEnd(perf);
+  }
   return true;
 }
 
@@ -38049,10 +38590,38 @@ function setDebugSubTab(tab) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
 }
 
+function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
+  if (!jsDebugStatsPanelVisible()) return false;
+  const domain = debugGraphDomain();
+  const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
+  const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
+  const requestedResolutionSeconds = jsDebugRequestedHistoryResolutionSeconds();
+  if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds)) return false;
+  const state = jsDebugHistoryReadiness;
+  const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+    && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
+    && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
+    && Number(state.requestedResolutionSeconds) === Number(requestedResolutionSeconds);
+  if (!currentRequestMatches || retry) {
+    const requestWindow = jsDebugHistoryRequestWindow(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds);
+    beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+      targetStartSeconds: requestedStartSeconds,
+      targetEndSeconds: requestedDomainEndSeconds,
+      requestedEndSeconds: requestWindow.endSeconds,
+      requestedResolutionSeconds,
+      retry,
+    });
+  }
+  armJsDebugStatsPolling({pollNow: true, forceGraphRefresh});
+  return true;
+}
+
 function setDebugGraphScale(value) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(value);
   saveJsDebugStatsUiPreferences();
+  if (requestJsDebugHistoryForCurrentDomain()) return;
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
@@ -38065,13 +38634,26 @@ function setDebugGraphRange(value, {render = true} = {}) {
   saveJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds();
   if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
-  if (render && jsDebugStatsPanelVisible() && (!jsDebugStatsHistoryStartSeconds || Math.floor(debugGraphDomain().startMs / 1000) < jsDebugStatsHistoryStartSeconds)) {
-    armJsDebugStatsPolling({pollNow: true});
-  }
   if (!render) return;
+  const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
+  if (requestJsDebugHistoryForCurrentDomain()) return;
+  if (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error') {
+    setJsDebugHistoryReadiness('ready', {
+      requestedRangeSeconds: jsDebugGraphRangeSeconds,
+      requestedStartSeconds,
+      attemptCount: 0,
+      error: '',
+      generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
+    });
+  }
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force: true});
   }
+}
+
+function retryJsDebugHistory() {
+  if (jsDebugHistoryReadiness.phase !== 'error' || !jsDebugStatsPanelVisible()) return false;
+  return requestJsDebugHistoryForCurrentDomain({retry: true});
 }
 
 function debugGraphRangeSliderIndex(slider, options = debugGraphAvailableRangeOptions()) {
@@ -38219,6 +38801,7 @@ function handleDebugGraphPointerUp(event, panel) {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
+    if (requestJsDebugHistoryForCurrentDomain()) return;
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
       refreshDebugGraphElement(graph, {force: true});
     }
@@ -38244,6 +38827,12 @@ function handleDebugGraphControlEvent(event, panel) {
   if (chartRestore && panel.contains(chartRestore)) {
     event.preventDefault();
     setDebugGraphChartVisible(chartRestore.dataset.jsDebugChartRestore, true);
+    return true;
+  }
+  const retry = event.target.closest('[data-js-debug-history-retry]');
+  if (retry && panel.contains(retry)) {
+    event.preventDefault();
+    retryJsDebugHistory();
     return true;
   }
   const reset = event.target.closest('[data-js-debug-zoom-reset]');
@@ -39231,6 +39820,15 @@ function switchFileExplorerChangesSession(session) {
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   sharePublish('finder-mode', {mode: fileExplorerMode, session});
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  // Tabber is backed by transcript/activity data, so a pane-tab click changes only its current and
+  // active row state. Preparing Differ payloads, rebuilding the tree, and forcing a session-files
+  // request here made one tab activation perform the same Tabber state sync twice.
+  if (fileExplorerMode === 'tabber') {
+    scheduleTabberTreeLayoutStateSync();
+    scheduleShareTopologySnapshot('finder-session');
+    return;
+  }
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
@@ -39244,7 +39842,6 @@ function switchFileExplorerChangesSession(session) {
     fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
-  scheduleFileExplorerActiveTabSync(session, {explicit: true});
   renderFileExplorerChangesPanels();
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
   scheduleShareTopologySnapshot('finder-session');
@@ -40170,10 +40767,6 @@ function countChangedFilesInDir(dirPath, entriesByDir, sessionFilesMap) {
   return count;
 }
 
-function dataAttributeName(key) {
-  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
-}
-
 function serializedElementAttributes(element) {
   const attrs = [];
   const attrMap = element?.attributes || {};
@@ -40188,7 +40781,7 @@ function serializedElementAttributes(element) {
   if (className) add('class', className);
   for (const [name, value] of Object.entries(attrMap)) add(name, value);
   if (element?.dataset && typeof element.dataset === 'object') {
-    for (const [key, value] of Object.entries(element.dataset)) add(dataAttributeName(key), value);
+    for (const [key, value] of Object.entries(element.dataset)) add(domDataAttributeName(key), value);
   }
   if (element?.hidden === true) add('hidden', true);
   if (element?.draggable === true) add('draggable', 'true');
@@ -42428,14 +43021,6 @@ function splitMarkdownResourceUrl(value) {
   };
 }
 
-function safeDecodeMarkdownUrlPath(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
 function markdownPreviewImageTarget(src, markdownPath) {
   const raw = String(src || '').trim();
   if (!raw || !markdownPath) return null;
@@ -42447,7 +43032,7 @@ function markdownPreviewImageTarget(src, markdownPath) {
   }
   const {path: rawPath} = splitMarkdownResourceUrl(raw);
   if (!rawPath) return null;
-  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
+  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeURIComponent(rawPath));
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
@@ -43739,14 +44324,6 @@ function applyMarkdownFenceFallbackHighlight(block) {
   block.classList.add('editor-highlight-code');
 }
 
-function safeDecodePathComponent(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
 function localPathFromFileHref(href) {
   const raw = String(href || '').trim();
   if (!/^file:/i.test(raw)) return '';
@@ -43754,10 +44331,10 @@ function localPathFromFileHref(href) {
     const base = globalThis.location?.href || 'http://localhost/';
     const url = new URL(raw, base);
     if (url.protocol !== 'file:') return '';
-    return safeDecodePathComponent(url.pathname || '');
+    return safeDecodeURIComponent(url.pathname || '');
   } catch (_) {
     const match = raw.match(/^file:\/\/(?:localhost)?(\/[^?#]*)/i);
-    return match ? safeDecodePathComponent(match[1]) : '';
+    return match ? safeDecodeURIComponent(match[1]) : '';
   }
 }
 
@@ -48684,11 +49261,6 @@ const shareReplayHostPerformance = {
   },
 };
 
-function shareReplayHostPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function shareReplayHostPerfMs(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
@@ -48725,7 +49297,7 @@ function shareReplayRecordHostPerfSkip(kind = '', reason = 'no-viewers') {
 function shareReplayRecordHostPerf(kind = '', startedAt = 0, detail = {}) {
   const counter = shareReplayHostPerformance[kind];
   if (!counter) return;
-  const durationMs = shareReplayHostPerfMs(shareReplayHostPerfNow() - Number(startedAt || 0)) ?? 0;
+  const durationMs = shareReplayHostPerfMs(performanceNow() - Number(startedAt || 0)) ?? 0;
   counter.count += 1;
   counter.totalMs = shareReplayHostPerfMs(Number(counter.totalMs || 0) + durationMs) ?? 0;
   counter.maxMs = Math.max(Number(counter.maxMs || 0), durationMs);
@@ -49636,7 +50208,7 @@ function shareReplayEnqueueMutationRecords(records = [], options = {}) {
     return [];
   }
   const sourceRecords = Array.from(records || []);
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const entries = shareReplayMutationEntries(sourceRecords);
   const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
   shareReplayRecordHostPerf('mutationRecords', startedAt, {
@@ -49719,7 +50291,7 @@ function shareReplayFlushMutationDeltas() {
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   if (!mutations.length && !terminals.length) return null;
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const payload = {
     mutations,
     count: mutations.length,
@@ -50054,7 +50626,7 @@ function sharePublish(type, payload = {}, options = {}) {
   if (!shareCanPublishUi() || !type) return {sent: false, queued: 0, bytes: 0};
   const message = shareBuildUiMessage(type, payload, {...options, commitSequence: false});
   const serialized = JSON.stringify(message);
-  const bytes = shareSerializedByteLength(serialized);
+  const bytes = utf8ByteLength(serialized);
   const maxBytes = Math.max(0, Math.round(Number(options.maxBytes) || 0));
   if (maxBytes > 0 && bytes > maxBytes) {
     return {sent: false, queued: 0, dropped: true, bytes, message};
@@ -51503,12 +52075,6 @@ function stableDigestJson(value) {
   return JSON.stringify(value);
 }
 
-function shareSerializedByteLength(text = '') {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
-}
-
 function shareHashText(text) {
   let hash = 2166136261;
   for (let index = 0; index < text.length; index += 1) {
@@ -51768,7 +52334,7 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 
 function shareReplayFrameByteLength(value = {}) {
   const text = stableDigestJson(shareRedactDiagnosticValue(value));
-  return shareSerializedByteLength(text);
+  return utf8ByteLength(text);
 }
 
 function shareReplayFrameLatencyMs(payload = {}) {
@@ -52134,7 +52700,7 @@ function publishShareGeometryDigest() {
     shareReplayRecordHostPerfSkip('geometryDigest');
     return;
   }
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const frame = shareGeometryDigestFrame();
   shareReplayRecordHostPerf('geometryDigest', startedAt, {
     digest: frame.digest,
@@ -54105,19 +54671,15 @@ function infoRecordLabel(record = {}, dimension = '') {
   return '';
 }
 
-function infoSearchText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
 function infoSearchField(kind, ...values) {
-  const text = values.map(infoSearchText).filter(Boolean).join(' ');
+  const text = values.map(singleLineText).filter(Boolean).join(' ');
   return text ? {kind, text} : null;
 }
 
 function infoSearchFields(kind, ...values) {
   const seen = new Set();
   return values
-    .map(infoSearchText)
+    .map(singleLineText)
     .filter(Boolean)
     .filter(value => {
       const key = value.toLowerCase();
@@ -55913,8 +56475,8 @@ function insertIntoTerminal(session, text) {
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
   const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  item.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  item.lastInputSentAt = performanceNow();
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
 }
@@ -55923,7 +56485,7 @@ function noteTerminalExplicitInput(session) {
   const item = terminals.get(session);
   if (item) {
     item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
-    item.lastExplicitInputAt = clientPerfNow();
+    item.lastExplicitInputAt = performanceNow();
   }
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
@@ -56236,7 +56798,7 @@ function handleTerminalData(session, data, options = {}) {
   try {
     return handleTerminalDataMeasured(session, data, options);
   } finally {
-    clientPerfEnd(perf, {bytes: jsDebugByteLength(data)});
+    clientPerfEnd(perf, {bytes: utf8ByteLength(data)});
   }
 }
 
@@ -56246,7 +56808,7 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   if (!filtered) return false;
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
-    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: jsDebugByteLength(filtered)});
+    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});
     current.lastExplicitInputMark = '';
   }
   if (shareReplayShellActive && shareWriteMode) {
@@ -56260,8 +56822,8 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  current.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  current.lastInputSentAt = performanceNow();
   return true;
 }
 
@@ -56385,7 +56947,6 @@ function updatePanelSlot(panel, session, slot) {
   if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
-  updatePanelInactiveOverlays();
 }
 
 function updatePaneExpandButton(panel, session) {
@@ -56545,10 +57106,10 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
-      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : jsDebugByteLength(event.data);
+      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : utf8ByteLength(event.data);
       const inputSentAt = Number(item.lastInputSentAt || 0);
       if (inputSentAt > 0) {
-        recordClientPerfCounter('echoToTermWrite', clientPerfNow() - inputSentAt, {bytes: dataBytes});
+        recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
         item.lastInputSentAt = 0;
       }
       const writePerf = clientPerfStart('xtermWrite');
@@ -58069,10 +58630,10 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
-  const dataBytes = jsDebugByteLength(rawData);
+  const dataBytes = utf8ByteLength(rawData);
   const dataLines = String(rawData || '').split(/\r?\n/);
-  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
-    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+  const frameBytes = utf8ByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + utf8ByteLength(`data: ${line}\n`), 0)
     + 1;
   const serverTimeMs = Number(envelope?.time) * 1000;
   const receiveLatencyMs = Number.isFinite(serverTimeMs)

@@ -440,7 +440,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   if (!tabStates.size) return null;
   const slotNames = String(raw || '')
     .split(',')
-    .map(value => layoutSlotName(readableParamComponentDecode(value.trim())))
+    .map(value => layoutSlotName(safeDecodeURIComponent(value.trim())))
     .filter(Boolean);
   if (!slotNames.length) return null;
   const next = emptyLayoutSlots();
@@ -529,7 +529,7 @@ function parseCompactLayoutNode(parser) {
     if (children.length < 2) return children[0] || null;
     return splitNode(splitMatch[1] === 'row' ? 'row' : 'column', children[0], children[1], splitMatch[2]);
   }
-  const slot = layoutSlotName(readableParamComponentDecode(name));
+  const slot = layoutSlotName(safeDecodeURIComponent(name));
   return slot ? leafNode(slot) : null;
 }
 
@@ -595,7 +595,7 @@ function layoutTabStatesFromParam(raw) {
     if (!part.trim()) continue;
     const separator = part.indexOf(':');
     if (separator <= 0) continue;
-    const slot = layoutSlotName(readableParamComponentDecode(part.slice(0, separator)));
+    const slot = layoutSlotName(safeDecodeURIComponent(part.slice(0, separator)));
     if (!slot) continue;
     const tabs = [];
     let active = null;
@@ -605,7 +605,7 @@ function layoutTabStatesFromParam(raw) {
       if (!token) continue;
       const activeToken = token.endsWith('*');
       if (activeToken) token = token.slice(0, -1);
-      const decoded = readableParamComponentDecode(token);
+      const decoded = safeDecodeURIComponent(token);
       if (decoded === emptyPaneParam) {
         placeholder = true;
         continue;
@@ -627,14 +627,6 @@ function readableItemParam(item) {
 
 function readableParamComponent(value) {
   return encodeURIComponent(String(value)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function readableParamComponentDecode(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
 }
 
 // Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
@@ -4989,7 +4981,9 @@ function performLayoutRender(request = {}) {
     // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
     // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
     syncActivePanelsInPlace();
-    renderPaneTabStrips();
+    // Dockview's in-place sync already refreshes its tab renderers and mounted panels. Running the
+    // generic strip pass again repeats that same work during every active-tab adoption.
+    if (!dockviewLayoutActive()) renderPaneTabStrips();
     syncPanelVisibility(previousActive);
     return;
   }

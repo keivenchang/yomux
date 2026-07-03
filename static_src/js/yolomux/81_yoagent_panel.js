@@ -549,18 +549,18 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
-    return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
+    return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
       <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
-      <span class="yoagent-waiting-label">${esc(label)}</span>
+      <span class="yoagent-waiting-label yoagent-compact-label">${esc(label)}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
     </li>`;
   }).join('');
   return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
-    <div class="yoagent-waiting-title">${esc(title)}</div>
-    <ul class="yoagent-waiting-list">${rows}</ul>
+    <div class="yoagent-waiting-title yoagent-section-title">${esc(title)}</div>
+    <ul class="yoagent-waiting-list yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
@@ -648,7 +648,7 @@ function yoagentJobsHtml() {
   const rows = yoagentJobRowsHtml();
   if (!rows) return '';
   return `<div class="yoagent-jobs-list" aria-live="polite" aria-label="${esc(t('yoagent.jobs.title'))}">
-    <div class="yoagent-jobs-title">${esc(t('yoagent.jobs.title'))}</div>
+    <div class="yoagent-jobs-title yoagent-section-title">${esc(t('yoagent.jobs.title'))}</div>
     <ul class="yoagent-jobs-items">${rows}</ul>
   </div>`;
 }
@@ -660,15 +660,15 @@ function yoagentChatQueueHtml() {
     const id = String(item?.id || '');
     const text = String(item?.text || '');
     const label = text.length > 180 ? `${text.slice(0, 177)}...` : text;
-    return `<li class="yoagent-chat-queue-item" data-yoagent-chat-queue-row="${esc(id)}">
+    return `<li class="yoagent-chat-queue-item yoagent-compact-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
-      <span class="yoagent-chat-queue-text">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
+      <span class="yoagent-chat-queue-text yoagent-compact-label">${esc(label)}</span>
+      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
-    <div class="yoagent-chat-queue-title">${esc(t('yoagent.queue.title'))}</div>
-    <ul class="yoagent-chat-queue-items">${rows}</ul>
+    <div class="yoagent-chat-queue-title yoagent-section-title">${esc(t('yoagent.queue.title'))}</div>
+    <ul class="yoagent-chat-queue-items yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
@@ -943,7 +943,7 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
     </li>`;
   }).join('');
   return `<div class="yoagent-recent-agents" aria-label="${esc(t('yoagent.recentAgents.label'))}">
-    <span class="yoagent-recent-agents-label">${esc(t('yoagent.recentAgents.label'))}</span>
+    <span class="yoagent-recent-agents-label yoagent-section-title">${esc(t('yoagent.recentAgents.label'))}</span>
     <ul class="yoagent-recent-agents-list">${rows}</ul>
   </div>`;
 }
@@ -1135,7 +1135,7 @@ function yoagentChatHtml() {
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
-    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
+    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
   const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';

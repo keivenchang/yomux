@@ -3468,6 +3468,8 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // honors the active Finder sort (label for A-Z, mtime for recent).
 // ---------------------------------------------------------------------------
 let tabberRefreshDeferredTimer = null;
+let tabberLayoutStateSignature = '';
+let tabberLayoutStateFrame = 0;
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
@@ -3582,6 +3584,7 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
+  tabberActivityLoaded = true;
   // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
   if (!refreshPlaceholder && generation > tabberActivityAppliedRequestGeneration) {
@@ -3593,18 +3596,25 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
 async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
+  if (tabberActivityFetchPromise) return tabberActivityFetchPromise;
   const requestGeneration = ++tabberActivityRequestGeneration;
-  try {
-    const params = new URLSearchParams();
-    params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
-    params.set('visible', visible ? '1' : '0');
-    const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-    applyTabberActivityPayload(payload, requestGeneration);
-  } catch (_) {
-    // keep the last snapshot; recency just goes stale until the next tick
-  }
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
-  return true;
+  tabberActivityFetchPromise = (async () => {
+    try {
+      const params = new URLSearchParams();
+      params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
+      params.set('visible', visible ? '1' : '0');
+      const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
+      applyTabberActivityPayload(payload, requestGeneration);
+    } catch (_) {
+      // Keep the last snapshot; the interval retries without a render-triggered request loop.
+    } finally {
+      tabberActivityLoaded = true;
+      tabberActivityFetchPromise = null;
+    }
+    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    return true;
+  })();
+  return tabberActivityFetchPromise;
 }
 
 function warmTabberDataOnLaunch() {
@@ -3755,7 +3765,7 @@ function tabberAgentSessions() {
 function ensureTabberSessionFilesFetches() {
   // Agent-window paths now come from the cached /api/activity agent_windows payload.
   // The session-files fetchers remain for the modified-files UI and focused tests.
-  if (!tabberActivityPayload?.agent_windows) fetchTabberActivity();
+  if (!tabberActivityLoaded && !tabberActivityFetchPromise) fetchTabberActivity();
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -3880,7 +3890,7 @@ function renderTabberTree(groupsEl) {
     treeSortMode: tabberSortMode(),
     includeHidden: true,
   });
-  syncTabberTreeActiveSelection(container);
+  syncTabberTreeLayoutState(container, {force: true});
 }
 
 function tabberSessionPopoverRefreshIsUnsafe() {
@@ -3916,24 +3926,30 @@ function scheduleDeferredTabberRefresh() {
 }
 
 function refreshTabberPanels() {
+  const perf = clientPerfStart('tabberFullRefresh');
   if (tabberSessionPopoverRefreshIsUnsafe()) {
     scheduleDeferredTabberRefresh();
+    clientPerfEnd(perf, {skipped: 1});
     return;
   }
   if (tabberRefreshDeferredTimer) {
     clearTimeout(tabberRefreshDeferredTimer);
     tabberRefreshDeferredTimer = null;
   }
+  let panels = 0;
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
-    if (groups) renderTabberTree(groups);
+    if (groups) {
+      panels += 1;
+      renderTabberTree(groups);
+    }
   }
+  clientPerfEnd(perf, {nodes: panels});
 }
 
 function refreshTabberPanelsForFocusChange() {
   if (fileExplorerMode !== 'tabber') return;
-  refreshTabberPanels();
-  syncTabberTreeActiveSelection();
+  scheduleTabberTreeLayoutStateSync();
 }
 
 function tabberWindowLabelHtml(label, iconHtml, options = {}) {
@@ -4368,6 +4384,48 @@ function syncTabberTreeActiveSelection(panel = document, options = {}) {
     return false;
   }
   return tabberTreeInteractionController.syncCurrent(panel, options);
+}
+
+function syncTabberTreeLayoutState(panel = document, options = {}) {
+  if (fileExplorerMode !== 'tabber') return false;
+  const currentPath = activeTabberRowPath();
+  const rows = Array.from(panel.querySelectorAll?.('.file-tree-row[data-tabber-type]') || []);
+  if (!rows.length) return syncTabberTreeActiveSelection(panel, options);
+  const visibleItems = new Set(activePaneItems());
+  const focusedItem = visualActivePaneItem();
+  const signature = `${Array.from(visibleItems).sort().join('\u001f')}\u001e${focusedItem || ''}\u001e${currentPath}`;
+  if (options.force !== true && tabberLayoutStateSignature === signature) return false;
+  tabberLayoutStateSignature = signature;
+  const perf = clientPerfStart('tabberLayoutSync');
+  for (const row of rows) {
+    const type = row.dataset.tabberType || '';
+    const session = row.dataset.tabberSession || '';
+    const item = row.dataset.tabberItem || '';
+    const activeSession = type === 'session' && visibleItems.has(session);
+    const activeTab = type === 'tab' && visibleItems.has(item);
+    const current = Boolean(currentPath && row.dataset.path === currentPath);
+    row.classList.toggle('tabber-active-session', activeSession);
+    row.classList.toggle('tabber-active-tab', activeTab);
+    row.querySelector?.('.tabber-session-tab')?.classList?.toggle(CLS.active, activeSession);
+    if (current || activeSession || activeTab) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  }
+  const synced = syncTabberTreeActiveSelection(panel, options);
+  clientPerfEnd(perf, {rows: rows.length});
+  return synced;
+}
+
+function scheduleTabberTreeLayoutStateSync() {
+  if (fileExplorerMode !== 'tabber') return false;
+  // Keep keyboard selection synchronous while folding all DOM state changes from one Dockview
+  // transaction into the next paint.
+  syncTabberTreeActiveSelection();
+  if (tabberLayoutStateFrame) return false;
+  tabberLayoutStateFrame = requestAnimationFrame(() => {
+    tabberLayoutStateFrame = 0;
+    syncTabberTreeLayoutState();
+  });
+  return true;
 }
 
 function bindTabberPanel(panel) {

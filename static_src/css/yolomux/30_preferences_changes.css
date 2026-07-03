@@ -376,12 +376,42 @@ body.theme-light .js-debug-graph-view {
   white-space: nowrap;
 }
 .js-debug-chart-shell {
+  position: relative;
   display: grid;
   flex: 1 1 auto;
   grid-template-rows: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 0;
+}
+.js-debug-history-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  pointer-events: none;
+}
+.js-debug-history-overlay[hidden] {
+  display: none;
+}
+.js-debug-history-overlay-message {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  font: 700 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  text-align: center;
+}
+.js-debug-history-retry {
+  pointer-events: auto;
 }
 .js-debug-chart-grid {
   display: grid;
@@ -765,15 +795,6 @@ body.theme-light .js-debug-graph-view {
 }
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
-}
-.file-explorer-changes-panel {
-  --changes-row-hover-bg: var(--active-control-soft-bg);
-  --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: rgba(148, 163, 184, 0.50);
-  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
-  --changes-folder-text: var(--accent-gold);
-  --changes-path-text: var(--muted);
-  --changes-icon-text: #a7c7ff;
 }
 .changes-toolbar {
   display: flex;
@@ -1389,6 +1410,7 @@ body.theme-light .js-debug-graph-view {
   font-weight: 650;
 }
 .preferences-setting-help {
+  grid-column: 1 / -1;
   display: block;
   margin-top: 3px;
   color: var(--muted);
@@ -1917,11 +1939,6 @@ body.theme-light .changes-diff-add-neutral {
 body.theme-light .changes-diff-remove {
   color: var(--danger-strong-hover);
 }
-body.theme-light .keyboard-shortcut-row kbd {
-  color: var(--text);
-  background: var(--panel2);
-  border-color: var(--line);
-}
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
@@ -2010,14 +2027,9 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control textarea[data-setting-autosize="true"] {
   overflow-y: hidden;
 }
-.preferences-setting-suffix,
-.preferences-setting-help {
+.preferences-setting-suffix {
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
-}
-.preferences-setting-help {
-  grid-column: 1 / -1;
-  margin-top: 3px;
 }
 .preferences-status-pulse-example {
   display: inline-flex;
@@ -2082,8 +2094,6 @@ body.theme-light .preferences-inline-action {
   gap: 8px;
   padding: 4px 0;
   font: inherit;
-}
-.branch-name {
 }
 .branch-meta {
   color: var(--text-muted-strong);

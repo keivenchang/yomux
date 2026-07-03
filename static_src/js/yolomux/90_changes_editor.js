@@ -885,6 +885,15 @@ function switchFileExplorerChangesSession(session) {
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   sharePublish('finder-mode', {mode: fileExplorerMode, session});
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  // Tabber is backed by transcript/activity data, so a pane-tab click changes only its current and
+  // active row state. Preparing Differ payloads, rebuilding the tree, and forcing a session-files
+  // request here made one tab activation perform the same Tabber state sync twice.
+  if (fileExplorerMode === 'tabber') {
+    scheduleTabberTreeLayoutStateSync();
+    scheduleShareTopologySnapshot('finder-session');
+    return;
+  }
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
@@ -898,7 +907,6 @@ function switchFileExplorerChangesSession(session) {
     fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
-  scheduleFileExplorerActiveTabSync(session, {explicit: true});
   renderFileExplorerChangesPanels();
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
   scheduleShareTopologySnapshot('finder-session');
@@ -1824,10 +1832,6 @@ function countChangedFilesInDir(dirPath, entriesByDir, sessionFilesMap) {
   return count;
 }
 
-function dataAttributeName(key) {
-  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
-}
-
 function serializedElementAttributes(element) {
   const attrs = [];
   const attrMap = element?.attributes || {};
@@ -1842,7 +1846,7 @@ function serializedElementAttributes(element) {
   if (className) add('class', className);
   for (const [name, value] of Object.entries(attrMap)) add(name, value);
   if (element?.dataset && typeof element.dataset === 'object') {
-    for (const [key, value] of Object.entries(element.dataset)) add(dataAttributeName(key), value);
+    for (const [key, value] of Object.entries(element.dataset)) add(domDataAttributeName(key), value);
   }
   if (element?.hidden === true) add('hidden', true);
   if (element?.draggable === true) add('draggable', 'true');

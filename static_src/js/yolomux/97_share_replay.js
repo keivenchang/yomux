@@ -260,11 +260,6 @@ const shareReplayHostPerformance = {
   },
 };
 
-function shareReplayHostPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function shareReplayHostPerfMs(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
@@ -301,7 +296,7 @@ function shareReplayRecordHostPerfSkip(kind = '', reason = 'no-viewers') {
 function shareReplayRecordHostPerf(kind = '', startedAt = 0, detail = {}) {
   const counter = shareReplayHostPerformance[kind];
   if (!counter) return;
-  const durationMs = shareReplayHostPerfMs(shareReplayHostPerfNow() - Number(startedAt || 0)) ?? 0;
+  const durationMs = shareReplayHostPerfMs(performanceNow() - Number(startedAt || 0)) ?? 0;
   counter.count += 1;
   counter.totalMs = shareReplayHostPerfMs(Number(counter.totalMs || 0) + durationMs) ?? 0;
   counter.maxMs = Math.max(Number(counter.maxMs || 0), durationMs);
@@ -1212,7 +1207,7 @@ function shareReplayEnqueueMutationRecords(records = [], options = {}) {
     return [];
   }
   const sourceRecords = Array.from(records || []);
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const entries = shareReplayMutationEntries(sourceRecords);
   const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
   shareReplayRecordHostPerf('mutationRecords', startedAt, {
@@ -1295,7 +1290,7 @@ function shareReplayFlushMutationDeltas() {
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   if (!mutations.length && !terminals.length) return null;
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const payload = {
     mutations,
     count: mutations.length,
@@ -1630,7 +1625,7 @@ function sharePublish(type, payload = {}, options = {}) {
   if (!shareCanPublishUi() || !type) return {sent: false, queued: 0, bytes: 0};
   const message = shareBuildUiMessage(type, payload, {...options, commitSequence: false});
   const serialized = JSON.stringify(message);
-  const bytes = shareSerializedByteLength(serialized);
+  const bytes = utf8ByteLength(serialized);
   const maxBytes = Math.max(0, Math.round(Number(options.maxBytes) || 0));
   if (maxBytes > 0 && bytes > maxBytes) {
     return {sent: false, queued: 0, dropped: true, bytes, message};
@@ -3079,12 +3074,6 @@ function stableDigestJson(value) {
   return JSON.stringify(value);
 }
 
-function shareSerializedByteLength(text = '') {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
-}
-
 function shareHashText(text) {
   let hash = 2166136261;
   for (let index = 0; index < text.length; index += 1) {
@@ -3344,7 +3333,7 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 
 function shareReplayFrameByteLength(value = {}) {
   const text = stableDigestJson(shareRedactDiagnosticValue(value));
-  return shareSerializedByteLength(text);
+  return utf8ByteLength(text);
 }
 
 function shareReplayFrameLatencyMs(payload = {}) {
@@ -3710,7 +3699,7 @@ function publishShareGeometryDigest() {
     shareReplayRecordHostPerfSkip('geometryDigest');
     return;
   }
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const frame = shareGeometryDigestFrame();
   shareReplayRecordHostPerf('geometryDigest', startedAt, {
     digest: frame.digest,

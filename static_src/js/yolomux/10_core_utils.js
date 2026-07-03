@@ -49,7 +49,7 @@ async function apiFetchJson(url, options = {}) {
   return apiJsonResponse(await apiFetch(url, options));
 }
 
-async function apiFetchJsonQuiet(url, options = {}) {
+async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   if (shareToken) {
@@ -61,7 +61,19 @@ async function apiFetchJsonQuiet(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  return apiJsonResponse(await fetch(url, requestOptions));
+  const fetchStartedAt = performanceNow();
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
+  }
+  const parseStartedAt = performanceNow();
+  try {
+    return await apiJsonResponse(response);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.parseMs = performanceNow() - parseStartedAt;
+  }
 }
 
 function messageDescriptorText(descriptor, fallback = '') {
@@ -178,27 +190,47 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
-function jsDebugPerformanceNow() {
-  if (!jsDebugCollectionEnabled) return 0;
+function performanceNow() {
   const value = globalThis.performance?.now?.();
   return Number.isFinite(value) ? value : Date.now();
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function utf8ByteLength(text) {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function domDataAttributeName(key) {
+  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function singleLineText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function jsDebugPerformanceNow() {
+  if (!jsDebugCollectionEnabled) return 0;
+  return performanceNow();
 }
 
 function jsDebugRequestMethod(options = {}) {
   return String(options?.method || 'GET').toUpperCase();
 }
 
-function jsDebugByteLength(text) {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
-}
-
 function jsDebugRequestBytes(url, options = {}) {
   if (!jsDebugCollectionEnabled) return 0;
-  let bytes = jsDebugByteLength(jsDebugUrlText(url));
+  let bytes = utf8ByteLength(jsDebugUrlText(url));
   const body = options?.body;
-  if (typeof body === 'string') bytes += jsDebugByteLength(body);
+  if (typeof body === 'string') bytes += utf8ByteLength(body);
   else if (body instanceof ArrayBuffer) bytes += body.byteLength;
   else if (body?.byteLength) bytes += Number(body.byteLength) || 0;
   return bytes;
@@ -272,11 +304,6 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
-function clientPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function clientPerfMark(name) {
   if (!name || typeof globalThis.performance?.mark !== 'function') return '';
   const mark = `yolomux:${String(name)}`;
@@ -304,7 +331,7 @@ function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
       ? globalThis.performance.getEntriesByName(markName)
       : [];
     const startedAt = Number(entries?.at?.(-1)?.startTime);
-    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+    if (Number.isFinite(startedAt)) durationMs = performanceNow() - startedAt;
   }
   globalThis.performance?.clearMarks?.(markName);
   if (endMark) globalThis.performance?.clearMarks?.(endMark);
@@ -346,12 +373,12 @@ function recordClientPerfCounter(name, durationMs = null, details = {}) {
 }
 
 function clientPerfStart(name) {
-  return {name: String(name || ''), startedAt: clientPerfNow()};
+  return {name: String(name || ''), startedAt: performanceNow()};
 }
 
 function clientPerfEnd(token, details = {}) {
   if (!token?.name) return null;
-  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+  return recordClientPerfCounter(token.name, performanceNow() - Number(token.startedAt || 0), details);
 }
 
 function clientPerfMeasure(name, fn, details = {}) {
@@ -1725,6 +1752,14 @@ function setFocusedTerminal(session, options = {}) {
   }
 }
 
+function updateFocusOnlyChrome() {
+  // Focus does not change pane-tab content. Dockview/classic layout activation owns active-tab
+  // chrome, while acknowledgement updates arrive through their existing status-render path.
+  updateTopbarActivityStatus();
+  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
+}
+
 function setFocusedTerminalMeasured(session, options = {}) {
   const previousItem = focusedPanelItem;
   const alreadyFocused = focusedTerminal === session && focusedPanelItem === session;
@@ -1748,9 +1783,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
     acknowledgeTerminalAttentionFromUserAction(session, null, options);
@@ -1765,13 +1798,35 @@ function clearFocusedTerminal(session) {
   if (focusedTerminal !== session) return;
   focusedTerminal = null;
   focusedPanelItem = null;
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
+}
+
+function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
+  if (isTmuxSession(item)) {
+    acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
+    rememberFileExplorerExplicitSyncSession(item);
+  }
+  if (isFileEditorItem(item)) {
+    activeFile = fileItemPath(item);
+    scheduleFileExplorerActiveFileReveal(activeFile);
+  }
+  const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
+  if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
+  if (previousItem !== item) recordFocusNavTransition(previousItem, item);
 }
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedPanelItem === item;
+  if (alreadyFocused) {
+    rememberActivePaneItem(item);
+    if (isTmuxSession(item)) lastFocusedTmuxSession = item;
+    if (options.userInitiated === true) {
+      if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
+      applyUserInitiatedPanelFocus(item, previousItem, options);
+    }
+    return;
+  }
   if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
@@ -1781,20 +1836,10 @@ function setFocusedPanelItem(item, options = {}) {
     lastFocusedTmuxSession = item;
     dismissAttentionAlertsForSession(item);
   }
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item});
   if (options.userInitiated === true) {
-    if (isTmuxSession(item)) acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
-    if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
-    if (isFileEditorItem(item)) {
-      activeFile = fileItemPath(item);
-      scheduleFileExplorerActiveFileReveal(activeFile);
-    }
-    const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
-    if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
-    recordFocusNavTransition(previousItem, item);
+    applyUserInitiatedPanelFocus(item, previousItem, options);
   }
   else recordAutoFocusNav(item, previousItem);
 }
@@ -1870,7 +1915,8 @@ function updatePanelInactiveOverlays() {
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
-  if (typeof refreshTabberPanelsForFocusChange === 'function') refreshTabberPanelsForFocusChange();
+  if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
+  else if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
 }
 
 function esc(value) {

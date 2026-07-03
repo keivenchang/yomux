@@ -130,16 +130,16 @@ def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str
     return result.stdout.decode("utf-8", errors="replace"), ""
 
 
-def _normal_ref(value: str | None, default: str) -> str:
+def normal_ref(value: str | None, default: str) -> str:
     ref = str(value or "").strip()
     return ref or default
 
 
-def _diff_refs(raw_from_ref: str | None, raw_to_ref: str | None) -> tuple[str, str]:
-    return _normal_ref(raw_from_ref, "HEAD"), _normal_ref(raw_to_ref, "current")
+def diff_refs(raw_from_ref: str | None, raw_to_ref: str | None) -> tuple[str, str]:
+    return normal_ref(raw_from_ref, "HEAD"), normal_ref(raw_to_ref, "current")
 
 
-def _refs_requested(from_ref: str | None, to_ref: str | None) -> bool:
+def refs_requested(from_ref: str | None, to_ref: str | None) -> bool:
     return bool((from_ref or "").strip() or (to_ref or "").strip())
 
 
@@ -152,7 +152,7 @@ def _diff_ref_resolution_error(error: Exception) -> bool:
     }
 
 
-def _ref_exists(repo: Path, ref: str) -> bool:
+def git_ref_exists(repo: Path, ref: str) -> bool:
     result = git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(repo), timeout=3.0)
     return result.returncode == 0
 
@@ -164,7 +164,7 @@ def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
                 "FROM ref must be older than TO ref (current is the working tree)",
                 message_key="fs.error.refOrderCurrent",
             )
-        if not _ref_exists(repo, from_ref):
+        if not git_ref_exists(repo, from_ref):
             raise paths.FilesystemError(
                 f"unknown FROM ref: {from_ref}",
                 message_key="common.unknownFromRef",
@@ -176,13 +176,13 @@ def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
             "FROM ref must be older than TO ref (current is the working tree)",
             message_key="fs.error.refOrderCurrent",
         )
-    if not _ref_exists(repo, from_ref):
+    if not git_ref_exists(repo, from_ref):
         raise paths.FilesystemError(
             f"unknown FROM ref: {from_ref}",
             message_key="common.unknownFromRef",
             message_params={"ref": from_ref},
         )
-    if not _ref_exists(repo, to_ref):
+    if not git_ref_exists(repo, to_ref):
         raise paths.FilesystemError(
             f"unknown TO ref: {to_ref}",
             message_key="common.unknownToRef",
@@ -212,14 +212,14 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
     except ValueError as exc:
         raise paths.FilesystemError.outside_repo(path) from exc
     tracked = git(["ls-files", "--error-unmatch", "--", rel_path], cwd=str(repo), timeout=3.0)
-    diff_from, diff_to = _diff_refs(from_ref, to_ref)
+    diff_from, diff_to = diff_refs(from_ref, to_ref)
     if not (diff_to == "current" and tracked.returncode != 0):
         try:
             _ensure_ref_order(repo, diff_from, diff_to)
         except paths.FilesystemError as error:
-            if not (_refs_requested(from_ref, to_ref) and _diff_ref_resolution_error(error)):
+            if not (refs_requested(from_ref, to_ref) and _diff_ref_resolution_error(error)):
                 raise
-            diff_from, diff_to = _diff_refs(None, None)
+            diff_from, diff_to = diff_refs(None, None)
             _ensure_ref_order(repo, diff_from, diff_to)
     original = ""
     original_error = ""

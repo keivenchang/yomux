@@ -8,6 +8,7 @@ import argparse
 import ast
 from collections import Counter, defaultdict
 import json
+import math
 import re
 import sys
 import time
@@ -372,8 +373,126 @@ def _iter_css_rules(css: str):
         i += 1
 
 
-def _color_luminance_alpha(color: str) -> tuple[float, float] | None:
-    """(relative luminance 0..1, alpha 0..1) for a #hex / rgb()/rgba() literal, else None."""
+def _css_without_comments(css: str) -> str:
+    """Remove comments without changing line numbers used by structural lint diagnostics."""
+    return re.sub(
+        r"/\*.*?\*/",
+        lambda match: "\n" * match.group(0).count("\n"),
+        css,
+        flags=re.DOTALL,
+    )
+
+
+def _iter_located_css_rules(
+    css: str,
+    *,
+    context: tuple[str, ...] = (),
+    base_line: int = 1,
+):
+    """Yield (context, selector, body, opening-brace line) for style rules.
+
+    Duplicate selectors are meaningful only inside the same at-rule context. Descend through the
+    conditional grouping rules used by this stylesheet, while treating keyframes/font-face/page as
+    non-style-rule bodies. The scanner skips quoted braces so generated content cannot split a rule.
+    """
+    i = 0
+    head_start = 0
+    length = len(css)
+    nested_at_rules = {"@container", "@layer", "@media", "@supports"}
+    while i < length:
+        char = css[i]
+        if char in {'"', "'"}:
+            quote = char
+            i += 1
+            while i < length:
+                if css[i] == "\\":
+                    i += 2
+                    continue
+                if css[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == ";":
+            head_start = i + 1
+            i += 1
+            continue
+        if char != "{":
+            i += 1
+            continue
+        header = css[head_start:i].strip()
+        opening_line = base_line + css.count("\n", 0, i)
+        depth = 1
+        j = i + 1
+        quote = ""
+        while j < length and depth:
+            current = css[j]
+            if quote:
+                if current == "\\":
+                    j += 2
+                    continue
+                if current == quote:
+                    quote = ""
+            elif current in {'"', "'"}:
+                quote = current
+            elif current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+            j += 1
+        body = css[i + 1:j - 1]
+        if header.startswith("@"):
+            keyword = header.split(None, 1)[0].lower()
+            if keyword in nested_at_rules:
+                normalized_header = " ".join(header.split())
+                yield from _iter_located_css_rules(
+                    body,
+                    context=(*context, normalized_header),
+                    base_line=opening_line,
+                )
+        elif header:
+            yield context, " ".join(header.split()), body, opening_line
+        i = j
+        head_start = i
+
+
+def lint_css_structure() -> list[str]:
+    """Reject CSS cascade ownership that would otherwise depend on source order.
+
+    A property repeated in one rule silently discards its first value, the same selector repeated in
+    one context splits ownership across arbitrary locations, and an empty rule is dead migration
+    debris. Conditional copies in different @media/@supports contexts remain valid.
+    """
+    errors: list[str] = []
+    selector_locations: dict[tuple[tuple[str, ...], str], list[str]] = defaultdict(list)
+    declaration_re = re.compile(r"(?:^|;)\s*(--[\w-]+|[\w-]+)\s*:")
+    for part in ASSETS.get("yolomux.css", []):
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for context, selector, body, line_no in _iter_located_css_rules(css):
+            location = f"{part}:{line_no}"
+            declarations = declaration_re.findall(body)
+            if not declarations:
+                errors.append(f"{location}: empty CSS rule '{selector}'")
+            duplicate_properties = sorted({name for name in declarations if declarations.count(name) > 1})
+            for name in duplicate_properties:
+                errors.append(f"{location}: CSS rule '{selector}' declares '{name}' more than once")
+            selector_locations[(context, selector)].append(location)
+    for (context, selector), locations in sorted(selector_locations.items()):
+        if len(locations) < 2:
+            continue
+        context_text = " > ".join(context) if context else "top level"
+        errors.append(
+            f"duplicate CSS selector '{selector}' in {context_text}: {', '.join(locations)}; merge it into one owner"
+        )
+    return errors
+
+
+def _color_rgba(color: str) -> tuple[tuple[int, int, int], float] | None:
+    """Return normalized integer RGB channels and alpha for a literal CSS color."""
     color = color.strip().lower()
     rgb: list[int] = []
     alpha = 1.0
@@ -404,6 +523,27 @@ def _color_luminance_alpha(color: str) -> tuple[float, float] | None:
                 alpha = float(parts[3].rstrip("%")) / (100 if parts[3].endswith("%") else 1)
         except ValueError:
             return None
+
+    channels = tuple(max(0, min(255, value)) for value in rgb[:3])
+    return channels, max(0.0, min(1.0, alpha))
+
+
+def _canonical_opaque_color(color: str) -> str | None:
+    measured = _color_rgba(color)
+    if measured is None:
+        return None
+    channels, alpha = measured
+    if not math.isclose(alpha, 1.0):
+        return None
+    return "#" + "".join(f"{value:02x}" for value in channels)
+
+
+def _color_luminance_alpha(color: str) -> tuple[float, float] | None:
+    """(relative luminance 0..1, alpha 0..1) for a #hex / rgb()/rgba() literal, else None."""
+    measured = _color_rgba(color)
+    if measured is None:
+        return None
+    rgb, alpha = measured
 
     def linear(value: int) -> float:
         v = max(0, min(255, value)) / 255
@@ -966,12 +1106,15 @@ def lint_undefined_css_vars() -> list[str]:
             for name in sorted(referenced - defined)]
 
 
-def _token_hex_values() -> dict[str, list[str]]:
+def _token_opaque_color_values() -> dict[str, list[str]]:
     token_file = repo_path("static_src/css/yolomux/00_tokens_base.css")
     css = re.sub(r"/\*.*?\*/", "", read_text(token_file), flags=re.DOTALL)
     values: dict[str, list[str]] = defaultdict(list)
-    for match in re.finditer(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{6})\b", css):
-        values[match.group(2).lower()].append(match.group(1))
+    literal_re = re.compile(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\))")
+    for match in literal_re.finditer(css):
+        canonical = _canonical_opaque_color(match.group(2))
+        if canonical:
+            values[canonical].append(match.group(1))
     return values
 
 
@@ -981,27 +1124,32 @@ def lint_raw_literal_equals_token() -> list[str]:
     White and `var(--x, #fallback)` literals are intentionally left alone: white is used as real paint in
     shadows/surfaces, and fallback literals are part of the token reference rather than a parallel copy.
     """
-    token_values = _token_hex_values()
+    token_values = _token_opaque_color_values()
+    ignored_values = {_canonical_opaque_color(value) for value in RAW_TOKEN_LITERAL_IGNORED_VALUES}
     errors: list[str] = []
+    literal_re = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)")
     for part in ASSETS.get("yolomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
         try:
-            text = read_text(path)
+            text = _css_without_comments(read_text(path))
         except FileNotFoundError:
             continue
         for line_no, line in enumerate(text.splitlines(), start=1):
-            for match in re.finditer(r"#[0-9a-fA-F]{6}\b", line):
-                literal = match.group(0).lower()
-                if literal not in token_values:
+            if re.match(r"^\s*--[\w-]+\s*:", line):
+                continue
+            for match in literal_re.finditer(line):
+                literal = match.group(0)
+                canonical = _canonical_opaque_color(literal)
+                if canonical not in token_values:
                     continue
-                if literal in RAW_TOKEN_LITERAL_IGNORED_VALUES:
+                if canonical in ignored_values:
                     continue
                 if "var(" in line:
                     continue
-                tokens = ", ".join(sorted(set(token_values[literal])))
-                errors.append(f"{part}:{line_no}: raw color {literal} duplicates token value(s) {tokens}; use var(--token)")
+                tokens = ", ".join(sorted(set(token_values[canonical])))
+                errors.append(f"{part}:{line_no}: raw color {literal.lower()} duplicates token value(s) {tokens}; use var(--token)")
     return errors
 
 
@@ -1159,6 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
             # --lint-light, so it was absent from --check / the CPS check list).
             lint_errors = (
                 lint_duplicate_functions()
+                + lint_css_structure()
                 + lint_undefined_css_vars()
                 + lint_raw_literal_equals_token()
                 + lint_repeated_raw_component_literals()

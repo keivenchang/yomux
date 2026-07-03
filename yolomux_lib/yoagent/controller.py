@@ -21,7 +21,6 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from ..approvals import blank_prompt_state
 from ..agent_tui import classify_agent_pane
 from ..agent_tui import clear_composer
 from ..agent_tui import composer_text_is_idle_placeholder
@@ -151,13 +150,6 @@ YOAGENT_LIVE_EXTERNAL_RE = re.compile(
     r"\b(?:weather|forecast|temperature|stock|stocks|market|markets|price|prices|news|headline|headlines|traffic|flight|flights|sports|score|scores|exchange rate)\b",
     re.IGNORECASE,
 )
-
-
-def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
-    state = blank_prompt_state()
-    if prompt:
-        state.update(prompt)
-    return state
 
 
 def yoagent_question_needs_activity_context(question: str) -> bool:

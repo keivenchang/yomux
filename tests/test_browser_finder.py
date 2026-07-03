@@ -877,7 +877,10 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+              && currentFileExplorerRoot() === '/home/test/yolomux.dev';
+            """
         )
     )
     metrics = browser.execute_async_script(

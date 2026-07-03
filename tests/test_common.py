@@ -1,8 +1,15 @@
+import ast
 from pathlib import Path
 import signal
 import subprocess
 
+from yolomux_lib import agent_tui
+from yolomux_lib import app
 from yolomux_lib import common
+from yolomux_lib import session_files
+from yolomux_lib import web
+from yolomux_lib.filesystem import git_ops
+from yolomux_lib.yoagent import conversation
 
 
 def test_project_git_normalizes_missing_and_malformed_git_payloads():
@@ -24,6 +31,67 @@ def test_project_git_helper_owns_project_git_extraction_sites():
             offenders.append(relative)
 
     assert offenders == []
+
+
+def test_positive_finite_number_normalizes_counter_inputs():
+    assert common.positive_finite_number("3.5") == 3.5
+    assert common.positive_finite_number(0) == 0.0
+    assert common.positive_finite_number(-1) == 0.0
+    assert common.positive_finite_number(float("inf")) == 0.0
+    assert common.positive_finite_number(float("nan")) == 0.0
+    assert common.positive_finite_number("invalid") == 0.0
+
+
+def test_backend_primitive_consumers_share_the_canonical_owners():
+    assert app.normalized_prompt_state is agent_tui.normalized_prompt_state
+    assert app.cached_agent_auth_status_snapshot is web.bootstrap_agent_auth_status
+    assert app.sanitized_yoagent_stream_items is conversation.sanitized_stream_items
+    assert session_files.normal_ref is git_ops.normal_ref
+    assert session_files.diff_refs is git_ops.diff_refs
+    assert session_files.refs_requested is git_ops.refs_requested
+    assert session_files.git_ref_exists is git_ops.git_ref_exists
+
+    calls = []
+
+    class SignatureOwner:
+        def stable_client_event_signature_payload(self, payload):
+            calls.append(payload)
+            return {"owned": payload}
+
+    payload = {"value": 1}
+    assert app.TmuxWebtermApp.tmux_signal_signature_payload(SignatureOwner(), payload) == {"owned": payload}
+    assert calls == [payload]
+
+
+def test_backend_primitive_implementation_bodies_have_one_owner():
+    root = Path(common.PROJECT_ROOT) / "yolomux_lib"
+    functions = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        functions.extend((path, node) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    owner_names = {
+        "normalized_prompt_state",
+        "sanitized_stream_items",
+        "positive_finite_number",
+        "normal_ref",
+        "diff_refs",
+        "refs_requested",
+        "git_ref_exists",
+        "bootstrap_agent_auth_status",
+        "healed_runtime_path",
+    }
+    owners = {node.name: (path, node) for path, node in functions if node.name in owner_names}
+    assert set(owners) == owner_names
+
+    for owner_name, (owner_path, owner) in owners.items():
+        fingerprint = ast.dump(ast.Module(body=owner.body, type_ignores=[]), include_attributes=False)
+        matches = [
+            f"{path.relative_to(root)}:{node.name}"
+            for path, node in functions
+            if ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False) == fingerprint
+        ]
+        assert matches == [f"{owner_path.relative_to(root)}:{owner_name}"]
 
 
 def test_terminate_process_group_waits_after_sigkill(monkeypatch):

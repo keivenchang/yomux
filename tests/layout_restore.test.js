@@ -339,7 +339,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function messageDescriptorText\(descriptor, fallback = ''\)[\s\S]*i18nResolve\(key\)[\s\S]*i18nInterpolate\(template, params\)[\s\S]*function userMessageText\(value, fallback = ''\)[\s\S]*payload\.user_message[\s\S]*messageDescriptorText\(descriptor, payload\.error \|\| source\.message \|\| fallback/.test(coreSource), 'one shared descriptor parent localizes frontend user messages and retains raw diagnostics as fallback');
     assert.ok(/async function apiJsonResponse\(response\)[\s\S]*new Error\(userMessageText\(payload, response\.statusText \|\| `HTTP \$\{response\.status\}`\)\)/.test(coreSource)
       && /async function apiFetchJson\([\s\S]*apiJsonResponse\(await apiFetch\(url, options\)\)/.test(coreSource)
-      && /async function apiFetchJsonQuiet\([\s\S]*apiJsonResponse\(await fetch\(url, requestOptions\)\)/.test(coreSource), 'shared JSON API helpers localize structured backend errors through one response parent before callers render them');
+      && /async function apiFetchJsonQuiet\([\s\S]*response = await fetch\(url, requestOptions\)[\s\S]*apiJsonResponse\(response\)/.test(coreSource), 'shared JSON API helpers localize structured backend errors through one response parent before callers render them');
     assert.ok(/function yoagentJobRowsHtml\([\s\S]*userMessageText\(job\?\.result\?\.send \|\| job\?\.result \|\| job, ''\)/.test(yoagentSource), 'YO!agent job rows consume the shared message descriptor, including nested send failures');
     assert.ok(/function runServerDropAction[\s\S]*userMessageText\(error, error\)/.test(dropSource)
       && /function showDropActionResult[\s\S]*dropActionResultPresentation\(payload\)/.test(dropSource)
@@ -1015,8 +1015,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
     assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
-    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*var\(--lt-text\)/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
-    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--lt-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
+    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'vanilla preview uses the stable neutral email-friendly text token');
+    assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--markdown-html-light-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
     assert.ok(/\.markdown-body pre code \.hljs-keyword,[\s\S]*color:\s*var\(--code-keyword\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js keyword color instead of relying on the external stylesheet');
@@ -1437,7 +1437,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('capturePaneViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing pane viewport through the shared helper');
     assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from a pane snapshots its live viewport');
     assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing pane viewport');
-    assert.ok(/function setFocusedTerminal\(session, options = \{\}\)[\s\S]*const alreadyFocused = focusedTerminal === session && focusedPanelItem === session[\s\S]*if \(alreadyFocused\) \{[\s\S]*options\.userInitiated === true[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null, options\)[\s\S]*return;[\s\S]*updateSessionButtonStates\(\);[\s\S]*for \(const activeSession of activeSessions\) updateTypingIndicator\(activeSession\)/.test(source), 'already-focused terminal input acknowledges attention without rerunning full focus chrome updates for every key');
+    assert.ok(/function setFocusedTerminalMeasured\(session, options = \{\}\)[\s\S]*const alreadyFocused = focusedTerminal === session && focusedPanelItem === session[\s\S]*if \(alreadyFocused\) \{[\s\S]*options\.userInitiated === true[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null, options\)[\s\S]*return;[\s\S]*updateFocusOnlyChrome\(\)/.test(source), 'already-focused terminal input acknowledges attention without rerunning the shared focus chrome updates for every key');
+    assert.ok(/function updateFocusOnlyChrome\(\)[\s\S]*updateTopbarActivityStatus\(\)[\s\S]*for \(const activeSession of activeSessions\) updateTypingIndicator\(activeSession\)[\s\S]*updatePanelInactiveOverlays\(\)/.test(source), 'changed focus refreshes all focus chrome through one shared parent');
     assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
     assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
     assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
@@ -1659,7 +1660,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(focusedPanelStart > 0 && focusedPanelEnd > focusedPanelStart, 'could not locate setFocusedPanelItem body');
     const focusedPanelBody = source.slice(focusedPanelStart, focusedPanelEnd);
     assert.equal(focusedPanelBody.includes('focusPreferencesSearch'), false, 'shared pane focus does not steal focus into Preferences search');
-    assert.ok(focusedPanelBody.includes('updateTypingIndicator(activeSession)'), 'shared pane focus refreshes every pane focus ring immediately');
+    assert.ok(focusedPanelBody.includes('updateFocusOnlyChrome()'), 'shared pane focus refreshes every pane focus ring through the shared focus-chrome parent');
     const panelShellStart = source.indexOf('function bindPanelShell(');
     const panelShellEnd = source.indexOf('const head = panel.querySelector', panelShellStart);
     assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
