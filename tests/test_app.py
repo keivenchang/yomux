@@ -90,6 +90,77 @@ def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch):
     assert any(record["system_cpu_count"] for record in second["history"]["records"])
 
 
+def test_stats_host_process_metrics_normalize_cpu_and_memory_to_the_whole_host(monkeypatch):
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1024 * 1024, 512 * 1024))
+    monkeypatch.setattr(app_module.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="11 python 200.0 256\n12 node 100.0 128\n13 python 40.0 64\n"))
+
+    cpu, memory = app_module.stats_host_process_metrics()
+
+    assert cpu["cpu:python"]["value"] == 60.0
+    assert cpu["cpu:node"]["value"] == 25.0
+    assert memory["memory:python"]["value"] == 31.25
+    assert memory["memory:node"]["value"] == 12.5
+
+
+def test_stats_GPU_gpu_metrics_use_processes_for_single_gpu_and_devices_for_many(monkeypatch):
+    responses = iter([
+        SimpleNamespace(returncode=0, stdout="0, GPU-0, 75, 4000, 8000\n"),
+        SimpleNamespace(returncode=0, stdout="GPU-0, 99, python, 2000\nGPU-0, 98, node, 1000\n"),
+        SimpleNamespace(returncode=0, stdout="# gpu pid type sm mem enc dec command\n0 99 C 60 10 0 0 python\n0 98 C 30 10 0 0 node\n"),
+    ])
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: next(responses))
+
+    metrics = app_module.stats_GPU_gpu_metrics()
+
+    assert metrics["devices"]["gpu:0"]["util_percent"] == 75.0
+    assert metrics["devices"]["gpu:0"]["memory_percent"] == 50.0
+    assert metrics["gpu_memory_processes"]["gpu-memory:python"]["value"] == 25.0
+    assert metrics["gpu_util_processes"]["gpu-util:python"]["value"] == 60.0
+
+
+def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
+    payload = app_module.plistlib.dumps([{
+        "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
+    }])
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    metrics = app_module.stats_macos_gpu_metrics()
+
+    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_percent": 25.0}
+    assert metrics["gpu_util_processes"] == {}
+
+
+def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    sample = {"time": time.time()}
+    webapp.stats_history_shared_host_metrics_available = False
+    with webapp.stats_agent_token_lock:
+        webapp.stats_agent_token_consumer_until = time.time() + 60
+    monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {
+        "system_memory_percent": 45,
+        "cpu_processes": {"cpu:python": {"label": "python", "value": 25}},
+        "memory_processes": {},
+        "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_percent": 50, "memory_percent": 40}},
+        "gpu_util_processes": {},
+        "gpu_memory_processes": {},
+    })
+    try:
+        assert webapp.stats_local_host_metrics_needed() is True
+        assert webapp.record_stats_local_host_sample(sample) is True
+        with webapp.stats_history_lock:
+            bucket = next(iter(webapp.stats_history_raw_buckets.values()))
+            metrics = bucket["host_metrics"]
+    finally:
+        webapp.control_server.stop()
+
+    assert metrics["system_memory_count"] == 1
+    assert metrics["cpu_processes"]["cpu:python"]["total_percent"] == 25
+    assert metrics["gpu_devices"]["gpu:0"]["util_total_percent"] == 50
+
+
 def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     wall_times = iter([1000.0, 1000.2, 1002.0])

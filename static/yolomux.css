@@ -3441,6 +3441,46 @@ body.theme-light .js-debug-graph-view {
   gap: 6px;
   min-width: 0;
 }
+.js-debug-hidden-charts {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.js-debug-hidden-charts-icon {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.js-debug-hidden-chart,
+.js-debug-chart-close {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--panel2);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-hidden-chart:hover,
+.js-debug-chart-close:hover {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+}
+.js-debug-chart-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-inline-start: auto;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+}
 .js-debug-range-slider-control datalist {
   display: none;
 }
@@ -3635,6 +3675,7 @@ body.theme-light .js-debug-graph-view {
   stroke-width: 0.3;
 }
 .js-debug-line {
+  stroke: var(--js-debug-series-color, var(--text));
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -3667,6 +3708,7 @@ body.theme-light .js-debug-graph-view {
   opacity: 1;
 }
 .js-debug-area {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
   opacity: 0.18;
 }
 .js-debug-bar {
@@ -3740,6 +3782,9 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-line--systemCpu {
   stroke: var(--bad);
+}
+.js-debug-line--systemMemory {
+  stroke: var(--accent-gold);
 }
 .js-debug-line--moving-average {
   opacity: 0.82;

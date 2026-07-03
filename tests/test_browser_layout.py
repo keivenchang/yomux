@@ -1162,7 +1162,7 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
             state.waiting = graph.textContent.includes('Waiting for server stats');
             state.chartCount = graph.querySelectorAll('[data-js-debug-chart]').length;
             state.renderedAtAfter = renderedAt;
-            return !state.waiting && state.chartCount === 6;
+                return !state.waiting && state.chartCount === 9;
             """
         )
     )
@@ -1522,6 +1522,77 @@ def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_serie
         assert chart["peerCovered"] is False, (key, metrics)
         assert chart["ranges"], (key, metrics)
         assert all(item["fill"] == "rgba(220, 38, 38, 0.12)" for item in chart["ranges"]), (key, metrics)
+
+
+def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const preferencesKey = 'yolomux.stats.ui_preferences.v1';
+        localStorage.removeItem(preferencesKey);
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        debugGraphApplyServerHistory({
+          sequence: 401,
+          records: [{
+            start: Math.floor(now / 1000), duration: 1, sequence: 401,
+            api_count: 1, cpu_total_percent: 5, cpu_count: 1,
+            system_cpu_total_percent: 20, system_cpu_count: 1,
+          }],
+        });
+        renderDebugPanels({force: true});
+        let panel = document.querySelector('.js-debug-panel');
+        const cpuClose = panel?.querySelector('[data-js-debug-chart-close="cpu"]');
+        cpuClose?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        const closed = !panel?.querySelector('[data-js-debug-chart="cpu"]');
+        const restore = panel?.querySelector('[data-js-debug-chart-restore="cpu"]');
+        restore?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        const restored = Boolean(panel?.querySelector('[data-js-debug-chart="cpu"]'));
+        panel?.querySelector('[data-js-debug-subtab="events"]')?.click();
+        panel?.querySelector('[data-js-debug-scale="30"]')?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        setDebugGraphRange(14400, {render: false});
+        panel?.querySelector('[data-js-debug-chart-close="gpuMemory"]')?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        return {
+          closed,
+          restoreVisible: Boolean(restore),
+          restored,
+          saved: JSON.parse(localStorage.getItem(preferencesKey) || '{}'),
+        };
+        """
+    )
+    assert metrics["closed"] is True, metrics
+    assert metrics["restoreVisible"] is True, metrics
+    assert metrics["restored"] is True, metrics
+    assert metrics["saved"] == {
+        "subTab": "events",
+        "scaleSeconds": 30,
+        "rangeSeconds": 14400,
+        "hiddenCharts": ["gpuMemory"],
+    }, metrics
+
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.js-debug-panel');
+            return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
+              && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
+              && document.querySelector('[data-js-debug-scale="30"]')?.getAttribute('aria-pressed') === 'true'
+              && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
+              && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
+            """
+        )
+    )
 
 
 def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):

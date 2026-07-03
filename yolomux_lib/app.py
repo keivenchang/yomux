@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import plistlib
 import random
 import re
 import resource
@@ -346,6 +347,10 @@ STATS_HISTORY_SERVER_FIELDS = (
     "tokens_per_agent_total",
     "agent_token_samples",
 )
+STATS_HOST_TOP_PROCESS_COUNT = 4
+STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
+STATS_HOST_PROCESS_CPU_LOCK = threading.Lock()
+STATS_HOST_PROCESS_CPU_PREVIOUS: dict[int, tuple[int, float]] = {}
 STATS_AGENT_TOKEN_HISTORY_FIELDS = frozenset({"tokens_per_agent_total", "agent_token_samples"})
 # Shared history uses this positional form only on disk. Keeping the field order in one place makes
 # the cross-process snapshot compact while readers still accept the older dictionary form.
@@ -356,7 +361,9 @@ STATS_HISTORY_SHARED_BUCKET_FIELDS = (
     "server_sequence",
     *STATS_HISTORY_SERVER_FIELDS,
     "agent_token_rates",
+    "host_metrics",
 )
+STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY = STATS_HISTORY_SHARED_BUCKET_FIELDS[:-1]
 STATS_CLIENT_HISTORY_VERSION = common.STATS_CLIENT_HISTORY_VERSION
 STATS_CLIENT_HISTORY_BUCKET_FIELDS = ("start", "duration", "sequence", "clients", "servers")
 STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
@@ -438,6 +445,266 @@ def current_system_cpu_percent_from_ps() -> float | None:
     return clamp_cpu_percent(total / max(1, os.cpu_count() or 1))
 
 
+def current_system_memory_bytes() -> tuple[int, int] | None:
+    """Return (total, used) host memory without requiring an optional dependency."""
+    try:
+        fields = {
+            key.rstrip(":"): int(value) * 1024
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+            if (parts := line.split()) and len(parts) >= 2
+            for key, value in [(parts[0], parts[1])]
+        }
+        total = fields.get("MemTotal", 0)
+        available = fields.get("MemAvailable", fields.get("MemFree", 0))
+        if total > 0 and 0 <= available <= total:
+            return total, total - available
+    except (OSError, ValueError):
+        pass
+    if sys.platform != "darwin":
+        return None
+    try:
+        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS, check=False).stdout.strip())
+        vm_stat = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS, check=False).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    page_size_match = re.search(r"page size of (\d+) bytes", vm_stat)
+    if total <= 0 or page_size_match is None:
+        return None
+    page_size = int(page_size_match.group(1))
+    pages: dict[str, int] = {}
+    for line in vm_stat.splitlines():
+        match = re.match(r"Pages ([^:]+):\s+(\d+)\.", line)
+        if match:
+            pages[match.group(1)] = int(match.group(2))
+    available = (pages.get("free", 0) + pages.get("speculative", 0)) * page_size
+    return total, max(0, total - min(total, available))
+
+
+def current_system_memory_percent() -> float | None:
+    memory = current_system_memory_bytes()
+    if memory is None or memory[0] <= 0:
+        return None
+    return clamp_cpu_percent((memory[1] / memory[0]) * 100.0)
+
+
+def stats_host_process_metrics() -> tuple[dict[str, dict[str, float | str]], dict[str, dict[str, float | str]]]:
+    """Return top CPU and RSS process groups as percentages of whole-host capacity."""
+    memory = current_system_memory_bytes()
+    memory_total = memory[0] if memory is not None else 0
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,comm=,pcpu=,rss="],
+            capture_output=True,
+            text=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, {}
+    if result.returncode != 0:
+        return {}, {}
+    cpu_by_name: dict[str, float] = {}
+    memory_by_name: dict[str, float] = {}
+    cpu_count = max(1, os.cpu_count() or 1)
+    now = time.perf_counter()
+    seen_pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        name = Path(parts[1]).name[:96] or "process"
+        try:
+            fallback_cpu_percent = max(0.0, float(parts[-2])) / cpu_count
+            rss_percent = max(0.0, float(parts[-1]) * 1024 / memory_total * 100.0) if memory_total > 0 else 0.0
+        except ValueError:
+            continue
+        cpu_percent = fallback_cpu_percent
+        if sys.platform != "darwin":
+            try:
+                after_name = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+                ticks = int(after_name[11]) + int(after_name[12])
+                with STATS_HOST_PROCESS_CPU_LOCK:
+                    previous = STATS_HOST_PROCESS_CPU_PREVIOUS.get(pid)
+                    STATS_HOST_PROCESS_CPU_PREVIOUS[pid] = (ticks, now)
+                if previous is not None and now > previous[1]:
+                    cpu_percent = clamp_cpu_percent(((ticks - previous[0]) / max(1, os.sysconf("SC_CLK_TCK"))) / (now - previous[1]) * 100.0 / cpu_count)
+                seen_pids.add(pid)
+            except (OSError, ValueError, IndexError):
+                pass
+        cpu_by_name[name] = cpu_by_name.get(name, 0.0) + cpu_percent
+        memory_by_name[name] = memory_by_name.get(name, 0.0) + rss_percent
+
+    if sys.platform != "darwin":
+        with STATS_HOST_PROCESS_CPU_LOCK:
+            for pid in list(STATS_HOST_PROCESS_CPU_PREVIOUS):
+                if pid not in seen_pids:
+                    STATS_HOST_PROCESS_CPU_PREVIOUS.pop(pid, None)
+
+    def top(values: dict[str, float], prefix: str) -> dict[str, dict[str, float | str]]:
+        return {
+            f"{prefix}:{name}": {"label": name, "value": round(clamp_cpu_percent(value), 4)}
+            for name, value in sorted(values.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
+            if value > 0
+        }
+
+    return top(cpu_by_name, "cpu"), top(memory_by_name, "memory")
+
+
+def stats_GPU_gpu_metrics() -> dict[str, Any]:
+    """Collect GPU device and process facts through the installed driver CLI, if present."""
+    try:
+        devices_result = subprocess.run(
+            ["gpu-info", "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if devices_result.returncode != 0:
+        return {}
+    devices: dict[str, dict[str, float | str]] = {}
+    device_by_uuid: dict[str, str] = {}
+    for line in devices_result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 5:
+            continue
+        try:
+            index = int(parts[0])
+            util = clamp_cpu_percent(float(parts[2]))
+            memory_used = max(0.0, float(parts[3]))
+            memory_total = max(0.0, float(parts[4]))
+        except ValueError:
+            continue
+        key = f"gpu:{index}"
+        devices[key] = {"label": f"GPU {index}", "util_percent": util, "memory_percent": clamp_cpu_percent(memory_used / memory_total * 100.0) if memory_total else 0.0}
+        device_by_uuid[parts[1]] = key
+    if not devices:
+        return {}
+    gpu_memory_processes: dict[str, dict[str, float | str]] = {}
+    try:
+        apps_result = subprocess.run(
+            ["gpu-info", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        apps_result = None
+    if len(devices) == 1 and apps_result is not None and apps_result.returncode == 0:
+        # gpu-info does not include total memory on app rows. Re-read it from the device line.
+        device_total = 0.0
+        for line in devices_result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) == 5:
+                try:
+                    device_total = float(parts[4])
+                except ValueError:
+                    pass
+        if device_total > 0:
+            grouped: dict[str, float] = {}
+            for line in apps_result.stdout.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) < 4 or parts[0] not in device_by_uuid:
+                    continue
+                try:
+                    value = max(0.0, float(parts[-1])) / device_total * 100.0
+                except ValueError:
+                    continue
+                name = Path(parts[2]).name[:96] or "process"
+                grouped[name] = grouped.get(name, 0.0) + value
+            gpu_memory_processes = {
+                f"gpu-memory:{name}": {"label": name, "value": round(value, 4)}
+                for name, value in sorted(grouped.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
+                if value > 0
+            }
+    gpu_util_processes: dict[str, dict[str, float | str]] = {}
+    try:
+        pmon_result = subprocess.run(
+            ["gpu-info", "pmon", "-c", "1", "-s", "um"],
+            capture_output=True,
+            text=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pmon_result = None
+    if len(devices) == 1 and pmon_result is not None and pmon_result.returncode == 0:
+        grouped: dict[str, float] = {}
+        for line in pmon_result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 8 or parts[0].startswith("#") or parts[1] == "-":
+                continue
+            try:
+                value = clamp_cpu_percent(float(parts[3]))
+            except ValueError:
+                continue
+            name = Path(parts[7]).name[:96] or "process"
+            grouped[name] = grouped.get(name, 0.0) + value
+        gpu_util_processes = {
+            f"gpu-util:{name}": {"label": name, "value": round(value, 4)}
+            for name, value in sorted(grouped.items(), key=lambda item: (-item[1], item[0]))[:STATS_HOST_TOP_PROCESS_COUNT]
+            if value > 0
+        }
+    return {"devices": devices, "gpu_memory_processes": gpu_memory_processes, "gpu_util_processes": gpu_util_processes}
+
+
+def stats_macos_gpu_metrics() -> dict[str, Any]:
+    """Use macOS IORegistry's public aggregate GPU counters; macOS exposes no per-process GPU API."""
+    if sys.platform != "darwin":
+        return {}
+    try:
+        result = subprocess.run(
+            ["ioreg", "-a", "-r", "-d1", "-w0", "-c", "IOAccelerator"],
+            capture_output=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+        records = plistlib.loads(result.stdout) if result.returncode == 0 and result.stdout else []
+    except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException):
+        return {}
+    if not isinstance(records, list):
+        return {}
+    memory = current_system_memory_bytes()
+    total_memory = memory[0] if memory is not None else 0
+    devices: dict[str, dict[str, float | str]] = {}
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        stats = record.get("PerformanceStatistics")
+        if not isinstance(stats, dict):
+            continue
+        util = stats.get("GPU Activity(%)", stats.get("GPU Activity", 0))
+        used = stats.get("In use system memory", stats.get("In use video memory", 0))
+        try:
+            util_percent = clamp_cpu_percent(float(util))
+            memory_percent = clamp_cpu_percent(float(used) / total_memory * 100.0) if total_memory > 0 else 0.0
+        except (TypeError, ValueError):
+            continue
+        devices[f"gpu:{index}"] = {"label": f"GPU {index}", "util_percent": util_percent, "memory_percent": memory_percent}
+    return {"devices": devices, "gpu_memory_processes": {}, "gpu_util_processes": {}} if devices else {}
+
+
+def stats_host_resource_metrics() -> dict[str, Any]:
+    cpu_processes, memory_processes = stats_host_process_metrics()
+    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics()
+    memory_percent = current_system_memory_percent()
+    return {
+        "system_memory_percent": memory_percent,
+        "cpu_processes": cpu_processes,
+        "memory_processes": memory_processes,
+        "gpu_devices": gpu.get("devices", {}),
+        "gpu_util_processes": gpu.get("gpu_util_processes", {}),
+        "gpu_memory_processes": gpu.get("gpu_memory_processes", {}),
+    }
+
+
 def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
     return {
         "start": start,
@@ -464,8 +731,21 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "tokens_per_agent_total": 0.0,
         "agent_token_samples": 0.0,
         "agent_token_rates": {},
+        "host_metrics": stats_history_empty_host_metrics(),
         "clients": {},
         "servers": {},
+    }
+
+
+def stats_history_empty_host_metrics() -> dict[str, Any]:
+    return {
+        "system_memory_total_percent": 0.0,
+        "system_memory_count": 0.0,
+        "cpu_processes": {},
+        "memory_processes": {},
+        "gpu_util_processes": {},
+        "gpu_memory_processes": {},
+        "gpu_devices": {},
     }
 
 
@@ -1335,6 +1615,7 @@ class TmuxWebtermApp:
         self.stats_history_sequence = 0
         self.stats_history_shared_rev = -1
         self.stats_history_shared_loaded = False
+        self.stats_history_shared_host_metrics_available = False
         self.stats_history_shared_write_lock = threading.Lock()
         self.stats_history_shared_next_write_at = 0.0
         self.stats_client_history_merge_lock = threading.Lock()
@@ -1540,6 +1821,119 @@ class TmuxWebtermApp:
             changed = True
         return changed
 
+    @staticmethod
+    def stats_history_host_metrics_snapshot(value: Any) -> dict[str, Any]:
+        source = value if isinstance(value, dict) else {}
+        result = stats_history_empty_host_metrics()
+        for field in ("system_memory_total_percent", "system_memory_count"):
+            result[field] = max(0.0, float(source.get(field) or 0.0))
+        for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
+            items = source.get(field)
+            if not isinstance(items, dict):
+                continue
+            target: dict[str, dict[str, Any]] = {}
+            for raw_key, raw_item in items.items():
+                key = str(raw_key or "").strip()
+                if not key or not isinstance(raw_item, dict):
+                    continue
+                item = {"label": str(raw_item.get("label") or key)}
+                if field == "gpu_devices":
+                    for value_key in ("util_total_percent", "memory_total_percent", "samples"):
+                        item[value_key] = max(0.0, float(raw_item.get(value_key) or 0.0))
+                else:
+                    item["total_percent"] = max(0.0, float(raw_item.get("total_percent") or 0.0))
+                    item["samples"] = max(0.0, float(raw_item.get("samples") or 0.0))
+                target[key] = item
+            result[field] = target
+        return result
+
+    def stats_history_record_host_metrics_locked(self, bucket: dict[str, Any], metrics: Any) -> bool:
+        if not isinstance(metrics, dict):
+            return False
+        target = bucket.get("host_metrics")
+        if not isinstance(target, dict):
+            target = stats_history_empty_host_metrics()
+            bucket["host_metrics"] = target
+        changed = False
+        memory_percent = metrics.get("system_memory_percent")
+        if isinstance(memory_percent, (int, float)) and math.isfinite(memory_percent):
+            target["system_memory_total_percent"] = float(target.get("system_memory_total_percent") or 0.0) + clamp_cpu_percent(float(memory_percent))
+            target["system_memory_count"] = float(target.get("system_memory_count") or 0.0) + 1.0
+            changed = True
+        for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes"):
+            source = metrics.get(field)
+            if not isinstance(source, dict):
+                continue
+            values = target.setdefault(field, {})
+            for raw_key, raw_item in source.items():
+                key = str(raw_key or "").strip()
+                if not key or not isinstance(raw_item, dict):
+                    continue
+                try:
+                    value = clamp_cpu_percent(float(raw_item.get("value") or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), "total_percent": 0.0, "samples": 0.0})
+                item["label"] = str(raw_item.get("label") or item.get("label") or key)
+                item["total_percent"] = float(item.get("total_percent") or 0.0) + value
+                item["samples"] = float(item.get("samples") or 0.0) + 1.0
+                changed = True
+        devices = metrics.get("gpu_devices")
+        if isinstance(devices, dict):
+            values = target.setdefault("gpu_devices", {})
+            for raw_key, raw_item in devices.items():
+                key = str(raw_key or "").strip()
+                if not key or not isinstance(raw_item, dict):
+                    continue
+                try:
+                    util = clamp_cpu_percent(float(raw_item.get("util_percent") or 0.0))
+                    memory = clamp_cpu_percent(float(raw_item.get("memory_percent") or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                item = values.setdefault(key, {"label": str(raw_item.get("label") or key), "util_total_percent": 0.0, "memory_total_percent": 0.0, "samples": 0.0})
+                item["label"] = str(raw_item.get("label") or item.get("label") or key)
+                item["util_total_percent"] = float(item.get("util_total_percent") or 0.0) + util
+                item["memory_total_percent"] = float(item.get("memory_total_percent") or 0.0) + memory
+                item["samples"] = float(item.get("samples") or 0.0) + 1.0
+                changed = True
+        return changed
+
+    def stats_history_merge_host_metrics_locked(self, target_bucket: dict[str, Any], source_metrics: Any) -> None:
+        source = self.stats_history_host_metrics_snapshot(source_metrics)
+        target = target_bucket.get("host_metrics")
+        if not isinstance(target, dict):
+            target = stats_history_empty_host_metrics()
+            target_bucket["host_metrics"] = target
+        for field in ("system_memory_total_percent", "system_memory_count"):
+            target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
+        for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
+            destination = target.setdefault(field, {})
+            for key, source_item in source[field].items():
+                if field == "gpu_devices":
+                    item = destination.setdefault(key, {"label": source_item["label"], "util_total_percent": 0.0, "memory_total_percent": 0.0, "samples": 0.0})
+                    for value_key in ("util_total_percent", "memory_total_percent", "samples"):
+                        item[value_key] = float(item.get(value_key) or 0.0) + float(source_item.get(value_key) or 0.0)
+                else:
+                    item = destination.setdefault(key, {"label": source_item["label"], "total_percent": 0.0, "samples": 0.0})
+                    item["total_percent"] = float(item.get("total_percent") or 0.0) + float(source_item.get("total_percent") or 0.0)
+                    item["samples"] = float(item.get("samples") or 0.0) + float(source_item.get("samples") or 0.0)
+                item["label"] = str(source_item.get("label") or item.get("label") or key)
+
+    def stats_history_apply_host_metrics_locked(self, bucket: dict[str, Any], source_metrics: Any) -> None:
+        bucket["host_metrics"] = self.stats_history_host_metrics_snapshot(source_metrics)
+
+    def stats_history_shared_snapshots_have_host_metrics(self, snapshots: list[Any]) -> bool:
+        for snapshot in snapshots:
+            source = self.stats_history_shared_bucket_from_snapshot(snapshot)
+            if source is None or source.get("_host_metrics_missing") is True:
+                continue
+            metrics = self.stats_history_host_metrics_snapshot(source.get("host_metrics"))
+            if float(metrics.get("system_memory_count") or 0.0) > 0:
+                return True
+            if any(bool(metrics.get(field)) for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices")):
+                return True
+        return False
+
     def stats_history_merge_record_locked(
         self,
         record: dict[str, Any],
@@ -1580,6 +1974,7 @@ class TmuxWebtermApp:
         for key in STATS_HISTORY_SERVER_FIELDS:
             target[key] = float(target.get(key) or 0.0) + float(source.get(key) or 0.0)
         self.stats_history_merge_agent_token_rates_locked(target, source.get("agent_token_rates"))
+        self.stats_history_merge_host_metrics_locked(target, source.get("host_metrics"))
         target["server_sequence"] = max(int(target.get("server_sequence") or 0), int(source.get("server_sequence") or 0))
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(target.get("server_sequence") or 0))
         source_clients = source.get("clients")
@@ -1741,6 +2136,7 @@ class TmuxWebtermApp:
                     for key, item in sorted((bucket.get("agent_token_rates") or {}).items())
                     if isinstance(item, dict)
                 ],
+                "host_metrics": self.stats_history_host_metrics_snapshot(bucket.get("host_metrics")),
             })
         return sorted(records, key=lambda item: (item["start"], item["duration"], item["sequence"]))
 
@@ -1941,13 +2337,18 @@ class TmuxWebtermApp:
             sequence,
             *(float(bucket.get(key) or 0.0) for key in STATS_HISTORY_SERVER_FIELDS),
             self.stats_history_agent_token_rates_snapshot(bucket.get("agent_token_rates")),
+            self.stats_history_host_metrics_snapshot(bucket.get("host_metrics")),
         ]
 
     @staticmethod
     def stats_history_shared_bucket_from_snapshot(snapshot: Any) -> dict[str, Any] | None:
         if isinstance(snapshot, dict):
             return snapshot
-        if not isinstance(snapshot, list) or len(snapshot) != len(STATS_HISTORY_SHARED_BUCKET_FIELDS):
+        if not isinstance(snapshot, list):
+            return None
+        if len(snapshot) == len(STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY):
+            return {**dict(zip(STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY, snapshot, strict=True)), "host_metrics": stats_history_empty_host_metrics(), "_host_metrics_missing": True}
+        if len(snapshot) != len(STATS_HISTORY_SHARED_BUCKET_FIELDS):
             return None
         return dict(zip(STATS_HISTORY_SHARED_BUCKET_FIELDS, snapshot, strict=True))
 
@@ -2508,6 +2909,34 @@ class TmuxWebtermApp:
             bucket["server_sequence"] = 0
             self.stats_history_refresh_bucket_sequence_locked(bucket)
 
+    def stats_history_has_host_metrics_locked(self) -> bool:
+        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+            metrics = bucket.get("host_metrics")
+            if not isinstance(metrics, dict):
+                continue
+            if float(metrics.get("system_memory_count") or 0.0) > 0:
+                return True
+            if any(bool(metrics.get(field)) for field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices")):
+                return True
+        return False
+
+    def stats_local_host_metrics_needed(self) -> bool:
+        if self.stats_history_shared_host_metrics_available:
+            return False
+        with self.stats_agent_token_lock:
+            return self.stats_agent_token_consumer_until > time.time()
+
+    def record_stats_local_host_sample(self, sample: dict[str, Any]) -> bool:
+        metrics = stats_host_resource_metrics()
+        now = float(sample.get("time") or time.time())
+        with self.stats_history_lock:
+            bucket = self.stats_history_bucket_locked(now, now)
+            if bucket is None or not self.stats_history_record_host_metrics_locked(bucket, metrics):
+                return False
+            self.stats_history_mark_server_changed_locked(bucket)
+            self.stats_history_compact_locked(now)
+        return True
+
     def stats_history_apply_shared_bucket_locked(self, snapshot: Any, include_agent_tokens: bool = True) -> None:
         source = self.stats_history_shared_bucket_from_snapshot(snapshot)
         if source is None:
@@ -2528,6 +2957,8 @@ class TmuxWebtermApp:
         for field in STATS_HISTORY_SERVER_FIELDS:
             bucket[field] = 0.0 if not include_agent_tokens and field in STATS_AGENT_TOKEN_HISTORY_FIELDS else float(source.get(field) or 0.0)
         bucket["agent_token_rates"] = self.stats_history_agent_token_rates_snapshot(source.get("agent_token_rates")) if include_agent_tokens else {}
+        if source.get("_host_metrics_missing") is not True:
+            self.stats_history_apply_host_metrics_locked(bucket, source.get("host_metrics"))
         server_sequence = int((source.get("server_sequence") if "server_sequence" in source else source.get("sequence")) or 0)
         bucket["server_sequence"] = server_sequence
         self.stats_history_refresh_bucket_sequence_locked(bucket)
@@ -2553,6 +2984,8 @@ class TmuxWebtermApp:
             for field in STATS_HISTORY_SERVER_FIELDS:
                 bucket[field] = 0.0 if not include_agent_tokens and field in STATS_AGENT_TOKEN_HISTORY_FIELDS else float(source.get(field) or 0.0)
             bucket["agent_token_rates"] = self.stats_history_agent_token_rates_snapshot(source.get("agent_token_rates")) if include_agent_tokens else {}
+            if source.get("_host_metrics_missing") is not True:
+                self.stats_history_apply_host_metrics_locked(bucket, source.get("host_metrics"))
             bucket["server_sequence"] = source_server_sequence
         self.stats_history_refresh_bucket_sequence_locked(bucket)
 
@@ -2569,6 +3002,7 @@ class TmuxWebtermApp:
         include_agent_tokens = self.stats_history_agent_tokens_compatible(stats_history)
         raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
         rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
+        self.stats_history_shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
         with self.stats_history_lock:
             for bucket in [*rollup_buckets, *raw_buckets]:
                 self.stats_history_merge_shared_bucket_locked(bucket, include_agent_tokens=include_agent_tokens)
@@ -2621,6 +3055,7 @@ class TmuxWebtermApp:
             include_agent_tokens = self.stats_history_agent_tokens_compatible(stats_history)
             raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
             rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
+            self.stats_history_shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
             with self.stats_history_lock:
                 self.stats_history_clear_server_fields_locked()
                 for bucket in [*rollup_buckets, *raw_buckets]:
@@ -3035,6 +3470,11 @@ class TmuxWebtermApp:
             phase_started = time.perf_counter()
         sample, record_cpu_sample = self.current_stats_sample()
         phase_ms["sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
+        phase_started = time.perf_counter()
+        # Process/GPU enumeration may invoke driver CLIs. Keep the first UI request responsive;
+        # the dedicated one-second sampler owns this host-wide work and fills the next bucket.
+        host_metrics = stats_host_resource_metrics() if record_cpu_sample and trigger == "sampler" else {}
+        phase_ms["host_resources_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         if record_cpu_sample:
             phase_started = time.perf_counter()
             self.record_stats_process_sample(sample)
@@ -3060,6 +3500,9 @@ class TmuxWebtermApp:
                 if agent_record:
                     record.update(agent_record)
                 self.stats_history_merge_record_locked(record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
+                bucket = self.stats_history_bucket_locked(float(sample["time"]), now)
+                if bucket is not None and self.stats_history_record_host_metrics_locked(bucket, host_metrics):
+                    self.stats_history_mark_server_changed_locked(bucket)
                 for token_record in agent_token_records:
                     if isinstance(token_record, dict):
                         self.stats_history_merge_record_locked(token_record, now, fields=STATS_HISTORY_SERVER_FIELDS, client_id=None)
@@ -3091,6 +3534,8 @@ class TmuxWebtermApp:
                         if record_cpu_sample:
                             self.record_stats_process_sample(sample)
                         self.merge_shared_stats_history(max_age_seconds=None)
+                        if record_cpu_sample and self.stats_local_host_metrics_needed():
+                            self.record_stats_local_host_sample(sample)
                     else:
                         self.record_stats_global_sample(trigger="sampler")
                 except (OSError, RuntimeError, ValueError) as exc:

@@ -3012,7 +3012,7 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
-    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', ...DEBUG_AGENT_STATUS_SERIES, 'tokensPerAgent', 'systemCpu'], 'graph tracks the fixed API, SSE, latency, bandwidth, agent activity, agent token, and system CPU series while process CPU series are discovered dynamically');
+    assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', ...DEBUG_AGENT_STATUS_SERIES, 'tokensPerAgent', 'systemCpu', 'systemMemory'], 'graph tracks the fixed API, SSE, latency, bandwidth, agent activity, agent token, CPU, and system-memory series while process series are discovered dynamically');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
     api.recordJsDebugStatsSampleForTest({
       uptime_seconds: 3661,
@@ -3129,7 +3129,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>[0-9.]+(?:B|kB|MB)</.test(html), 'bandwidth chart Y axis uses compact byte labels');
     assert.ok(/data-js-debug-axis-max="cpu"[^>]*>[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
-    assert.ok(html.includes('system avg CPU %'), 'CPU chart includes system average CPU beside yolomux.py CPU');
+    assert.ok(html.includes('system avg CPU %'), 'CPU chart includes the host CPU total beside its stacked process areas');
     assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 20'), 'graph renders restarted process metadata with retained sequence');
   });
 
@@ -3305,7 +3305,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>5s</.test(html), 'latency chart Y axis converts large millisecond values to terse seconds');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>1\.0kB</.test(html), 'bandwidth chart Y axis keeps byte labels terse');
     assert.ok(/data-js-debug-axis-max="cpu"[^>]*>100%</.test(html), 'CPU chart Y axis always uses a 0-100% scale');
-    assert.ok(html.includes('yolomux.py CPU %') && html.includes('system avg CPU %'), 'CPU legend shows process and system CPU series together');
+    assert.ok(html.includes('system avg CPU %'), 'CPU legend keeps the host CPU total visible with process areas');
     assert.ok(html.includes('data-js-debug-x-tick="start"') && html.includes('data-js-debug-x-tick="mid"') && html.includes('data-js-debug-x-tick="end"'), 'split charts render start/mid/end time ticks on the X axis');
   });
 
@@ -3511,7 +3511,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend has no current-versus-peer split');
   });
 
-  test('YO!stats graph renders one persisted CPU series per yolomux server', () => {
+  test('YO!stats graph renders top four host process areas and GPU device lines', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {locationPort: '8001'});
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -3523,34 +3523,40 @@ async function runEditorPreviewSuite() {
         sequence: 74,
         system_cpu_total_percent: 40,
         system_cpu_count: 1,
-        servers: {
-          'port:7777': {label: 'yolomux.py :7777', cpu_total_percent: 7, cpu_count: 1},
-          'port:8001': {label: 'yolomux.py :8001', cpu_total_percent: 11, cpu_count: 1},
-          'port:8002': {label: 'yolomux.py :8002', cpu_total_percent: 22, cpu_count: 1},
-          'port:8003': {label: 'yolomux.py :8003', cpu_total_percent: 33, cpu_count: 1},
+        host_metrics: {
+          system_memory_total_percent: 55,
+          system_memory_count: 1,
+          cpu_processes: {
+            'cpu:python': {label: 'python', total_percent: 30, samples: 1},
+            'cpu:node': {label: 'node', total_percent: 20, samples: 1},
+            'cpu:chrome': {label: 'chrome', total_percent: 10, samples: 1},
+            'cpu:xterm': {label: 'xterm', total_percent: 5, samples: 1},
+            'cpu:ignored': {label: 'ignored', total_percent: 1, samples: 1},
+          },
+          memory_processes: {
+            'memory:python': {label: 'python', total_percent: 20, samples: 1},
+            'memory:node': {label: 'node', total_percent: 10, samples: 1},
+          },
+          gpu_devices: {
+            'gpu:0': {label: 'GPU 0', util_total_percent: 70, memory_total_percent: 60, samples: 1},
+            'gpu:1': {label: 'GPU 1', util_total_percent: 40, memory_total_percent: 30, samples: 1},
+          },
         },
       }],
     });
-    const cpuSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.processCpu === true);
-    assert.deepStrictEqual([...cpuSeries.map(series => series.label)], [
-      'yolomux.py :7777 CPU %',
-      'yolomux.py :8001 CPU %',
-      'yolomux.py :8002 CPU %',
-      'yolomux.py :8003 CPU %',
-    ], 'CPU series are stable and ordered by server label');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [7, 11, 22, 33], 'each server keeps its own CPU samples');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.linePattern)], ['dot', 'solid', 'dot', 'dot'], 'only the YOLOmux server on the current browser port uses a solid CPU line');
-    assert.deepStrictEqual([...cpuSeries.map(series => series.color)], ['var(--bad)', 'var(--active-accent-bright)', 'var(--accent-gold)', 'var(--link-soft)'], 'the current server is envy green regardless of sort position and peers use the shared non-green palette');
+    const allSeries = api.debugGraphSeriesDataForTest(now);
+    const cpuSeries = allSeries.filter(series => series.hostMetric === 'cpu');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.label)], ['python', 'node', 'chrome', 'xterm'], 'CPU retains only the four largest process groups');
+    assert.deepStrictEqual([...cpuSeries.map(series => series.values.at(-1))], [30, 20, 10, 5], 'CPU process values are normalized to total host capacity');
+    assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:ignored'), false, 'smaller CPU groups do not create a fifth area');
+    assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
     const html = api.debugPanelHtmlForTest();
-    for (const port of ['7777', '8001', '8002', '8003']) {
-      assert.ok(html.includes(`data-js-debug-series="cpu:port:${port}"`) && html.includes(`yolomux.py :${port} CPU %`), `CPU chart renders server ${port}`);
-    }
-    assert.match(html, /data-js-debug-series="cpu:port:8001"[^>]*data-js-debug-line-pattern="solid"/, 'current YOLOmux CPU plot is solid');
-    for (const port of ['7777', '8002', '8003']) {
-      assert.match(html, new RegExp(`data-js-debug-series="cpu:port:${port}"[^>]*data-js-debug-line-pattern="dot"`), `peer YOLOmux ${port} CPU plot is dotted`);
-    }
-    assert.match(html, /data-js-debug-series="systemCpu"[^>]*data-js-debug-line-pattern="solid"/, 'system CPU plot is solid');
-    assert.ok(html.includes('system avg CPU %'), 'one system CPU series remains beside all process series');
+    assert.match(html, /data-js-debug-chart="cpu" data-js-debug-chart-kind="area"[^>]*data-js-debug-chart-stacked="true"/, 'CPU renders cumulative process areas');
+    assert.match(html, /data-js-debug-area-series="host:cpu:cpu:python"[^>]*data-js-debug-area-stacked=/, 'CPU process areas expose stacked geometry');
+    assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
+    assert.ok(html.includes('data-js-debug-chart-close="cpu"'), 'every chart has a compact X close control');
+    const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-restore'), 'YO!stats preferences persist browser-local chart visibility and restore markup');
   });
 
   test('YO!stats graph renders server-shared agent status and token bars', () => {
@@ -3601,7 +3607,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
-    assert.deepStrictEqual([...summary.charts], ['latency', 'count', 'bandwidth', 'cpu', 'activity', 'agentTokens'], 'YO!stats charts render in scan order: latency, API/SSE, bandwidth, CPU, agent status, agent tokens');
+    assert.deepStrictEqual([...summary.charts], ['cpu', 'memory', 'gpuUtil', 'gpuMemory', 'latency', 'count', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats renders host CPU/memory and GPU/GPU-memory before client and agent charts');
 
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
@@ -3776,13 +3782,19 @@ async function runEditorPreviewSuite() {
     const scale = new TestElement('graph-scale', 'button');
     const range = new TestElement('graph-range', 'button');
     const slider = new TestElement('graph-range-slider', 'input');
+    const chartClose = new TestElement('graph-chart-close', 'button');
+    const chartRestore = new TestElement('graph-chart-restore', 'button');
     scale.dataset.jsDebugScale = '10';
     range.dataset.jsDebugRange = '7200';
     slider.dataset.jsDebugRangeSlider = '';
+    chartClose.dataset.jsDebugChartClose = 'cpu';
+    chartRestore.dataset.jsDebugChartRestore = 'cpu';
     slider.value = '7';
     panel.appendChild(scale);
     panel.appendChild(range);
     panel.appendChild(slider);
+    panel.appendChild(chartClose);
+    panel.appendChild(chartRestore);
     api.bindDebugPanelForTest(panel);
     const pointerdown = panel.listeners.get('pointerdown')[0];
     const input = panel.listeners.get('input')[0];
@@ -3805,6 +3817,33 @@ async function runEditorPreviewSuite() {
     change({type: 'change', target: slider, preventDefault() {}});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider change commits the matching range stop after dragging');
     assert.equal(slider.value, '7', 'range slider change snaps the thumb to the nearest preset stop');
+    pointerdown({target: chartClose, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), false, 'one X click hides the selected graph without changing range or scale');
+    assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-chart-restore="cpu"'), 'a closed graph moves to the compact restore strip at the top');
+    pointerdown({target: chartRestore, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'the top restore chip reopens the graph');
+  });
+
+  test('YO!stats graph choices survive a browser reload', () => {
+    const preferencesKey = 'yolomux.stats.ui_preferences.v1';
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.setDebugSubTabForTest('events');
+    api.setDebugGraphScaleForTest(30);
+    api.setDebugGraphRangeForTest(4 * 60 * 60);
+    api.setDebugGraphChartVisibleForTest('gpuMemory', false);
+    const saved = api.storageValueForTest(preferencesKey);
+    assert.ok(saved, 'YO!stats writes its UI choices to browser preferences');
+
+    const reloaded = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      localStorage: {[preferencesKey]: saved},
+    });
+    const html = reloaded.debugPanelHtmlForTest();
+    const summary = reloaded.debugGraphBucketSummaryForTest();
+    assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'the selected YO!stats sub-tab survives reload');
+    assert.equal(summary.scaleSeconds, 30, 'the graph aggregation scale survives reload');
+    assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
+    assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
+    assert.ok(html.includes('data-js-debug-chart-restore="gpuMemory"'), 'the top restore strip retains a closed chart after reload');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
@@ -4174,8 +4213,9 @@ async function runEditorPreviewSuite() {
     for (const chart of ['latency', 'count', 'bandwidth']) {
       assert.ok(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-disconnected-range=`).test(html), `YO!stats renders the bad-connection block in the ${chart} chart`);
     }
-    for (const chart of ['cpu', 'activity', 'agentTokens']) {
-      assert.equal(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-disconnected-range=`).test(html), false, `YO!stats does not render bad-connection blocks in server-side ${chart} chart`);
+    const chartHtml = chart => html.match(new RegExp(`<section[^>]*data-js-debug-chart="${chart}"[\\s\\S]*?<\\/section>`))?.[0] || '';
+    for (const chart of ['cpu', 'memory', 'gpuUtil', 'gpuMemory', 'activity', 'agentTokens']) {
+      assert.equal(chartHtml(chart).includes('data-js-debug-disconnected-range='), false, `YO!stats does not render bad-connection blocks in server-side ${chart} chart`);
     }
     assert.ok(/class="js-debug-disconnected-range"[^>]* y="0"[^>]* height="120"/.test(html), 'bad-connection overlays cover the full SVG graph area');
     assert.ok(html.includes('Bad connection: no data collected for'), 'bad-connection overlays explain the missing collection interval');
