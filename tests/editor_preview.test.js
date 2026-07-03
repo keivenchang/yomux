@@ -3135,9 +3135,10 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-bar--idleAgents\s*\{[\s\S]*opacity:\s*var\(--js-debug-agent-idle-bar-opacity\)/.test(debugPaneCss), 'YO!stats idle bars use the separate faint opacity');
     assert.ok(/\.js-debug-line--idleAgents\s*\{[\s\S]*stroke:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle line uses the darker idle status stroke');
     assert.ok(/\.js-debug-legend-swatch--idleAgents\s*\{[\s\S]*color:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle legend uses the darker idle status color');
-    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*overflow:\s*auto/.test(debugPaneCss) && /\.js-debug-chart-shell\s*\{[\s\S]*flex:\s*0 0 auto/.test(debugPaneCss), 'YO!stats scrolls whole chart cards instead of compressing them beneath a fixed outer graph frame');
+    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*display:\s*flex[\s\S]*overflow:\s*auto/.test(debugPaneCss) && /\.js-debug-chart-shell\s*\{[\s\S]*flex:\s*1 0 auto/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid\s*\{[\s\S]*grid-auto-rows:\s*minmax\(var\(--js-debug-chart-min-height\), 1fr\)[\s\S]*height:\s*100%/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid > \.js-debug-chart\s*\{[\s\S]*max-height:\s*var\(--js-debug-chart-max-height\)/.test(debugPaneCss), 'YO!stats grows chart cards into tall panes within shared minimum and maximum height bounds, while short panes scroll whole cards');
     assert.ok(/\.js-debug-hover-tooltip\s*\{[\s\S]*position:\s*absolute/.test(debugPaneCss) && debugPaneSource.includes('data-js-debug-hover-tooltip') && debugPaneSource.includes('debugGraphSetHoverTooltip'), 'YO!stats chart hover shows a contained, chart-owned max-and-time tooltip beside the cursor');
     assert.ok(debugPaneSource.includes("data.group.key === 'activity'") && debugPaneSource.includes("item.key !== 'idleAgents'") && debugPaneSource.includes('debugGraphHoverValueAtTime'), 'YO!stats hover reads the plotted value at the cursor and excludes idle agents from the Agent-status total');
+    assert.ok(debugPaneSource.includes('function syncDebugGraphAgentTokenResolution()') && debugPaneSource.includes('if (resolutionSeconds === 0) resetJsDebugHistoryReadiness()'), 'YO!stats reloads token-inclusive normal history when returning from compact token history to a short range');
     assert.equal(debugPaneSource.includes('${debugGraphLegendHtml(legendItems)}'), false, 'YO!stats does not append a redundant all-series legend after the chart grid');
     const debugGraphLegendSource = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphLegendHtml'), debugPaneSource.indexOf('function debugGraphAxisHtml'));
     assert.equal(debugGraphLegendSource.includes('debugGraphValueText'), false, 'YO!stats chart legends show labels only, without current values');
@@ -3404,7 +3405,7 @@ async function runEditorPreviewSuite() {
     assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
     assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
     assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
-    assert.ok(/data-js-debug-displayed-token-sum="1200"[^>]*>\(sum of tokens from displayed = 1\.2k\)<\/span>/.test(api.debugPanelHtmlForTest()), 'displayed token sum adds all retained token deltas and uses the shared compact formatter');
+    assert.ok(/data-js-debug-displayed-token-sum="1200"[^>]*>\(1\.2k, Σ displayed\)<\/span>/.test(api.debugPanelHtmlForTest()), 'displayed token sum adds all retained token deltas and uses the shared compact formatter');
   });
 
   test('YO!stats token rates use the sampled elapsed time rather than the selected history bucket width', () => {
@@ -3703,7 +3704,7 @@ async function runEditorPreviewSuite() {
     assert.equal(metric('latency').values.at(-2), 40, 'a disconnected prior client remains in historical latency');
     const html = api.debugPanelHtmlForTest();
     assert.match(html, /data-js-debug-displayed-client-request-sum="26"[^>]*>\(26, Σ displayed reqs\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum across connected and disconnected clients');
-    assert.match(html, /data-js-debug-displayed-bandwidth-sum="1150"[^>]*>\(sum of bandwidth from displayed = 1\.1 KB\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum across connected and disconnected clients');
+    assert.match(html, /data-js-debug-displayed-bandwidth-sum="1150"[^>]*>\(1\.1 KB, Σ displayed\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum across connected and disconnected clients');
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
     assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
     assert.equal(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8').includes('.js-debug-line--client-dash'), false, 'YO!stats no longer ships a dashed client comparison variant');
@@ -3834,7 +3835,7 @@ async function runEditorPreviewSuite() {
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
     assert.ok(/data-js-debug-chart="activity"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="10"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'Agent status uses stacked ten-second bars');
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
-    assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(sum of tokens from displayed = 210\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
+    assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(210, Σ displayed\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
     assert.ok(/class="js-debug-chart js-debug-chart--token-agents" data-js-debug-chart="agentTokens"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="60"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars');
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
@@ -3951,7 +3952,7 @@ async function runEditorPreviewSuite() {
     const noTokenHtml = noTokenApi.debugPanelHtmlForTest();
     assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
     assert.ok(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), 'token chart renders without numeric token counters');
-    assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(sum of tokens from displayed = 0\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
+    assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(0, Σ displayed\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {

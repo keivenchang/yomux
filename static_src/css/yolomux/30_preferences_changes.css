@@ -114,7 +114,8 @@
   --js-debug-agent-token-total: #ffe1a3;
   --js-debug-agent-token-pattern-ink: var(--paint-white);
   --js-debug-agent-token-pattern-ink-rgb: 255 255 255;
-  display: block;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: auto;
 }
@@ -188,6 +189,7 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-graph {
   display: flex;
+  flex: 1 0 auto;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
@@ -347,8 +349,8 @@ body.theme-light .js-debug-graph-view {
 .js-debug-chart-shell {
   position: relative;
   display: grid;
-  flex: 0 0 auto;
-  grid-template-rows: auto;
+  flex: 1 0 auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 0;
@@ -382,6 +384,12 @@ body.theme-light .js-debug-graph-view {
 .js-debug-history-retry {
   pointer-events: auto;
 }
+.js-debug-chart-shell > .js-debug-chart-grid {
+  --js-debug-chart-min-height: 172px;
+  --js-debug-chart-max-height: 360px;
+  grid-auto-rows: minmax(var(--js-debug-chart-min-height), 1fr);
+  height: 100%;
+}
 .js-debug-chart-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -397,11 +405,14 @@ body.theme-light .js-debug-graph-view {
   grid-template-rows: auto minmax(138px, 1fr);
   gap: 6px;
   min-width: 0;
-  min-height: 172px;
+  min-height: var(--js-debug-chart-min-height);
   padding: 7px 8px 8px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--panel2) 54%, transparent);
+}
+.js-debug-chart-shell > .js-debug-chart-grid > .js-debug-chart {
+  max-height: var(--js-debug-chart-max-height);
 }
 .js-debug-hover-tooltip {
   position: absolute;

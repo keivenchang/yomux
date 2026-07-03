@@ -35688,13 +35688,13 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   },
   bandwidth: {
     attribute: 'displayed-bandwidth-sum',
-    labelKey: 'debug.graph.sumDisplayedBandwidth',
+    labelKey: 'debug.graph.sumDisplayed',
     value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['bandwidthBytes']),
     format: value => debugGraphValueText(value, 'bytes'),
   },
   agentTokens: {
     attribute: 'displayed-token-sum',
-    labelKey: 'debug.graph.sumDisplayedTokens',
+    labelKey: 'debug.graph.sumDisplayed',
     value: debugGraphAgentTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
@@ -37146,6 +37146,17 @@ function resetDebugGraphAgentTokenHistory() {
   jsDebugStatsAgentTokenSequence = 0;
   jsDebugStatsAgentTokenResolutionSeconds = 0;
   jsDebugGraphAgentTokenBuckets.clear();
+}
+
+function syncDebugGraphAgentTokenResolution() {
+  const resolutionSeconds = debugGraphAgentTokenResolution();
+  if (resolutionSeconds === jsDebugStatsAgentTokenResolutionSeconds) return false;
+  resetDebugGraphAgentTokenHistory();
+  // Long ranges intentionally omit token rates from normal history and use the separate compact
+  // token stream. Returning to a short range must fetch normal history again with token rates;
+  // otherwise the old coverage marker leaves only new live samples to render.
+  if (resolutionSeconds === 0) resetJsDebugHistoryReadiness();
+  return true;
 }
 
 function clearDebugGraphAgentTokenData() {
@@ -38633,6 +38644,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
     const tokenResolution = debugGraphAgentTokenResolution();
+    syncDebugGraphAgentTokenResolution();
     const domain = debugGraphDomain();
     const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
     const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
@@ -38663,7 +38675,6 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
       : 0;
     const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : targetStart;
-    if (tokenResolution !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}`
       : '';
@@ -38981,6 +38992,7 @@ function setDebugSubTab(tab) {
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
   if (!jsDebugStatsPanelVisible()) return false;
+  syncDebugGraphAgentTokenResolution();
   const domain = debugGraphDomain();
   const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
   const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
@@ -39022,7 +39034,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   saveJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds();
-  if (debugGraphAgentTokenResolution() !== jsDebugStatsAgentTokenResolutionSeconds) resetDebugGraphAgentTokenHistory();
+  syncDebugGraphAgentTokenResolution();
   if (!render) return;
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
   if (requestJsDebugHistoryForCurrentDomain()) return;

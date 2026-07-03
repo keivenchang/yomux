@@ -723,6 +723,37 @@ def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap
     assert all(label["top"] >= label["card"]["top"] and label["bottom"] <= label["card"]["bottom"] for label in metrics["timeLabels"]), metrics
 
 
+def test_debug_graph_cards_fill_a_tall_pane_without_exceeding_their_maximum_height(browser, tmp_path):
+    page = tmp_path / "debug-graph-tall-card-layout.html"
+    chart = """
+      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>100%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
+    """
+    page.write_text(page_html(f"""
+      <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:1040px">
+        <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}{chart.format(title='Client latency')}{chart.format(title='Agent status')}</div></div></div>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
+        const view = document.getElementById('graph-view');
+        const grid = document.getElementById('chart-grid');
+        return {
+          view: {clientHeight:view.clientHeight, scrollHeight:view.scrollHeight},
+          grid: rect(grid),
+          cards: [...document.querySelectorAll('.js-debug-chart')].map(rect),
+          minimum: Number.parseFloat(getComputedStyle(grid).getPropertyValue('--js-debug-chart-min-height')),
+          maximum: Number.parseFloat(getComputedStyle(grid).getPropertyValue('--js-debug-chart-max-height')),
+        };
+        """
+    )
+    assert metrics["view"]["scrollHeight"] == metrics["view"]["clientHeight"], metrics
+    assert all(metrics["minimum"] < card["height"] <= metrics["maximum"] for card in metrics["cards"]), metrics
+    assert metrics["cards"][0]["bottom"] <= metrics["cards"][2]["top"] - 9, metrics
+    assert metrics["cards"][2]["bottom"] <= metrics["cards"][4]["top"] - 9, metrics
+
+
 def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(browser, tmp_path):
     page = tmp_path / "repo-chip-grid-columns.html"
     page.write_text(page_html("""
@@ -2187,6 +2218,106 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["value"] > 1, drag_metrics
     assert drag_metrics["value"] == round(drag_metrics["value"]), drag_metrics
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
+
+
+def test_debug_graph_short_range_refetches_token_rates_after_compact_token_history(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerAgentTokenHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsFirstSampleReceived = false;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          jsDebugGraphRangeSeconds = 8 * 60 * 60;
+          jsDebugStatsAgentTokenResolutionSeconds = 120;
+          debugGraphApplyServerAgentTokenHistory({
+            sequence: 9,
+            resolution_seconds: 120,
+            records: [{
+              start: nowSeconds - (60 * 60),
+              duration: 120,
+              sequence: 9,
+              tokens_per_agent_total: 100,
+              agent_token_samples: 1,
+              agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}],
+            }],
+          });
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: nowSeconds - (8 * 60 * 60),
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: nowSeconds - (8 * 60 * 60), endSeconds: nowSeconds, resolutionSeconds: 5}],
+          });
+          const originalFetch = window.fetch;
+          const requests = [];
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            return Promise.resolve(new Response(JSON.stringify({history: {
+              sequence: 50,
+              latest_sequence: 50,
+              agent_token_schema_version: 2,
+              records: [{
+                start: nowSeconds - 60,
+                duration: 60,
+                sequence: 50,
+                tokens_per_agent_total: 120,
+                agent_token_samples: 1,
+                agent_token_rates: [{key: '8002|1|codex', label: '8002:1:codex', total: 120, samples: 1, tokens: 120, seconds: 60}],
+              }],
+              coverage: {
+                mode: 'live', requested_start: requestedStart, requested_end: 0,
+                covered_start: requestedStart, covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true, has_more_older: false, next_older_end: 0,
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            setDebugGraphRange(2 * 60 * 60);
+            const deadline = performance.now() + 3000;
+            while ((!requests.length || jsDebugStatsPollInFlight) && performance.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            renderDebugPanels({force: true});
+            const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+            const url = new URL(requests[0] || location.href);
+            return {
+              requestCount: requests.length,
+              since: url.searchParams.get('since'),
+              historyStart: Number(url.searchParams.get('history_start')),
+              tokenResolution: url.searchParams.get('token_resolution'),
+              separateTokenCount: jsDebugGraphAgentTokenBuckets.size,
+              legendLabels: [...(chart?.querySelectorAll('[data-js-debug-legend] span') || [])].map(node => node.textContent),
+              barCount: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:8002|1|codex"]').length || 0,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 1, metrics
+    assert metrics["since"] == "0", metrics
+    assert metrics["historyStart"] > 0, metrics
+    assert metrics["tokenResolution"] is None, metrics
+    assert metrics["separateTokenCount"] == 0, metrics
+    assert "8002:1:codex" in metrics["legendLabels"], metrics
+    assert metrics["barCount"] == 1, metrics
 
 
 def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):
