@@ -10158,6 +10158,42 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
+function workingAgentTransitionNotificationEnabled(tone) {
+  if (tone === 'attention') return boolSetting('notifications.notify_working_attention', true);
+  if (tone === 'cooldown') return boolSetting('notifications.notify_working_done', false);
+  return false;
+}
+
+function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {
+  if (!session || !workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) return false;
+  const marker = tone === 'attention'
+    ? String(options.attentionKey || options.attentionSignature || '').trim()
+    : String(options.stoppedAt || '').trim();
+  if (!marker) return false;
+  const key = `agent-window-transition:${session}:${agentKey}:${tone}:${marker}`;
+  const now = Date.now();
+  const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
+  const lastSent = notificationLastSent.get(key) || 0;
+  if (now - lastSent < throttleMs) return false;
+  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
+  const agent = kind ? agentLabel(kind) : t('common.agentLabel');
+  const title = t(`notify.working.${tone}.title`);
+  const body = t(`notify.working.${tone}.body`, {agent, session: sessionLabel(session)});
+  if (notificationDeliveryEnabled('inApp') && typeof HTMLElement !== 'undefined' && document.body instanceof HTMLElement) {
+    showToast(title, [body], {container: displayToastContainer(session)});
+  }
+  postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
+  try {
+    sendBrowserNotification(title, {body, tag: key, renotify: true, session});
+    postEvent(session, 'notification_sent', body, {agent: kind, tone});
+  } catch (error) {
+    postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
+  }
+  return true;
+}
+
 // a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {
@@ -17201,6 +17237,12 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const acknowledging = acknowledgementVisualActive;
     const acknowledged = recordedAcknowledgement && !acknowledging;
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
+    if (previous.visualTone === STATE_KEY.working) {
+      maybeNotifyWorkingAgentTransition(options.session, agentKey, 'attention', {
+        attentionKey: ackKey,
+        attentionSignature: options.attention_signature || options.screen_text,
+      });
+    }
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
       agentWindowActivityStates.set(transitionKey, {
@@ -17254,6 +17296,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     const recordedAcknowledgement = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
     const acknowledged = recordedAcknowledgement && !acknowledging;
+    if (previous.visualTone === STATE_KEY.working) {
+      maybeNotifyWorkingAgentTransition(options.session, agentKey, 'cooldown', {stoppedAt});
+    }
     scheduleAgentWindowStatusGlowRefresh(transitionKey, cooldownTransitionStartedAt, options);
     if (transitionKey) {
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, cooldownTransitionStartedAt, options);
@@ -34260,13 +34305,14 @@ function preferenceSections() {
     ]},
     {id: PREFERENCE_SECTION_IDS.notifications, title: t('pref.section.notifications'), items: [
       ...notificationDeliveryDescriptors().map(({channel, label, help}) => ({type: 'notification-delivery', channel, label, help})),
+      preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'}),
+      preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'}),
       preferenceSettingItem('notifications.toast_duration_ms', {type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms'}),
       preferenceSettingItem('updates.notify_level', {type: 'radio', choices: updateNotifyLevelPreferenceChoices()}),
       preferenceSettingItem('notifications.notify_transitions', {type: 'list'}),
       preferenceSettingItem('notifications.throttle_seconds', {type: 'number', min: 0, max: 600, step: 5, suffix: 's'}),
       preferenceSettingItem('performance.agent_status_pulse_period_ms', {type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', exampleHtml: preferencesStatusPulseExampleHtml}),
       preferenceSettingItem('performance.workflow_transition_glow_seconds', {type: 'number', min: 0, max: 300, step: 1, suffix: 's'}),
-      preferenceSettingItem('appearance.metadata_badge_pulse_seconds', {type: 'number', min: 0, max: 120, step: 1, suffix: 's'}),
       preferenceSettingItem('general.reload_on_update', {type: 'boolean'}),
       preferenceSettingItem('general.reload_on_update_auto', {type: 'boolean'}),
     ]},

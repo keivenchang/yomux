@@ -1272,7 +1272,7 @@ def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch)
         [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
     ])
     monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
+    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
         running = webapp.stats_agent_activity_record(1000.0)
         transition = webapp.stats_agent_activity_record(1010.0)
@@ -1319,7 +1319,7 @@ def test_stats_agent_activity_record_counts_sticky_cooldown_as_transition(monkey
         "stats_agent_window_rows",
         lambda: [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0}],
     )
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
+    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
         record = webapp.stats_agent_activity_record(1000.0)
     finally:
@@ -1339,7 +1339,7 @@ def test_stats_agent_activity_record_keeps_zero_timeout_run_to_idle_transition(m
         [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex"}],
     ])
     monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 0.0)
+    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
     try:
         running = webapp.stats_agent_activity_record(1000.0)
         first_idle = webapp.stats_agent_activity_record(1010.0)
@@ -1364,7 +1364,7 @@ def test_stats_agent_activity_record_drops_acknowledged_attention_and_cooldown(m
             {"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0, "cooldown_acknowledged": True},
         ],
     )
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 0.0)
+    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
     try:
         record = webapp.stats_agent_activity_record(1000.0)
     finally:
@@ -1379,7 +1379,7 @@ def test_stats_agent_activity_record_drops_acknowledged_attention_and_cooldown(m
 
 def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
-    monkeypatch.setattr(webapp, "stats_agent_transition_seconds", lambda: 60.0)
+    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
         with webapp.stats_agent_token_lock:
             active_kind = webapp.stats_agent_activity_kind_locked({"state": "active"}, "active-agent", 1000.0, 60.0)

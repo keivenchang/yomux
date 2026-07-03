@@ -157,7 +157,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "active_color": "green",
         "separator_color": "theme",
         "max_tabs_per_pane": 10,
-        "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
         "latency_refresh_ms": 3000,
@@ -179,6 +178,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "notifications": {
         "toast_duration_ms": 10000,
         "notify_transitions": ["needs-input", "needs-approval", "blocked"],
+        "notify_working_attention": True,
+        "notify_working_done": False,
         "throttle_seconds": 60,
     },
     # PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
@@ -329,7 +330,6 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "pane_ring_opacity"): (5, 100),
     ("appearance", "inactive_pane_opacity"): (0, 100),
     ("appearance", "max_tabs_per_pane"): (2, 30),
-    ("appearance", "metadata_badge_pulse_seconds"): (0, 120),
     ("performance", "latency_refresh_ms"): (1000, 30000),
     ("performance", "event_log_refresh_ms"): (1000, 60000),
     ("performance", "tabber_activity_refresh_ms"): (1000, 60000),
@@ -487,12 +487,11 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "pane_ring_opacity"): "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
     ("appearance", "inactive_pane_opacity"): "Percent, 0-100. Strength of inactive pane gray-out.",
     ("appearance", "max_tabs_per_pane"): "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
-    ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "tabber_activity_refresh_ms"): "Server-side refresh interval for cached Tabber activity; clients read the latest cached snapshot. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "agent_status_pulse_period_ms"): "Milliseconds, 250-10000. Period for red/yellow/green Claude/Codex status ball transition pulses.",
-    ("performance", "workflow_transition_glow_seconds"): "Seconds, 0-300. A green/red/yellow Claude/Codex status ball glows for this long after it appears or changes color. 0 keeps transition balls visible but static.",
+    ("performance", "workflow_transition_glow_seconds"): "Seconds, 0-300. Shared duration for Claude/Codex status transitions and branch/PR/status/CI badge pulses. 0 keeps transition balls visible but static.",
     ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
     ("performance", "server_background_file_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for background editor file signatures before pushing files_changed events to browsers.",
     ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",
@@ -505,6 +504,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
     ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
     ("notifications", "notify_transitions"): "Event keys that may show notifications. Session states (needs-input, needs-approval, blocked, …) plus watched-PR transitions (pr-merged, pr-ci-failing, pr-review). Unknown keys are ignored.",
+    ("notifications", "notify_working_attention"): "true/false. Default true. Notify when a working Claude or Codex stops and needs your attention.",
+    ("notifications", "notify_working_done"): "true/false. Default false. Notify when a working Claude or Codex finishes without needing attention.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
@@ -590,9 +591,10 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("updates", "check_enabled"): "Notifications",
     ("updates", "notify_level"): "Notifications",
     ("notifications", "notify_transitions"): "Notifications",
+    ("notifications", "notify_working_attention"): "Notifications",
+    ("notifications", "notify_working_done"): "Notifications",
     ("notifications", "toast_duration_ms"): "Notifications",
     ("notifications", "throttle_seconds"): "Notifications",
-    ("appearance", "metadata_badge_pulse_seconds"): "Notifications",
     ("file_explorer", "root_mode"): "Finder",
     ("file_explorer", "image_open_mode"): "Finder",
     ("file_explorer", "image_preview_max_px"): "Finder",
@@ -845,6 +847,12 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             incoming = dict(incoming)
             old_value = incoming.get("agent_window_cooldown_seconds")
             incoming["workflow_transition_glow_seconds"] = defaults["performance"]["workflow_transition_glow_seconds"] if old_value == 0 else old_value
+        if section == "performance" and "workflow_transition_glow_seconds" not in incoming:
+            legacy_value = source.get("appearance", {}).get("metadata_badge_pulse_seconds") if isinstance(source.get("appearance"), dict) else None
+            if legacy_value is not None:
+                incoming = dict(incoming)
+                # The former 20-second default was not an explicit user choice; use the merged setting's 60-second default.
+                incoming["workflow_transition_glow_seconds"] = defaults["performance"]["workflow_transition_glow_seconds"] if legacy_value == 20 else legacy_value
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)

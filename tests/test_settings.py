@@ -47,6 +47,20 @@ def test_stale_agent_window_cooldown_default_migrates_to_workflow_transition_glo
     assert "agent_window_cooldown_seconds" not in custom["performance"]
 
 
+def test_legacy_badge_pulse_migrates_to_the_shared_notification_duration():
+    defaults = default_settings()
+
+    migrated_default = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 20}})
+    assert migrated_default["performance"]["workflow_transition_glow_seconds"] == 60
+    assert "metadata_badge_pulse_seconds" not in migrated_default["appearance"]
+
+    migrated_custom = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 45}})
+    assert migrated_custom["performance"]["workflow_transition_glow_seconds"] == 45
+
+    explicit_shared = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 45}, "performance": {"workflow_transition_glow_seconds": 90}})
+    assert explicit_shared["performance"]["workflow_transition_glow_seconds"] == 90
+
+
 def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
     write_settings_file({"appearance": {"theme": "light"}}, path)
@@ -157,6 +171,15 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["share"]["scheme"] == "http"
     assert sanitize_settings({"share": {"scheme": "https"}})["share"]["scheme"] == "https"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
+    assert settings["notifications"]["notify_working_attention"] is True
+    assert settings["notifications"]["notify_working_done"] is False
+    assert sanitize_settings({"notifications": {"notify_working_attention": False, "notify_working_done": True}})["notifications"] == {
+        "toast_duration_ms": 10000,
+        "notify_transitions": ["needs-input", "needs-approval", "blocked"],
+        "notify_working_attention": False,
+        "notify_working_done": True,
+        "throttle_seconds": 60,
+    }
     assert settings["updates"]["notify_level"] == "patch"
     assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
     assert settings["file_explorer"]["dir_cache_ms"] == 5000

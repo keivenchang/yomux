@@ -4611,6 +4611,42 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
+function workingAgentTransitionNotificationEnabled(tone) {
+  if (tone === 'attention') return boolSetting('notifications.notify_working_attention', true);
+  if (tone === 'cooldown') return boolSetting('notifications.notify_working_done', false);
+  return false;
+}
+
+function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {
+  if (!session || !workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) return false;
+  const marker = tone === 'attention'
+    ? String(options.attentionKey || options.attentionSignature || '').trim()
+    : String(options.stoppedAt || '').trim();
+  if (!marker) return false;
+  const key = `agent-window-transition:${session}:${agentKey}:${tone}:${marker}`;
+  const now = Date.now();
+  const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
+  const lastSent = notificationLastSent.get(key) || 0;
+  if (now - lastSent < throttleMs) return false;
+  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
+  const agent = kind ? agentLabel(kind) : t('common.agentLabel');
+  const title = t(`notify.working.${tone}.title`);
+  const body = t(`notify.working.${tone}.body`, {agent, session: sessionLabel(session)});
+  if (notificationDeliveryEnabled('inApp') && typeof HTMLElement !== 'undefined' && document.body instanceof HTMLElement) {
+    showToast(title, [body], {container: displayToastContainer(session)});
+  }
+  postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
+  try {
+    sendBrowserNotification(title, {body, tag: key, renotify: true, session});
+    postEvent(session, 'notification_sent', body, {agent: kind, tone});
+  } catch (error) {
+    postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
+  }
+  return true;
+}
+
 // a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {

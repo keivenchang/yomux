@@ -6802,6 +6802,18 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux();
     assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'a default session-state key still notifies');
     assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'pr-merged is opt-in, off by default');
+    const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
+    const preferencesSource = fs.readFileSync('static_src/js/yolomux/82_preferences_panel.js', 'utf8');
+    const notificationSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
+    const locale = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+    assert.ok(/"notify_working_attention": True,[\s\S]*"notify_working_done": False,/.test(settingsSource), 'working-to-attention notification defaults on while working-to-done defaults off');
+    assert.ok(preferencesSource.includes("preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'})") && preferencesSource.includes("preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'})"), 'Notifications preferences expose separate working-attention and working-done toggles');
+    assert.equal(locale['pref.notifications.notify_working_attention.label'], 'Notify when a working AI needs your attention');
+    assert.equal(locale['pref.notifications.notify_working_done.label'], 'Notify when a working AI finishes');
+    assert.ok(/function workingAgentTransitionNotificationEnabled\(tone\)[\s\S]*notify_working_attention[\s\S]*notify_working_done/.test(notificationSource), 'one notification preference helper owns both working-agent transition toggles');
+    assert.ok(/previous\.visualTone === STATE_KEY\.working[\s\S]*maybeNotifyWorkingAgentTransition\(options\.session, agentKey, 'attention'/.test(activitySource), 'red notifications fire only from a prior green working state');
+    assert.ok(/previous\.visualTone === STATE_KEY\.working[\s\S]*maybeNotifyWorkingAgentTransition\(options\.session, agentKey, 'cooldown'/.test(activitySource), 'yellow notifications fire only from a prior green working state');
   });
 
   test('state contract keys route through STATE_KEY owners', () => {

@@ -232,7 +232,6 @@ from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_STATES
 
 logger = logging.getLogger(__name__)
 ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
-METADATA_BADGE_PULSE_SECONDS = 20.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
@@ -2525,7 +2524,7 @@ class TmuxWebtermApp:
         state = str(row.get("state") or "").strip().lower()
         return state in STATS_AGENT_ACTIVE_STATES
 
-    def stats_agent_transition_seconds(self) -> float:
+    def notification_transition_seconds(self) -> float:
         return self.performance_setting_seconds("workflow_transition_glow_seconds", 0.0, 300.0)
 
     def stats_agent_cooldown_visible(self, row: dict[str, Any], sample_time: float, transition_seconds: float) -> bool:
@@ -2680,7 +2679,7 @@ class TmuxWebtermApp:
         inactive_agents = 0
         agent_token_records: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
-        transition_seconds = self.stats_agent_transition_seconds()
+        transition_seconds = self.notification_transition_seconds()
         with self.stats_agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
@@ -7314,13 +7313,6 @@ class TmuxWebtermApp:
         value = settings_payload().get("settings", {}).get("yolo", {}).get("prompt_source", "hybrid")
         return value if value in {"pane", "hybrid"} else "hybrid"
 
-    def metadata_badge_pulse_seconds(self) -> float:
-        value = settings_payload().get("settings", {}).get("appearance", {}).get("metadata_badge_pulse_seconds", METADATA_BADGE_PULSE_SECONDS)
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            return METADATA_BADGE_PULSE_SECONDS
-
     def set_notify(self, enabled: bool) -> dict[str, Any]:
         update_yolomux_state({"notify_enabled": enabled})
         self.log_event(
@@ -8946,7 +8938,7 @@ class TmuxWebtermApp:
                     continue
                 for badge in METADATA_BADGES:
                     if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
-                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.metadata_badge_pulse_seconds()
+                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.notification_transition_seconds()
 
             if self.metadata_badge_signatures != next_signatures:
                 self.metadata_badge_signatures = next_signatures
