@@ -3121,10 +3121,14 @@ async function runEditorPreviewSuite() {
       width: 600,
       height: 120,
       plotTop: 8,
-      plotHeight: 104,
-      plotBottom: 112,
-      hoverBottom: 116,
+      plotHeight: 112,
+      plotBottom: 120,
+      hoverBottom: 120,
     }, 'YO!stats exposes one internally consistent SVG coordinate model');
+    assert.equal(api.debugGraphPlotYForValueForTest(0, 5), api.debugGraphGeometryForTest().plotBottom, 'numeric zero resolves to the shared visible plot baseline');
+    assert.equal(api.debugGraphGridLineYForTest(0, 5), api.debugGraphGeometryForTest().plotBottom, 'the zero grid line resolves through the same plot baseline helper');
+    assert.deepStrictEqual(canonical(api.debugGraphBarVerticalGeometryForTest(0, 0, 5, true)), {y: 119.25, height: 0.75}, 'a visible zero bar ends at the shared plot baseline instead of extending below it');
+    assert.match(api.debugGraphPlotOverlayRectHtmlForTest('probe', 'data-probe', 0, 0, 1, 'probe'), / y="8"[^>]* height="112"/, 'plot overlays inherit the shared plot bounds instead of a parallel full-SVG rectangle');
     assert.ok(html.includes('viewBox="0 0 600 120"'), 'YO!stats chart viewBox consumes the shared SVG geometry');
     for (const chart of ['memory', 'gpuUtil', 'gpuMemory']) {
       assert.ok(html.includes(`data-js-debug-chart-restore="${chart}"`), `${chart} starts minimized in the top restore strip`);
@@ -3193,9 +3197,10 @@ async function runEditorPreviewSuite() {
     for (const retiredName of ['jsDebugStatsHistoryFlushTimer', 'jsDebugStatsHistoryFlushInFlight']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel upload global ${retiredName}`);
     }
-    assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = 104;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: height - hoverBottomInset/.test(debugPaneSource), 'YO!stats owns SVG width, height, plot, baseline, and hover coordinates in one frozen model');
+    assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = height - plotTop;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: plotTop \+ plotHeight/.test(debugPaneSource), 'YO!stats owns SVG width, visible plot baseline, and hover coordinates in one frozen model');
     const debugGeometryConsumers = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphPointForValue'));
     assert.equal(/viewBox="0 0 600 120"|x2="600"|\* 600|\/ 120|const top = 8|const height = 104|baseline = 112|y2="116"|height="120"/.test(debugGeometryConsumers), false, 'YO!stats renderers and interactions do not restate shared SVG coordinate literals');
+    assert.ok(/function debugGraphPointForValue[\s\S]*debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphGridLineY[\s\S]*return debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphPlotOverlayRectHtml[\s\S]*jsDebugGraphGeometry\.plotTop[\s\S]*jsDebugGraphGeometry\.plotHeight/.test(debugPaneSource), 'lines, bars, areas, grids, axes, and overlays share one plot-coordinate parent');
     assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
@@ -3215,8 +3220,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/class="js-debug-hidden-chart control-active-hover"/.test(debugPaneSource) && /class="js-debug-chart-close control-active-hover"/.test(debugPaneSource), 'YO!stats chart restore and close controls reuse the global accent hover/focus parent');
     assert.equal(debugPaneCss.includes('.js-debug-range-button'), false, 'YO!stats has no dead range-button CSS after migrating to the slider');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
-    assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-api-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API line and legend share the API series color');
-    assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE line and legend share the distinct SSE series color');
+    assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-api-series\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API lines accept a shared comparison color while their default legend color stays API blue');
+    assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-sse-series\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE lines accept a shared comparison color while their default legend color stays distinct');
     assert.equal(debugPaneCss.includes('.js-debug-line--apiSseTotal'), false, 'YO!stats has no obsolete combined-total series after API and SSE each aggregate all clients');
     assert.ok(/\.js-debug-line--cpu\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--cpu\s*\{[\s\S]*color:\s*var\(--js-debug-series-color, var\(--active-accent-bright\)\)/.test(debugPaneCss), 'YO!stats per-server CPU lines and legends consume their shared series color');
     assert.ok(/\.js-debug-line--systemCpu\s*\{[\s\S]*stroke:\s*var\(--bad\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--systemCpu\s*\{[\s\S]*color:\s*var\(--bad\)/.test(debugPaneCss), 'YO!stats system CPU uses the red warning color');
@@ -3438,11 +3443,12 @@ async function runEditorPreviewSuite() {
     assert.notEqual(datedTicks[0][2], datedTicks[2][2], '24-hour start and end ticks identify different local dates even when their clock times match');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
     assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
-    assert.ok(html.includes('>API<') && html.includes('>Client latency<'), 'client legends describe the aggregate metric without tying it to the current tab');
-    assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid API total line');
-    assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid SSE total line');
-    assert.match(html, /data-js-debug-series="latency"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid latency average line');
-    assert.match(html, /data-js-debug-series="bandwidth"[^>]*data-js-debug-client-series="all-clients"[^>]*data-js-debug-client-line="solid"/, 'all retained clients share one solid bandwidth total line');
+    assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'client legends identify this browser separately');
+    assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client API keeps the stable solid line');
+    assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client SSE keeps the stable solid line');
+    assert.match(html, /data-js-debug-series="latency"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client latency keeps the stable solid line');
+    assert.match(html, /data-js-debug-series="bandwidth"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client bandwidth keeps the stable solid line');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:api"[^>]*--js-debug-series-color: var\(--bad\)/, 'peer API average uses the system-average red token');
     assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
@@ -3843,9 +3849,10 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-line--pattern,[\s\S]*\.js-debug-line--client\s*\{[\s\S]*stroke-dasharray:\s*var\(--js-debug-line-dash, none\)/.test(debugPaneCss), 'client and CPU identities share one line-pattern token');
   });
 
-  test('YO!stats graph sums or averages every retained client without current-tab splits', () => {
+  test('YO!stats graph compares this client with a red other-client average', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
+    const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.debugGraphApplyServerHistoryForTest({
       sequence: 72,
@@ -3866,7 +3873,7 @@ async function runEditorPreviewSuite() {
         latency_count: 1,
         bandwidth_bytes: 500,
         clients: {
-          'client-current': {api_count: 8, sse_count: 4, latency_total_ms: 10, latency_count: 1, bandwidth_bytes: 500},
+          [thisClientId]: {api_count: 8, sse_count: 4, latency_total_ms: 10, latency_count: 1, bandwidth_bytes: 500},
           'client-alpha': {api_count: 2, sse_count: 0, latency_total_ms: 20, latency_count: 1, bandwidth_bytes: 100},
           'client-beta': {api_count: 4, sse_count: 2, latency_total_ms: 90, latency_count: 3, bandwidth_bytes: 300},
           'client-gamma': {api_count: 0, sse_count: 0, latency_total_ms: 0, latency_count: 0, bandwidth_bytes: 0},
@@ -3874,24 +3881,29 @@ async function runEditorPreviewSuite() {
       }],
     });
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
-    assert.equal(clientSeries.length, 4, 'the Client charts have one aggregate series per metric');
-    assert.ok(clientSeries.every(series => series.clientId === 'all-clients' && series.clientLinePattern === 'solid'), 'every Client series uses the same retained-client population and solid-line contract');
-    const metric = metricKey => clientSeries.find(series => series.metricKey === metricKey);
-    assert.equal(metric('api').values.at(-1), 14, 'API sums every retained client in the bucket');
-    assert.equal(metric('sse').values.at(-1), 6, 'SSE sums every retained client in the bucket');
-    assert.equal(metric('latency').values.at(-1), 20, 'latency equally averages all client averages that supplied samples');
-    assert.equal(metric('bandwidth').values.at(-1), 900, 'bandwidth sums every retained client, including zero-valued records');
-    assert.equal(metric('api').values.at(-2), 5, 'a disconnected prior client remains in the historical aggregate');
-    assert.equal(metric('latency').values.at(-2), 40, 'a disconnected prior client remains in historical latency');
+    assert.equal(clientSeries.length, 8, 'the Client charts show this-client and other-client-average series for every metric when peers exist');
+    const metric = (metricKey, aggregate) => clientSeries.find(series => series.metricKey === metricKey && series.clientAggregate === aggregate);
+    const current = metric('api', 'thisClient');
+    assert.equal(current.values.at(-1), 8, 'this-client API rate stays separate from peer activity');
+    assert.equal(metric('sse', 'thisClient').values.at(-1), 4, 'this-client SSE rate stays separate from peer activity');
+    assert.equal(metric('latency', 'thisClient').values.at(-1), 10, 'this-client latency stays separate from peer latency');
+    assert.equal(metric('bandwidth', 'thisClient').values.at(-1), 500, 'this-client bandwidth stays separate from peer bandwidth');
+    assert.equal(metric('api', 'otherClientsAverage').values.at(-1), 2, 'peer API averages all other retained clients, including a zero-valued sample');
+    assert.equal(metric('sse', 'otherClientsAverage').values.at(-1), 2 / 3, 'peer SSE averages all other retained clients, including zero-valued samples');
+    assert.equal(metric('latency', 'otherClientsAverage').values.at(-1), 25, 'peer latency averages only peers with real latency samples');
+    assert.equal(metric('bandwidth', 'otherClientsAverage').values.at(-1), 400 / 3, 'peer bandwidth averages all other retained clients, including a zero-valued sample');
+    assert.equal(current.hasDataValues.at(-2), false, 'a disconnected historic peer does not masquerade as this-client data');
+    assert.equal(metric('api', 'otherClientsAverage').values.at(-2), 5, 'a disconnected historic peer remains in the other-client average');
     const html = api.debugPanelHtmlForTest();
     assert.match(html, /data-js-debug-displayed-client-request-sum="26"[^>]*>\(26, Σ displayed reqs\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum across connected and disconnected clients');
     assert.match(html, /data-js-debug-displayed-bandwidth-sum="1150"[^>]*>\(1\.1 KB, Σ displayed\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum across connected and disconnected clients');
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
     assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
-    assert.equal(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8').includes('.js-debug-line--client-dash'), false, 'YO!stats no longer ships a dashed client comparison variant');
+    assert.match(html, /other clients avg/, 'the peer comparison is visible in the legend when peer samples exist');
+    assert.match(html, /--js-debug-series-color: var\(--bad\)/, 'the peer comparison uses the same red token as system-average CPU');
   });
 
-  test('YO!stats graph keeps one stable aggregate series before client history arrives', () => {
+  test('YO!stats graph keeps stable this-client series before client history arrives', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -3900,9 +3912,9 @@ async function runEditorPreviewSuite() {
       records: [{start: Math.floor((now - 500) / 1000), duration: 1, sequence: 73}],
     });
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
-    assert.equal(clientSeries.length, 4, 'aggregate Client series do not appear and disappear with connection state');
-    assert.ok(clientSeries.every(series => series.samples === 0), 'aggregate Client series stay empty until retained per-client history arrives');
-    assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the legend has no current-versus-peer split');
+    assert.equal(clientSeries.length, 4, 'this-client series do not appear and disappear with connection state');
+    assert.ok(clientSeries.every(series => series.samples === 0 && series.clientAggregate === 'thisClient'), 'this-client series stay empty until retained per-client history arrives');
+    assert.equal(api.debugPanelHtmlForTest().includes('other clients avg'), false, 'the peer legend is absent until a peer has data');
   });
 
   test('YO!stats graph keeps CPU to YOLOmux and system lines and uses GPU device lines', () => {
@@ -4399,6 +4411,28 @@ async function runEditorPreviewSuite() {
     assert.equal(state.pendingBuckets, 1, 'stale completion does not restore old buckets or discard a post-Clear event');
   });
 
+  await testAsync('YO!stats client health polling runs without an open or visible stats pane', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET'), body: options.body || ''});
+      return Promise.resolve(jsonResponse({ok: true, time: 1}));
+    });
+
+    await api.pollJsDebugClientHealthForTest();
+    await api.flushJsDebugStatsHistoryForTest();
+
+    const ping = requests.find(request => request.url.startsWith('/api/ping?client_id='));
+    const history = requests.find(request => request.url === '/api/stats-history');
+    assert.ok(ping, 'the independent client health poll uses the lightweight ping endpoint without opening YO!stats');
+    assert.ok(history, 'the health sample is persisted through the existing per-client history upload');
+    const body = JSON.parse(history.body);
+    assert.ok(body.records.some(record => record.heartbeat_count === 1 && record.latency_count === 1 && record.bandwidth_bytes > 0), 'health polling records latency, transfer bytes, and an explicit heartbeat');
+    assert.equal(body.records.reduce((total, record) => total + Number(record.api_count || 0) + Number(record.sse_count || 0), 0), 0, 'health polling does not inflate API or SSE activity counters');
+    assert.equal(api.jsDebugEventsForTest().length, 0, 'the quiet health request is not reported as a normal API event');
+  });
+
   test('YO!stats history readiness owns empty success, interval resolution, and retained loading UI', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -4850,7 +4884,7 @@ async function runEditorPreviewSuite() {
     assert.ok(emptyAfterSampleHtml.includes('No events yet'), 'after the first server sample, an empty selected range keeps its independent graph-body empty state');
   });
 
-  await testAsync('YO!stats records disconnected client gaps with full-height bad-connection overlays', async () => {
+  await testAsync('YO!stats records disconnected client gaps within shared plot bounds', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -4885,7 +4919,7 @@ async function runEditorPreviewSuite() {
     for (const chart of ['cpu', 'memory', 'gpuUtil', 'gpuMemory', 'activity', 'agentTokens']) {
       assert.equal(chartHtml(chart).includes('data-js-debug-disconnected-range='), false, `YO!stats does not render bad-connection blocks in server-side ${chart} chart`);
     }
-    assert.ok(/class="js-debug-disconnected-range"[^>]* y="0"[^>]* height="120"/.test(html), 'bad-connection overlays cover the full SVG graph area');
+    assert.ok(/class="js-debug-disconnected-range"[^>]* y="8"[^>]* height="112"/.test(html), 'bad-connection overlays inherit the shared plot bounds');
     assert.ok(html.includes('Bad connection: no data collected for'), 'bad-connection overlays explain the missing collection interval');
     assert.equal(html.includes('data-js-debug-disconnect-line='), false, 'YO!stats does not render disconnected-client bars in the chart SVG');
     assert.equal(html.includes('class="js-debug-disconnect-line"') || html.includes('Client disconnected'), false, 'disconnected-client spans are not a bottom red baseline overlay');
@@ -4984,12 +5018,11 @@ async function runEditorPreviewSuite() {
     const noDataRanges = chart => [...chart.matchAll(/data-js-debug-no-data-range="[^"]+"[^>]* x="([0-9.]+)"[^>]* width="([0-9.]+)"/g)]
       .map(match => ({start: Number(match[1]), end: Number(match[1]) + Number(match[2])}));
     const countChart = chartHtml('count');
-    assert.ok((countChart.match(/data-js-debug-no-data-range="/g) || []).length >= 2, 'Client API&SSE chart shades both leading and interior no-data spans');
-    assert.ok(/class="js-debug-no-data-range"[^>]* x="0\.0"[^>]* height="120"/.test(countChart), 'leading client no-data block starts at the left edge and covers the graph height');
-    assert.equal(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, 'traffic from a retained disconnected client contributes to the all-client API/SSE series');
+    assert.equal((countChart.match(/data-js-debug-no-data-range="/g) || []).length, 1, 'Client API&SSE only shades the portion after 30 seconds without this-client communication');
+    assert.equal(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, 'a sub-30-second quiet period around peer traffic is not marked as missing this-client communication');
     for (const chart of ['latency', 'bandwidth']) {
       assert.ok(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-no-data-range=`).test(html), `YO!stats shades no-data spans in client ${chart} chart`);
-      assert.equal(noDataRanges(chartHtml(chart)).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, `traffic from a retained disconnected client contributes to all-client ${chart}`);
+      assert.equal(noDataRanges(chartHtml(chart)).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, `a sub-30-second quiet period is not marked as missing this-client ${chart} communication`);
     }
     for (const chart of ['cpu', 'activity', 'agentTokens']) {
       assert.equal(chartHtml(chart).includes('data-js-debug-no-data-range='), false, `YO!stats does not shade server-side ${chart} chart for client no-data spans`);
@@ -4999,9 +5032,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.js-debug-no-data-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.12\)/.test(debugPaneCss), 'generic no-data overlays use a very light red opacity');
   });
 
-  test('YO!stats computes variable-duration no-data gaps with one interval complement sweep', () => {
+  test('YO!stats delays client no-data overlays until 30 seconds of continuous silence', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const domain = {startMs: 0, endMs: 100_000};
+    const domain = {startMs: 0, endMs: 150_000};
     const buckets = [
       {startMs: 90_000, durationMs: 20_000, apiCount: 1},
       {startMs: 30_000, durationMs: 10_000, disconnectedMs: 10_000},
@@ -5011,10 +5044,10 @@ async function runEditorPreviewSuite() {
     ];
     const runs = canonical(api.debugGraphNoDataRunsForTest(buckets, domain, [{key: 'api'}]));
     assert.deepStrictEqual(runs, [
-      {startMs: 10_000, endMs: 20_000},
-      {startMs: 60_000, endMs: 90_000},
-    ], 'the complement preserves clipped leading/trailing coverage, variable buckets, an interior disconnect, and both remaining gaps');
+      {startMs: 140_000, endMs: 150_000},
+    ], 'only the portion after 30 seconds of a variable-duration no-data run is shaded; shorter and exactly-30-second gaps stay clear');
     const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(debugSource.includes('const jsDebugGraphNoDataOverlayDelayMs = 30000'), 'the no-data overlay grace period is a shared 30-second policy');
     assert.equal(debugSource.includes('debugGraphOverlayStepMs'), false, 'the one-second domain walker is removed');
     assert.equal(debugSource.includes('debugGraphStepHasSeriesData'), false, 'the nested full bucket rescan is removed');
   });

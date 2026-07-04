@@ -40,6 +40,37 @@ def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(bro
     assert result["elapsedMs"] < 300, result
 
 
+def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const tabsContainer = tab?.closest('.dv-tabs-container');
+        const rect = tabsContainer?.getBoundingClientRect();
+        const event = new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: Math.max(rect.left + 2, rect.right - 4),
+          clientY: rect.top + (rect.height / 2),
+        });
+        tabsContainer.dispatchEvent(event);
+        const menu = document.querySelector('.session-context-menu');
+        return {
+          prevented: event.defaultPrevented,
+          menuOpen: Boolean(menu),
+          labels: Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim()),
+        };
+        """
+    )
+    assert result["prevented"] is True, result
+    assert result["menuOpen"] is True, result
+    assert any(label.startswith("Pin Tab") for label in result["labels"]), result
+    assert "Rename tmux session '1'" in result["labels"], result
+    assert "Transcript for session '1'" in result["labels"], result
+    assert "Kill tmux session '1'" in result["labels"], result
+
+
 def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_budget(browser, tmp_path):
     sessions = [str(index) for index in range(1, 13)]
     transcript_sessions = {

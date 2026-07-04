@@ -822,10 +822,27 @@ function dockviewPaneChromeDragExcluded(target) {
   return Boolean(target?.closest?.('.dv-tab, .dockview-pane-tab, [data-pane-drag], button, input, textarea, select, a'));
 }
 
+function dockviewBindTabContainerContextMenu(tabsContainer, group) {
+  if (!tabsContainer || tabsContainer.__yolomuxEmptySpaceContextMenuBound) return;
+  tabsContainer.__yolomuxEmptySpaceContextMenuBound = true;
+  tabsContainer.addEventListener('contextmenu', event => {
+    // Tab context menus retain their own target and inline-rename behavior. This handler owns only
+    // the blank portion of a pane's Dockview tab strip, where the browser menu has no app meaning.
+    if (event.target.closest('.dv-tab, .dockview-pane-tab')) return;
+    const activeItem = group.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab
+      || activeItemForSide(dockviewSlotForGroupElement(group));
+    if (!activeItem || (!isPinnableTab(activeItem) && !isTmuxSession(activeItem))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showTabContextMenu(activeItem, event.clientX, event.clientY);
+  });
+}
+
 function dockviewSyncHeaderBackgroundDragSources() {
   if (!dockviewLayoutActive()) return;
   document.querySelectorAll('.dv-groupview').forEach(group => {
     const header = group.querySelector('.dv-tabs-and-actions-container');
+    const tabsContainer = header?.querySelector('.dv-tabs-container');
     const infoBar = group.querySelector('.dockview-panel-content > .panel > .pane-info-bar, .dockview-panel-content > .panel > .panel-detail-row');
     const editorToolbar = group.querySelector('.dockview-panel-content > .file-editor-panel > .file-editor-toolbar');
     const slot = dockviewSlotForGroupElement(group);
@@ -847,6 +864,7 @@ function dockviewSyncHeaderBackgroundDragSources() {
     syncDragSource(header);
     syncDragSource(infoBar);
     syncDragSource(editorToolbar);
+    dockviewBindTabContainerContextMenu(tabsContainer, group);
   });
 }
 

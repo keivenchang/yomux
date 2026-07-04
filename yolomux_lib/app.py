@@ -471,6 +471,7 @@ STATS_HISTORY_BROWSER_FIELDS = (
     "latency_total_ms",
     "latency_count",
     "bandwidth_bytes",
+    "heartbeat_count",
     "disconnected_ms",
 )
 STATS_HISTORY_PROCESS_FIELDS = (
@@ -733,6 +734,7 @@ def stats_history_empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "latency_total_ms": 0.0,
         "latency_count": 0.0,
         "bandwidth_bytes": 0.0,
+        "heartbeat_count": 0.0,
         "disconnected_ms": 0.0,
         "cpu_total_percent": 0.0,
         "cpu_count": 0.0,
@@ -775,6 +777,7 @@ def stats_history_empty_client_bucket() -> dict[str, Any]:
         "latency_total_ms": 0.0,
         "latency_count": 0.0,
         "bandwidth_bytes": 0.0,
+        "heartbeat_count": 0.0,
         "disconnected_ms": 0.0,
     }
 
@@ -2086,6 +2089,7 @@ class TmuxWebtermApp:
             "latency_total_ms": float(client_bucket.get("latency_total_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
             "latency_count": float(client_bucket.get("latency_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
             "bandwidth_bytes": float(client_bucket.get("bandwidth_bytes") or 0.0) if isinstance(client_bucket, dict) else 0.0,
+            "heartbeat_count": float(client_bucket.get("heartbeat_count") or 0.0) if isinstance(client_bucket, dict) else 0.0,
             "disconnected_ms": float(client_bucket.get("disconnected_ms") or 0.0) if isinstance(client_bucket, dict) else 0.0,
             "cpu_total_percent": float(bucket.get("cpu_total_percent") or 0.0),
             "cpu_count": float(bucket.get("cpu_count") or 0.0),

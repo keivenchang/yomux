@@ -1014,6 +1014,10 @@ globalThis.__layoutTestApi = {
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
   debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
+  debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
+  debugGraphGridLineYForTest: debugGraphGridLineY,
+  debugGraphPlotOverlayRectHtmlForTest: debugGraphPlotOverlayRectHtml,
+  debugGraphBarVerticalGeometryForTest: debugGraphBarVerticalGeometry,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {
@@ -1048,6 +1052,7 @@ globalThis.__layoutTestApi = {
     };
   },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  pollJsDebugClientHealthForTest: pollJsDebugClientHealth,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
   recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
   recordJsDebugDisconnectedSpanForTest: recordJsDebugDisconnectedSpan,

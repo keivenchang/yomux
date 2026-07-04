@@ -886,7 +886,7 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
             )
         client_a, status_a = webapp.record_stats_history_payload({
             "client_id": "client-a",
-            "records": [{"start": now, "api_count": 2, "latency_total_ms": 30, "latency_count": 2, "bandwidth_bytes": 1000}],
+            "records": [{"start": now, "api_count": 2, "latency_total_ms": 30, "latency_count": 2, "bandwidth_bytes": 1000, "heartbeat_count": 1}],
         })
         client_b, status_b = webapp.record_stats_history_payload({
             "client_id": "client-b",
@@ -905,6 +905,7 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
     assert sum(record["sse_count"] for record in history_a["records"]) == 0
     assert sum(record["latency_count"] for record in history_a["records"]) == 2
     assert sum(record["bandwidth_bytes"] for record in history_a["records"]) == 1000
+    assert sum(record["heartbeat_count"] for record in history_a["records"]) == 1
     assert sum(record["api_count"] for record in history_b["records"]) == 7
     assert sum(record["sse_count"] for record in history_b["records"]) == 3
     assert sum(record["latency_count"] for record in history_b["records"]) == 3
@@ -915,6 +916,7 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
     assert sum(record["agent_activity_samples"] for record in history_b["records"]) == 1
     clients = history_a["records"][0]["clients"]
     assert clients["client-a"]["api_count"] == 2
+    assert clients["client-a"]["heartbeat_count"] == 1
     assert clients["client-b"]["api_count"] == 7
     assert clients["client-b"]["bandwidth_bytes"] == 3000
     assert history_a_after_b["sequence"] == client_b["history"]["sequence"]

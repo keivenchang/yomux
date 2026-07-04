@@ -2790,7 +2790,7 @@ function insertUploadPaths(session, paths, options = {}) {
 function insertPasteUploadReferences(session, files, options = {}) {
   const references = pasteUploadReferences(files);
   if (!references.length) return insertUploadPaths(session, files.map(file => file.path).filter(Boolean), options);
-  const inserted = insertIntoTerminal(session, `${references.join(' ')} `);
+  const inserted = insertIntoTerminal(session, references.join(' '));
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">${localizedHtml('status.insertedPastedImage', {session: sessionLabel(session)})}</span>`

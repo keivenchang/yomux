@@ -1880,7 +1880,7 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
           <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60" vector-effect="non-scaling-stroke"></line>
           <polyline class="js-debug-line js-debug-line--bandwidth" points="0,100 600,20" fill="none"></polyline>
-          <rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="0" x="120" y="0" width="180" height="120"></rect>
+          <rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="0" x="120" y="8" width="180" height="112"></rect>
         </svg>
       </section>
     """, extra_css="""
@@ -1905,13 +1905,54 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
         };
         """
     )
-    assert metrics["overlayTopDelta"] <= 0.5, metrics
-    assert metrics["overlayHeightDelta"] <= 1.1, metrics
+    assert metrics["overlayTopDelta"] > 0.5, metrics
+    assert metrics["overlayHeightDelta"] > 1.1, metrics
     assert metrics["fill"] == "rgba(220, 38, 38, 0.28)", metrics
     assert metrics["pointerEvents"] == "none", metrics
 
 
-def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_series(browser, tmp_path):
+def test_debug_graph_zero_baseline_is_shared_by_lines_grid_axis_bars_and_overlays(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        debugGraphApplyServerHistory({sequence: 1, records: [{
+          start: Math.floor((now - 500) / 1000), duration: 1, sequence: 1,
+          cpu_total_percent: 0, cpu_count: 1, system_cpu_total_percent: 0, system_cpu_count: 1,
+        }]});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="cpu"]');
+        const line = chart.querySelector('[data-js-debug-series="cpu"]');
+        const grid = [...chart.querySelectorAll('[data-js-debug-grid-line="cpu"]')].find(node => Number(node.getAttribute('y1')) === jsDebugGraphGeometry.plotBottom);
+        const axis = chart.querySelector('[data-js-debug-axis-zero="cpu"]');
+        const pointY = Number(line.getAttribute('points').split(/[, ]+/)[1]);
+        const zeroBar = debugGraphBarVerticalGeometry(0, 0, 1, true);
+        const overlay = debugGraphPlotOverlayRectHtml('probe', 'data-probe', 0, 0, 1, 'probe');
+        return {
+          plotBottom: jsDebugGraphGeometry.plotBottom,
+          pointY,
+          gridY: Number(grid.getAttribute('y1')),
+          axisY: axis.style.getPropertyValue('--js-debug-axis-y'),
+          zeroBar,
+          overlay,
+        };
+        """
+    )
+    assert metrics["pointY"] == metrics["plotBottom"], metrics
+    assert metrics["gridY"] == metrics["plotBottom"], metrics
+    assert metrics["axisY"] == "100.000%", metrics
+    assert metrics["zeroBar"]["y"] + metrics["zeroBar"]["height"] == metrics["plotBottom"], metrics
+    assert 'y="8"' in metrics["overlay"] and 'height="112"' in metrics["overlay"], metrics
+
+
+def test_debug_graph_peer_traffic_shows_red_averages_without_marking_short_self_quiet_period(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1965,9 +2006,22 @@ def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_serie
           charts[key] = {
             ranges,
             peerCovered: ranges.some(range => range.start <= peerMidpointX && range.end >= peerMidpointX),
+            peerLines: [...chart.querySelectorAll('polyline[data-js-debug-client-series="other-clients-average"]')].map(line => ({
+              color: getComputedStyle(line).stroke,
+              points: line.getAttribute('points'),
+            })),
           };
         }
-        return {peerMidpointX, charts};
+        const colorProbe = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        colorProbe.setAttribute('class', 'js-debug-line js-debug-line--systemCpu');
+        document.querySelector('[data-js-debug-graph]').append(colorProbe);
+        const systemAverageColor = getComputedStyle(colorProbe).stroke;
+        colorProbe.remove();
+        return {
+          peerMidpointX,
+          systemAverageColor,
+          charts,
+        };
         """
     )
     assert 0 < metrics["peerMidpointX"] < 600, metrics
@@ -1975,6 +2029,8 @@ def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_serie
         assert chart["peerCovered"] is False, (key, metrics)
         assert chart["ranges"], (key, metrics)
         assert all(item["fill"] == "rgba(220, 38, 38, 0.12)" for item in chart["ranges"]), (key, metrics)
+        assert chart["peerLines"], (key, metrics)
+        assert all(item["color"] == metrics["systemAverageColor"] and item["points"] for item in chart["peerLines"]), (key, metrics)
 
 
 def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path):

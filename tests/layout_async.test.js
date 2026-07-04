@@ -2138,8 +2138,8 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].body.fields[0].filename, generatedName);
       assert.deepStrictEqual(sent[0], {
         type: 'input',
-        data: `[Image #1] '/home/test/${generatedName}' `,
-      }, 'pasted image upload inserts the image reference into xterm');
+        data: `[Image #1] '/home/test/${generatedName}'`,
+      }, 'pasted image upload inserts the image reference into xterm without trailing whitespace');
     }
 
     // DOIT.78 payload-matrix contract (78.5): the ONE shared image-payload detector/extractor used by BOTH

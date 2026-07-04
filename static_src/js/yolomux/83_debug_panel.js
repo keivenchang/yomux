@@ -7,15 +7,14 @@ const jsDebugGraphGeometry = (() => {
   const width = 600;
   const height = 120;
   const plotTop = 8;
-  const plotHeight = 104;
-  const hoverBottomInset = 4;
+  const plotHeight = height - plotTop;
   return Object.freeze({
     width,
     height,
     plotTop,
     plotHeight,
     plotBottom: plotTop + plotHeight,
-    hoverBottom: height - hoverBottomInset,
+    hoverBottom: plotTop + plotHeight,
   });
 })();
 const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
@@ -102,6 +101,10 @@ const jsDebugStatsPollMs = 30000;
 const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30000;
+// A request-driven client can be quiet between normal polls. Only mark the portion
+// after this continuous silence as missing communication, rather than treating each
+// empty raw bucket as a connection failure.
+const jsDebugGraphNoDataOverlayDelayMs = 30000;
 const jsDebugStatsHistoryMaxPoints = 6000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
@@ -111,10 +114,12 @@ const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', '
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphAgentTokenSmoothingSamples = 3;
-const jsDebugGraphAllClientsId = 'all-clients';
-const jsDebugGraphAllClientsLinePattern = 'solid';
-const jsDebugGraphClientAggregateAverage = 'allClientsAverage';
-const jsDebugGraphClientAggregateTotal = 'allClientsTotal';
+const jsDebugGraphThisClientId = 'this-client';
+const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
+const jsDebugGraphThisClientAggregate = 'thisClient';
+const jsDebugGraphOtherClientsAverageAggregate = 'otherClientsAverage';
+const jsDebugGraphThisClientLinePattern = 'solid';
+const jsDebugGraphOtherClientsAverageLinePattern = 'solid';
 const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   clientRequests: {
     attribute: 'displayed-client-request-sum',
@@ -136,10 +141,10 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   },
 });
 const jsDebugGraphClientMetrics = Object.freeze([
-  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
-  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
-  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', aggregate: jsDebugGraphClientAggregateAverage, value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
-  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', aggregate: jsDebugGraphClientAggregateTotal, value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
+  {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
+  {key: 'sse', labelKey: 'debug.graph.metric.sse', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.sseCount), hasData: bucket => Number(bucket.sseCount || 0) > 0},
+  {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
+  {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
@@ -199,7 +204,7 @@ const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphAllClientsId, clientAggregate: metric.aggregate, clientLinePattern: jsDebugGraphAllClientsLinePattern})),
+  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
@@ -811,6 +816,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     latencyTotalMs: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
+    heartbeatCount: 0,
     disconnectedMs: 0,
     cpuTotalPercent: 0,
     cpuCount: 0,
@@ -853,6 +859,7 @@ function debugGraphNewClientBucket() {
     latencyTotalMs: 0,
     latencyCount: 0,
     bandwidthBytes: 0,
+    heartbeatCount: 0,
     disconnectedMs: 0,
   };
 }
@@ -972,6 +979,8 @@ function debugGraphAddBucketData(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) bucket.bandwidthBytes += bytes;
+  const heartbeatCount = Number(data.heartbeatCount || 0);
+  if (Number.isFinite(heartbeatCount) && heartbeatCount > 0) bucket.heartbeatCount += heartbeatCount;
   const disconnectedMs = Number(data.disconnectedMs || 0);
   if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) bucket.disconnectedMs += disconnectedMs;
   const cpuPercent = Number(data.cpuPercent);
@@ -1050,6 +1059,7 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
       latency_total_ms: 0,
       latency_count: 0,
       bandwidth_bytes: 0,
+      heartbeat_count: 0,
       disconnected_ms: 0,
       cpu_total_percent: 0,
       cpu_count: 0,
@@ -1067,6 +1077,8 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
   }
   const bytes = Number(data.bandwidthBytes || 0);
   if (Number.isFinite(bytes) && bytes > 0) record.bandwidth_bytes += bytes;
+  const heartbeatCount = Number(data.heartbeatCount || 0);
+  if (Number.isFinite(heartbeatCount) && heartbeatCount > 0) record.heartbeat_count += heartbeatCount;
   const disconnectedMs = Number(data.disconnectedMs || 0);
   if (Number.isFinite(disconnectedMs) && disconnectedMs > 0) record.disconnected_ms += disconnectedMs;
   scheduleJsDebugStatsHistoryFlush();
@@ -1366,6 +1378,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.latencyTotalMs = Math.max(bucket.latencyTotalMs, Number(record.latency_total_ms || 0));
   bucket.latencyCount = Math.max(bucket.latencyCount, Number(record.latency_count || 0));
   bucket.bandwidthBytes = Math.max(bucket.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+  bucket.heartbeatCount = Math.max(bucket.heartbeatCount, Number(record.heartbeat_count || 0));
   bucket.disconnectedMs = Math.max(bucket.disconnectedMs, Number(record.disconnected_ms || 0));
   debugGraphApplyServerClients(bucket, record.clients);
   debugGraphApplyServerProcesses(bucket, record.servers);
@@ -1485,6 +1498,7 @@ function debugGraphApplyServerClients(bucket, clients) {
     client.latencyTotalMs = Math.max(client.latencyTotalMs, Number(record.latency_total_ms || 0));
     client.latencyCount = Math.max(client.latencyCount, Number(record.latency_count || 0));
     client.bandwidthBytes = Math.max(client.bandwidthBytes, Number(record.bandwidth_bytes || 0));
+    client.heartbeatCount = Math.max(client.heartbeatCount, Number(record.heartbeat_count || 0));
     client.disconnectedMs = Math.max(client.disconnectedMs, Number(record.disconnected_ms || 0));
     bucket.clients.set(cleanClientId, client);
   }
@@ -1783,23 +1797,30 @@ function debugGraphBucketValue(bucket, key) {
   return 0;
 }
 
-function debugGraphAllClientMetricBuckets(bucket, metric) {
-  if (!bucket || !metric) return [];
-  const mappedClients = bucket.clients instanceof Map ? [...bucket.clients.values()] : [];
-  // Pre-client-map journals exposed the requesting browser through the top-level fields. Preserve
-  // that retained history as one client only when this metric supplied data. Newer mapped records
-  // stay explicit even at zero; a disconnect marker alone does not invent traffic for legacy data.
-  const clientBuckets = mappedClients.length ? mappedClients : (metric.hasData(bucket) ? [bucket] : []);
-  return metric.aggregate === jsDebugGraphClientAggregateAverage
-    ? clientBuckets.filter(clientBucket => metric.hasData(clientBucket))
-    : clientBuckets;
+function debugGraphThisClientMetricBucket(bucket, metric) {
+  if (!bucket || !metric) return null;
+  if (bucket.clients instanceof Map) {
+    const mapped = bucket.clients.get(jsDebugStatsClientIdForRequest());
+    if (mapped) return mapped;
+  }
+  // The server's top-level values belong to this requesting browser. They also preserve
+  // pre-client-map history when another retained client map has no row for this browser.
+  return metric.hasData(bucket) ? bucket : null;
 }
 
-function debugGraphAllClientMetricValue(bucket, metric) {
-  const clientBuckets = debugGraphAllClientMetricBuckets(bucket, metric);
+function debugGraphOtherClientMetricBuckets(bucket, metric) {
+  if (!(bucket?.clients instanceof Map) || !metric) return [];
+  const thisClientId = jsDebugStatsClientIdForRequest();
+  return [...bucket.clients.entries()]
+    .filter(([clientId, clientBucket]) => clientId !== thisClientId
+      && (metric.key !== 'latency' || metric.hasData(clientBucket)))
+    .map(([, clientBucket]) => clientBucket);
+}
+
+function debugGraphOtherClientMetricAverage(bucket, metric) {
+  const clientBuckets = debugGraphOtherClientMetricBuckets(bucket, metric);
   if (!clientBuckets.length) return 0;
-  const total = clientBuckets.reduce((sum, clientBucket) => sum + metric.value(clientBucket), 0);
-  return metric.aggregate === jsDebugGraphClientAggregateAverage ? total / clientBuckets.length : total;
+  return clientBuckets.reduce((sum, clientBucket) => sum + metric.value(clientBucket), 0) / clientBuckets.length;
 }
 
 function debugGraphProcessCpuBucketValue(bucket, processId) {
@@ -1828,7 +1849,9 @@ function debugGraphHostMetricBucketValue(bucket, series) {
 function debugGraphSeriesBucketValue(bucket, series) {
   if (series?.clientMetric === true) {
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    return metric ? debugGraphAllClientMetricValue(bucket, metric) : 0;
+    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return metric ? debugGraphOtherClientMetricAverage(bucket, metric) : 0;
+    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
+    return metric && clientBucket ? metric.value(clientBucket) : 0;
   }
   if (series?.processCpu === true) return debugGraphProcessCpuBucketValue(bucket, series.processId);
   if (series?.hostMetric) return debugGraphHostMetricBucketValue(bucket, series);
@@ -1855,7 +1878,9 @@ function debugGraphBucketHasSeriesData(bucket, key) {
 function debugGraphSeriesBucketHasData(bucket, series) {
   if (series?.clientMetric === true) {
     const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    return debugGraphAllClientMetricBuckets(bucket, metric).length > 0;
+    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return debugGraphOtherClientMetricBuckets(bucket, metric).length > 0;
+    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
+    return Boolean(metric && clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket)));
   }
   if (series?.processCpu === true) {
     const process = bucket?.servers instanceof Map ? bucket.servers.get(series.processId) : null;
@@ -2168,6 +2193,24 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   }];
 }
 
+function debugGraphClientMetricSeriesDefs(buckets) {
+  return jsDebugGraphClientMetrics
+    .filter(metric => buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, metric).length > 0))
+    .map(metric => ({
+      ...metric,
+      key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
+      labelKey: 'debug.graph.series.otherClientsAverage',
+      metricLabelKey: metric.labelKey,
+      cssKey: metric.key,
+      clientMetric: true,
+      metricKey: metric.key,
+      clientId: jsDebugGraphOtherClientsAverageId,
+      clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
+      clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
+      color: 'var(--bad)',
+    }));
+}
+
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
   for (const bucket of buckets) {
@@ -2237,7 +2280,7 @@ function debugGraphHostMetricSeriesDefs(buckets) {
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
@@ -2357,7 +2400,6 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
 }
 
 function debugGraphPointForValue(value, timeMs, chartMax, domain) {
-  const max = Math.max(chartMax, 1);
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
@@ -2365,8 +2407,14 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain) {
     ? ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width
     : jsDebugGraphGeometry.width;
   const x = Math.max(0, Math.min(jsDebugGraphGeometry.width, rawX));
-  const y = jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, value) / max)) * jsDebugGraphGeometry.plotHeight;
+  const y = debugGraphPlotYForValue(value, chartMax);
   return [x.toFixed(1), y.toFixed(1)];
+}
+
+function debugGraphPlotYForValue(value, chartMax) {
+  const max = Math.max(Number(chartMax) || 0, 1);
+  const normalized = Math.max(0, Math.min(1, (Number(value) || 0) / max));
+  return jsDebugGraphGeometry.plotTop + ((1 - normalized) * jsDebugGraphGeometry.plotHeight);
 }
 
 function debugGraphXForTime(timeMs, domain) {
@@ -2402,7 +2450,7 @@ function debugGraphDisconnectedRectsHtml(buckets, domain) {
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
     const title = t('debug.graph.badConnection', {duration: debugGraphTerseTimeText(range.disconnectedMs)});
-    return `<rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(title)}</title></rect>`;
+    return debugGraphPlotOverlayRectHtml('js-debug-disconnected-range', 'data-js-debug-disconnected-range', index, x1, width, title);
   }).join('');
 }
 
@@ -2455,8 +2503,15 @@ function debugGraphComplementTimeRanges(ranges, domain) {
   return gaps;
 }
 
-function debugGraphCommunicationSeriesItems(seriesItems) {
-  return Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
+function debugGraphCurrentClientSeriesItems(seriesItems) {
+  const items = Array.isArray(seriesItems) ? seriesItems.filter(Boolean) : [];
+  const currentClientItems = items.filter(series => series.clientMetric === true && series.clientAggregate === jsDebugGraphThisClientAggregate);
+  return currentClientItems.length ? currentClientItems : items;
+}
+
+function debugGraphCurrentClientHeartbeatCount(bucket) {
+  const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
+  return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
 }
 
 function debugGraphNoDataRuns(buckets, domain, seriesItems) {
@@ -2467,11 +2522,17 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
   const perf = clientPerfStart('statsNoDataSweep');
   try {
+    const hasCurrentClientHeartbeat = debugGraphBucketRanges(buckets)
+      .some(item => debugGraphCurrentClientHeartbeatCount(item.bucket) > 0);
     const dataRanges = debugGraphBucketRanges(buckets)
-      .filter(item => items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
+      .filter(item => hasCurrentClientHeartbeat
+        ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
+        : items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
-    return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain);
+    return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain)
+      .map(range => ({...range, startMs: range.startMs + jsDebugGraphNoDataOverlayDelayMs}))
+      .filter(range => range.endMs > range.startMs);
   } finally {
     clientPerfEnd(perf, {rows: (buckets || []).length});
   }
@@ -2482,8 +2543,12 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
-    return `<rect class="js-debug-no-data-range" data-js-debug-no-data-range="${esc(index)}" x="${esc(x1.toFixed(1))}" y="0" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.height)}"><title>${esc(t('debug.noCommunicationData'))}</title></rect>`;
+    return debugGraphPlotOverlayRectHtml('js-debug-no-data-range', 'data-js-debug-no-data-range', index, x1, width, t('debug.noCommunicationData'));
   }).join('');
+}
+
+function debugGraphPlotOverlayRectHtml(className, attribute, index, x, width, title) {
+  return `<rect class="${esc(className)}" ${attribute}="${esc(index)}" x="${esc(x.toFixed(1))}" y="${esc(jsDebugGraphGeometry.plotTop)}" width="${esc(width.toFixed(1))}" height="${esc(jsDebugGraphGeometry.plotHeight)}"><title>${esc(title)}</title></rect>`;
 }
 
 function debugGraphSeriesPlotValues(series) {
@@ -2638,12 +2703,19 @@ function debugGraphBarRectsHtml(series, chartMax, domain) {
     const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(0.15, slotWidth * 0.05);
     const x = x1 + gap / 2;
     const width = Math.max(0, slotWidth - gap);
-    const top = debugGraphPointForValue(topValue, startMs, chartMax, domain)[1];
-    const bottom = debugGraphPointForValue(bottomValue, startMs, chartMax, domain)[1];
-    const height = Math.max(0.75, Number(bottom) - Number(top));
+    const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true);
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
-    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(top)}" width="${esc(width.toFixed(2))}" height="${esc(height.toFixed(1))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
+    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
   }).join('');
+}
+
+function debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, zeroBar = false) {
+  const top = debugGraphPlotYForValue(topValue, chartMax);
+  const bottom = debugGraphPlotYForValue(bottomValue, chartMax);
+  const height = Math.max(0, bottom - top);
+  if (height > 0 || !zeroBar) return {y: top, height};
+  const zeroHeight = 0.75;
+  return {y: bottom - zeroHeight, height: zeroHeight};
 }
 
 function debugGraphMovingAveragePolylineHtml(series, chartMax, domain) {
@@ -2704,8 +2776,7 @@ function debugGraphIntegerAxisHtml(group, max) {
 }
 
 function debugGraphGridLineY(value, chartMax) {
-  const max = Math.max(Number(chartMax) || 0, 1);
-  return jsDebugGraphGeometry.plotTop + (1 - (Math.max(0, Number(value) || 0) / max)) * jsDebugGraphGeometry.plotHeight;
+  return debugGraphPlotYForValue(value, chartMax);
 }
 
 function debugGraphAxisTickStyle(value, chartMax) {
@@ -2922,7 +2993,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
-          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCommunicationSeriesItems(groupSeries)) : ''}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain) : ''}
@@ -3282,7 +3353,38 @@ async function clearJsDebugServerHistory() {
 }
 
 function startJsDebugStatsPolling() {
+  startJsDebugClientHealthPolling();
   syncJsDebugStatsPolling({pollNow: true});
+}
+
+const jsDebugClientHealthPollState = {inFlight: false};
+
+async function pollJsDebugClientHealth() {
+  if (!jsDebugCollectionEnabled || jsDebugClientHealthPollState.inFlight || typeof apiFetchJsonQuiet !== 'function') return;
+  jsDebugClientHealthPollState.inFlight = true;
+  const url = `/api/ping?client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}`;
+  const startedAt = performanceNow();
+  try {
+    const payload = await apiFetchJsonQuiet(url, {cache: 'no-store'});
+    const latencyMs = Math.max(0, performanceNow() - startedAt);
+    const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
+    const sampleTimeMs = Date.now();
+    const bucketRef = debugGraphServerBucketRefForTime(sampleTimeMs, sampleTimeMs);
+    const data = {heartbeatCount: 1, latencyMs, bandwidthBytes};
+    debugGraphAddBucketData(debugGraphBucketForTime(sampleTimeMs, sampleTimeMs), data);
+    debugGraphQueueServerDelta(bucketRef, data);
+    compactJsDebugGraphBuckets(sampleTimeMs);
+  } finally {
+    jsDebugClientHealthPollState.inFlight = false;
+  }
+}
+
+function startJsDebugClientHealthPolling() {
+  if (!jsDebugCollectionEnabled || runtimeIntervalActive('debug-client-health')) return;
+  // A background health request is best-effort: an offline/browser-suspended page has no
+  // sample to contribute and must not surface an unhandled promise rejection.
+  void pollJsDebugClientHealth().catch(() => {});
+  resetRuntimeInterval('debug-client-health', () => { void pollJsDebugClientHealth().catch(() => {}); }, jsDebugStatsPollMs);
 }
 
 function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {}) {

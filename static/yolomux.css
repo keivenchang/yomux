@@ -4002,16 +4002,16 @@ body.theme-light .js-debug-graph-view {
   opacity: 0.32;
 }
 .js-debug-line--api {
-  stroke: var(--js-debug-api-series);
+  stroke: var(--js-debug-series-color, var(--js-debug-api-series));
 }
 .js-debug-line--sse {
-  stroke: var(--js-debug-sse-series);
+  stroke: var(--js-debug-series-color, var(--js-debug-sse-series));
 }
 .js-debug-line--latency {
-  stroke: var(--accent-gold);
+  stroke: var(--js-debug-series-color, var(--accent-gold));
 }
 .js-debug-line--bandwidth {
-  stroke: var(--link-soft);
+  stroke: var(--js-debug-series-color, var(--link-soft));
 }
 .js-debug-line--askAgents {
   stroke: var(--js-debug-agent-attention);
