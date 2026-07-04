@@ -156,11 +156,11 @@ function worktreeDisplayText(worktree) {
 }
 
 function clientPushCanSupplyData() {
-  return Boolean(clientEventsSource && location.protocol !== 'file:');
+  return Boolean(clientEventTransportState.source && location.protocol !== 'file:');
 }
 
 function clientPushConnectedForData() {
-  return clientPushCanSupplyData() && clientEventsConnected === true;
+  return clientPushCanSupplyData() && clientEventTransportState.connected === true;
 }
 
 function loginRedirectUrlForCurrentLocation() {
@@ -1092,7 +1092,7 @@ function setFileConflictDialogOpen(path, open) {
 // Normalized view of a session's transcript metadata — prevents each call site from re-implementing
 // the same `?.[session]?.project?.git?.root` chain differently.
 function sessionTranscriptInfo(session) {
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const git = info.project?.git || {};
   return {
     gitRoot: git.root || '',
@@ -1718,7 +1718,7 @@ function tmuxWindowUserInteractionIndex(session) {
     .find(button => String(button.dataset.windowSession || '').trim() === sessionKey);
   const activeIndex = tmuxWindowIndexKey(activeButton?.dataset.windowIndex);
   if (activeIndex !== null) return activeIndex;
-  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  const info = transcriptMetadataState.payload.sessions?.[sessionKey] || null;
   return typeof tmuxWindowCurrentActiveIndex === 'function'
     ? tmuxWindowCurrentActiveIndex(sessionKey, info)
     : null;
@@ -2954,25 +2954,17 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  if (options.id) button.id = options.id;
-  if (options.className) button.className = options.className;
-  if (options.role) button.setAttribute('role', options.role);
-  if (options.html !== undefined) button.innerHTML = options.html;
-  else if (options.label !== undefined) button.textContent = options.label;
+  setDomBuilderOptions(button, options);
   button.disabled = options.disabled === true;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
     button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
     if (options.checked === true) button.dataset.checked = 'true';
   }
-  if (options.dataset) {
-    for (const [key, value] of Object.entries(options.dataset)) {
-      if (value !== undefined && value !== null) button.dataset[key] = String(value);
-    }
-  }
   if (typeof options.onClick === 'function') button.addEventListener('click', options.onClick);
+  for (const [type, listener] of Object.entries(options.events || {})) {
+    if (typeof listener === 'function') button.addEventListener(type, listener);
+  }
   return button;
 }
 

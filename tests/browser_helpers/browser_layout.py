@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 import difflib
 from http import HTTPStatus
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from types import MappingProxyType
 from types import SimpleNamespace
 import uuid
 from urllib.parse import parse_qsl
@@ -42,6 +44,43 @@ SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").Web
 
 
 XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
+LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
+LIVE_RUNTIME_LATE_FUNCTION = "handleGlobalShortcutKeydown"
+LIVE_RUNTIME_BUNDLE_WAIT_SECONDS = 20.0
+BROWSER_WAIT_HELPER_SOURCE = r"""
+(() => {
+  const waitFor = async (predicate, options = {}) => {
+    if (typeof predicate !== 'function') throw new TypeError('wait predicate must be a function');
+    const requestedTimeout = Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(0, requestedTimeout) : 6500;
+    const requestedInterval = Number(options.intervalMs);
+    const intervalMs = Number.isFinite(requestedInterval) && requestedInterval > 0
+      ? Math.min(1000, Math.max(4, requestedInterval))
+      : 0;
+    const predicateText = String(predicate).replace(/\s+/g, ' ').slice(0, 180);
+    const description = String(options.description || `browser condition: ${predicateText}`);
+    const deadline = performance.now() + timeoutMs;
+    const poll = () => new Promise(resolve => {
+      if (intervalMs > 0) setTimeout(resolve, intervalMs);
+      else requestAnimationFrame(resolve);
+    });
+    while (true) {
+      const value = await predicate();
+      if (value) return value;
+      if (performance.now() >= deadline) {
+        const finalValue = await predicate();
+        if (finalValue) return finalValue;
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for ${description}`);
+      }
+      await poll();
+    }
+  };
+  Object.defineProperty(window, '__yolomuxTestWaitFor', {
+    configurable: true,
+    value: waitFor,
+  });
+})();
+"""
 
 
 def browser_wait_timeout(timeout, worker=None):
@@ -63,6 +102,7 @@ class WebDriverWait(SeleniumWebDriverWait):
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _APP_CSS_CACHE: str | None = None
+_APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
 
 
 def new_chrome_driver(window_size: str = "1000,700"):
@@ -75,7 +115,10 @@ def new_chrome_driver(window_size: str = "1000,700"):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={window_size}")
-    return webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(options=options)
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": BROWSER_WAIT_HELPER_SOURCE})
+    driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
+    return driver
 
 
 def fast_pointer_actions(browser):
@@ -92,6 +135,18 @@ def app_css() -> str:
     if _APP_CSS_CACHE is None:
         _APP_CSS_CACHE = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     return _APP_CSS_CACHE
+
+
+def app_english_strings() -> Mapping[str, str]:
+    # Locale fixture data is flat string-to-string JSON. Keep one parsed read-only catalog so every
+    # browser fixture consumes the same shipped labels without repeated disk reads and decoding.
+    global _APP_ENGLISH_STRINGS_CACHE
+    if _APP_ENGLISH_STRINGS_CACHE is None:
+        catalog = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+        if not isinstance(catalog, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in catalog.items()):
+            raise TypeError("English browser fixture catalog must contain only string values")
+        _APP_ENGLISH_STRINGS_CACHE = MappingProxyType(catalog)
+    return _APP_ENGLISH_STRINGS_CACHE
 
 
 def page_html(body: str, *, extra_css: str = "") -> str:
@@ -759,7 +814,7 @@ def codemirror_todo_diff_overview_texts():
 def codemirror_todo_diff_overview_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -905,7 +960,7 @@ def codemirror_todo_diff_overview_fixture_html():
 def codemirror_file_explorer_diff_overview_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -1118,7 +1173,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
     """
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -1264,7 +1319,7 @@ def app_bundle_before_boot_script():
 def codemirror_wrap_toggle_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -1426,6 +1481,8 @@ def finder_click_toolbar_fixture_html():
                 <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
                 <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
                   <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="expand"><svg class="file-tree-expand-collapse-icon"></svg></button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="collapse"><svg class="file-tree-expand-collapse-icon"></svg></button>
                   <button type="button" class="changes-refresh">Reload</button>
                 </span>
               </div>
@@ -1605,7 +1662,7 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1641,7 +1698,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
         "localeRegistry": locale_registry_payload(),
-        "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
+        "strings": {"en": dict(app_english_strings())},
     }
     if share_bootstrap is not None:
         bootstrap["share"] = share_bootstrap
@@ -2021,15 +2078,21 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         <script>{stub_script}</script>
         <script src="{dockview_script_uri}"></script>
         <script src="{script_uri}"></script>
+        <script>window.{LIVE_RUNTIME_BUNDLE_SENTINEL} = true;</script>
       </body>
     </html>
     """
 
 
-def load_fixture(browser, tmp_path, width):
-    page = tmp_path / f"pane-{width}.html"
-    page.write_text(pane_fixture_html(width), encoding="utf-8")
+def load_static_html_fixture(browser, tmp_path, filename, html):
+    page = tmp_path / filename
+    page.write_text(html, encoding="utf-8")
     browser.get(page.as_uri())
+    return page
+
+
+def load_fixture(browser, tmp_path, width):
+    load_static_html_fixture(browser, tmp_path, f"pane-{width}.html", pane_fixture_html(width))
     return browser.execute_script(
         """
         const panel = document.querySelector('.panel').getBoundingClientRect();
@@ -2076,33 +2139,23 @@ def load_fixture(browser, tmp_path, width):
 
 
 def load_pc_controls_fixture(browser, tmp_path):
-    page = tmp_path / "pc-controls.html"
-    page.write_text(pc_controls_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "pc-controls.html", pc_controls_fixture_html())
 
 
 def load_topbar_font_fixture(browser, tmp_path):
-    page = tmp_path / "topbar-font.html"
-    page.write_text(topbar_font_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "topbar-font.html", topbar_font_fixture_html())
 
 
 def load_editor_diff_ref_toolbar_fixture(browser, tmp_path):
-    page = tmp_path / "editor-diff-ref-toolbar.html"
-    page.write_text(editor_diff_ref_toolbar_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "editor-diff-ref-toolbar.html", editor_diff_ref_toolbar_fixture_html())
 
 
 def load_codemirror_wrap_toggle_fixture(browser, tmp_path):
-    page = tmp_path / "cm-wrap-toggle.html"
-    page.write_text(codemirror_wrap_toggle_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "cm-wrap-toggle.html", codemirror_wrap_toggle_fixture_html())
 
 
 def load_menu_fixture(browser, tmp_path):
-    page = tmp_path / "menu.html"
-    page.write_text(menu_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "menu.html", menu_fixture_html())
     return browser.execute_script(
         """
         const rows = Array.from(document.querySelectorAll('.app-menu-tab-command')).map(row => {
@@ -2128,45 +2181,31 @@ def load_menu_fixture(browser, tmp_path):
 
 
 def load_editor_pane_legacy_body_fixture(browser, tmp_path):
-    page = tmp_path / "editor-pane-legacy-body.html"
-    page.write_text(editor_pane_ignores_legacy_body_class_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "editor-pane-legacy-body.html", editor_pane_ignores_legacy_body_class_fixture_html())
 
 
 def load_codemirror_editor_controls_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-editor-controls.html"
-    page.write_text(codemirror_editor_controls_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-editor-controls.html", codemirror_editor_controls_fixture_html())
 
 
 def load_codemirror_bundle_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-bundle.html"
-    page.write_text(codemirror_bundle_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-bundle.html", codemirror_bundle_fixture_html())
 
 
 def load_codemirror_todo_diff_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-todo-diff-overview.html"
-    page.write_text(codemirror_todo_diff_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-todo-diff-overview.html", codemirror_todo_diff_overview_fixture_html())
 
 
 def load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-file-explorer-diff-overview.html"
-    page.write_text(codemirror_file_explorer_diff_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-file-explorer-diff-overview.html", codemirror_file_explorer_diff_overview_fixture_html())
 
 
 def load_codemirror_diff_wrapped_inserted_line_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-diff-wrapped-inserted-line.html"
-    page.write_text(codemirror_diff_wrapped_inserted_line_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-diff-wrapped-inserted-line.html", codemirror_diff_wrapped_inserted_line_fixture_html())
 
 
 def load_finder_click_toolbar_fixture(browser, tmp_path):
-    page = tmp_path / "finder-click-toolbar.html"
-    page.write_text(finder_click_toolbar_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "finder-click-toolbar.html", finder_click_toolbar_fixture_html())
 
 
 def activate_finder_diff_fixture(browser):
@@ -2184,27 +2223,75 @@ def activate_finder_diff_fixture(browser):
 
 
 def load_file_tree_status_alignment_fixture(browser, tmp_path):
-    page = tmp_path / "file-tree-status-alignment.html"
-    page.write_text(file_tree_status_alignment_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "file-tree-status-alignment.html", file_tree_status_alignment_fixture_html())
 
 
 def load_codemirror_scrollbar_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-scrollbar-overview.html"
-    page.write_text(codemirror_scrollbar_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-scrollbar-overview.html", codemirror_scrollbar_overview_fixture_html())
 
 
 def load_split_seam_fixture(browser, tmp_path):
-    page = tmp_path / "split-seam.html"
-    page.write_text(split_seam_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "split-seam.html", split_seam_fixture_html())
 
 
-def load_live_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
+def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redirect_paths=(), **fixture_kwargs):
     page = tmp_path / "live-runtime-boot.html"
-    page.write_text(live_runtime_boot_fixture_html(**fixture_kwargs), encoding="utf-8")
-    browser.get(page.as_uri() + search)
+    page.write_text(_live_runtime_boot_fixture_html(**fixture_kwargs), encoding="utf-8")
+    fixture_url = page.as_uri() + search
+    browser.get(fixture_url)
+    wait_for_live_runtime_bundle(
+        browser,
+        timeout=LIVE_RUNTIME_BUNDLE_WAIT_SECONDS,
+        expected_url=fixture_url,
+        expected_redirect_paths=expected_redirect_paths,
+    )
+
+
+def live_runtime_bundle_state(browser):
+    return browser.execute_script(
+        f"""
+        return {{
+          sentinel: window.{LIVE_RUNTIME_BUNDLE_SENTINEL} === true,
+          grid: document.getElementById('grid') !== null,
+          appRoot: document.getElementById('appRoot') !== null,
+          lateFunction: typeof {LIVE_RUNTIME_LATE_FUNCTION} === 'function',
+          url: location.href,
+          errors: Array.from(window.__bootErrors || []),
+          rejections: Array.from(window.__bootRejections || []),
+        }};
+        """
+    )
+
+
+def live_runtime_bundle_ready_state(state, expected_path="", expected_redirect_paths=()):
+    failures = [*state.get("errors", []), *state.get("rejections", [])]
+    if failures:
+        raise AssertionError(f"live runtime bundle failed before readiness: {failures}")
+    current_path = urlsplit(state.get("url", "")).path
+    if expected_path and current_path and current_path != expected_path:
+        allowed = frozenset(str(path) for path in expected_redirect_paths)
+        if current_path in allowed:
+            return state
+        if allowed and str(state.get("url", "")).startswith("chrome-error://chromewebdata/"):
+            return state
+        return False
+    anchor_ready = state.get("grid") or state.get("appRoot")
+    return state if state.get("sentinel") and anchor_ready and state.get("lateFunction") else False
+
+
+def wait_for_live_runtime_bundle(browser, timeout=5, expected_url="", expected_redirect_paths=()):
+    last_state = None
+    expected_path = urlsplit(expected_url).path if expected_url else ""
+
+    def ready(driver):
+        nonlocal last_state
+        last_state = live_runtime_bundle_state(driver)
+        return live_runtime_bundle_ready_state(last_state, expected_path, expected_redirect_paths)
+
+    try:
+        return WebDriverWait(browser, timeout).until(ready)
+    except TimeoutException as exc:
+        raise AssertionError(f"live runtime bundle did not become ready: {last_state}") from exc
 
 
 def live_runtime_boot_health(browser):
@@ -2374,12 +2461,14 @@ def wait_for_visible_selector(browser, selector):
     return WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const node = document.querySelector(arguments[0]);
+            const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
+              const rect = candidate.getBoundingClientRect();
+              const style = getComputedStyle(candidate);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            });
             if (!node) return false;
             node.scrollIntoView?.({block: 'center', inline: 'center'});
             const rect = node.getBoundingClientRect();
-            const style = getComputedStyle(node);
-            if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') return false;
             return {
               x: Math.round(rect.left + rect.width / 2),
               y: Math.round(rect.top + rect.height / 2),
@@ -2416,7 +2505,11 @@ def click_visible_selector(browser, selector):
     wait_for_visible_selector(browser, selector)
     browser.execute_script(
         """
-        const node = document.querySelector(arguments[0]);
+        const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        });
         if (!node) return;
         const rect = node.getBoundingClientRect();
         const clientX = Math.round(rect.left + rect.width / 2);

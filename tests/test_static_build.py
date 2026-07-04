@@ -1,3 +1,4 @@
+import ast
 import re
 
 import pytest
@@ -25,6 +26,7 @@ from tools.static_build import lint_css_structure
 from tools.static_build import lint_code_syntax_color_ownership
 from tools.static_build import lint_raw_standard_border_radii
 from tools.static_build import lint_raw_standard_font_sizes
+from tools.static_build import lint_raw_standard_spacing
 from tools.static_build import lint_raw_standard_motion_durations
 from tools.static_build import lint_repeated_raw_box_shadows
 from tools.static_build import lint_repeated_raw_component_literals
@@ -479,6 +481,233 @@ def test_repeated_semantic_declaration_set_lint_tree_is_clean():
     assert lint_repeated_semantic_declaration_sets() == []
 
 
+def test_preformatted_text_wrapping_has_one_shared_selector_owner():
+    css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    selectors = (
+        ".tmux-snapshot",
+        ".transcript-text",
+        ".yoagent-message-body",
+        ".yoagent-details-preview",
+        ".yoagent-message-details pre",
+        ".modal pre",
+        ".drop-action-result pre",
+        ".file-editor-conflict-compare pre",
+    )
+    selector_group = ",\n".join(selectors[:-1]) + ",\n" + selectors[-1]
+    rule = re.search(rf"{re.escape(selector_group)}\s*\{{([^}}]+)\}}", css)
+    assert rule is not None
+    assert "white-space: pre-wrap" in rule.group(1)
+    assert "overflow-wrap: anywhere" in rule.group(1)
+    assert lint_repeated_semantic_declaration_sets() == []
+
+
+def test_transient_surface_capacities_reuse_the_viewport_clamp():
+    css_by_part = {
+        part: repo_path(part).read_text(encoding="utf-8")
+        for part in ASSETS["yolomux.css"]
+    }
+    topbar = css_by_part["static_src/css/yolomux/10_topbar_menus.css"]
+    popovers = css_by_part["static_src/css/yolomux/20_sessions_popovers.css"]
+    file_tree = css_by_part["static_src/css/yolomux/50_terminal_file_tree.css"]
+    assert re.search(r"\.topbar-search\s*\{[^}]*flex:\s*1 1 36ch[^}]*max-inline-size:\s*min\(50%, 64ch\)", topbar, re.DOTALL)
+    assert re.search(r"\.drag-timing-overlay\s*\{[^}]*max-inline-size:\s*min\(88ch, var\(--popover-max-inline-size\)\)", popovers, re.DOTALL)
+    assert re.search(r"\.file-tree-repo-popover\s*\{[^}]*max-inline-size:\s*min\(72ch, var\(--popover-max-inline-size\)\)", file_tree, re.DOTALL)
+    assert re.search(r"\.terminal-drop-suggestions\s*\{[^}]*inline-size:\s*min\(64ch, var\(--popover-max-inline-size\)\)[^}]*max-inline-size:\s*var\(--popover-max-inline-size\)", file_tree, re.DOTALL)
+    assert "--input-bg is undefined" not in topbar
+    for literal in ("max-width: 320px", "max-width: 460px", "max-width: 360px", "max-width: 380px", "min-width: 248px"):
+        assert literal not in topbar + popovers + file_tree
+
+
+def test_dialog_capacities_have_one_content_relative_token_owner():
+    tokens = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    preferences = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    file_tree = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+
+    assert "--dialog-compact-inline-size: 80ch" in tokens
+    assert "--dialog-standard-inline-size: 112ch" in tokens
+    assert "--dialog-wide-inline-size: 144ch" in tokens
+    assert topbar.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
+    assert topbar.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert file_tree.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
+    assert file_tree.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert "width: min(var(--dialog-standard-inline-size), var(--popover-max-inline-size))" in preferences
+    assert preferences.count("width: min(var(--dialog-wide-inline-size), var(--popover-max-inline-size))") == 1
+    assert "width: min(var(--dialog-standard-inline-size), 100%)" in panels
+    assert "width: min(520px" not in topbar + file_tree
+    assert "width: min(760px" not in preferences + panels
+    assert "width: min(1180px" not in preferences
+    assert "width: min(960px" not in topbar + file_tree
+    assert "calc(100% - 28px)" not in topbar
+
+
+def test_scroll_restoration_browser_checks_wait_for_observable_state():
+    source = repo_path("tests/test_browser_layout.py").read_text(encoding="utf-8")
+
+    assert "setTimeout(resolve, 140)" not in source
+    assert "setTimeout(resolve, 120)" not in source
+    for description in (
+        "file editor scroll restoration",
+        "Dockview file editor scroll restoration",
+        "Preferences scroll restoration",
+        "YO!info scroll restoration",
+    ):
+        assert source.count(f"description: '{description}'") == 1
+
+
+def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
+    paths = (
+        "tests/test_browser_layout.py",
+        "tests/test_browser_editor.py",
+        "tests/test_browser_finder.py",
+        "tests/test_browser_share.py",
+    )
+
+    def is_page_write(statement):
+        value = statement.value if isinstance(statement, ast.Expr) else None
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "write_text"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "page"
+        )
+
+    def is_page_navigation(statement):
+        value = statement.value if isinstance(statement, ast.Expr) else None
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "get"
+            and len(value.args) == 1
+        ):
+            return False
+        uri = value.args[0]
+        return (
+            isinstance(uri, ast.Call)
+            and isinstance(uri.func, ast.Attribute)
+            and uri.func.attr == "as_uri"
+            and isinstance(uri.func.value, ast.Name)
+            and uri.func.value.id == "page"
+        )
+
+    def statement_bodies(node):
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and all(isinstance(item, ast.stmt) for item in value):
+                yield value
+                for item in value:
+                    yield from statement_bodies(item)
+            elif isinstance(value, ast.AST):
+                yield from statement_bodies(value)
+
+    duplicates = []
+    helper_calls = 0
+    for path in paths:
+        source = repo_path(path).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=path)
+        helper_calls += sum(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "load_static_html_fixture"
+            for node in ast.walk(tree)
+        )
+        for body in statement_bodies(tree):
+            for first, second in zip(body, body[1:]):
+                if is_page_write(first) and is_page_navigation(second):
+                    duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
+
+    assert duplicates == []
+    assert helper_calls == 79
+
+
+def test_browser_fixtures_use_one_read_only_english_catalog_owner():
+    helper_path = "tests/browser_helpers/browser_layout.py"
+    browser_fixture_paths = (
+        "tests/test_browser_editor.py",
+        "tests/test_browser_share.py",
+        helper_path,
+    )
+    direct_read = '(REPO_ROOT / "static" / "locales" / "en.json").read_text'
+    sources = {path: repo_path(path).read_text(encoding="utf-8") for path in browser_fixture_paths}
+
+    assert sources[helper_path].count(direct_read) == 1
+    assert "MappingProxyType(catalog)" in sources[helper_path]
+    assert "def app_english_strings() -> Mapping[str, str]:" in sources[helper_path]
+    for path in browser_fixture_paths[:-1]:
+        assert direct_read not in sources[path], path
+        assert "app_english_strings()" in sources[path], path
+
+
+def test_event_rows_use_one_container_responsive_layout_owner():
+    css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+
+    assert re.search(r"\.event-list\s*\{[^}]*container:\s*event-list / inline-size", css, re.DOTALL)
+    assert re.search(r"\.event-item\s*\{[^}]*grid-template-columns:\s*minmax\(18ch, max-content\) minmax\(12ch, 20ch\) minmax\(0, 1fr\)", css, re.DOTALL)
+    assert re.search(r"@container event-list \(max-width: 72ch\)\s*\{[\s\S]*?\.event-message\s*\{[^}]*grid-column:\s*1 / -1", css)
+    assert "grid-template-columns: 132px 118px minmax(0, 1fr)" not in css
+
+
+def test_browser_fixture_wait_loops_have_one_injected_owner():
+    browser_fixture_paths = (
+        "tests/test_browser_share.py",
+        "tests/test_browser_layout.py",
+        "tests/test_browser_editor.py",
+        "tests/test_browser_dockview.py",
+    )
+    fixture_sources = {
+        path: repo_path(path).read_text(encoding="utf-8")
+        for path in browser_fixture_paths
+    }
+    helper = repo_path("tests/browser_helpers/browser_layout.py").read_text(encoding="utf-8")
+
+    assert "BROWSER_WAIT_HELPER_SOURCE" in helper
+    assert "Page.addScriptToEvaluateOnNewDocument" in helper
+    assert "Timed out after ${timeoutMs}ms waiting for ${description}" in helper
+    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 40
+    for path, source in fixture_sources.items():
+        assert "const waitFor = async" not in source, path
+        assert "const waitFor = predicate" not in source, path
+        assert "await delay(320)" not in source, path
+    assert "file-editor-preview-zoom-measuring'); i += 1" not in fixture_sources["tests/test_browser_editor.py"]
+    assert "description: 'split Mermaid zoom measurement'" in fixture_sources["tests/test_browser_editor.py"]
+    assert "description: 'bright Mermaid zoom measurement'" in fixture_sources["tests/test_browser_editor.py"]
+
+    layout_tree = ast.parse(fixture_sources["tests/test_browser_layout.py"], filename="tests/test_browser_layout.py")
+    rename_test = next(
+        ast.get_source_segment(fixture_sources["tests/test_browser_layout.py"], node) or ""
+        for node in ast.walk(layout_tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "test_rename_marks_index_building_and_refresh_done_requeries_open_search"
+    )
+    assert "setTimeout(resolve, 0)" not in rename_test
+    assert "description: 'renamed root index building'" in rename_test
+
+
+def test_yostats_history_browser_tests_use_shared_observable_waits():
+    path = repo_path("tests/test_browser_layout.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    names = {
+        "test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll",
+        "test_debug_graph_history_error_retains_chart_and_retry_clears_overlay",
+        "test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately",
+    }
+    function_sources = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+    }
+
+    assert set(function_sources) == names
+    for name, function_source in function_sources.items():
+        assert "window.__yolomuxTestWaitFor" in function_source, name
+        assert "const deadline = performance.now()" not in function_source, name
+        assert "setTimeout(resolve, 650)" not in function_source, name
+    assert function_sources["test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll"].count(
+        'assert metrics["historyResolution"] == 1'
+    ) == 1
+
+
 def test_tokenized_component_base_rules_have_no_identical_light_restatements():
     tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
     topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
@@ -533,8 +762,46 @@ def test_compact_overflow_strips_have_one_shared_layout_owner():
     assert not re.search(r"\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{", file_tree_css)
 
 
+def test_audited_css_families_have_one_grouped_owner():
+    layout_css = repo_path("static_src/css/yolomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
+    preferences_css = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+
+    assert ".preferences-search,\n.search-history-input {" in preferences_css
+    assert ".changes-summary-totals,\n.changes-repo-totals {" in preferences_css
+    assert ".keyboard-shortcut-row,\n.keyboard-legend-row {" in preferences_css
+    assert ".info-tree-search-control input:focus,\n.preferences-search:focus,\n.search-history-input:focus {" in file_tree_css
+    assert ".yoagent-chat-send,\n.yoagent-chat-stop {" in file_tree_css
+    assert ".file-editor-preview-pane,\n.file-editor-preview-pane-panel {" in panels_css
+    assert ".file-explorer-title,\n.file-explorer-panel-title,\n.file-editor-title {" in panels_css
+    assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
+    assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.file-editor-panel-close::after\s*\{", preferences_css)
+    assert re.search(r"\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{", panels_css)
+    assert ".cm-content ::-moz-selection" not in panels_css
+    assert not re.search(r"\.panel\s*\{[^}]*grid-template-rows:", layout_css)
+    assert not re.search(r"\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:", panels_css)
+
+
 def test_code_syntax_color_ownership_tree_is_clean():
     assert lint_code_syntax_color_ownership() == []
+
+
+def test_runtime_buttons_have_one_shared_construction_owner():
+    assert sb.lint_direct_button_construction() == []
+
+
+def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, tmp_path):
+    owner = tmp_path / "10_core_utils.js"
+    parallel = tmp_path / "20_parallel.js"
+    owner.write_text("function makeButton() {\n  return document.createElement('button');\n}\n", encoding="utf-8")
+    parallel.write_text("function localButton() {\n  return document.createElement(\"button\");\n}\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["10_core_utils.js", "20_parallel.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+
+    assert sb.lint_direct_button_construction() == [
+        "20_parallel.js:2: direct button construction bypasses makeButton()"
+    ]
 
 
 def test_code_syntax_color_ownership_requires_one_grouped_renderer_rule(monkeypatch, tmp_path):
@@ -562,35 +829,8 @@ def test_code_syntax_color_ownership_requires_one_grouped_renderer_rule(monkeypa
 @pytest.mark.parametrize(
     ("name", "declarations"),
     [
-        ("active-control paint", ("color: var(--active-control-text)", "background: var(--active-control-bg)", "border-color: var(--active-control-border)")),
-        ("disabled-control state", ("opacity: 0.42", "cursor: default")),
-        ("inactive-agent-marker paint", ("color: var(--agent-inactive-marker-text)", "background: var(--agent-inactive-marker-bg)", "border-color: var(--agent-inactive-marker-border)")),
-        ("pane pressed-control paint", ("color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text))", "background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg))", "border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border))")),
-        ("YO!info text-action reset", ("padding: 0", "border: 0", "background: transparent", "text-align: left", "font: inherit", "cursor: pointer")),
-        ("agent identity-cluster layout", ("display: inline-flex", "align-items: center", "gap: 2px", "flex: 0 0 auto", "vertical-align: middle")),
-        ("editor toolbar hover paint", ("color: var(--editor-toolbar-control-hover-fg)", "border-color: var(--editor-toolbar-control-hover-border)", "background: var(--editor-toolbar-control-hover-bg)")),
-        ("branch-indicator paint", ("color: var(--branch-indicator-text)", "background: var(--branch-indicator-bg)", "border-color: var(--branch-indicator-border)")),
-        ("server-update reload rest paint", ("background: var(--danger-strong)", "color: var(--paint-white)")),
-        ("server-update reload hover paint", ("border-color: var(--danger-strong-border)", "background: var(--danger-strong-hover)", "color: var(--paint-white)")),
-        ("three-row content scaffold", ("height: 100%", "min-height: 0", "background: var(--bg)", "display: grid", "grid-template-rows: auto auto minmax(0, 1fr)")),
-        ("two-row debug-view layout", ("display: grid", "grid-template-rows: auto minmax(0, 1fr)", "gap: 8px")),
-        ("search-input focus ring", ("outline: 0", "border-color: var(--active-control-border)", "box-shadow: var(--active-control-focus-shadow)")),
-        ("danger-status paint", ("color: var(--danger-text)", "background: var(--danger-bg)", "border-color: var(--danger-border)")),
-        ("compact agent SVG geometry", ("flex-basis: 14px", "width: 14px", "height: 14px")),
-        ("light panel-surface paint", ("color: var(--text)", "background: var(--panel)", "border-color: var(--line)")),
-        ("single-line ellipsis", ("min-width: 0", "overflow: hidden", "text-overflow: ellipsis", "white-space: nowrap")),
-        ("vanilla-preview code surface", ("color: var(--markdown-html-light-text)", "background: var(--lt-panel)", "border-color: var(--lt-line)")),
-        ("inline-code paint", ("color: var(--code-inline)", "background: var(--code-inline-bg)", "border: 1px solid var(--code-inline-border)", "border-radius: var(--radius-sm)")),
-        ("light code-block paint", ("color: var(--lt-code-block-text)", "background: var(--lt-code-block-bg)", "border-color: var(--lt-code-block-border)")),
-        ("vanilla nested-code reset", ("color: inherit !important", "background: transparent !important", "border-color: transparent")),
-        ("flexible tab text", ("flex: 1 1 auto", "min-width: 0", "max-width: none")),
-        ("shared link rest paint", ("color: var(--link-soft)", "text-decoration: none")),
-        ("shared link hover paint", ("color: var(--link-soft-hover)", "text-decoration: underline")),
-        ("path-drag outline", ("outline: 2px dashed var(--pane-resizer-hover-bg)", "outline-offset: -5px")),
-        ("file explorer chrome hover paint", ("color: var(--text)", "border-color: var(--text)")),
-        ("YO!agent action hover paint", ("border-color: var(--active-control-focus-ring)", "color: var(--text)", "outline: 0")),
-        ("topbar status surface shell", ("flex: 0 0 auto", "display: inline-flex", "align-items: center", "height: var(--compact-control-height)", "font-size: var(--ui-font-size-2xs)", "cursor: pointer", "white-space: nowrap")),
-        ("compact overflow strip layout", ("flex: 0 0 auto", "min-width: 0", "display: inline-flex", "align-items: center", "gap: 1px", "overflow: visible")),
+        (name, tuple(f"{property_name}: {value}" for property_name, value in sorted(declarations)))
+        for name, declarations in sorted(sb.SHARED_CSS_DECLARATION_SETS.items())
     ],
 )
 def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properties(monkeypatch, tmp_path, name, declarations):
@@ -691,6 +931,47 @@ def test_standard_component_font_size_lint_rejects_fixed_text_but_ignores_fallba
     ]
 
 
+def test_standard_spacing_lint_tree_is_clean():
+    assert lint_raw_standard_spacing() == []
+
+
+def test_standard_spacing_lint_rejects_physical_logical_compound_and_fallback_copies(monkeypatch, tmp_path):
+    tokens = tmp_path / "00_tokens_base.css"
+    component = tmp_path / "component.css"
+    tokens.write_text(":root { --space-4: 4px; --space-8: 8px; --space-12: 12px; }\n", encoding="utf-8")
+    component.write_text(
+        ".scalar { gap: 8px; }\n"
+        ".compound { gap: 4px 8px; }\n"
+        ".row { row-gap: 12px; }\n"
+        ".column { column-gap: var(--local-gap, 4px); }\n"
+        ".padding { padding: 2px 4px 16px; }\n"
+        ".logical { padding-inline-start: 8px; margin-block: var(--local-margin, 6px) auto; }\n"
+        ".margin { margin: 0 5px; }\n"
+        ".invalid-negative { margin-inline-start: -var(--space-4); }\n"
+        ".owned { gap: var(--space-8); }\n"
+        ".owned-box { padding: var(--space-2) var(--space-4); margin: 0; }\n"
+        ".custom { gap: 16px; }\n"
+        ".custom-box { padding: 14px; margin: 18px; }\n"
+        ".relative { gap: 0.45em; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert lint_raw_standard_spacing() == [
+        "component.css:1: raw standard spacing 8px; use var(--space-8)",
+        "component.css:2: raw standard spacing 4px; use var(--space-4)",
+        "component.css:2: raw standard spacing 8px; use var(--space-8)",
+        "component.css:3: raw standard spacing 12px; use var(--space-12)",
+        "component.css:4: raw standard spacing 4px; use var(--space-4)",
+        "component.css:5: raw standard spacing 2px; use var(--space-2)",
+        "component.css:5: raw standard spacing 4px; use var(--space-4)",
+        "component.css:6: raw standard spacing 8px; use var(--space-8)",
+        "component.css:6: raw standard spacing 6px; use var(--space-6)",
+        "component.css:7: raw standard spacing 5px; use var(--space-5)",
+        "component.css:8: invalid negated spacing token -var(--space-4); use calc(-1 * var(--space-4))",
+    ]
+
+
 def test_undefined_css_var_lint_is_clean():
     # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
     assert lint_undefined_css_vars() == []
@@ -712,6 +993,55 @@ def test_opaque_white_has_one_css_paint_owner():
         occurrences.extend(part for _match in re.finditer(r"(?i)#fff(?:fff)?\b", text))
     assert occurrences == ["static_src/css/yolomux/00_tokens_base.css"]
     assert "--paint-white: #fff;" in repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+
+
+def test_linked_semantic_colors_alias_one_palette_owner():
+    css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+
+    for declaration in (
+        "--editor-scheme-panel: var(--panel);",
+        "--editor-scheme-gutter-bg: var(--panel);",
+        "--pane-tab-panel-head-bg: var(--brand-green-dark);",
+        "--pane-meta-path: var(--pane-tab-text);",
+        "--pc-control-fg: var(--pane-tab-text);",
+        "--pc-control-border: var(--pane-tab-control-border);",
+        "--git-deleted-badge: var(--danger-strong);",
+        "--bad: var(--danger-strong-hover);",
+        "--code-function: var(--link-soft);",
+        "--pr-status-passing: var(--good);",
+        "--code-inline: var(--code-inline-dark-text);",
+        "--code-inline-bg: var(--code-inline-dark-bg);",
+        "--code-inline-border: var(--code-inline-dark-border);",
+        "--markdown-html-dark-code: var(--code-inline-dark-text);",
+        "--markdown-html-dark-code-bg: var(--code-inline-dark-bg);",
+        "--markdown-html-dark-code-border: var(--code-inline-dark-border);",
+        "--lt-markdown-link: var(--light-link-text);",
+        "--markdown-html-light-link: var(--light-link-text);",
+        "--lt-code-inline: var(--code-inline-light-text);",
+        "--lt-code-inline-bg: var(--code-inline-light-bg);",
+        "--lt-code-inline-border: var(--code-inline-light-border);",
+        "--markdown-html-light-code: var(--code-inline-light-text);",
+        "--markdown-html-light-code-bg: var(--code-inline-light-bg);",
+        "--markdown-html-light-code-border: var(--code-inline-light-border);",
+        "--lt-code-number: var(--lt-code-atom);",
+        "--lt-code-tag: var(--lt-code-keyword);",
+        "--lt-code-comment: var(--lt-muted);",
+        "--editor-preview-bg: var(--editor-scheme-preview-bg);",
+        "--markdown-html-dark-border: var(--markdown-html-dark-bg);",
+        "--share-stage-bg: var(--paint-black);",
+        "--pane-resizer-shadow: var(--pane-resizer-bg);",
+    ):
+        assert declaration in css
+    assert css.count("#151922") == 1
+    assert css.count("#dfe6ef") == 2  # one owner plus the explanatory light-theme comment
+    assert css.count("#3f6f00") == 2  # dark owner plus the intentionally distinct light git-staged value
+    assert css.count("#075985") == 1
+    assert css.count("#a40e26") == 1
+    assert css.count("#fff1d6") == 1
+    assert css.count("#d8a657") == 1
+    assert css.count("#000") == 1
+    for inherited in ("--auto-text", "--danger-text", "--danger-bg", "--danger-border", "--danger-muted-bg", "--danger-strong", "--danger-strong-hover", "--danger-strong-border", "--danger-light-text"):
+        assert css.count(f"{inherited}:") == 1
 
 
 def test_repeated_raw_box_shadow_lint_tree_is_clean():
@@ -788,6 +1118,23 @@ def test_repeated_raw_component_literal_lint_flags_new_repeats(monkeypatch, tmp_
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
     assert sb.lint_repeated_raw_component_literals() == [
         "raw component color #123456 repeats in bad.css:1, bad.css:2; move it to a CSS token or add a reviewed allowlist reason"
+    ]
+
+
+def test_repeated_raw_component_literal_lint_owns_variable_channel_alpha(monkeypatch, tmp_path):
+    bad = tmp_path / "bad.css"
+    bad.write_text(
+        ".a { color: rgb(var(--theme-rgb) / 0.2); }\n"
+        ".b { border-color: rgba(var(--theme-rgb) / 20%); }\n"
+        ".c { color: rgb(var(--other-rgb) / 0.2); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
+
+    assert sb.lint_repeated_raw_component_literals() == [
+        "raw component color rgb(var(--theme-rgb) / 0.2) repeats in bad.css:1, bad.css:2; move it to a CSS token"
     ]
 
 

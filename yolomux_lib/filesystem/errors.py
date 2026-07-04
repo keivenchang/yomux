@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
+from typing import NoReturn
 
 from ..common import ErrorPayload
 from ..common import error_payload
@@ -40,10 +43,11 @@ class FilesystemError(Exception):
         )
 
     @classmethod
-    def os_error(cls, error: OSError, status: int = 500) -> "FilesystemError":
+    def os_error(cls, error: OSError, status: int | None = None) -> "FilesystemError":
+        resolved_status = int(status) if status is not None else 403 if isinstance(error, PermissionError) else 500
         return cls(
             "filesystem operation failed",
-            status=status,
+            status=resolved_status,
             message_key="fs.error.operationFailed",
             diagnostic=error,
         )
@@ -98,3 +102,20 @@ class FilesystemError(Exception):
             message_key="fs.error.outsideRepo",
             message_params={"path": str(path)},
         )
+
+
+def normalize_os_errors(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep raw OS failures behind the package's typed, localizable filesystem contract."""
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        except OSError as exc:
+            raise FilesystemError.os_error(exc) from exc
+
+    return wrapped
+
+
+def raise_os_error(error: OSError) -> NoReturn:
+    """Make walkers fail through the same package-facade boundary as direct OS calls."""
+    raise error

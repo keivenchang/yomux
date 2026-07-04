@@ -3,6 +3,8 @@ from pathlib import Path
 import signal
 import subprocess
 
+import pytest
+
 from yolomux_lib import agent_tui
 from yolomux_lib import app
 from yolomux_lib import common
@@ -10,6 +12,49 @@ from yolomux_lib import session_files
 from yolomux_lib import web
 from yolomux_lib.filesystem import git_ops
 from yolomux_lib.yoagent import conversation
+
+
+def test_record_owned_thread_starts_use_shared_rollback_owner():
+    root = Path(common.PROJECT_ROOT)
+    owners = {
+        "yolomux_lib/app.py": {
+            "start_stats_history_sampler",
+            "start_client_event_watcher",
+            "start_client_directory_poll",
+            "request_session_files_disk_cache_prune",
+            "start_input_heartbeat_worker",
+            "start_tabber_activity_cache_refresh",
+            "start_tabber_activity_cache_warmer",
+            "warm_metadata_cache_async",
+        },
+        "yolomux_lib/file_index.py": {"_start_build"},
+        "yolomux_lib/yoagent/controller.py": {
+            "start_yoagent_action_result_watcher",
+            "start_yoagent_backend_prewarm",
+        },
+    }
+    for relative, names in owners.items():
+        source = (root / relative).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=relative)
+        functions = {
+            node.name: ast.get_source_segment(source, node) or ""
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+        }
+        assert set(functions) == names
+        for name, function_source in functions.items():
+            assert "start_thread_with_rollback(" in function_source, f"{relative}:{name}"
+            assert ".start()" not in function_source, f"{relative}:{name}"
+
+    rolled_back = []
+
+    class FailedWorker:
+        def start(self):
+            raise RuntimeError("cannot start")
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        common.start_thread_with_rollback(FailedWorker(), lambda: rolled_back.append(True))
+    assert rolled_back == [True]
 
 
 def test_project_git_normalizes_missing_and_malformed_git_payloads():

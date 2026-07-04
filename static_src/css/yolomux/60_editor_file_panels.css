@@ -36,18 +36,15 @@
   background: var(--document-preview-bg);
   color-scheme: light;
 }
-.html-preview-body {
+.html-preview-body,
+.pdf-preview-body {
   display: flex;
   flex-direction: column;
   padding: 0;
   background: var(--document-preview-bg);
 }
 .pdf-preview-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0;
-  background: var(--document-preview-bg);
+  gap: var(--space-10);
 }
 .image-preview-body,
 .file-editor-image-panel {
@@ -64,29 +61,26 @@ body.editor-theme-light .image-preview-body,
 body.editor-theme-light .file-editor-image-panel {
   background-color: var(--image-preview-checker-bg-light);
   background-image:
-    linear-gradient(45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
-    linear-gradient(-45deg, rgb(var(--overlay-slate-rgb) / 0.07) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%),
-    linear-gradient(-45deg, transparent 75%, rgb(var(--overlay-slate-rgb) / 0.07) 75%);
+    linear-gradient(45deg, var(--paint-overlay-slate-07) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--paint-overlay-slate-07) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--paint-overlay-slate-07) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--paint-overlay-slate-07) 75%);
 }
 .image-preview-body {
   display: grid;
   place-items: center;
-  padding: 10px;
+  padding: var(--space-10);
 }
 .file-editor-preview-image,
-.mermaid-preview-image {
-  display: block;
-  max-width: 100%;
-  max-height: min(340px, 48vh);
-  height: auto;
-  object-fit: contain;
-}
+.mermaid-preview-image,
 .markdown-body img.markdown-preview-image {
   display: block;
   max-width: 100%;
   height: auto;
   object-fit: contain;
+}
+.mermaid-preview-image {
+  max-height: min(340px, 48vh);
 }
 .file-editor-preview-image {
   max-height: 100%;
@@ -98,15 +92,12 @@ body.editor-theme-light .file-editor-image-panel {
 .mermaid-preview-error {
   display: block;
   max-width: min(72ch, 100%);
-  padding: 12px;
-  border: 1px solid var(--line);
+  padding: var(--space-12);
   border-radius: var(--radius-md);
-  background: var(--panel2);
-  color: var(--text);
   overflow-wrap: anywhere;
 }
 .markdown-image-error {
-  margin: 8px 0;
+  margin: var(--space-8) 0;
   font: 600 var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
 .markdown-image-error a,
@@ -118,17 +109,14 @@ body.editor-theme-light .file-editor-image-panel {
   display: grid;
   place-items: center;
   min-height: 80px;
-  margin: 12px 0;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--panel);
+  margin: var(--space-12) 0;
+  padding: var(--space-12);
   color: var(--text);
 }
 .file-editor-preview-zoom-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 6px;
+  gap: var(--space-6);
   min-width: 0;
   min-height: 0;
   color: var(--text);
@@ -147,15 +135,15 @@ body.editor-theme-light .file-editor-image-panel {
 .mermaid-preview-host.file-editor-preview-zoom-shell {
   place-items: stretch;
   overflow: hidden;
-  padding: 8px;
+  padding: var(--space-8);
 }
 .file-editor-preview-zoom-toolbar {
   display: inline-flex;
   justify-self: end;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
   min-width: 0;
-  padding: 2px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: color-mix(in srgb, var(--panel2) 92%, transparent);
@@ -163,7 +151,7 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-preview-zoom-toolbar button {
   height: 22px;
   min-width: 28px;
-  padding: 0 6px;
+  padding: 0 var(--space-6);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
@@ -172,7 +160,7 @@ body.editor-theme-light .file-editor-image-panel {
 }
 .file-editor-preview-zoom-value {
   min-width: 4ch;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   text-align: right;
   font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
   color: var(--muted);
@@ -187,9 +175,6 @@ body.editor-theme-light .file-editor-image-panel {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--panel);
 }
 .file-editor-preview-zoom-shell[data-preview-zoom-pan="1"] .file-editor-preview-zoom-viewport {
   cursor: grab;
@@ -210,7 +195,7 @@ body.editor-theme-light .file-editor-image-panel {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px;
+  padding: var(--space-12);
 }
 /* While the zoom surface measures its settled size, keep the stage laid out (so the viewport size
    stays measurable) but invisible, so the diagram is not painted at a transient pre-settle size and
@@ -227,17 +212,17 @@ body.editor-theme-light .file-editor-image-panel {
   place-self: stretch;
 }
 .mermaid-preview-error pre {
-  margin: 10px 0 0;
+  margin: var(--space-10) 0 0;
   white-space: pre-wrap;
 }
 .file-editor-html-js-notice {
   display: flex;
   flex: 0 0 auto;
-  gap: 10px;
+  gap: var(--space-10);
   align-items: center;
   justify-content: space-between;
   min-height: 30px;
-  padding: 5px 9px;
+  padding: var(--space-5) var(--space-9);
   color: #17210f;
   background: #f6e6a8;
   border-bottom: 1px solid var(--accent-gold);
@@ -312,37 +297,22 @@ body.editor-theme-light .file-editor-image-panel {
   transform: translate(-50%, -50%) rotate(45deg);
 }
 .file-editor-icon-blame::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 9px;
   height: 9px;
   border: 2px solid currentColor;
   border-radius: var(--radius-pill);
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-blame::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 3px;
   height: 3px;
   border-radius: var(--radius-pill);
   background: currentColor;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 12px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::after {
   content: "";
@@ -368,47 +338,27 @@ body.editor-theme-light .file-editor-image-panel {
   transform: translate(-50%, -50%) rotate(-35deg);
 }
 .file-editor-icon-eye::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 13px;
   height: 8px;
   border: 1.5px solid currentColor;
   border-radius: 50% / 60%;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-eye::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 3.5px;
   height: 3.5px;
   border-radius: 50%;
   background: currentColor;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 13px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 1.5px;
   height: 8px;
   background: currentColor;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-popout-preview::before {
   content: "";
@@ -430,15 +380,10 @@ body.editor-theme-light .file-editor-image-panel {
   color: currentColor;
 }
 .file-editor-icon-theme::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
   width: 12px;
   height: 12px;
   border: 1.5px solid currentColor;
   border-radius: 50%;
-  transform: translate(-50%, -50%);
 }
 .file-editor-icon-theme::after {
   content: "";
@@ -485,7 +430,7 @@ body.editor-theme-light .file-editor-image-panel {
   padding: 24px;
 }
 .file-editor-dialog {
-  width: min(760px, 96vw);
+  width: min(var(--dialog-standard-inline-size), 100%);
   max-height: 86vh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -495,12 +440,12 @@ body.editor-theme-light .file-editor-image-panel {
   color: var(--text);
 }
 .file-editor-dialog-title {
-  padding: 10px 12px;
+  padding: var(--space-10) var(--space-12);
   border-bottom: 1px solid var(--line);
   font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .file-editor-dialog-body {
-  padding: 12px;
+  padding: var(--space-12);
   overflow: auto;
   color: var(--inactive-tab-bg-hover);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
@@ -514,8 +459,6 @@ body.editor-theme-light .file-editor-image-panel {
   max-height: min(62vh, 720px);
   overflow: auto;
   margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-sm);
   line-height: 1.45;
@@ -523,13 +466,13 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: var(--space-8);
+  padding: var(--space-10) var(--space-12);
   border-top: 1px solid var(--line);
 }
 .file-editor-dialog-action {
   min-height: 26px;
-  padding: 4px 9px;
+  padding: var(--space-4) var(--space-9);
   border: 1px solid #59677d;
   border-radius: var(--radius-control);
   background: #202838;
@@ -550,10 +493,10 @@ body.editor-theme-light .file-editor-image-panel {
 .file-editor-conflict-compare {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: var(--space-10);
 }
 .file-editor-conflict-compare h4 {
-  margin: 0 0 6px;
+  margin: 0 0 var(--space-6);
   color: var(--good);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
@@ -566,13 +509,11 @@ body.editor-theme-light .file-editor-image-panel {
   background: #0f131b;
   border: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 .file-compare-line {
   display: block;
   min-height: 1.35em;
-  padding: 1px 8px;
+  padding: var(--space-1) var(--space-8);
   border-inline-start: 3px solid transparent;
 }
 .file-compare-line.added {
@@ -663,7 +604,7 @@ body.editor-theme-light .file-editor-image {
   background: var(--neutral-surface-subtle-light);
 }
 .file-editor-status {
-  padding: 3px 10px;
+  padding: var(--space-3) var(--space-10);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   color: var(--muted);
@@ -679,15 +620,15 @@ body.editor-theme-light .file-editor-image {
   display: inline-block;
   width: 6px;
   height: 6px;
-  margin-inline-end: 2px;
+  margin-inline-end: var(--space-2);
   border-radius: var(--radius-pill);
   background: var(--accent-gold);
   flex: 0 0 6px;
 }
 .file-tab-owner {
   flex: 0 0 auto;
-  margin-inline-end: 5px;
-  padding: 0 4px;
+  margin-inline-end: var(--space-5);
+  padding: 0 var(--space-4);
   color: var(--auto-text);
   background: var(--brand-green);
   border: 1px solid #a8e95a;
@@ -744,18 +685,21 @@ body.editor-theme-light .file-editor-image {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
 }
-/* Rendered markdown preview pane */
-.file-editor-preview-pane {
-  position: absolute;
-  inset: 0;
+/* Rendered preview surfaces share paint and typography; only their placement differs. */
+.file-editor-preview-pane,
+.file-editor-preview-pane-panel {
   z-index: var(--z-file-editor-preview-layer);
   overflow: auto;
-  padding: 12px 16px;
+  padding: var(--space-12) 16px;
   background: var(--editor-preview-bg);
   color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--editor-preview-font-size);
   line-height: 1.35;
+}
+.file-editor-preview-pane {
+  position: absolute;
+  inset: 0;
 }
 .file-editor-preview-pane[hidden] { display: none; }
 body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.markdown-body,
@@ -763,15 +707,15 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
   background: var(--markdown-preview-bg);
 }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
-  margin: 10px 0 5px;
+  margin: var(--space-10) 0 var(--space-5);
   font-weight: 600;
   line-height: var(--editor-line-height);
   color: var(--markdown-heading, var(--text));
 }
-.markdown-body h1 { font-size: 1.7em; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
-.markdown-body h2 { font-size: 1.4em; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.markdown-body h1 { font-size: 1.7em; border-bottom: 1px solid var(--line); padding-bottom: var(--space-4); }
+.markdown-body h2 { font-size: 1.4em; border-bottom: 1px solid var(--line); padding-bottom: var(--space-3); }
 .markdown-body h3 { font-size: 1.2em; }
-.markdown-body p { margin: 4px 0 6px; }
+.markdown-body p { margin: var(--space-4) 0 var(--space-6); }
 .markdown-body a { color: var(--markdown-link); text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
 .markdown-body strong {
   color: var(--markdown-strong, var(--text));
@@ -789,11 +733,11 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
   border-radius: var(--radius-sm);
 }
 .markdown-body code {
-  padding: 1px 4px;
+  padding: var(--space-1) var(--space-4);
   font-family: var(--mono-font);
   font-size: 0.9em;
 }
-.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 4px 8px; overflow: auto; margin: 4px 0; }
+.markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: var(--space-4) var(--space-8); overflow: auto; margin: var(--space-4) 0; }
 /* Light mode: the near-black code block is a dark box on the light app
    chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
    transcript summary) — the file-editor preview's `pre` is handled separately under
@@ -929,8 +873,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   background: transparent;
   border: 0;
 }
-.markdown-body ul, .markdown-body ol { margin: 4px 0 6px 22px; }
-.markdown-body li { margin: 2px 0; }
+.markdown-body ul, .markdown-body ol { margin: var(--space-4) 0 var(--space-6) 22px; }
+.markdown-body li { margin: var(--space-2) 0; }
 .markdown-body ul.contains-task-list {
   margin-inline-start: 0;
   padding-inline-start: 0;
@@ -955,7 +899,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 /* a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }
-.markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
+.markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: var(--space-6) 0; padding: var(--space-3) var(--space-8); color: var(--muted); }
 .markdown-body blockquote.markdown-alert {
   --markdown-heading: var(--markdown-html-light-text);
   --markdown-strong: var(--markdown-html-light-text);
@@ -964,8 +908,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   --code-inline: var(--markdown-html-light-code);
   --code-inline-bg: var(--markdown-html-light-code-bg);
   --code-inline-border: var(--markdown-html-light-code-border);
-  margin: 6px 0;
-  padding: 8px 10px;
+  margin: var(--space-6) 0;
+  padding: var(--space-8) var(--space-10);
   color: var(--markdown-html-light-text);
   background: #fff8cc;
   border: 0;
@@ -973,7 +917,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .markdown-body blockquote.markdown-alert > :first-child { margin-top: 0; }
 .markdown-body blockquote.markdown-alert > :last-child { margin-bottom: 0; }
-.markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: 2px; }
+.markdown-body blockquote.markdown-alert :is(p, ul, ol, pre) { margin-block: var(--space-2); }
 .markdown-body blockquote.markdown-alert :is(strong, em) { color: var(--markdown-html-light-text); }
 .markdown-body blockquote.markdown-alert-caution {
   background: var(--markdown-alert-caution-light-bg);
@@ -995,8 +939,8 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.mar
   background: var(--markdown-alert-caution-dark-bg);
 }
 body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
-.markdown-body table { border-collapse: collapse; margin: 8px 0; }
-.markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
+.markdown-body table { border-collapse: collapse; margin: var(--space-8) 0; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: var(--space-4) var(--space-8); }
 .markdown-body th { background: var(--panel2); }
 .markdown-body .markdown-html-light-bg,
 .markdown-body table.markdown-html-light-bg :is(th, td),
@@ -1017,7 +961,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(
 .markdown-body table.markdown-html-light-bg :is(th, td),
 .markdown-body table[bgcolor] :is(th, td),
 .markdown-body :is(th, td)[bgcolor] {
-  padding: 10px;
+  padding: var(--space-10);
 }
 .markdown-body .markdown-html-light-bg :is(strong, em),
 .markdown-body table.markdown-html-light-bg :is(strong, em),
@@ -1047,7 +991,7 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body table[bgcolor]
 body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bgcolor] :is(strong, em) {
   color: var(--markdown-html-dark-text);
 }
-.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: var(--paint-white);
@@ -1109,6 +1053,13 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   background: transparent !important;
   border-color: transparent;
 }
+/* Firefox has supported the standard ::selection pseudo-element since version 62. Keeping the legacy
+   ::-moz-selection pseudo-element in this selector list invalidates the whole rule in Chrome. */
+.file-editor-codemirror .cm-content ::selection,
+.file-editor-codemirror-panel .cm-content ::selection {
+  color: inherit !important;
+  background: var(--editor-native-selection-bg) !important;
+}
 .file-editor-preview-pane.vanilla-preview-body blockquote,
 .file-editor-preview-pane-panel.vanilla-preview-body blockquote {
   color: var(--pane-meta-desc);
@@ -1146,9 +1097,9 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   min-height: 31px;
-  padding: 3px 6px;
+  padding: var(--space-3) var(--space-6);
 }
 .panel.file-explorer-panel .pane-tabs {
   flex: 0 0 auto;
@@ -1165,11 +1116,9 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   background: var(--pane-bar-bg, var(--panel2));
   color: var(--text);
 }
-.file-explorer-title {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.file-explorer-title,
+.file-explorer-panel-title,
+.file-editor-title {
   color: var(--text);
   font-family: var(--tab-font);
   font-size: var(--ui-font-size);
@@ -1180,7 +1129,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   width: min(280px, 100%);
   min-width: 90px;
   height: 20px;
-  padding: 1px 5px;
+  padding: var(--space-1) var(--space-5);
   color: var(--text);
   font: inherit;
   line-height: 18px;
@@ -1200,15 +1149,12 @@ body.theme-light .file-tree-rename-input {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 3px;
+  gap: var(--space-3);
   justify-content: flex-start;
   padding: 0;
   min-width: 0;
 }
 .file-explorer-toolbar-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   inline-size: 100%;
   min-width: 0;
 }
@@ -1238,18 +1184,9 @@ body.theme-light .file-tree-rename-input {
 }
 .file-explorer-panel-title {
   flex: 0 0 auto;
-  color: var(--text);
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size);
-  font-weight: 700;
-  white-space: nowrap;
 }
 .file-explorer-actions-row .file-explorer-date-reload-cluster {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   flex: 0 0 auto;
-  min-width: 0;
 }
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-only,
@@ -1352,7 +1289,7 @@ body.resizing-file-explorer-changes {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 4px 0;
+  padding: var(--space-4) 0;
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
    of the old special-cased hardcoded-green strip. At rest a thin yellow line (--pane-resizer-bg, the same
@@ -1403,7 +1340,7 @@ body.resizing-file-explorer-changes {
   overflow-x: auto;
   scrollbar-gutter: stable;
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
-  padding: 0 5px 5px;
+  padding: 0 var(--space-5) var(--space-5);
 }
 /* Differ timestamps are supporting metadata, smaller than the changed-file names. */
 .file-explorer-changes-panel .file-tree-date {
@@ -1433,9 +1370,9 @@ body.theme-light .file-explorer-changes-panel {
      title (flex), sort, date mode, refresh, close. */
   grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   align-items: center;
-  gap: 6px;
-  padding: 3px 5px;
-  margin: 0 -5px 2px;
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-5);
+  margin: 0 calc(-1 * var(--space-5)) var(--space-2);
   border-bottom: 1px solid var(--line);
   background: var(--pane-bar-bg, var(--panel2));
   background-clip: padding-box;
@@ -1462,13 +1399,13 @@ body.theme-light .file-explorer-changes-panel {
   min-width: 0;
   justify-content: space-between;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
 }
 /* #44(d): compact the Modified-files status chrome so the section spends its height on files. */
 .file-explorer-changes-panel .changes-comparison-head {
   flex-wrap: nowrap;
-  gap: 4px 8px;
-  margin-bottom: 4px;
+  gap: var(--space-4) var(--space-8);
+  margin-bottom: var(--space-4);
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -1486,8 +1423,8 @@ body.theme-light .file-explorer-changes-panel {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: var(--space-8);
+  margin-bottom: var(--space-4);
 }
 .file-explorer-changes-panel .changes-comparison-head.compact .changes-comparison-title {
   min-width: 0;
@@ -1500,7 +1437,7 @@ body.theme-light .file-explorer-changes-panel {
 .file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
   width: clamp(17ch, 24vw, 32ch);
   max-width: min(34ch, 42vw);
-  margin: 0 2px;
+  margin: 0 var(--space-2);
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
 }
@@ -1529,9 +1466,9 @@ body.theme-light .file-explorer-changes-panel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
+  gap: var(--space-3);
   height: 20px;
-  padding: 0 6px;
+  padding: 0 var(--space-6);
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
@@ -1556,7 +1493,7 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
 body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
 body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  background: var(--paint-overlay-slate-05);
 }
 body :is(
   .file-explorer-sort-select,
@@ -1584,7 +1521,7 @@ body :is(
     grid-template-columns: minmax(0, 1fr) auto auto auto auto;
     grid-template-areas:
       "title sort date refresh close";
-    gap: 3px;
+    gap: var(--space-3);
   }
   .file-explorer-changes-head .changes-title {
     grid-area: title;
@@ -1634,24 +1571,14 @@ body :is(
   }
 }
 .file-explorer-changes-panel .changes-repo-group {
-  margin-bottom: 6px;
+  margin-bottom: var(--space-6);
 }
 .file-explorer-changes-panel .changes-repo-head {
-  padding: 4px 6px;
-}
-.file-explorer-panel-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  padding: var(--space-4) var(--space-6);
 }
 .file-explorer-path-inline {
   height: 20px;
-  padding: 1px 5px;
-}
-.file-explorer-hidden-toggle-panel,
-.file-explorer-root-mode-toggle-panel,
-.file-explorer-panel .file-explorer-header-action {
-  height: 18px;
+  padding: var(--space-1) var(--space-5);
 }
 .file-explorer-folder-action {
   color: var(--muted);
@@ -1696,15 +1623,7 @@ body :is(
 .changes-toolbar .file-tree-expand-collapse-all.changes-date-toggle,
 .file-explorer-changes-head .file-tree-expand-collapse-all.changes-date-toggle,
 .file-explorer-date-reload-cluster .file-tree-expand-collapse-all.changes-date-toggle {
-  width: 16px;
-  min-width: 16px;
-  max-width: 16px;
-  inline-size: 16px;
-  min-inline-size: 16px;
-  max-inline-size: 16px;
-  flex: 0 0 16px;
   height: 20px;
-  padding: 0;
 }
 .file-tree-expand-collapse-icon {
   display: block;
@@ -1840,14 +1759,14 @@ body :is(
   inset-inline-end: 8px !important;
   z-index: var(--z-panel-resizer-inline);
   display: inline-flex;
-  gap: 2px;
+  gap: var(--space-2);
   align-items: center;
 }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons button {
   min-width: 20px;
   height: 18px;
   margin: 0;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   border-radius: 0;
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
@@ -1900,30 +1819,15 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   background: #b9e7c2;
   text-decoration-color: var(--success-text-strong);
 }
-/* File editor panels are layout siblings of terminals and Files. */
-.panel.file-editor-panel {
-  display: grid;
-  /* #42: head (tabs) / editor-toolbar row / body. The toolbar row is auto and collapses when hidden. */
-  grid-template-rows: auto auto minmax(0, 1fr);
-}
 .panel.file-editor-panel .file-editor-panel-head {
   display: block;
   min-height: 31px;
-  padding: 3px 6px;
+  padding: var(--space-3) var(--space-6);
 }
 .panel.file-editor-panel .pane-tabs {
   display: block;
 }
 .file-editor-title {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text);
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size);
-  font-weight: 700;
-  white-space: nowrap;
   overflow: hidden;
 }
 .file-editor-panel-actions {
@@ -1934,11 +1838,11 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-start;
-  gap: 2px;
+  gap: var(--space-2);
   float: right;
   max-width: calc(100% - 4px);
-  margin: 0 0 0 4px;
-  padding: 1px 2px;
+  margin: 0 0 0 var(--space-4);
+  padding: var(--space-1) var(--space-2);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
   border-radius: var(--radius-control);
@@ -1965,9 +1869,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-start;
-  gap: 2px;
+  gap: var(--space-2);
   min-height: 26px;
-  padding: 2px 6px;
+  padding: var(--space-2) var(--space-6);
   overflow-x: auto;
   scrollbar-width: none;
   border-bottom: 1px solid var(--line);
@@ -1983,7 +1887,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-toolbar-zone {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .file-editor-toolbar-left {
@@ -1997,11 +1901,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   transform: translate(-50%, -50%);
   justify-content: center;
 }
-.file-editor-toolbar-right {
-  flex: 0 1 auto;
-  margin-inline-start: auto;
-  justify-content: flex-end;
-}
 .file-editor-diff-ref-panel {
   display: inline-flex;
   align-items: center;
@@ -2014,10 +1913,10 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   display: none;
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact {
-  gap: 2px;
+  gap: var(--space-2);
 }
 .file-editor-diff-ref-panel .diff-ref-control {
-  gap: 1px;
+  gap: var(--space-1);
   font-size: 0;
 }
 .file-editor-diff-ref-panel .diff-ref-controls.compact [data-diff-ref-from] {
@@ -2046,7 +1945,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   width: 1px;
   height: 14px;
   flex: 0 0 1px;
-  margin: 0 1px;
+  margin: 0 var(--space-1);
   background: var(--line);
   opacity: 0.78;
 }
@@ -2058,7 +1957,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   color: var(--muted);
 }
 .file-editor-preview-font-panel[hidden] {
@@ -2070,7 +1969,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-preview-font-panel button {
   height: 20px;
   min-width: 24px;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
@@ -2095,7 +1994,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--editor-toolbar-control-border);
   border-radius: var(--radius-sm);
   color: var(--editor-toolbar-control-fg);
@@ -2103,14 +2002,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
-.file-editor-save-panel {
-  min-width: 20px;
-  width: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
+.file-editor-save-panel,
 .file-editor-gutter-panel,
 .file-editor-wrap-panel,
 .file-editor-find-panel,
@@ -2129,9 +2021,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-theme-panel.theme-with-label {
   width: auto;
   min-width: 66px;
-  gap: 4px;
+  gap: var(--space-4);
   justify-content: flex-start;
-  padding: 0 7px 0 4px;
+  padding: 0 var(--space-7) 0 var(--space-4);
 }
 .file-editor-theme-panel.theme-with-label::after {
   content: attr(data-editor-theme-short);
@@ -2142,7 +2034,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-diff-panel {
   width: auto;
   min-width: 44px;
-  padding: 0 5px;
+  padding: 0 var(--space-5);
 }
 .file-editor-reload-panel {
   display: inline-flex;
@@ -2215,7 +2107,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   color: var(--lt-text);
   background: var(--lt-editor-bg);
   border-color: var(--lt-line);
-  box-shadow: inset 0 0 0 1px rgb(var(--overlay-slate-rgb) / 0.12);
+  box-shadow: inset 0 0 0 1px var(--paint-overlay-slate-12);
 }
 .file-editor-save-panel:not(:disabled):hover {
   background: var(--success-soft-bg);
@@ -2399,9 +2291,9 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   inset-inline-end: 10px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   max-width: calc(100% - 20px);
-  padding: 4px;
+  padding: var(--space-4);
   border: 1px solid var(--editor-toolbar-control-border);
   border-radius: var(--radius-control);
   color: var(--editor-toolbar-control-fg);
@@ -2439,7 +2331,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   min-width: 0;
   border: 1px solid var(--editor-toolbar-control-border);
   border-radius: var(--radius-sm);
-  padding: 2px 5px;
+  padding: var(--space-2) var(--space-5);
   color: var(--text);
   background: var(--panel);
   font: var(--ui-font-size-xs)/1.2 var(--ui-font);
@@ -2542,19 +2434,9 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
   --pane-scrollbar-border: 2px solid rgba(7, 10, 14, 0.95);
   --pane-scrollbar-radius: 6px;
 }
-.file-editor-codemirror .cm-content ::selection,
-.file-editor-codemirror-panel .cm-content ::selection {
-  background: transparent !important;
-  color: inherit !important;
-}
-.file-editor-codemirror .cm-content ::-moz-selection,
-.file-editor-codemirror-panel .cm-content ::-moz-selection {
-  background: transparent !important;
-  color: inherit !important;
-}
 .file-editor.editor-wrap .file-editor-codemirror .cm-lineWrapping .cm-line,
 .file-editor-panel.editor-wrap .file-editor-codemirror-panel .cm-lineWrapping .cm-line {
-  padding-inline-start: calc(6px + var(--editor-wrap-marker-col));
+  padding-inline-start: calc(var(--space-6) + var(--editor-wrap-marker-col));
   text-indent: calc(-1 * var(--editor-wrap-marker-col));
 }
 .cm-wrap-marker-layer {
@@ -2585,9 +2467,9 @@ body.editor-theme-light .file-editor-codemirror .cm-scroller,
 body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
   color: var(--text) !important;
   background: var(--editor-bg) !important;
-  --pane-scrollbar-track: rgb(var(--overlay-slate-rgb) / 0.16);
-  --pane-scrollbar-track-active: rgb(var(--overlay-slate-rgb) / 0.16);
-  --pane-scrollbar-corner: rgb(var(--overlay-slate-rgb) / 0.10);
+  --pane-scrollbar-track: var(--paint-overlay-slate-16);
+  --pane-scrollbar-track-active: var(--paint-overlay-slate-16);
+  --pane-scrollbar-corner: var(--paint-overlay-slate-10);
   --pane-scrollbar-border: 2px solid var(--paint-white-92);
 }
 body.editor-theme-light .file-editor-codemirror .cm-content,
@@ -2633,8 +2515,8 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-template-columns: minmax(18ch, 22ch) repeat(3, 24px) minmax(4ch, max-content) repeat(3, 24px) minmax(0, 1fr);
   align-items: center;
   column-gap: var(--cm-search-column-gap);
-  row-gap: 4px;
-  padding: 5px 34px 5px 7px;
+  row-gap: var(--space-4);
+  padding: var(--space-5) 34px var(--space-5) var(--space-7);
   font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search::before,
@@ -2654,7 +2536,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   min-width: 18ch;
   height: 24px;
   margin: 0;
-  padding: 3px 6px;
+  padding: var(--space-3) var(--space-6);
   color: var(--text);
   background: var(--bg);
   border: 1px solid #91a68a;
@@ -2754,7 +2636,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-button[name="replaceAll"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"] {
   grid-column: 3;
-  margin-inline-start: -2px;
+  margin-inline-start: calc(-1 * var(--space-2));
 }
 .file-editor-codemirror .cm-search .cm-search-count,
 .file-editor-codemirror-panel .cm-search .cm-search-count {
@@ -2774,10 +2656,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search label,
 .file-editor-codemirror-panel .cm-search label {
   position: relative;
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
-  gap: 5px;
   box-sizing: border-box;
   width: 24px;
   height: 24px;
@@ -2906,7 +2785,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   z-index: var(--z-file-editor-layer);
   margin: 0;
   overflow: auto;
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   border: 0;
   background: var(--editor-bg);
   color: var(--text);
@@ -3018,7 +2897,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-raw-panel .md-code,
 .file-editor-code-preview .md-code,
 .cm-content .md-code {
-  padding: 0 2px;
+  padding: 0 var(--space-2);
 }
 .file-editor-raw-panel .md-html,
 .file-editor-code-preview .md-html,
@@ -3083,45 +2962,37 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--code-tag);
 }
 .file-editor-preview-pane-panel {
-  z-index: var(--z-file-editor-preview-layer);
   min-height: 0;
-  overflow: auto;
-  padding: 12px 16px;
-  background: var(--editor-preview-bg);
-  color: var(--text);
-  font-family: var(--ui-font);
-  font-size: var(--editor-preview-font-size);
-  line-height: 1.35;
 }
 .file-editor-preview-pane.code-preview-body,
 .file-editor-preview-pane-panel.code-preview-body {
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   font-family: var(--mono-font);
   font-size: var(--editor-preview-font-size);
   line-height: var(--editor-line-height);
 }
 .file-editor-preview-pane.data-preview-body,
 .file-editor-preview-pane-panel.data-preview-body {
-  padding: 10px 12px;
+  padding: var(--space-10) var(--space-12);
 }
 .file-editor-preview-pane.media-preview-body,
 .file-editor-preview-pane-panel.media-preview-body {
   display: grid;
   place-items: center;
-  gap: 12px;
+  gap: var(--space-12);
   padding: 16px;
 }
 .file-editor-data-preview {
   min-width: 0;
 }
 .file-editor-data-preview-header {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-8);
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .file-editor-preview-error {
-  margin: 0 0 8px;
-  padding: 8px 10px;
+  margin: 0 0 var(--space-8);
+  padding: var(--space-8) var(--space-10);
   color: var(--code-invalid);
   background: color-mix(in srgb, var(--code-invalid) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--code-invalid) 35%, transparent);
@@ -3141,7 +3012,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-table-preview th,
 .file-editor-table-preview td {
   max-width: 32ch;
-  padding: 4px 8px;
+  padding: var(--space-4) var(--space-8);
   border: 1px solid var(--line);
   text-align: start;
   vertical-align: top;
@@ -3166,7 +3037,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   min-height: 0;
   display: grid;
   place-items: center;
-  padding: 10px;
+  padding: var(--space-10);
   overflow: auto;
 }
 .file-editor-image-panel .file-editor-image {
@@ -3196,7 +3067,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   font-weight: 700;
 }
 .file-editor-empty-detail {
-  margin-top: 6px;
+  margin-top: var(--space-6);
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
@@ -3204,7 +3075,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 }
 .file-editor-status-panel {
   min-height: 18px;
-  padding: 3px 10px;
+  padding: var(--space-3) var(--space-10);
   border-top: 1px solid var(--line);
   background: var(--panel2);
   color: var(--muted);
@@ -3212,7 +3083,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   font-size: var(--ui-font-size-2xs);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
 }
 .file-editor-status-message {
   min-width: 0;
@@ -3238,7 +3109,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   flex: 0 0 88px;
   min-width: 88px;
   max-width: 88px;
-  padding-inline: 8px;
+  padding-inline: var(--space-8);
 }
 .pane-tab.file-explorer .pane-tab-core {
   justify-content: center;
@@ -3254,8 +3125,8 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 }
 .file-tab-kind {
   flex: 0 0 auto;
-  margin-inline-end: 5px;
-  padding: 0 4px;
+  margin-inline-end: var(--space-5);
+  padding: 0 var(--space-4);
   border: 1px solid rgba(245, 197, 66, 0.55);
   border-radius: var(--radius-control);
   color: var(--accent-gold);
@@ -3338,13 +3209,7 @@ body.theme-light .file-tree-row.tabber-row {
 }
 .file-tree-row.tabber-row .tabber-window-token {
   display: inline-flex;
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
-  margin-inline-start: 0;
-  justify-content: flex-start;
-  overflow: visible;
-  vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-button {
   max-width: 100%;
@@ -3364,7 +3229,7 @@ body.theme-light .file-tree-row.tabber-row {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
   vertical-align: middle;
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-window-activity {
@@ -3372,7 +3237,7 @@ body.theme-light .file-tree-row.tabber-row {
   --agent-window-activity-inline-size: var(--agent-window-icon-size);
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   margin-inline-start: 0;
-  margin-inline-end: 1px;
+  margin-inline-end: var(--space-1);
 }
 .file-tree-row.tabber-row .tabber-window-label .agent-icon {
   flex: 0 0 auto;

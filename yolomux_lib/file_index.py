@@ -24,6 +24,7 @@ from typing import Any
 from typing import Callable
 
 from .common import STATE_DIR
+from .common import start_thread_with_rollback
 
 
 INDEX_DIR = STATE_DIR / "search_index"
@@ -558,7 +559,14 @@ def _start_build(
             daemon=True,
         )
         ri.thread = thread
-    thread.start()
+
+    def rollback() -> None:
+        with ri.lock:
+            if ri.thread is thread:
+                ri.thread = None
+                ri.building = False
+
+    start_thread_with_rollback(thread, rollback)
 
 
 def ensure_index(

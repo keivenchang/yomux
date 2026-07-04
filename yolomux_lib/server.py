@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -621,6 +623,19 @@ def share_replay_frame_int(value: Any) -> int | None:
     return int(value)
 
 
+@dataclass
+class ShareReplayRecord:
+    keyframe: dict[str, Any] | None = None
+    deltas_by_epoch: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+@dataclass
+class SharePointerRecord:
+    latest: dict[str, Any] | None = None
+    clicks: list[dict[str, Any]] = field(default_factory=list)
+    thread: threading.Thread | None = None
+
+
 class ShareViewerConnection:
     def __init__(self, connection: socket.socket, client_id: str = ""):
         self.connection = connection
@@ -745,7 +760,7 @@ class ShareViewerConnection:
                     if share_frame_is_dom_keyframe(frame):
                         self.queued_replay_keyframe = False
                 self.send_frame(frame)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             self.close("writer-closed")
@@ -883,7 +898,7 @@ class ShareTerminalUpstream:
                 if not data:
                     break
                 self.broadcast(data)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             if reader_fd is not None:
@@ -1778,7 +1793,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if current != last:
                     last = current
                     self.write_sse_json("reload", {"signature": current})
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
 
     def stream_client_events(self) -> None:
@@ -1801,7 +1816,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.write_sse_json("ping", {"time": time.time()})
                     continue
                 self.write_sse_json(str(event.get("type") or "event"), event)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
@@ -1851,7 +1866,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 },
             )
             self.follow_transcript_file(path)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
 
     def stream_codex_summary(self, parsed: Any) -> None:
@@ -1910,7 +1925,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 {"model": summary_settings["codex_model"]},
                 message_key="events.message.summary.finished",
             )
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             self.server.app.log_event(
                 session,
                 "summary_disconnected",
@@ -2319,7 +2334,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.bridge_shared_tmux(token, session, viewer_id)
 
     def bridge_tmux(self, session: str, readonly: bool = False, resize_client_id: str = "") -> None:
-        initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
+        try:
+            initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
+        except OSError:
+            return
         if not saw_initial_resize:
             initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
         if not readonly and saw_initial_resize:
@@ -2410,7 +2428,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     process = attach_tmux()
                     continue
                 break
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             for fd in (master_fd, slave_fd):
@@ -2451,7 +2469,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     if self.request_is_https() and str(current_record.get("mode") or "ro") == "rw":
                         upstream.write_input(payload)
                     continue
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             viewer.close("viewer-closed")
@@ -2580,7 +2598,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if receive_only and not share_replay_viewer_control_frame_allowed(str(message.get("type") or "")):
                     continue
                 self.handle_share_ui_message(token, message, clean_client_id, accept_semantic_state=accept_semantic_state)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             client.close("ui-closed")
@@ -2758,14 +2776,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_upstreams: dict[tuple[str, str], ShareTerminalUpstream] = {}
         self.share_ui_clients_lock = threading.Lock()
         self.share_ui_clients: dict[str, set[ShareViewerConnection]] = {}
-        self.share_replay_keyframes_lock = threading.Lock()
-        self.share_replay_keyframes: dict[str, dict[str, Any]] = {}
-        self.share_replay_deltas_lock = threading.Lock()
-        self.share_replay_deltas: dict[str, dict[int, list[dict[str, Any]]]] = {}
+        self.share_replay_lock = threading.Lock()
+        self.share_replay_records: dict[str, ShareReplayRecord] = {}
         self.share_pointer_lock = threading.Lock()
-        self.share_pointer_latest: dict[str, dict[str, Any]] = {}
-        self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
-        self.share_pointer_threads: dict[str, threading.Thread] = {}
+        self.share_pointer_records: dict[str, SharePointerRecord] = {}
         self.share_pointer_stop = threading.Event()
         if hasattr(self.app, "start_input_heartbeat_worker"):
             self.app.start_input_heartbeat_worker()
@@ -2875,18 +2889,14 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 self.share_ui_clients.pop(token, None)
         for client in stale_clients:
             client.close("share-inactive")
-        self.prune_inactive_share_replay_keyframes()
-        self.prune_inactive_share_replay_deltas()
+        self.prune_inactive_share_replay_records()
 
     def record_share_replay_keyframe(self, token: str, message: dict[str, Any]) -> None:
         clean_token = str(token or "")
         if not clean_token:
             return
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_keyframes_lock:
-                self.share_replay_keyframes.pop(clean_token, None)
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return
         if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_KEYFRAME:
             return
@@ -2905,35 +2915,30 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         reason = message.get("reason")
         if isinstance(reason, str) and reason.strip():
             stored["reason"] = reason.strip()[:120]
-        with self.share_replay_keyframes_lock:
-            self.share_replay_keyframes[clean_token] = stored
         epoch = share_replay_frame_int(stored.get("epoch"))
         sequence = share_replay_frame_int(stored.get("sequence"))
-        if epoch is not None and sequence is not None:
-            with self.share_replay_deltas_lock:
-                epoch_map = self.share_replay_deltas.get(clean_token)
-                if epoch_map is not None:
-                    for existing_epoch in list(epoch_map):
-                        if existing_epoch != epoch:
-                            epoch_map.pop(existing_epoch, None)
-                    epoch_deltas = epoch_map.get(epoch)
-                    if epoch_deltas is not None:
-                        epoch_map[epoch] = [
-                            delta for delta in epoch_deltas
-                            if (share_replay_frame_int(delta.get("sequence")) or -1) > sequence
-                        ]
-                        if not epoch_map[epoch]:
-                            epoch_map.pop(epoch, None)
-                    if not epoch_map:
-                        self.share_replay_deltas.pop(clean_token, None)
+        with self.share_replay_lock:
+            record = self.share_replay_records.setdefault(clean_token, ShareReplayRecord())
+            record.keyframe = stored
+            if epoch is not None and sequence is not None:
+                for existing_epoch in list(record.deltas_by_epoch):
+                    if existing_epoch != epoch:
+                        record.deltas_by_epoch.pop(existing_epoch, None)
+                epoch_deltas = record.deltas_by_epoch.get(epoch)
+                if epoch_deltas is not None:
+                    record.deltas_by_epoch[epoch] = [
+                        delta for delta in epoch_deltas
+                        if (share_replay_frame_int(delta.get("sequence")) or -1) > sequence
+                    ]
+                    if not record.deltas_by_epoch[epoch]:
+                        record.deltas_by_epoch.pop(epoch, None)
 
     def record_share_replay_delta(self, token: str, message: dict[str, Any]) -> bool:
         clean_token = str(token or "")
         if not clean_token:
             return False
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return False
         if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_DELTA:
             return False
@@ -2959,9 +2964,9 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         reason = message.get("reason")
         if isinstance(reason, str) and reason.strip():
             stored["reason"] = reason.strip()[:120]
-        with self.share_replay_deltas_lock:
-            epoch_map = self.share_replay_deltas.setdefault(clean_token, {})
-            epoch_deltas = epoch_map.setdefault(epoch, [])
+        with self.share_replay_lock:
+            record = self.share_replay_records.setdefault(clean_token, ShareReplayRecord())
+            epoch_deltas = record.deltas_by_epoch.setdefault(epoch, [])
             epoch_deltas[:] = [
                 delta for delta in epoch_deltas
                 if share_replay_frame_int(delta.get("sequence")) != sequence
@@ -2969,35 +2974,36 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             epoch_deltas.append(stored)
             epoch_deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
             del epoch_deltas[:-SHARE_REPLAY_DELTA_RING_LIMIT]
-            for existing_epoch in list(epoch_map):
-                if existing_epoch != epoch and not epoch_map[existing_epoch]:
-                    epoch_map.pop(existing_epoch, None)
+            for existing_epoch in list(record.deltas_by_epoch):
+                if existing_epoch != epoch and not record.deltas_by_epoch[existing_epoch]:
+                    record.deltas_by_epoch.pop(existing_epoch, None)
         return True
+
+    def clear_share_replay_record(self, token: str) -> None:
+        with self.share_replay_lock:
+            self.share_replay_records.pop(str(token or ""), None)
 
     def latest_share_replay_keyframe(self, token: str) -> dict[str, Any] | None:
         clean_token = str(token or "")
         if not clean_token:
             return None
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_keyframes_lock:
-                self.share_replay_keyframes.pop(clean_token, None)
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return None
-        with self.share_replay_keyframes_lock:
-            frame = self.share_replay_keyframes.get(clean_token)
+        with self.share_replay_lock:
+            frame = self.share_replay_records.get(clean_token, ShareReplayRecord()).keyframe
             return copy.deepcopy(frame) if frame else None
 
-    def share_replay_deltas_after_keyframe(self, token: str, keyframe: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-        clean_token = str(token or "")
+    @staticmethod
+    def contiguous_share_replay_deltas(record: ShareReplayRecord, keyframe: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
         epoch = share_replay_frame_int((keyframe or {}).get("epoch"))
         cursor = share_replay_frame_int((keyframe or {}).get("sequence"))
-        if not clean_token or epoch is None or cursor is None:
+        if epoch is None or cursor is None:
             return [], True
-        with self.share_replay_deltas_lock:
-            epoch_map = self.share_replay_deltas.get(clean_token, {})
-            deltas = [copy.deepcopy(delta) for delta in epoch_map.get(epoch, [])]
-        deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
+        deltas = sorted(
+            record.deltas_by_epoch.get(epoch, []),
+            key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0,
+        )
         contiguous: list[dict[str, Any]] = []
         for delta in deltas:
             sequence = share_replay_frame_int(delta.get("sequence"))
@@ -3008,9 +3014,23 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 continue
             if base_sequence != cursor or sequence != cursor + 1:
                 return contiguous, False
-            contiguous.append(delta)
+            contiguous.append(copy.deepcopy(delta))
             cursor = sequence
         return contiguous, True
+
+    def share_replay_frames_snapshot(self, token: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
+        clean_token = str(token or "")
+        if not clean_token or self.app.verify_share_token(clean_token) is None:
+            if clean_token:
+                self.clear_share_replay_record(clean_token)
+            return None, [], True
+        with self.share_replay_lock:
+            record = self.share_replay_records.get(clean_token)
+            if record is None or record.keyframe is None:
+                return None, [], True
+            frame = copy.deepcopy(record.keyframe)
+            deltas, contiguous = self.contiguous_share_replay_deltas(record, frame)
+            return frame, deltas, contiguous
 
     def enqueue_latest_share_replay_keyframe(self, token: str, client: ShareViewerConnection) -> bool:
         frame = self.latest_share_replay_keyframe(token)
@@ -3019,11 +3039,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         return client.enqueue_reset_frame(share_ui_frame(frame)) == "queued"
 
     def enqueue_share_replay_frames_for_viewer(self, token: str, client: ShareViewerConnection) -> bool:
-        frame = self.latest_share_replay_keyframe(token)
+        frame, deltas, contiguous = self.share_replay_frames_snapshot(token)
         if not frame:
             self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
             return False
-        deltas, contiguous = self.share_replay_deltas_after_keyframe(token, frame)
         if not contiguous:
             self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
             return False
@@ -3061,17 +3080,11 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             skip_client_id=skip_client_id,
         )
 
-    def prune_inactive_share_replay_keyframes(self) -> None:
-        with self.share_replay_keyframes_lock:
-            for token in list(self.share_replay_keyframes):
+    def prune_inactive_share_replay_records(self) -> None:
+        with self.share_replay_lock:
+            for token in list(self.share_replay_records):
                 if self.app.verify_share_token(token) is None:
-                    self.share_replay_keyframes.pop(token, None)
-
-    def prune_inactive_share_replay_deltas(self) -> None:
-        with self.share_replay_deltas_lock:
-            for token in list(self.share_replay_deltas):
-                if self.app.verify_share_token(token) is None:
-                    self.share_replay_deltas.pop(token, None)
+                    self.share_replay_records.pop(token, None)
 
     def share_viewer_count(self, token: str) -> int:
         count = 0
@@ -3094,32 +3107,40 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         clean_token = str(token or "")
         if not clean_token:
             return
+        if self.app.verify_share_token(clean_token) is None:
+            with self.share_pointer_lock:
+                self.share_pointer_records.pop(clean_token, None)
+            return
         clean_payload = dict(payload or {})
         clean_payload["sender"] = str(sender or clean_payload.get("sender") or "")
         click = clean_payload.get("click") is True
         with self.share_pointer_lock:
-            self.share_pointer_latest[clean_token] = {key: value for key, value in clean_payload.items() if key != "click"}
+            record = self.share_pointer_records.setdefault(clean_token, SharePointerRecord())
+            record.latest = {key: value for key, value in clean_payload.items() if key != "click"}
             if click:
-                clicks = self.share_pointer_clicks.setdefault(clean_token, [])
-                clicks.append(clean_payload | {"click": True})
-                del clicks[:-SHARE_POINTER_CLICK_QUEUE_LIMIT]
-            thread = self.share_pointer_threads.get(clean_token)
+                record.clicks.append(clean_payload | {"click": True})
+                del record.clicks[:-SHARE_POINTER_CLICK_QUEUE_LIMIT]
+            thread = record.thread
             if thread is None or not thread.is_alive():
-                thread = threading.Thread(target=self.share_pointer_loop, args=(clean_token,), name="share-pointer", daemon=True)
-                self.share_pointer_threads[clean_token] = thread
+                thread = threading.Thread(target=self.share_pointer_loop, args=(clean_token, record), name="share-pointer", daemon=True)
+                record.thread = thread
                 thread.start()
 
-    def share_pointer_loop(self, token: str) -> None:
+    def share_pointer_loop(self, token: str, record: SharePointerRecord) -> None:
         last_sent = ""
         while not self.share_pointer_stop.is_set():
             if self.app.verify_share_token(token) is None:
                 break
             hz = self.share_pointer_hz(token)
-            time.sleep(1.0 / max(1, hz))
+            if self.share_pointer_stop.wait(1.0 / max(1, hz)):
+                break
             messages: list[dict[str, Any]] = []
             with self.share_pointer_lock:
-                latest = self.share_pointer_latest.get(token)
-                clicks = self.share_pointer_clicks.pop(token, [])
+                if self.share_pointer_records.get(token) is not record:
+                    break
+                latest = record.latest
+                clicks = list(record.clicks)
+                record.clicks.clear()
                 if latest:
                     signature = json.dumps(latest, sort_keys=True, separators=(",", ":"))
                     if signature != last_sent:
@@ -3134,9 +3155,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                     skip_client_id=sender,
                 )
         with self.share_pointer_lock:
-            self.share_pointer_latest.pop(token, None)
-            self.share_pointer_clicks.pop(token, None)
-            self.share_pointer_threads.pop(token, None)
+            if self.share_pointer_records.get(token) is record:
+                self.share_pointer_records.pop(token, None)
 
     def broadcast_share_ui(self, token: str, message: dict[str, Any], *, skip_client_id: str = "") -> None:
         clean_message = dict(message or {})

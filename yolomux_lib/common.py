@@ -18,11 +18,13 @@ import signal
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
@@ -76,6 +78,15 @@ TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
 YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
+
+
+def start_thread_with_rollback(worker: threading.Thread, rollback: Callable[[], None]) -> None:
+    """Start an installed worker, restoring its owning record if Thread.start fails."""
+    try:
+        worker.start()
+    except Exception:
+        rollback()
+        raise
 
 
 def file_revision(path: Path) -> str:

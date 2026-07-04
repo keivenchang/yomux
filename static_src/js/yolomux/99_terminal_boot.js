@@ -64,7 +64,7 @@ function panelControlsHtml(session, options = {}) {
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
@@ -165,11 +165,11 @@ function createPanel(session) {
       </div>
       <div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
-          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
+          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
-          ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
+          ${sessionPopoverHtml(session, transcriptMetadataState.payload.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}
         </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMetadataState.payload.sessions?.[session], {infoBar: true}) : ''}
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>
@@ -216,16 +216,16 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 
 function syncTranscriptMetaLoadingUi() {
   document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
+    setMetadataRefreshButtonLoading(button, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
   });
   const metaRefreshButton = refreshMeta;
   if (metaRefreshButton) {
-    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
-    metaRefreshButton.disabled = transcriptMetaLoading;
-    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
+    metaRefreshButton.classList.toggle('loading', transcriptMetadataState.loading);
+    metaRefreshButton.disabled = transcriptMetadataState.loading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetadataState.loading ? 'true' : 'false');
     refreshMetaButtonChrome();
   }
-  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetadataState.loading);
 }
 
 function infoMetadataLoadingHtml() {
@@ -253,7 +253,7 @@ function backgroundServerLabel(record, fallback = '') {
   ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
 }
 
-function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
+function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusState.payload, options = {}) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
   const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
@@ -271,7 +271,7 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPay
   };
 }
 
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.payload) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
   const summary = backgroundOwnerRoleSummary('search-index', payload);
@@ -290,20 +290,20 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayloa
   };
 }
 
-function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('stats-sampler', payload);
 }
 
-function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('session-files', payload);
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusPayload = payload;
-  backgroundOwnerStatusLoaded = true;
-  backgroundOwnerStatusError = '';
-  backgroundOwnerStatusLoading = false;
+  backgroundOwnerStatusState.guard.invalidate();
+  backgroundOwnerStatusState.payload = payload;
+  backgroundOwnerStatusState.error = '';
+  backgroundOwnerStatusState.loading = false;
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   return true;
@@ -311,26 +311,30 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
 
 async function refreshBackgroundOwnerStatus(options = {}) {
   if (shareViewMode) return false;
-  if (backgroundOwnerStatusRefreshPromise && options.force !== true) return backgroundOwnerStatusRefreshPromise;
-  backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
-  backgroundOwnerStatusError = '';
+  if (backgroundOwnerStatusState.request && options.force !== true) return backgroundOwnerStatusState.request;
+  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  backgroundOwnerStatusRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
       return applyBackgroundOwnerStatusPayload(payload, options);
     } catch (error) {
-      backgroundOwnerStatusError = userMessageSnapshot(error);
-      backgroundOwnerStatusLoading = false;
+      if (!requestIsCurrent()) return false;
+      backgroundOwnerStatusState.error = userMessageSnapshot(error);
+      backgroundOwnerStatusState.loading = false;
       if (options.render !== false) renderInfoPanel();
       if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
       return false;
     } finally {
-      backgroundOwnerStatusRefreshPromise = null;
+      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
     }
   })();
-  return backgroundOwnerStatusRefreshPromise;
+  backgroundOwnerStatusState.request = request;
+  return request;
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -481,7 +485,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
 }
 
 function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
-  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
+  return Boolean(yoagentChatState.busy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
@@ -572,7 +576,7 @@ function renderYoagentPanel(options = {}) {
   const inputFocused = input && document.activeElement === input;
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
-  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (input && options.preserveDraft !== false) yoagentChatState.draft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
     if (refreshYoagentSummaryRegions(node)) {
       if (shouldScrollBottom) scrollYoagentChatToBottom(node);
@@ -1517,7 +1521,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const record = status.record;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
@@ -1752,13 +1756,13 @@ function infoPanelRenderVisible() {
 
 function infoPanelRenderSignature() {
   return JSON.stringify({
-    loading: transcriptMetaLoading,
-    loaded: transcriptMetaLoaded,
-    error: transcriptMetaLoadError,
+    loading: transcriptMetadataState.loading,
+    loaded: transcriptMetadataState.loaded,
+    error: transcriptMetadataState.error,
     search: infoSearch,
     grouping: infoGrouping,
     sort: infoSort,
-    meta: transcriptMeta,
+    meta: transcriptMetadataState.payload,
   });
 }
 
@@ -1766,11 +1770,9 @@ function renderInfoPanel(options = {}) {
   const node = document.getElementById('info-content');
   if (!node) return;
   if (options.force !== true && !infoPanelRenderVisible()) {
-    infoPanelRenderPending = true;
     recordClientPerfCounter('renderInfoPanel', 0, {skipped: 1});
     return;
   }
-  infoPanelRenderPending = false;
   let renderedNodes = 0;
   const perf = clientPerfStart('renderInfoPanel');
   try {
@@ -1792,15 +1794,15 @@ function renderInfoPanelMeasured(node, options = {}) {
   };
   syncTranscriptMetaLoadingUi();
   const signature = infoPanelRenderSignature();
-  if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
+  if (options.force !== true && signature === infoPanelRenderCache.signature && infoPanelRenderCache.html) {
     const hasContent = Boolean(node.children?.length || String(node.innerHTML || '').trim());
-    if (!hasContent) renderInfoContent(infoPanelLastRenderHtml);
+    if (!hasContent) renderInfoContent(infoPanelRenderCache.html);
     else syncInfoContent();
     return;
   }
   const commitInfoContent = html => {
-    infoPanelLastRenderSignature = signature;
-    infoPanelLastRenderHtml = html;
+    infoPanelRenderCache.signature = signature;
+    infoPanelRenderCache.html = html;
     renderInfoContent(html);
   };
   const allRecords = infoRelationshipRecords();
@@ -1810,15 +1812,15 @@ function renderInfoPanelMeasured(node, options = {}) {
       commitInfoContent(`<div class="info-empty info-tree-empty">${localizedHtml('info.search.noMatches', {query: infoSearch.trim()})}</div>`);
       return;
     }
-    if (transcriptMetaLoading) {
+    if (transcriptMetadataState.loading) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    if (transcriptMetaLoadError) {
+    if (transcriptMetadataState.error) {
       commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetadataLoadErrorText())}</div>`);
       return;
     }
-    if (!transcriptMetaLoaded) {
+    if (!transcriptMetadataState.loaded) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
@@ -1910,7 +1912,7 @@ function infoBranchSourcesForSession(session, info) {
 }
 
 function infoBranchSourcesForIndexedRepos() {
-  const repos = Array.isArray(transcriptMeta?.indexed_repos) ? transcriptMeta.indexed_repos : [];
+  const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
     .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
@@ -2230,9 +2232,9 @@ function mergeInfoBranchRow(existing, next) {
 
 function rawInfoBranchRows() {
   const rowsByKey = new Map();
-  const infoSessions = Array.isArray(transcriptMeta?.session_order) ? transcriptMeta.session_order : sessions;
+  const infoSessions = Array.isArray(transcriptMetadataState.payload?.session_order) ? transcriptMetadataState.payload.session_order : sessions;
   for (const session of infoSessions) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
       for (const branch of source.git?.other_branches?.branches || []) {
         const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
@@ -3058,7 +3060,7 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -3086,10 +3088,10 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
     selectedPane = synthesized;
   }
   const nextInfo = {...info, selected_pane: selectedPane, panes};
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -3110,7 +3112,7 @@ function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
     changed = applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, {render: false}) || changed;
   }
   if (changed) {
-    for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    for (const session of seen) updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
     renderInfoPanel();
     if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
@@ -3161,7 +3163,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       } else {
-        const info = transcriptMeta.sessions?.[session];
+        const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
       }
     });
@@ -3175,7 +3177,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
 function noteTerminalTmuxWindowSwitch(session, shortcut) {
   if (!shortcut) return false;
   const directIndex = tmuxWindowNumber(shortcut.windowIndex);
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
@@ -3475,7 +3477,7 @@ function tmuxWindow(session, key, label) {
   }
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
-    const previousInfo = transcriptMeta.sessions?.[session] || null;
+    const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
@@ -3488,14 +3490,14 @@ function tmuxWindow(session, key, label) {
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
         if (previousInfo) {
-          transcriptMeta = {
-            ...transcriptMeta,
-            sessions: {...(transcriptMeta.sessions || {}), [session]: previousInfo},
-          };
+          setTranscriptMetadataPayload({
+            ...transcriptMetadataState.payload,
+            sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: previousInfo},
+          });
           updatePanelHeader(session, previousInfo);
           renderInfoPanel();
         } else {
-          reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
+          reconcileTmuxWindowActiveIndexOverride(session, transcriptMetadataState.payload.sessions?.[session], {sequence});
         }
         statusErr(esc(userMessageText(error, t('terminal.window.failed', {error: error.message || error}))));
       });
@@ -3506,7 +3508,7 @@ function tmuxWindow(session, key, label) {
     statusErr(terminalNotConnectedHtml(session));
     return;
   }
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
@@ -3530,7 +3532,7 @@ async function ensureTerminalRunning(session) {
       startTerminal(session);
       return;
     }
-    const knownFromTranscriptPayload = Boolean(transcriptMetaLoaded && transcriptMeta.sessions?.[session]);
+    const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
       const container = document.getElementById(terminalDomId(session));
@@ -3938,7 +3940,7 @@ function applyAutoApprovePayload(payload, options = {}) {
 }
 
 function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const agentWindows = typeof agentWindowPayloadRows === 'function'
     ? agentWindowPayloadRows(payload.agent_windows)
@@ -3966,17 +3968,17 @@ function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
       process_label_pid: agent.pid || null,
     };
   })].sort((left, right) => Number(left.window) - Number(right.window));
-  transcriptMeta = {
-    ...transcriptMeta,
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
     sessions: {
-      ...(transcriptMeta.sessions || {}),
+      ...(transcriptMetadataState.payload.sessions || {}),
       [session]: {
         ...info,
         panes: reconciledPanes,
         selected_pane: reconciledPanes.find(pane => pane.window_active === true) || info.selected_pane,
       },
     },
-  };
+  });
   return true;
 }
 
@@ -4018,7 +4020,7 @@ function renderAutoApproveButton(session, payload) {
     if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
     else button.title = buttonLabel;
   }
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   updateTypingIndicator(session);
 }
 
@@ -4114,11 +4116,13 @@ function reloadIsSafe() {
 }
 
 let selfUpdateAvailableTarget = '';
-let selfUpdateReloadPending = false;
-let selfUpdateReloadTarget = '';
-let selfUpdateReloadAttempts = 0;
-let selfUpdateReloadTimer = null;
-let selfUpdateReloadDeferredToastShown = false;
+const selfUpdateReloadState = {
+  pending: false,
+  target: '',
+  attempts: 0,
+  timer: null,
+  deferredToastShown: false,
+};
 const selfUpdateReloadPollMs = 1500;
 const selfUpdateReloadMaxAttempts = 120;
 
@@ -4158,17 +4162,17 @@ function renderUpdateBadgeChrome() {
 }
 
 function markSelfUpdateReloadPending(target = '') {
-  selfUpdateReloadPending = true;
-  selfUpdateReloadTarget = String(target || selfUpdateReloadTarget || '').trim();
-  selfUpdateReloadAttempts = 0;
-  selfUpdateReloadDeferredToastShown = false;
-  if (selfUpdateReloadTarget) serverVersionReloadHandled = selfUpdateReloadTarget;
+  selfUpdateReloadState.pending = true;
+  selfUpdateReloadState.target = String(target || selfUpdateReloadState.target || '').trim();
+  selfUpdateReloadState.attempts = 0;
+  selfUpdateReloadState.deferredToastShown = false;
+  if (selfUpdateReloadState.target) serverVersionReloadHandled = selfUpdateReloadState.target;
   document.getElementById('serverUpdateBanner')?.remove();
 }
 
 function selfUpdateOwnsServerVersion(serverVersion) {
-  if (!selfUpdateReloadPending) return false;
-  if (!selfUpdateReloadTarget || serverVersion === selfUpdateReloadTarget) {
+  if (!selfUpdateReloadState.pending) return false;
+  if (!selfUpdateReloadState.target || serverVersion === selfUpdateReloadState.target) {
     if (serverVersion) serverVersionReloadHandled = serverVersion;
     return true;
   }
@@ -4187,15 +4191,15 @@ function selfUpdateReloadDeferredReason() {
 }
 
 function showSelfUpdateReloadDeferredToast() {
-  if (selfUpdateReloadDeferredToastShown) return;
-  selfUpdateReloadDeferredToastShown = true;
+  if (selfUpdateReloadState.deferredToastShown) return;
+  selfUpdateReloadState.deferredToastShown = true;
   showToast(t('update.softwareTitle'), [
     t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
   ], {className: 'attention-alert toast toast-update'});
 }
 
 function maybeReloadAfterSelfUpdate() {
-  if (!selfUpdateReloadPending) return false;
+  if (!selfUpdateReloadState.pending) return false;
   if (reloadIsSafe()) {
     location.reload();
     return true;
@@ -4206,25 +4210,25 @@ function maybeReloadAfterSelfUpdate() {
 }
 
 function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
-  if (!selfUpdateReloadPending) return;
-  if (selfUpdateReloadTimer) clearTimeout(selfUpdateReloadTimer);
-  selfUpdateReloadTimer = window.setTimeout(() => {
-    selfUpdateReloadTimer = null;
+  if (!selfUpdateReloadState.pending) return;
+  if (selfUpdateReloadState.timer) clearTimeout(selfUpdateReloadState.timer);
+  selfUpdateReloadState.timer = window.setTimeout(() => {
+    selfUpdateReloadState.timer = null;
     pollSelfUpdateReload();
   }, delayMs);
 }
 
 async function pollSelfUpdateReload() {
-  if (!selfUpdateReloadPending) return false;
-  selfUpdateReloadAttempts += 1;
+  if (!selfUpdateReloadState.pending) return false;
+  selfUpdateReloadState.attempts += 1;
   try {
     await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
     return maybeReloadAfterSelfUpdate();
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
-  if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
-    selfUpdateReloadPending = false;
+  if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
+    selfUpdateReloadState.pending = false;
     showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
     return false;
   }
@@ -4255,17 +4259,13 @@ function showServerUpdateBanner(version) {
   const msg = document.createElement('span');
   msg.className = 'server-update-banner-msg';
   msg.textContent = t('update.available');
-  const reload = document.createElement('button');
-  reload.type = 'button';
-  reload.className = 'server-update-banner-reload';
-  reload.textContent = t('common.reload');
-  reload.addEventListener('click', () => location.reload());
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'server-update-banner-dismiss';
-  dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = t('update.dismiss');
-  dismiss.addEventListener('click', () => banner.remove());
+  const reload = makeButton({className: 'server-update-banner-reload', label: t('common.reload'), onClick: () => location.reload()});
+  const dismiss = makeButton({
+    className: 'server-update-banner-dismiss',
+    label: t('update.dismiss'),
+    ariaLabel: t('update.dismiss'),
+    onClick: () => banner.remove(),
+  });
   banner.append(msg, reload, dismiss);
   document.body.appendChild(banner);
 }
@@ -4295,24 +4295,28 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 
 async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
+  const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
+  if (!requestIsCurrent()) return false;
+  setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
-  for (const session of Object.keys(transcriptMeta.sessions || {})) {
+  for (const session of Object.keys(transcriptMetadataState.payload.sessions || {})) {
     reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
   }
-  transcriptMetaLoaded = true;
-  transcriptMetaLoadError = null;
+  transcriptMetadataState.loaded = true;
+  transcriptMetadataState.error = null;
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
-  applyAgentAvailabilityPayload(transcriptMeta);
-  updateMetadataBadgePulses(transcriptMeta);
+  maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision);
+  applyAgentAvailabilityPayload(transcriptMetadataState.payload);
+  updateMetadataBadgePulses(transcriptMetadataState.payload);
   const previousActive = activeSessions.slice();
-  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
+  if (!requestIsCurrent()) return false;
+  transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   renderSessionButtons();
   renderInfoPanel();
@@ -4320,7 +4324,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
     const preview = document.getElementById(transcriptDomId(session));
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
     renderSummaryContext(session, info, agent);
@@ -4373,12 +4377,13 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
 }
 
 async function refreshSessionMetadata(options = {}) {
-  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
-  transcriptMetaLoading = true;
-  transcriptMetaLoadError = null;
+  if (transcriptMetadataState.request) return transcriptMetadataState.request;
+  const requestIsCurrent = transcriptMetadataState.guard.begin();
+  transcriptMetadataState.loading = true;
+  transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
   renderInfoPanel();
-  transcriptMetaRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
@@ -4389,23 +4394,28 @@ async function refreshSessionMetadata(options = {}) {
           refreshAuto: options.refreshAuto !== false,
           refreshContext: true,
           refreshActivity: options.refreshActivity !== false,
+          source: 'request',
+          requestIsCurrent,
         }),
       );
-      if (!result.ok) {
-        transcriptMetaLoadError = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
+      if (!result.ok && requestIsCurrent()) {
+        transcriptMetadataState.error = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
         console.error(`session metadata ${result.stage} failed`, result.error);
         for (const session of activeSessions.filter(isTmuxSession)) {
           renderTranscriptMetadataLoadError(session);
         }
       }
     } finally {
-      transcriptMetaLoading = false;
-      transcriptMetaRefreshPromise = null;
-      syncTranscriptMetaLoadingUi();
-      renderInfoPanel();
+      if (transcriptMetadataState.request === request) {
+        transcriptMetadataState.loading = false;
+        transcriptMetadataState.request = null;
+        syncTranscriptMetaLoadingUi();
+        renderInfoPanel();
+      }
     }
   })();
-  return transcriptMetaRefreshPromise;
+  transcriptMetadataState.request = request;
+  return request;
 }
 
 async function refreshTranscripts(options = {}) {
@@ -4561,7 +4571,7 @@ function updatePanelHeader(session, info) {
 
 function refreshSessionChrome(session) {
   updateSessionButtonStates();
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
 }
 
 function refreshTrackedSessionChrome(session) {
@@ -4588,7 +4598,7 @@ function relocalizeTerminalPanelChrome(session) {
   relocalizeVirtualPanelChrome(panel);
   const terminalTab = panel.querySelector('.terminal-tab');
   if (terminalTab) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const title = terminalTabTitle(session, info);
     terminalTab.textContent = terminalTabLabel(session, info);
     terminalTab.title = title;
@@ -4598,7 +4608,7 @@ function relocalizeTerminalPanelChrome(session) {
     button.title = t('common.sessionActions');
     button.setAttribute('aria-label', t('common.sessionActions'));
   });
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
     node.textContent = t(node.dataset.localeTextKey);
   });
@@ -4626,14 +4636,14 @@ function updateTranscriptPathRow(session, path, fallback = '') {
 }
 
 function transcriptMetadataLoadErrorText() {
-  const fallback = transcriptMetaLoadError?.stage === 'apply'
+  const fallback = transcriptMetadataState.error?.stage === 'apply'
     ? t('common.requestFailed')
     : t('transcript.lookupFailed');
-  return userMessageText(transcriptMetaLoadError, fallback);
+  return userMessageText(transcriptMetadataState.error, fallback);
 }
 
 function transcriptMetadataLoadErrorLabel() {
-  return transcriptMetaLoadError?.stage === 'apply'
+  return transcriptMetadataState.error?.stage === 'apply'
     ? transcriptMetadataLoadErrorText()
     : t('transcript.lookupFailed');
 }
@@ -4674,7 +4684,7 @@ function renderTranscriptMetadataLoadError(session) {
   updateTranscriptPathRow(session, '', label);
   if (preview) {
     clearTranscriptContextLoadError(preview);
-    preview.textContent = transcriptMetaLoadError?.stage === 'apply'
+    preview.textContent = transcriptMetadataState.error?.stage === 'apply'
       ? error
       : t('transcript.lookupFailedWithError', {error});
   }
@@ -4683,11 +4693,11 @@ function renderTranscriptMetadataLoadError(session) {
 function relocalizeTranscriptPanelStatus(session) {
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
-  if (transcriptMetaLoadError) {
+  if (transcriptMetadataState.error) {
     renderTranscriptMetadataLoadError(session);
     return;
   }
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   if (agent?.transcript) {
     renderTranscriptContextLoadError(preview);
@@ -4947,9 +4957,9 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
-  reconnectResyncTimer = setTimeout(() => {
-    reconnectResyncTimer = null;
+  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  clientEventTransportState.resyncTimer = setTimeout(() => {
+    clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
 }
@@ -5033,8 +5043,8 @@ async function boot() {
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
-    transcriptMeta = {session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))};
-    transcriptMetaLoaded = true;
+    setTranscriptMetadataPayload({session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))});
+    transcriptMetadataState.loaded = true;
     await refreshTranscripts({refreshAuto: false, refreshActivity: false});
   }
   installYolomuxFontMetricRefresh();
@@ -5126,13 +5136,13 @@ function updateDryRunEnabled() {
 }
 
 function updateActionButton(label, onClick) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'toast-action';
-  button.textContent = label;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick(event, button.closest('.toast'));
+  const button = makeButton({
+    className: 'toast-action',
+    label,
+    onClick: event => {
+      event.stopPropagation();
+      onClick(event, button.closest('.toast'));
+    },
   });
   return button;
 }
@@ -5305,26 +5315,26 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 
 function queueClientPushEvent(type, payload = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientPushEventQueue.set(key, {type, payload});
+  clientEventTransportState.queue.set(key, {type, payload});
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
-    if (clientPushEventFrame) cancelAnimationFrame(clientPushEventFrame);
-    clientPushEventFrame = 0;
+    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
-  if (clientPushEventFrame) return;
-  clientPushEventFrame = requestAnimationFrame(() => {
-    clientPushEventFrame = 0;
+  if (clientEventTransportState.frame) return;
+  clientEventTransportState.frame = requestAnimationFrame(() => {
+    clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
 }
 
 function flushQueuedClientPushEvents() {
-  const events = Array.from(clientPushEventQueue.values());
-  clientPushEventQueue.clear();
+  const events = Array.from(clientEventTransportState.queue.values());
+  clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
   for (const event of events) handleClientPushEventNow(event.type, event.payload);
 }
@@ -5365,8 +5375,8 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
-      if (commandPaletteNode && !commandPaletteNode.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteQuery).catch(error => console.warn('search-index quick-open refresh failed', error));
+      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
+        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }
     }
     if (payload.role === 'session-files') {
@@ -5382,7 +5392,7 @@ function handleClientPushEventNow(type, payload = {}) {
     if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
       for (const session of activePaneItems()) {
         if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
-        updatePanelWindowStepButtons(session, transcriptMeta.sessions?.[session]);
+        updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
       }
     }
     return;
@@ -5448,16 +5458,16 @@ function handleClientPushEventNow(type, payload = {}) {
 }
 
 function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+  if (typeof EventSource === 'undefined' || clientEventTransportState.source) return;
   let source;
   try {
     source = new EventSource('/api/client-events');
   } catch (_error) {
     return;
   }
-  clientEventsSource = source;
+  clientEventTransportState.source = source;
   source.addEventListener('ready', event => {
-    clientEventsConnected = true;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -5465,17 +5475,17 @@ function installClientEventStream() {
     refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   });
   source.addEventListener('ping', event => {
-    clientEventsConnected = true;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    clientEventsConnected = false;
+    clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
   for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
-      clientEventsConnected = true;
+      clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);

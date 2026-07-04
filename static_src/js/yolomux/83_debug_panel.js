@@ -42,13 +42,17 @@ const jsDebugHistoryReadiness = {
 };
 let jsDebugSubTab = 'graph';
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
-let jsDebugStatsPollTimer = null;
-let jsDebugStatsPollInFlight = false;
-let jsDebugStatsPollPending = false;
-let jsDebugStatsPollPendingForceGraphRefresh = false;
-let jsDebugStatsFirstSampleReceived = false;
-let jsDebugStatsHistoryFlushTimer = null;
-let jsDebugStatsHistoryFlushInFlight = false;
+const jsDebugStatsPollState = {
+  inFlight: false,
+  pending: false,
+  pendingForceGraphRefresh: false,
+  firstSampleReceived: false,
+};
+const jsDebugStatsUploadState = {
+  timer: null,
+  worker: null,
+  generation: 0,
+};
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsAgentTokenSequence = 0;
 let jsDebugStatsAgentTokenResolutionSeconds = 0;
@@ -191,9 +195,7 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
 const jsDebugGraphAgentTokenBuckets = new Map();
-const jsDebugGraphEventBuckets = new Map();
-const jsDebugGraphEventResponseBytes = new Map();
-const jsDebugGraphEventRefTimes = new Map();
+const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
@@ -1182,11 +1184,9 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     }
   }
   const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, timeMs] of [...jsDebugGraphEventRefTimes.entries()]) {
-    if (timeMs >= refCutoff) continue;
-    jsDebugGraphEventRefTimes.delete(id);
-    jsDebugGraphEventBuckets.delete(id);
-    jsDebugGraphEventResponseBytes.delete(id);
+  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
+    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
+    jsDebugGraphEventRecords.delete(id);
   }
 }
 
@@ -1211,26 +1211,24 @@ function recordJsDebugEventForGraph(event) {
   debugGraphAddBucketData(debugGraphBucketForTime(debugGraphEventTimeMs(event), nowMs), data);
   debugGraphQueueServerDelta(bucketRef, data);
   if (event.type === 'api' && Number.isFinite(event.id)) {
-    jsDebugGraphEventBuckets.set(event.id, bucketRef);
-    jsDebugGraphEventResponseBytes.set(event.id, responseBytes);
-    jsDebugGraphEventRefTimes.set(event.id, nowMs);
+    jsDebugGraphEventRecords.set(event.id, {bucket: bucketRef, responseBytes, lastSeenAt: nowMs});
   }
   compactJsDebugGraphBuckets(nowMs);
 }
 
 function recordApiDebugResponseBytesForGraph(event, responseBytes) {
   if (!jsDebugCollectionEnabled || !event || !Number.isFinite(event.id)) return;
-  const bucket = jsDebugGraphEventBuckets.get(event.id);
-  if (!bucket) return;
+  const record = jsDebugGraphEventRecords.get(event.id);
+  if (!record?.bucket) return;
   const nextBytes = Number(responseBytes);
   if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(jsDebugGraphEventResponseBytes.get(event.id) || 0);
+  const previousBytes = Number(record.responseBytes || 0);
   const delta = nextBytes - previousBytes;
-  jsDebugGraphEventResponseBytes.set(event.id, nextBytes);
-  jsDebugGraphEventRefTimes.set(event.id, Date.now());
+  record.responseBytes = nextBytes;
+  record.lastSeenAt = Date.now();
   if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
+  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
+  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -1306,9 +1304,9 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     payload.cpu_percent,
     payload.system_cpu_percent,
   ].some(value => Number.isFinite(Number(value)));
-  const firstSampleApplied = sampleApplied && !jsDebugStatsFirstSampleReceived;
+  const firstSampleApplied = sampleApplied && !jsDebugStatsPollState.firstSampleReceived;
   if (firstSampleApplied) {
-    jsDebugStatsFirstSampleReceived = true;
+    jsDebugStatsPollState.firstSampleReceived = true;
     armJsDebugStatsPolling();
   }
   debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: advanceHistoryCursor, replaceCoverage});
@@ -1320,8 +1318,8 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     clearJsDebugGraphData();
     resetJsDebugHistoryReadiness();
     jsDebugStatsServerSequence = 0;
-    jsDebugStatsPollPending = true;
-    jsDebugStatsPollPendingForceGraphRefresh = true;
+    jsDebugStatsPollState.pending = true;
+    jsDebugStatsPollState.pendingForceGraphRefresh = true;
   }
   if (payload.history && typeof payload.history === 'object') {
     if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
@@ -1345,9 +1343,7 @@ function clearJsDebugGraphData() {
   jsDebugGraphRollupBuckets.clear();
   resetDebugGraphAgentTokenHistory();
   jsDebugStatsAgentTokenSchemaVersion = 0;
-  jsDebugGraphEventBuckets.clear();
-  jsDebugGraphEventResponseBytes.clear();
-  jsDebugGraphEventRefTimes.clear();
+  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
 }
 
@@ -3001,7 +2997,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventBuckets.size,
+    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
     rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
@@ -3035,12 +3031,11 @@ function jsDebugStatsTokenConsumerEnabled() {
 }
 
 function stopJsDebugStatsPolling() {
-  if (jsDebugStatsPollTimer && typeof clearInterval === 'function') clearInterval(jsDebugStatsPollTimer);
-  jsDebugStatsPollTimer = null;
+  clearRuntimeInterval('debug-stats');
 }
 
 function jsDebugStatsPollIntervalMs() {
-  return jsDebugStatsFirstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+  return jsDebugStatsPollState.firstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
 }
 
 function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {}) {
@@ -3049,8 +3044,8 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
     return;
   }
   stopJsDebugStatsPolling();
-  if (pollNow) pollJsDebugStatsSample({forceGraphRefresh});
-  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+  if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
+  resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
 }
 
 async function fetchJsDebugStatsJson(url, options = {}) {
@@ -3093,14 +3088,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     stopJsDebugStatsPolling();
     return;
   }
-  if (jsDebugStatsPollInFlight) {
-    jsDebugStatsPollPending = true;
-    jsDebugStatsPollPendingForceGraphRefresh ||= forceGraphRefresh;
+  if (jsDebugStatsPollState.inFlight) {
+    jsDebugStatsPollState.pending = true;
+    jsDebugStatsPollState.pendingForceGraphRefresh ||= forceGraphRefresh;
     return;
   }
   if (typeof apiFetchJsonQuiet !== 'function') return;
-  jsDebugStatsPollPending = false;
-  jsDebugStatsPollInFlight = true;
+  jsDebugStatsPollState.pending = false;
+  jsDebugStatsPollState.inFlight = true;
   let readinessRequest = null;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
@@ -3160,8 +3155,8 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
       if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
-        jsDebugStatsPollPending = true;
-        jsDebugStatsPollPendingForceGraphRefresh = true;
+        jsDebugStatsPollState.pending = true;
+        jsDebugStatsPollState.pendingForceGraphRefresh = true;
         return;
       }
       await paintJsDebugHistoryResponse(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds);
@@ -3171,26 +3166,27 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
     }
   } finally {
-    jsDebugStatsPollInFlight = false;
-    if (jsDebugStatsPollPending) {
-      const pendingForceGraphRefresh = jsDebugStatsPollPendingForceGraphRefresh;
-      jsDebugStatsPollPending = false;
-      jsDebugStatsPollPendingForceGraphRefresh = false;
+    jsDebugStatsPollState.inFlight = false;
+    if (jsDebugStatsPollState.pending) {
+      const pendingForceGraphRefresh = jsDebugStatsPollState.pendingForceGraphRefresh;
+      jsDebugStatsPollState.pending = false;
+      jsDebugStatsPollState.pendingForceGraphRefresh = false;
       pollJsDebugStatsSample({forceGraphRefresh: pendingForceGraphRefresh});
     }
   }
 }
 
 function scheduleJsDebugStatsHistoryFlush() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushTimer || typeof setTimeout !== 'function') return;
-  jsDebugStatsHistoryFlushTimer = setTimeout(() => {
-    jsDebugStatsHistoryFlushTimer = null;
+  if (!jsDebugCollectionEnabled || jsDebugStatsUploadState.timer || typeof setTimeout !== 'function') return;
+  jsDebugStatsUploadState.timer = setTimeout(() => {
+    jsDebugStatsUploadState.timer = null;
     flushJsDebugStatsHistory();
   }, jsDebugStatsHistoryFlushMs);
 }
 
 async function flushJsDebugStatsHistory() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  if (!jsDebugCollectionEnabled || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  if (jsDebugStatsUploadState.worker) return jsDebugStatsUploadState.worker;
   const records = [...jsDebugGraphPendingServerBuckets.values()]
     .map(record => ({...record}))
     .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
@@ -3202,58 +3198,87 @@ async function flushJsDebugStatsHistory() {
     jsDebugGraphPendingServerBuckets.delete(key);
   }
   if (!records.length) return;
-  jsDebugStatsHistoryFlushInFlight = true;
-  try {
-    await apiFetchJsonQuiet('/api/stats-history', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
-    });
-    scheduleJsDebugPanelRefresh();
-  } catch (_error) {
-    for (const record of chunk) {
-      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-      const existing = jsDebugGraphPendingServerBuckets.get(key);
-      if (existing) {
-        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
-          existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
+  const generation = jsDebugStatsUploadState.generation;
+  let worker = null;
+  worker = (async () => {
+    try {
+      await apiFetchJsonQuiet('/api/stats-history', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
+      });
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      scheduleJsDebugPanelRefresh();
+    } catch (_error) {
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      for (const record of chunk) {
+        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+        const existing = jsDebugGraphPendingServerBuckets.get(key);
+        if (existing) {
+          for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
+            existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
+          }
+        } else {
+          jsDebugGraphPendingServerBuckets.set(key, record);
         }
-      } else {
-        jsDebugGraphPendingServerBuckets.set(key, record);
       }
+    } finally {
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      for (const record of held) {
+        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+        if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
+      }
+      jsDebugStatsUploadState.worker = null;
+      if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
     }
-  } finally {
-    for (const record of held) {
-      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-      if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
-    }
-    jsDebugStatsHistoryFlushInFlight = false;
-    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
-  }
+  })();
+  jsDebugStatsUploadState.worker = worker;
+  return worker;
 }
 
-function clearJsDebugServerHistory() {
-  jsDebugStatsFirstSampleReceived = false;
+async function clearJsDebugServerHistory() {
+  const priorWorker = jsDebugStatsUploadState.worker;
+  const generation = ++jsDebugStatsUploadState.generation;
+  const restartPolling = runtimeIntervalActive('debug-stats');
+  stopJsDebugStatsPolling();
+  jsDebugStatsPollState.firstSampleReceived = false;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
   jsDebugStatsServerStartedAt = null;
   jsDebugStatsServerRssBytes = null;
   resetJsDebugHistoryReadiness();
-  if (jsDebugStatsHistoryFlushTimer) {
-    clearTimeout(jsDebugStatsHistoryFlushTimer);
-    jsDebugStatsHistoryFlushTimer = null;
+  jsDebugGraphPendingServerBuckets.clear();
+  if (jsDebugStatsUploadState.timer) {
+    clearTimeout(jsDebugStatsUploadState.timer);
+    jsDebugStatsUploadState.timer = null;
   }
-  if (jsDebugStatsPollTimer) armJsDebugStatsPolling({pollNow: true});
-  if (typeof apiFetchJsonQuiet !== 'function') return;
-  apiFetchJsonQuiet('/api/stats-history', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
-  }).then(payload => {
+  if (priorWorker) {
+    try {
+      await priorWorker;
+    } catch (_error) {}
+  }
+  if (jsDebugStatsUploadState.generation !== generation) return;
+  if (jsDebugStatsUploadState.worker === priorWorker) jsDebugStatsUploadState.worker = null;
+  if (typeof apiFetchJsonQuiet !== 'function') {
+    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
+    return;
+  }
+  try {
+    const payload = await apiFetchJsonQuiet('/api/stats-history', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
+    });
+    if (jsDebugStatsUploadState.generation !== generation) return;
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
-  }).catch(() => {});
+  } catch (_error) {
+  } finally {
+    if (jsDebugStatsUploadState.generation !== generation) return;
+    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
+    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
+  }
 }
 
 function startJsDebugStatsPolling() {
@@ -3265,15 +3290,15 @@ function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {
     stopJsDebugStatsPolling();
     return false;
   }
-  if (jsDebugStatsPollTimer && !pollNow) return true;
+  if (runtimeIntervalActive('debug-stats') && !pollNow) return true;
   armJsDebugStatsPolling({pollNow, forceGraphRefresh});
   return true;
 }
 
 async function primeJsDebugStatsBeforeLongLivedStreams() {
-  if (!jsDebugStatsPanelVisible() || jsDebugStatsFirstSampleReceived) return false;
+  if (!jsDebugStatsPanelVisible() || jsDebugStatsPollState.firstSampleReceived) return false;
   await pollJsDebugStatsSample();
-  return jsDebugStatsFirstSampleReceived;
+  return jsDebugStatsPollState.firstSampleReceived;
 }
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
@@ -3368,7 +3393,7 @@ function createDebugPanel() {
 }
 
 function renderDebugPanels(options = {}) {
-  if (dragSession != null) return;
+  if (dragState.item != null) return;
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     refreshDebugPanelFromEvents(panel, options);

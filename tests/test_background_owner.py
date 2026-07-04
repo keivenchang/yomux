@@ -425,9 +425,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     owner.owner = True
     owner.status = "owner"
     webapp.background_owner = owner
-    webapp.tabber_activity_cache_warmer_running = True
-    webapp.tabber_activity_cache_refreshing = True
-    webapp.session_files_refreshing_cache_keys.add(("payload", "1"))
+    webapp.tabber_activity_warmer_record.running = True
+    webapp.tabber_activity_cache_record.refresh_worker = threading.Thread()
+    webapp.session_files_work_records[("payload", "1")] = app_module.SessionFilesWorkRecord()
     cleared_indexes = []
     monkeypatch.setattr(file_index, "clear_memory_indexes", lambda: cleared_indexes.append(True))
     try:
@@ -439,9 +439,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     assert response["ok"] is True
     assert owner.is_owner() is False
     assert owner.status == "follower"
-    assert webapp.tabber_activity_cache_warmer_running is False
-    assert webapp.tabber_activity_cache_refreshing is False
-    assert webapp.session_files_refreshing_cache_keys == set()
+    assert webapp.tabber_activity_warmer_record.running is False
+    assert webapp.tabber_activity_cache_record.refresh_worker is None
+    assert webapp.session_files_work_records == {}
     assert cleared_indexes == [True]
     assert "background_owner_released" in {event["type"] for event in events}
 
@@ -617,9 +617,77 @@ def test_follower_does_not_start_tabber_activity_warmer(no_control_socket):
     webapp.background_owner = owner
     try:
         assert webapp.start_tabber_activity_cache_warmer() is False
-        assert webapp.tabber_activity_cache_warmer_running is False
+        assert webapp.tabber_activity_warmer_record.running is False
         assert owner.refresh_requests == [BACKGROUND_ROLE_TABBER_ACTIVITY]
     finally:
+        webapp.control_server.stop()
+
+
+def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch, no_control_socket):
+    class MutableOwner(FollowerOwner):
+        def __init__(self):
+            super().__init__()
+            self.allowed = True
+
+        def can_run(self, role):
+            return self.allowed
+
+    webapp = app_module.TmuxWebtermApp([])
+    owner = MutableOwner()
+    webapp.background_owner = owner
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    calls = []
+
+    def metadata(info, _cache, allow_network=False):
+        assert allow_network is True
+        calls.append(info.session)
+        if info.session == "first":
+            first_started.set()
+            first_release.wait(timeout=2.0)
+        elif info.session == "second":
+            second_started.set()
+            second_release.wait(timeout=2.0)
+        return {}
+
+    monkeypatch.setattr(app_module, "session_project_metadata", metadata)
+    sessions = {
+        name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
+        for name in ("first", "second")
+    }
+    try:
+        webapp.warm_metadata_cache_async(sessions)
+        with webapp.metadata_warm_lock:
+            first_worker = webapp.metadata_warm_record.worker
+        assert first_worker is not None
+        assert first_started.wait(timeout=1.0)
+
+        owner.allowed = False
+        webapp.demote_background_owner()
+        with webapp.metadata_warm_lock:
+            assert webapp.metadata_warm_record.stop_event.is_set() is True
+        first_release.set()
+        first_worker.join(timeout=1.0)
+
+        assert calls == ["first"]
+        with webapp.metadata_warm_lock:
+            assert webapp.metadata_warm_record.worker is None
+        assert not hasattr(webapp, "metadata_warm_running")
+
+        owner.allowed = True
+        webapp.warm_metadata_cache_async({"second": sessions["second"]})
+        assert second_started.wait(timeout=1.0)
+        with webapp.metadata_warm_lock:
+            second_worker = webapp.metadata_warm_record.worker
+        assert second_worker is not None
+        second_release.set()
+        second_worker.join(timeout=1.0)
+        assert calls == ["first", "second"]
+    finally:
+        first_release.set()
+        second_release.set()
         webapp.control_server.stop()
 
 
@@ -627,6 +695,7 @@ def test_follower_activity_payload_without_cache_returns_empty_refreshing(monkey
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = FollowerOwner()
     webapp.background_owner = owner
+    monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(webapp, "build_activity_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not build activity payloads")))
     try:
         payload, status = webapp.activity_payload()
@@ -825,6 +894,7 @@ def test_follower_activity_payload_uses_bounded_fallback_when_owner_unresponsive
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = UnresponsiveFollowerOwner()
     webapp.background_owner = owner
+    monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
     build_calls = []
 
     def build_payload(*_args, **_kwargs):

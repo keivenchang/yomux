@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -27,6 +28,13 @@ YOAGENT_SESSION_SUMMARIES_STATE_KEY = "yoagent_session_summaries"
 YOAGENT_SESSION_SUMMARY_STATES = {"working", "waiting", "blocked", "done", "idle"}
 YOAGENT_SESSION_SUMMARY_QUIET_SECONDS = 15.0
 YOAGENT_SESSION_SUMMARY_MAX_ITEMS = 120
+
+
+@dataclass
+class YoagentSummaryWorkerRecord:
+    worker: threading.Thread | None = None
+    running: bool = False
+    first_launch_started: bool = False
 
 
 class YoagentSessionSummariesMixin:
@@ -207,16 +215,32 @@ class YoagentSessionSummariesMixin:
 
     def maybe_start_yoagent_summary_worker(self) -> None:
         with self.yoagent_summary_worker_lock:
-            if self.yoagent_summary_worker_running or self.yoagent_summary_first_launch_started:
+            current = self.yoagent_summary_worker_record
+            if current.running or current.first_launch_started:
                 return
-            self.yoagent_summary_first_launch_started = True
-            self.yoagent_summary_worker_running = True
-        threading.Thread(target=self.yoagent_summary_worker_loop, name="yoagent-summary-first-launch", daemon=True).start()
+            record = YoagentSummaryWorkerRecord(running=True, first_launch_started=True)
+            worker = threading.Thread(
+                target=lambda: self.yoagent_summary_worker_loop(record),
+                name="yoagent-summary-first-launch",
+                daemon=True,
+            )
+            record.worker = worker
+            self.yoagent_summary_worker_record = record
+        try:
+            worker.start()
+        except RuntimeError:
+            with self.yoagent_summary_worker_lock:
+                if self.yoagent_summary_worker_record is record and record.worker is worker:
+                    self.yoagent_summary_worker_record = YoagentSummaryWorkerRecord()
+            raise
 
 
-    def yoagent_summary_worker_loop(self) -> None:
+    def yoagent_summary_worker_loop(self, record: YoagentSummaryWorkerRecord | None = None) -> None:
+        current = record or self.yoagent_summary_worker_record
         try:
             self.deps.tick_yoagent_session_summaries(self.yoagent_settings(), force=True)
         finally:
             with self.yoagent_summary_worker_lock:
-                self.yoagent_summary_worker_running = False
+                if self.yoagent_summary_worker_record is current:
+                    current.worker = None
+                    current.running = False

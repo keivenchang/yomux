@@ -2,7 +2,7 @@
   position: relative;
   height: 100%;
   min-height: 0;
-  padding: 0 5px 5px;
+  padding: 0 var(--space-5) var(--space-5);
   display: block;
   overflow: auto;
 }
@@ -100,7 +100,7 @@
   flex: 0 0 auto;
   align-items: flex-start;
   min-height: calc(var(--pane-tab-height) + 2px);
-  padding-top: 2px;
+  padding-top: var(--space-2);
   pointer-events: none;
 }
 .yolomux-dockview .dockview-pane-header-actions {
@@ -116,7 +116,7 @@
   float: none;
   flex: 0 0 auto;
   max-width: none;
-  margin: 0 1px 0 4px;
+  margin: 0 var(--space-1) 0 var(--space-4);
   overflow: visible;
 }
 .yolomux-dockview .dockview-pane-header-actions .tab {
@@ -140,7 +140,7 @@
   flex: 0 0 min(18px, var(--pane-tab-height));
   min-width: min(18px, var(--pane-tab-height));
   max-width: min(18px, var(--pane-tab-height));
-  margin: 0 0 0 3px;
+  margin: 0 0 0 var(--space-3);
   padding: 0;
   cursor: grab;
 }
@@ -211,7 +211,7 @@
   min-width: 0;
   height: var(--pane-tab-height);
   padding: 0;
-  margin: 0 1px 0 0;
+  margin: 0 var(--space-1) 0 0;
   overflow: visible;
   background: transparent;
   border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
@@ -443,7 +443,7 @@ body.layout-resizing {
 /* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
    border already uses the theme-aware pane separator token. */
 body.theme-light .drop-slot.drag-over {
-  background: rgb(var(--overlay-slate-rgb) / 0.06);
+  background: var(--paint-overlay-slate-06);
 }
 .drop-slot.drop-preview::before,
 .yolomux-dockview .dv-groupview.drop-preview::before,
@@ -553,8 +553,6 @@ body.theme-light .drop-slot.drag-over {
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 .panel:is(.focused-pane, .active-pane):hover {
@@ -718,7 +716,7 @@ body.theme-light .drop-slot.drag-over {
 .panel.empty-pane-panel {
   display: flex;
   grid-template-rows: none;
-  padding: 10px;
+  padding: var(--space-10);
   border: 1px dashed #7a8799;
   background: #101722;
   box-shadow: none;
@@ -779,7 +777,7 @@ body.theme-light .drop-slot.drag-over {
   max-width: 100%;
   min-height: calc(var(--pane-tab-height) + 2px);
   display: block;
-  padding: 2px 1px 0;
+  padding: var(--space-2) var(--space-1) 0;
   border-bottom: 0;
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg);
@@ -804,7 +802,7 @@ body.theme-light .drop-slot.drag-over {
   align-items: center;
   min-width: 0;
   max-width: 100%;
-  padding: 1px 2px 1px 8px;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-8);
   color: var(--pane-meta-path);
   background: var(--pane-bar-bg);
   border-bottom: 1px solid var(--line);
@@ -819,7 +817,7 @@ body.theme-light .drop-slot.drag-over {
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  margin-inline-start: 4px;
+  margin-inline-start: var(--space-4);
   margin-inline-end: 0;
   align-self: center;
   position: relative;
@@ -941,7 +939,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-5);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -950,7 +948,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   height: max(16px, calc(var(--ui-font-size) + 5px));
   padding-inline-end: 0;
   white-space: nowrap;
@@ -962,9 +960,6 @@ body.theme-light .drop-slot.drag-over {
   flex: 1 1 auto;
   min-width: 0;
   position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -1007,11 +1002,6 @@ body.theme-light .drop-slot.drag-over {
 /* The window buttons own the left edge of the Info Bar.  Metadata shares the
    remaining flex row, using its natural width when it fits and shrinking only
    when necessary so its right edge stays aligned with the pane. */
-.pane-info-bar-popover-zone .pane-info-bar-meta {
-  flex: 0 1 auto;
-  margin-inline-start: auto;
-  justify-content: flex-end;
-}
 .pane-info-bar-popover-zone .pane-info-bar-scroll-viewport {
   flex: 0 1 auto;
 }
@@ -1021,7 +1011,7 @@ body.theme-light .drop-slot.drag-over {
 }
 .pane-info-bar > .pane-info-bar-controls {
   order: -1;
-  margin-inline-end: 8px;
+  margin-inline-end: var(--space-8);
 }
 .pane-info-bar > .pane-info-bar-controls:empty {
   display: none;
@@ -1091,20 +1081,20 @@ body.theme-light .drop-slot.drag-over {
 .meta-sep {
   color: var(--sep-muted);
   display: inline-block;
-  margin-inline: 2px;
+  margin-inline: var(--space-2);
   opacity: 0.65;
 }
 /* Multi-repo detail controls and popover rows. Tokens only (light/dark). */
 .meta-repo-switch {
   display: inline-flex;
   align-items: center;
-  gap: 1px;
+  gap: var(--space-1);
   max-width: 100%;
   vertical-align: middle;
 }
 .meta-repo-chip {
   min-width: 0;
-  padding: 0 1px;
+  padding: 0 var(--space-1);
   border-radius: 0;
   appearance: none;
   font-weight: 600;
@@ -1115,7 +1105,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   width: auto;
   height: auto;
-  padding: 0 1px;
+  padding: 0 var(--space-1);
   border-radius: 0;
   appearance: none;
   font-weight: 800;
@@ -1134,7 +1124,7 @@ body.theme-light .drop-slot.drag-over {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(12ch, 1fr) max-content;
   align-items: center;
-  gap: 2px 10px;
+  gap: var(--space-2) var(--space-10);
 }
 .repo-chip-menu .repo-chip-row {
   display: grid;
@@ -1145,7 +1135,7 @@ body.theme-light .drop-slot.drag-over {
   color: var(--text);
   font: inherit;
   text-align: start;
-  padding: 4px 8px;
+  padding: var(--space-4) var(--space-8);
 }
 .repo-chip-menu .repo-chip-row:hover,
 .repo-chip-menu .repo-chip-row:focus-visible {
@@ -1157,7 +1147,7 @@ body.theme-light .drop-slot.drag-over {
 }
 .repo-chip-menu .repo-chip-status {
   display: inline-flex;
-  gap: 8px;
+  gap: var(--space-8);
   justify-content: flex-start;
 }
 .pane-tabs {
@@ -1210,10 +1200,10 @@ body.theme-light .drop-slot.drag-over {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
   min-width: 0;
   height: var(--pane-tab-height);
-  padding: 1px 5px 0;
+  padding: var(--space-1) var(--space-5) 0;
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
@@ -1233,7 +1223,7 @@ body.theme-light .drop-slot.drag-over {
   max-width: min(var(--pane-tab-width), 100%);
   z-index: var(--z-pane-tab);
   vertical-align: top;
-  margin: 0 1px 0 0;
+  margin: 0 var(--space-1) 0 0;
   cursor: pointer;
   user-select: none;
 }
@@ -1254,7 +1244,7 @@ body.theme-light .drop-slot.drag-over {
 }
 .tmux-pane-tab-token .session-button-text,
 .pane-tab .session-button-text {
-  gap: 1px;
+  gap: var(--space-1);
 }
 .tmux-pane-tab-token .tab-inline-detail,
 .pane-tab .tab-inline-detail,
@@ -1266,7 +1256,7 @@ body.theme-light .drop-slot.drag-over {
 .file-explorer-mode-switcher {
   display: inline-flex;
   align-items: flex-end;
-  gap: 1px;
+  gap: var(--space-1);
   flex: 0 0 auto;
   min-width: 0;
   height: var(--pane-tab-height);
@@ -1279,7 +1269,7 @@ body.theme-light .drop-slot.drag-over {
   flex: 0 0 auto;
   height: var(--pane-tab-height);
   min-width: 0;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   box-sizing: border-box;
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg, var(--panel2));
@@ -1355,7 +1345,7 @@ body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
 }
 .pane-tab.pinned-tab,
 .tmux-pane-tab-token.pinned-tab {
-  padding-inline-start: 4px;
+  padding-inline-start: var(--space-4);
 }
 .pane-tab.pinned-tab .pane-tab-core,
 .tmux-pane-tab-token.pinned-tab .pane-tab-core {
@@ -1443,17 +1433,6 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   opacity: 0.58;
   border-radius: 50%;
 }
-.pane-tab-close::before,
-.pane-tab-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 1.6px;
-  border-radius: var(--radius-pill);
-  background: currentColor;
-}
 .pane-tab-close::before {
   transform: translate(-50%, -50%) rotate(45deg);
 }
@@ -1529,14 +1508,14 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   max-width: none;
 }
 .pane-tab .ci-indicator {
-  padding: 1px 3px;
+  padding: var(--space-1) var(--space-3);
   font-size: var(--ui-font-size-3xs);
 }
 .pane-tab-core {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   flex: 1 1 auto;
   overflow: hidden;
 }
@@ -1544,7 +1523,7 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
   flex: 0 0 auto;
   min-width: 18px;
   height: 18px;
-  padding: 1px 0;
+  padding: var(--space-1) 0;
   border-radius: var(--radius-control);
   font-size: var(--ui-font-size-2xs);
 }
@@ -1620,10 +1599,10 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   float: right;
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: var(--space-1);
   min-width: 0;
   max-width: calc(100% - 4px);
-  margin: 0 0 0 6px;
+  margin: 0 0 0 var(--space-6);
   padding: 0;
   border-bottom: 0;
   background: transparent;
@@ -1652,7 +1631,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   color: var(--muted);
   background: transparent;
   font-family: var(--control-font);
@@ -1668,7 +1647,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-bar {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1680,14 +1659,14 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: max-content;
   max-width: none;
   margin-inline-start: 0;
-  margin-inline-end: 8px;
+  margin-inline-end: var(--space-8);
   justify-content: flex-start;
   overflow: visible;
 }
 .tmux-status-toggle {
   flex: 0 0 auto;
   min-width: 20px;
-  margin-inline-start: 4px;
+  margin-inline-start: var(--space-4);
   border-radius: 0;
   border: 1px solid;
 }
@@ -1695,7 +1674,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 1 auto;
   min-width: 18px;
   max-width: 96px;
-  padding-inline: 2px;
+  padding-inline: var(--space-2);
   /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
   font-family: var(--ui-font);
   font-stretch: normal;
@@ -1722,7 +1701,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   align-items: center;
   justify-content: center;
   /* One shared minimum separates state glyph, agent identity, and the window label. */
-  gap: 1px;
+  gap: var(--space-1);
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -1749,7 +1728,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .tmux-window-button .agent-window-activity--subwindow {
   /* Keep the state glyph and stable agent identity visually distinct without wasting label space. */
-  gap: 3px;
+  gap: var(--space-3);
 }
 .tmux-window-button .agent-window-status-placeholder {
   inline-size: var(--subwindow-status-slot-size);
@@ -1865,7 +1844,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 0 auto;
   min-width: 20px;
   max-width: 28px;
-  padding-inline: 3px;
+  padding-inline: var(--space-3);
 }
 /* Active-window paint comes from the shared base selector. This scoped weight still beats the generic
    `.tab.active` fallback without duplicating the theme-aware paint declarations. */
@@ -1897,12 +1876,12 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   flex: 0 1 auto;
   max-width: 72px;
   min-width: 0;
-  padding-inline: 3px;
+  padding-inline: var(--space-3);
 }
 .tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
-  padding-inline: 3px;
+  padding-inline: var(--space-3);
 }
 .tabs .panel-detail-toggle {
   min-width: 0;
@@ -1967,27 +1946,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: min(20px, var(--pane-tab-height));
   max-width: min(20px, var(--pane-tab-height));
   padding: 0;
-}
-.panel-detail-close::before,
-.panel-detail-close::after,
-.tabs .pane-close::before,
-.tabs .pane-close::after,
-.tabs .pane-detail-toggle::before,
-.tabs .pane-detail-toggle::after,
-.tabs .pane-minimize::before,
-.tabs .pane-minimize::after,
-.tabs .pane-popout::before,
-.tabs .pane-popout::after,
-.tabs .pane-expand::before,
-.tabs .pane-expand::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 1.4px;
-  border-radius: var(--radius-pill);
-  background: currentColor;
 }
 .tabs .pane-close::before {
   transform: translate(-50%, -50%) rotate(45deg);
@@ -2113,7 +2071,7 @@ body.theme-light .panel.active-pane .panel-detail-row .session-button-name {
 body.theme-light .panel-detail-close:hover,
 body.theme-light .panel-detail-close:focus-visible {
   color: var(--pc-control-hover-fg);
-  background: rgb(var(--overlay-slate-rgb) / 0.08);
+  background: var(--paint-overlay-slate-08);
 }
 /* Light-mode contrast fixes for the near-white tab-hover border and white hover-glyph text on
    the light control hover bg. Saturated-chip light text (red/dark-blue badges) is left as-is. */

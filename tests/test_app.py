@@ -205,6 +205,76 @@ def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
     assert third["history"]["sequence"] > duplicate["history"]["sequence"]
 
 
+def test_stats_sample_parallel_scalars_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    for name in (
+        "stats_sample_last_monotonic",
+        "stats_sample_last_process_time",
+        "stats_sample_last_system_cpu_times",
+        "stats_sample_cached_monotonic",
+        "stats_sample_cached_payload",
+    ):
+        assert f"self.{name}" not in source
+
+
+def test_stats_history_sampler_record_reuses_worker_and_stops_same_generation(monkeypatch):
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            self.join_timeout = None
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    try:
+        assert webapp.start_stats_history_sampler() is True
+        record = webapp.stats_history_sampler_record
+        assert record.thread.args == (record,)
+        assert webapp.start_stats_history_sampler() is False
+        webapp.stop_stats_history_sampler()
+        assert record.stop_event.is_set()
+        assert record.thread.join_timeout == 2.0
+    finally:
+        webapp.control_server.stop()
+
+
+def test_stats_history_sampler_old_loop_cannot_clear_replacement():
+    webapp = app_module.TmuxWebtermApp([])
+    old_record = app_module.StatsHistorySamplerRecord(running=True)
+    old_record.stop_event.set()
+    replacement = app_module.StatsHistorySamplerRecord(running=True)
+    webapp.stats_history_sampler_record = replacement
+    try:
+        webapp.stats_history_sampler_loop(old_record)
+        assert replacement.running is True
+        webapp.stats_history_sampler_record = old_record
+        webapp.stats_history_sampler_loop(old_record)
+        assert old_record.running is False
+    finally:
+        webapp.control_server.stop()
+
+
+def test_stats_history_sampler_parallel_state_is_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.stats_history_sampler_thread" not in source
+    assert "self.stats_history_sampler_stop_event" not in source
+    assert "self.stats_history_sampler_running" not in source
+
+
 def test_stats_history_payload_limits_records_to_requested_visible_range():
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -1097,6 +1167,55 @@ def test_stats_process_history_batches_disk_writes_without_losing_one_second_cpu
     assert all(record["servers"][process_key]["cpu_count"] == 1.0 for record in records)
 
 
+def test_stats_process_history_requeues_failed_shared_write_without_double_counting(monkeypatch, tmp_path):
+    history_path = tmp_path / "stats-client-history.json"
+    monkeypatch.setattr(common, "STATS_CLIENT_HISTORY_PATH", history_path)
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.background_owner = StatsRoleOwner(owner=False, port=9101)
+    real_write = webapp.write_shared_stats_client_history_locked
+    writes = 0
+
+    def fail_first_write(previous, now):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise OSError("injected stats history write failure")
+        return real_write(previous, now)
+
+    monkeypatch.setattr(webapp, "write_shared_stats_client_history_locked", fail_first_write)
+    sample_time = time.time()
+    try:
+        with pytest.raises(OSError, match="injected stats history write failure"):
+            webapp.record_stats_process_sample({"time": sample_time, "pid": 9101, "cpu_percent": 10.0})
+
+        write_record = webapp.stats_process_history_write_record
+        assert [sample["cpu_percent"] for sample in write_record.pending_samples] == [10.0]
+        assert write_record.next_write_at <= sample_time
+        assert write_record.retry_requires_reload is True
+
+        webapp.record_stats_process_sample({"time": sample_time + 1.0, "pid": 9101, "cpu_percent": 20.0})
+        with webapp.stats_history_lock:
+            history = webapp.stats_history_payload_locked()
+    finally:
+        webapp.control_server.stop()
+
+    process_rows = [process for record in history["records"] for process in record["servers"].values()]
+    assert sum(process["cpu_count"] for process in process_rows) == 2.0
+    assert sum(process["cpu_total_percent"] for process in process_rows) == 30.0
+    assert write_record.pending_samples == []
+    assert write_record.retry_requires_reload is False
+    assert writes == 2
+    assert history_path.exists()
+    for obsolete in (
+        "stats_process_history_pending_samples",
+        "stats_process_history_next_write_at",
+        "stats_client_history_shared_rev",
+        "stats_client_history_shared_signature",
+        "stats_client_history_migrated_versions",
+    ):
+        assert not hasattr(webapp, obsolete)
+
+
 def test_shared_stats_history_write_is_batched_without_losing_the_first_sample(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     writes = []
@@ -1547,7 +1666,7 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
 
 
 def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_path):
-    app_module.session_files._CLAUDE_TRANSCRIPT_SCAN_CACHE.clear()
+    app_module.session_files._TRANSCRIPT_SCAN_CACHE.clear()
     webapp = app_module.TmuxWebtermApp(["1"])
     transcript = tmp_path / "session-id.jsonl"
     subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
@@ -1645,7 +1764,7 @@ def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch):
         started = time.monotonic()
         payload = webapp.stats_sample_payload(token_consumer=True)
         response_elapsed = time.monotonic() - started
-        webapp.stats_sample_cached_monotonic = None
+        webapp.stats_sample_record.cached_monotonic = None
         webapp.record_stats_global_sample(trigger="sampler")
     finally:
         webapp.control_server.stop()
@@ -2085,7 +2204,7 @@ def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
     refreshes = []
     stale_payload = {"session_order": ["1"], "sessions": {"1": {"enabled": True}}, "errors": [], "rules": {}}
     with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
+        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
     monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append("refresh") or True)
     try:
@@ -2097,6 +2216,111 @@ def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
     assert payload["sessions"] == stale_payload["sessions"]
     assert payload["cache"]["stale"] is True
     assert refreshes == ["refresh"]
+
+
+def test_auto_approve_cache_rejects_retired_refresh_after_invalidation(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    old_started = threading.Event()
+    release_old = threading.Event()
+    old_publish_attempted = threading.Event()
+    stale_publish_results = []
+    calls = 0
+
+    def build_auto_approve_status(timings=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            old_started.set()
+            assert release_old.wait(timeout=3)
+            return {"marker": "old", "sessions": {}}, HTTPStatus.OK
+        return {"marker": "new", "sessions": {}}, HTTPStatus.OK
+
+    real_set_cache = webapp.set_auto_approve_cache
+
+    def tracked_set_cache(payload, status, generation, worker):
+        published = real_set_cache(payload, status, generation, worker)
+        if payload.get("marker") == "old":
+            stale_publish_results.append(published)
+            old_publish_attempted.set()
+        return published
+
+    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
+    monkeypatch.setattr(webapp, "set_auto_approve_cache", tracked_set_cache)
+    try:
+        assert webapp.start_auto_approve_cache_refresh() is True
+        assert old_started.wait(timeout=3)
+        webapp.invalidate_auto_approve_cache()
+        payload, status = webapp.refresh_auto_approve_cache_sync()
+        release_old.set()
+        assert old_publish_attempted.wait(timeout=3)
+        with webapp.auto_approve_cache_condition:
+            cached = webapp.auto_approve_cache_record.payload
+            assert cached is not None
+            cached_payload = cached[1][0]
+            worker = webapp.auto_approve_cache_record.worker
+    finally:
+        release_old.set()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["marker"] == "new"
+    assert cached_payload["marker"] == "new"
+    assert worker is None
+    assert stale_publish_results == [False]
+
+
+def test_sync_auto_approve_cache_waits_for_current_async_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_calls = []
+
+    def build_auto_approve_status(timings=None):
+        build_calls.append(True)
+        build_started.set()
+        assert release_build.wait(timeout=3)
+        return {"marker": "shared", "sessions": {}}, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
+    try:
+        assert webapp.start_auto_approve_cache_refresh() is True
+        assert build_started.wait(timeout=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting = executor.submit(webapp.refresh_auto_approve_cache_sync)
+            assert waiting.done() is False
+            release_build.set()
+            payload, status = waiting.result(timeout=3)
+    finally:
+        release_build.set()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["marker"] == "shared"
+    assert build_calls == [True]
+
+
+def test_auto_approve_cache_failure_cleanup_is_generation_guarded():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        with webapp.auto_approve_cache_condition:
+            record = webapp.auto_approve_cache_record
+            first_worker = object()
+            record.generation = 7
+            record.worker = first_worker
+        webapp.invalidate_auto_approve_cache()
+        with webapp.auto_approve_cache_condition:
+            current_worker = object()
+            webapp.auto_approve_cache_record.worker = current_worker
+            current_generation = webapp.auto_approve_cache_record.generation
+        assert webapp.finish_auto_approve_cache_refresh(7, first_worker) is False
+        assert webapp.auto_approve_cache_record.worker is current_worker
+        assert webapp.finish_auto_approve_cache_refresh(current_generation, current_worker) is True
+        assert webapp.auto_approve_cache_record.worker is None
+        assert not hasattr(webapp, "auto_approve_cache")
+        assert not hasattr(webapp, "auto_approve_cache_refreshing")
+        assert not hasattr(webapp, "auto_approve_cache_lock")
+    finally:
+        webapp.control_server.stop()
 
 
 def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
@@ -2116,7 +2340,7 @@ def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
         "rules": {},
     }
     with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache = (time.monotonic(), (cached_payload, HTTPStatus.OK))
+        webapp.auto_approve_cache_record.payload = (time.monotonic(), (cached_payload, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should use the fresh auto-approve cache")))
     try:
         rows = webapp.stats_agent_window_rows()
@@ -2137,7 +2361,7 @@ def test_stats_agent_window_rows_uses_briefly_stale_cache_while_refreshing(monke
     }
     refreshes = []
     with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (cached_payload, HTTPStatus.OK))
+        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (cached_payload, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append(True) or True)
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should keep the briefly stale cache")))
     try:
@@ -2182,7 +2406,7 @@ def test_auto_approve_session_status_skips_roster_cache(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload == {"target": "5", "enabled": False}
     assert build_calls == ["5"]
-    assert webapp.auto_approve_cache is None
+    assert webapp.auto_approve_cache_record.payload is None
 
 
 def test_auto_approve_session_lock_owner_probes_agent_pane_targets(monkeypatch):
@@ -2946,14 +3170,15 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
             "settings_payload",
             lambda: {"settings": {"performance": {"server_event_poll_ms": 250}}},
         )
-        webapp.client_event_next_file_poll_at = 100.5
-        webapp.client_event_next_background_file_poll_at = 100.75
-        webapp.client_event_next_signature_poll_at = 100.25
-        webapp.client_event_next_auto_poll_at = 101.0
-        webapp.client_event_next_attention_ack_poll_at = 100.6
-        webapp.client_event_next_watched_pr_poll_at = 200.0
+        record = webapp.client_event_watcher_record
+        record.next_file_poll_at = 100.5
+        record.next_background_file_poll_at = 100.75
+        record.next_signature_poll_at = 100.25
+        record.next_auto_poll_at = 101.0
+        record.next_attention_ack_poll_at = 100.6
+        record.next_watched_pr_poll_at = 200.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
-        webapp.client_event_next_signature_poll_at = 0.0
+        record.next_signature_poll_at = 0.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
     finally:
         webapp.control_server.stop()
@@ -3169,16 +3394,17 @@ def test_tmux_signal_full_snapshot_keeps_removed_window_origin(monkeypatch):
 def test_tmux_signal_event_does_not_force_auto_approve_poll():
     webapp = app_module.TmuxWebtermApp([])
     try:
-        webapp.client_event_next_auto_poll_at = 123.0
-        webapp.client_event_next_tmux_signal_poll_at = 456.0
+        record = webapp.client_event_watcher_record
+        record.next_auto_poll_at = 123.0
+        record.next_tmux_signal_poll_at = 456.0
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
 
         webapp.handle_tmux_signal_event({"event": "pane_changed"})
 
-        assert webapp.client_event_next_auto_poll_at == pytest.approx(123.0)
-        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(0.0)
+        assert record.next_auto_poll_at == pytest.approx(123.0)
+        assert record.next_tmux_signal_poll_at == pytest.approx(0.0)
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
-        assert webapp.client_watch_wake_event.is_set()
+        assert record.wake_event.is_set()
     finally:
         webapp.control_server.stop()
 
@@ -3188,24 +3414,25 @@ def test_tmux_output_events_share_one_debounced_metadata_refresh(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
     try:
-        webapp.client_event_next_tmux_signal_poll_at = 456.0
+        record = webapp.client_event_watcher_record
+        record.next_tmux_signal_poll_at = 456.0
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
 
         webapp.handle_tmux_signal_event({"type": "output"})
 
         scheduled_at = 100.0 + app_module.TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
-        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert record.next_tmux_signal_poll_at == pytest.approx(scheduled_at)
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
-        assert webapp.client_watch_wake_event.is_set()
+        assert record.wake_event.is_set()
 
-        webapp.client_watch_wake_event.clear()
+        record.wake_event.clear()
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
         clock[0] = 100.1
         webapp.handle_tmux_signal_event({"type": "extended-output"})
 
-        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert record.next_tmux_signal_poll_at == pytest.approx(scheduled_at)
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") == {"ok": True}
-        assert webapp.client_watch_wake_event.is_set() is False
+        assert record.wake_event.is_set() is False
     finally:
         webapp.control_server.stop()
 
@@ -3235,7 +3462,7 @@ def test_save_settings_active_color_syncs_existing_tmux_theme(monkeypatch):
     assert calls == [("blue", app_module.tmux)]
     assert webapp.tmux_theme_color == "blue"
     assert events[0][0] == "settings_changed"
-    assert webapp.client_watch_wake_event.is_set()
+    assert webapp.client_event_watcher_record.wake_event.is_set()
 
 
 def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch, tmp_path):
@@ -3326,8 +3553,9 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     started = []
 
     class FakeThread:
-        def __init__(self, target, name=None, daemon=None):
+        def __init__(self, target, args=(), name=None, daemon=None):
             self.target = target
+            self.args = args
             self.name = name
             self.daemon = daemon
 
@@ -3346,11 +3574,129 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     try:
         webapp.start_client_event_watcher()
         assert started == ["client-event-watch"]
-        assert webapp.client_event_next_auto_poll_at == pytest.approx(110.0)
-        assert webapp.client_event_next_attention_ack_poll_at == pytest.approx(112.0)
-        assert webapp.client_event_next_tmux_signal_poll_at == pytest.approx(115.0)
+        record = webapp.client_event_watcher_record
+        assert record.next_auto_poll_at == pytest.approx(110.0)
+        assert record.next_attention_ack_poll_at == pytest.approx(112.0)
+        assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
     finally:
         webapp.stop_client_event_watcher()
+        webapp.control_server.stop()
+
+
+def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    old_polled = threading.Event()
+    new_polled = threading.Event()
+    release_old = threading.Event()
+    poll_threads = []
+
+    def poll_files():
+        worker = threading.current_thread()
+        poll_threads.append(worker)
+        if len(poll_threads) == 1:
+            old_polled.set()
+            assert release_old.wait(timeout=2.0)
+            return
+        with webapp.client_watch_lock:
+            record = webapp.client_event_watcher_record
+            record.stop_event.set()
+            record.wake_event.set()
+        new_polled.set()
+
+    monkeypatch.setattr(webapp, "poll_client_file_events_once", poll_files)
+    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: None)
+    monkeypatch.setattr(webapp, "poll_auto_approve_client_event_once", lambda: None)
+    monkeypatch.setattr(webapp, "poll_attention_acks_client_event_once", lambda: None)
+    monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: None)
+    monkeypatch.setattr(webapp, "poll_watched_prs_client_event_once", lambda: None)
+    monkeypatch.setattr(webapp, "poll_yoagent_jobs_once", lambda: None)
+    monkeypatch.setattr(webapp, "start_client_directory_poll", lambda record=None: False)
+    monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
+    monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
+    try:
+        webapp.start_client_event_watcher()
+        old_record = webapp.client_event_watcher_record
+        old_worker = old_record.worker
+        assert old_worker is not None
+        assert old_polled.wait(timeout=1.0)
+
+        old_worker.join = lambda timeout=None: None
+        webapp.stop_client_event_watcher()
+        assert old_record.stop_event.is_set()
+        assert webapp.client_event_watcher_record is not old_record
+
+        webapp.start_client_event_watcher()
+        replacement = webapp.client_event_watcher_record
+        replacement_worker = replacement.worker
+        assert replacement is not old_record
+        assert replacement_worker is not None and replacement_worker is not old_worker
+        assert replacement.stop_event is not old_record.stop_event
+        assert replacement.wake_event is not old_record.wake_event
+        assert new_polled.wait(timeout=1.0)
+        replacement_worker.join(timeout=1.0)
+
+        release_old.set()
+        threading.Thread.join(old_worker, timeout=1.0)
+        assert old_worker.is_alive() is False
+        assert replacement_worker.is_alive() is False
+        assert webapp.client_event_watcher_record is replacement
+        assert replacement.worker is None
+        assert poll_threads == [old_worker, replacement_worker]
+    finally:
+        release_old.set()
+        webapp.stop_client_event_watcher()
+        webapp.control_server.stop()
+
+
+def test_client_event_watcher_parallel_lifecycle_attributes_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    for name in (
+        "client_watch_thread",
+        "client_watch_running",
+        "client_watch_wake_event",
+        "client_watch_stop_event",
+        "client_directory_poll_running",
+        "client_event_next_signature_poll_at",
+        "client_event_next_file_poll_at",
+        "client_event_next_background_file_poll_at",
+        "client_event_next_auto_poll_at",
+        "client_event_next_attention_ack_poll_at",
+        "client_event_next_tmux_signal_poll_at",
+        "client_event_next_watched_pr_poll_at",
+        "client_event_next_yoagent_job_poll_at",
+    ):
+        assert f"self.{name}" not in source
+
+
+def test_client_directory_poll_old_generation_cannot_clear_replacement(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_poll():
+        entered.set()
+        assert release.wait(timeout=2.0)
+
+    monkeypatch.setattr(webapp, "poll_client_events_once", blocked_poll)
+    try:
+        old_record = webapp.client_event_watcher_record
+        assert webapp.start_client_directory_poll(old_record) is True
+        old_worker = old_record.directory_poll_worker
+        assert old_worker is not None
+        assert entered.wait(timeout=1.0)
+
+        replacement = app_module.ClientEventWatcherRecord(directory_poll_worker=threading.current_thread())
+        with webapp.client_watch_lock:
+            webapp.client_event_watcher_record = replacement
+        release.set()
+        old_worker.join(timeout=1.0)
+
+        assert old_worker.is_alive() is False
+        assert webapp.client_event_watcher_record is replacement
+        assert replacement.directory_poll_worker is threading.current_thread()
+    finally:
+        release.set()
         webapp.control_server.stop()
 
 
@@ -3761,17 +4107,56 @@ def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
     monkeypatch.setattr(webapp, "prompt_and_screen_status", lambda *args, **kwargs: (app_module.normalized_prompt_state(), {"key": "idle", "text": ""}))
     try:
         payload, status = webapp.set_auto_approve("6", True, persist=False)
+        record_sessions = {target: record.session for target, record in webapp.auto_worker_records.items()}
+        released = webapp.disable_auto_approve_for_takeover("6", {"pid": 123})
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
     assert created_targets == ["%11", "%12"]
-    assert set(webapp.auto_workers) == {"%11", "%12"}
-    assert webapp.auto_worker_sessions == {"%11": "6", "%12": "6"}
+    assert record_sessions == {"%11": "6", "%12": "6"}
     assert payload["target"] == "6"
     assert payload["worker_targets"] == ["%11", "%12"]
     assert payload["approved"] == 3
     assert payload["enabled"] is True
+    assert released["ok"] is True
+    assert webapp.auto_worker_records == {}
+
+
+def test_auto_approve_worker_record_is_single_owner_for_persistence_and_prune(monkeypatch):
+    class FakeWorker:
+        def __init__(self, alive: bool):
+            self.is_alive = alive
+
+        def alive(self):
+            return self.is_alive
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["6", "7"]
+    webapp.auto_workers_lock = threading.RLock()
+    webapp.auto_worker_records = {
+        "%11": app_module.AutoApproveWorkerRecord(session="6", worker=FakeWorker(True)),
+        "%21": app_module.AutoApproveWorkerRecord(session="7", worker=FakeWorker(False)),
+    }
+    persisted = []
+    monkeypatch.setattr(app_module, "read_yolomux_state", lambda: {"auto_approve_enabled": ["6"]})
+    monkeypatch.setattr(app_module, "update_yolomux_state", lambda payload: persisted.append(payload))
+    webapp.auto_approve_session_lock_owner = lambda session: pytest.fail(f"local session {session} was misclassified as external")
+
+    webapp.persist_auto_sessions()
+    assert persisted == [{"auto_approve_enabled": ["6"]}]
+    assert webapp.prune_auto_approve_workers_locked("7") is True
+    assert set(webapp.auto_worker_records) == {"%11"}
+
+
+def test_auto_approve_worker_parallel_maps_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.auto_workers:" not in source
+    assert "self.auto_workers =" not in source
+    assert "self.auto_workers." not in source
+    assert "auto_worker_sessions" not in source
+    assert "auto_worker_session_map" not in source
 
 
 def test_prompt_and_screen_status_skips_idle_tmux_signal_capture(monkeypatch):
@@ -4077,6 +4462,129 @@ def test_activity_payload_all_scope_uses_visible_tmux_sessions(monkeypatch):
     assert activity_hours[-1] == 0.5
 
 
+def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_sessions(monkeypatch):
+    infos = {
+        session: SessionInfo(
+            session=session,
+            panes=[],
+            selected_pane=None,
+            agents=[AgentInfo(session, "codex", 100 + int(session), f"%{session}", "codex", "/repo", "running", f"sid-{session}", None, None)],
+        )
+        for session in ("1", "2")
+    }
+    current_infos = dict(infos)
+    screens = {"%1": {"key": "idle", "text": ""}, "%2": {"key": "idle", "text": ""}}
+    row_builds = []
+    recent_builds = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({session: current_infos[session] for session in sessions if session in current_infos}, []))
+    monkeypatch.setattr(
+        app_module,
+        "build_recent_agents_payload",
+        lambda sessions, ordered, session_files_by_session=None, **_kwargs: recent_builds.append(tuple(ordered)) or [{"session": ordered[0]}],
+    )
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: [session for session in ("2", "1") if session in (session_names or [])]
+    webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {session: {"files": [], "repos": [], "errors": []} for session in agent_infos}
+    webapp.activity_snapshot_with_recency = lambda snapshot=None: {"1": {"last_user_input_ts": 10}, "2": {"last_user_input_ts": 20}}
+    webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: dict(screens[agent.pane_target])
+    webapp.merge_shared_attention_acks = lambda: False
+
+    def build_windows(session, **kwargs):
+        row_builds.append(session)
+        screen = kwargs["preclassified_by_target"][f"%{session}"]
+        return [{"session": session, "state": webapp.agent_window_state_from_screen(screen)}]
+
+    webapp.agent_window_status_payloads = build_windows
+    try:
+        first = webapp.build_activity_payload()
+        second = webapp.build_activity_payload()
+        screens["%2"] = {"key": "working", "text": "Working"}
+        changed = webapp.build_activity_payload()
+        current_infos.pop("2")
+        deleted = webapp.build_activity_payload()
+        with webapp.client_watch_lock:
+            webapp.client_watch_attention_ack_rev += 1
+        acknowledged = webapp.build_activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert [row["session"] for row in first["agents"]] == ["2", "1"]
+    assert second == first
+    assert changed["agent_windows"]["2"][0]["state"] == "working"
+    assert "2" not in deleted["agent_windows"]
+    assert "2" not in webapp.tabber_activity_cache_record.session_rows
+    assert acknowledged["agent_windows"]["1"][0]["state"] == "idle"
+    assert row_builds == ["2", "1", "2", "1"]
+    assert recent_builds == [("2",), ("1",), ("2",), ("1",)]
+
+
+def test_session_files_and_tabber_refreshes_are_per_target_single_flight(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = app_module.TmuxWebtermApp([])
+    session_compute_started = threading.Event()
+    release_session_compute = threading.Event()
+    session_compute_calls = []
+
+    def compute_session_files():
+        session_compute_calls.append(True)
+        session_compute_started.set()
+        assert release_session_compute.wait(timeout=5)
+        return {"files": [{"path": "shared.py"}], "repos": [], "errors": []}, HTTPStatus.OK
+
+    try:
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(webapp.compute_session_files_cache_entry, ("same-target",), compute_session_files) for _index in range(6)]
+            assert session_compute_started.wait(timeout=5)
+            release_session_compute.set()
+            results = [future.result(timeout=5) for future in futures]
+        assert len(session_compute_calls) == 1
+        assert all(result[0]["files"] == [{"path": "shared.py"}] for result in results)
+
+        webapp.compute_session_files_cache_entry(
+            ("changed-target",),
+            lambda: ({"files": [{"path": "changed.py"}], "repos": [], "errors": []}, HTTPStatus.OK),
+        )
+        assert len(webapp.session_files_work_records) == 0
+
+        source_signature = ["same-signature"]
+        monkeypatch.setattr(webapp, "tabber_activity_source_signature", lambda: source_signature[0])
+        tabber_started = threading.Event()
+        release_tabber = threading.Event()
+        tabber_calls = []
+
+        def same_target_owner(hours, signature):
+            tabber_calls.append((hours, signature))
+            tabber_started.set()
+            assert release_tabber.wait(timeout=5)
+            return {"session_file_hours": hours, "signature": signature, "agents": []}
+
+        monkeypatch.setattr(webapp, "refresh_tabber_activity_cache_owner", same_target_owner)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(webapp.refresh_tabber_activity_cache, 24.0) for _index in range(5)]
+            assert tabber_started.wait(timeout=5)
+            release_tabber.set()
+            payloads = [future.result(timeout=5) for future in futures]
+        assert tabber_calls == [(24.0, "same-signature")]
+        assert all(payload == payloads[0] for payload in payloads)
+
+        barrier = threading.Barrier(2)
+        tabber_calls.clear()
+
+        def different_target_owner(hours, signature):
+            tabber_calls.append((hours, signature))
+            barrier.wait(timeout=5)
+            return {"session_file_hours": hours, "signature": signature, "agents": []}
+
+        monkeypatch.setattr(webapp, "refresh_tabber_activity_cache_owner", different_target_owner)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(webapp.refresh_tabber_activity_cache, (0.5, 24.0)))
+        assert sorted(tabber_calls) == [(0.5, "same-signature"), (24.0, "same-signature")]
+        assert sorted(payload["session_file_hours"] for payload in results) == [0.5, 24.0]
+    finally:
+        webapp.control_server.stop()
+
+
 def test_recent_agents_payload_filters_paths_by_agent_window():
     panes = [
         PaneInfo(session="5", window="0", pane="0", pane_id="%50", target="5:0.0", current_path="/repo/codex", command="codex", active=True, window_active=True, title="", pid=50, process_label="codex"),
@@ -4216,8 +4724,7 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     try:
         first = webapp.transcripts_payload(force=True)
         with webapp.transcripts_payload_cache_lock:
-            stored_at, value = webapp.transcripts_payload_cache
-            webapp.transcripts_payload_cache = (stored_at - app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS - 1.0, value)
+            webapp.transcripts_payload_cache_record.stored_at -= app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS + 1.0
         second = webapp.transcripts_payload()
         third = webapp.transcripts_payload()
     finally:
@@ -4281,6 +4788,87 @@ def test_refresh_transcripts_payload_cache_publishes_full_payload_when_requested
     assert events and events[0][0] == "transcripts_changed"
     assert events[0][1]["data"]["metadata_loading"] is False
     assert events[0][2]["trigger"] == "transcripts_refresh"
+
+
+def test_old_transcripts_refresh_cannot_overwrite_forced_payload(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    old_started = threading.Event()
+    release_old = threading.Event()
+    events = []
+
+    def blocked_build():
+        old_started.set()
+        assert release_old.wait(timeout=3)
+        return {"marker": "old"}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", blocked_build)
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", lambda: {"marker": "forced"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload, kwargs)))
+    try:
+        assert webapp.start_transcripts_payload_refresh(publish=True) is True
+        with webapp.transcripts_payload_cache_lock:
+            old_worker = webapp.transcripts_payload_cache_record.worker
+        assert old_worker is not None
+        assert old_started.wait(timeout=2)
+
+        forced = webapp.session_metadata_payload(force=True)
+        release_old.set()
+        old_worker.join(timeout=2)
+        with webapp.transcripts_payload_cache_lock:
+            cached = webapp.transcripts_payload_cache_record.payload
+            active_worker = webapp.transcripts_payload_cache_record.worker
+    finally:
+        release_old.set()
+        webapp.control_server.stop()
+
+    assert forced["marker"] == "forced"
+    assert cached == {"marker": "forced"}
+    assert active_worker is None
+    assert events == []
+
+
+def test_clear_transcript_caches_invalidates_blocked_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    def blocked_build():
+        old_started.set()
+        assert release_old.wait(timeout=3)
+        return {"marker": "old"}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", blocked_build)
+    try:
+        assert webapp.start_transcripts_payload_refresh() is True
+        with webapp.transcripts_payload_cache_lock:
+            old_worker = webapp.transcripts_payload_cache_record.worker
+        assert old_worker is not None
+        assert old_started.wait(timeout=2)
+
+        webapp.clear_transcript_caches()
+        release_old.set()
+        old_worker.join(timeout=2)
+        with webapp.transcripts_payload_cache_lock:
+            record = webapp.transcripts_payload_cache_record
+            cached = record.payload
+            stored_at = record.stored_at
+            active_worker = record.worker
+    finally:
+        release_old.set()
+        webapp.control_server.stop()
+
+    assert cached is None
+    assert stored_at is None
+    assert active_worker is None
+
+
+def test_transcripts_payload_parallel_cache_state_is_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.transcripts_payload_cache:" not in source
+    assert "self.transcripts_payload_cache =" not in source
+    assert "self.transcripts_payload_refreshing" not in source
+    assert "self.client_watch_snapshot_running" not in source
 
 
 def test_transcripts_payload_event_signature_ignores_volatile_fields():
@@ -4351,6 +4939,121 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
     assert events[0][2]["trigger"] == "watch_state"
     assert events[0][1]["refresh"] is True
     assert "data" not in events[0][1]
+
+
+def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    old_started = threading.Event()
+    release_old = threading.Event()
+    replacement_started = threading.Event()
+    release_replacement = threading.Event()
+    events = []
+    build_count = 0
+
+    def build_payload():
+        nonlocal build_count
+        build_count += 1
+        if build_count == 1:
+            old_started.set()
+            assert release_old.wait(timeout=3)
+            return {"marker": "old"}
+        replacement_started.set()
+        assert release_replacement.wait(timeout=3)
+        return {"marker": "new"}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", build_payload)
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
+    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
+    try:
+        old_record = webapp.client_event_watcher_record
+        assert webapp.start_client_watch_snapshot_publish() is True
+        old_worker = old_record.snapshot_worker
+        assert old_worker is not None
+        assert old_started.wait(timeout=2)
+
+        webapp.stop_client_event_watcher()
+        replacement = webapp.client_event_watcher_record
+        assert replacement is not old_record
+        assert webapp.start_client_watch_snapshot_publish() is True
+        assert replacement_started.wait(timeout=2)
+        replacement_worker = replacement.snapshot_worker
+        assert replacement_worker is not None
+        release_replacement.set()
+        replacement_worker.join(timeout=2)
+
+        release_old.set()
+        old_worker.join(timeout=2)
+        with webapp.transcripts_payload_cache_lock:
+            cached = webapp.transcripts_payload_cache_record.payload
+            cache_worker = webapp.transcripts_payload_cache_record.worker
+    finally:
+        release_old.set()
+        release_replacement.set()
+        webapp.stop_client_event_watcher()
+        webapp.control_server.stop()
+
+    assert cached == {"marker": "new"}
+    assert cache_worker is None
+    assert old_record.snapshot_worker is None
+    assert replacement.snapshot_worker is None
+    assert [event_type for event_type, _payload, _kwargs in events] == ["transcripts_changed"]
+
+
+def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    real_thread = threading.Thread
+    retry_started = threading.Event()
+    release_retry = threading.Event()
+
+    class FailingThread:
+        def __init__(self, target=None, daemon=False):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(app_module.threading, "Thread", FailingThread)
+    try:
+        with pytest.raises(RuntimeError, match="thread unavailable"):
+            webapp.start_client_watch_snapshot_publish()
+        with webapp.client_watch_lock:
+            assert webapp.client_event_watcher_record.snapshot_worker is None
+        with webapp.transcripts_payload_cache_lock:
+            assert webapp.transcripts_payload_cache_record.worker is None
+
+        monkeypatch.setattr(app_module.threading, "Thread", real_thread)
+        def retry_build():
+            retry_started.set()
+            assert release_retry.wait(timeout=3)
+            return {"marker": "retry"}
+
+        monkeypatch.setattr(webapp, "build_transcripts_payload", retry_build)
+        monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
+        monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+        monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
+        monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
+        monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+        monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
+        assert webapp.start_client_watch_snapshot_publish() is True
+        assert retry_started.wait(timeout=2)
+        worker = webapp.client_event_watcher_record.snapshot_worker
+        assert worker is not None
+        release_retry.set()
+        worker.join(timeout=2)
+    finally:
+        release_retry.set()
+        monkeypatch.setattr(app_module.threading, "Thread", real_thread)
+        webapp.stop_client_event_watcher()
+        webapp.control_server.stop()
+
+    assert webapp.transcripts_payload_cache_record.payload == {"marker": "retry"}
+    assert webapp.client_event_watcher_record.snapshot_worker is None
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
@@ -4735,11 +5438,7 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
         assert second["cache"]["stale"] is False
         assert calls == ["snapshot"]
 
-        stored_at, payload = webapp.tabber_activity_cache
-        webapp.tabber_activity_cache = (
-            stored_at - webapp.tabber_activity_refresh_seconds() - 1,
-            payload,
-        )
+        webapp.tabber_activity_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
         monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: "queued")
         stale, _status = webapp.activity_payload()
@@ -4771,6 +5470,85 @@ def test_owner_activity_payload_without_cache_queues_one_shared_refresh(monkeypa
     assert first["cache"]["refreshing"] is True
     assert second["cache"]["refreshing"] is False
     assert first["activity"] == second["activity"] == {}
+
+
+def test_tabber_activity_cache_record_owns_signature_and_refresh(monkeypatch):
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
+    payload = {"activity": {}, "agents": [], "session_file_hours": 24.0}
+    try:
+        webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature="source-a")
+        assert webapp.get_tabber_activity_cache(60.0, source_signature="source-a")[0] == payload
+        assert webapp.get_tabber_activity_cache(60.0, source_signature="source-b") is None
+        assert webapp.start_tabber_activity_cache_refresh() is True
+        assert webapp.tabber_activity_cache_record.refresh_worker is not None
+        assert webapp.start_tabber_activity_cache_refresh() is False
+    finally:
+        webapp.control_server.stop()
+
+
+def test_tabber_activity_parallel_cache_state_is_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.tabber_activity_cache:" not in source
+    assert "self.tabber_activity_cache =" not in source
+    assert "self.tabber_activity_cache_source_signature" not in source
+    assert "self.tabber_activity_cache_refreshing" not in source
+    assert "tabber_activity_cache_record.refreshing" not in source
+
+
+def test_tabber_activity_cache_refresh_failed_start_allows_retry(monkeypatch):
+    workers = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            workers.append(self)
+
+        def start(self):
+            if len(workers) == 1:
+                raise RuntimeError("thread unavailable")
+
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    try:
+        with pytest.raises(RuntimeError, match="thread unavailable"):
+            webapp.start_tabber_activity_cache_refresh()
+        assert webapp.tabber_activity_cache_record.refresh_worker is None
+        assert webapp.start_tabber_activity_cache_refresh() is True
+        assert webapp.tabber_activity_cache_record.refresh_worker is workers[1]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_retired_tabber_activity_cache_refresh_cannot_clear_replacement(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    old_worker = threading.Thread()
+    replacement_worker = threading.Thread()
+    webapp.tabber_activity_cache_record.refresh_worker = old_worker
+    monkeypatch.setattr(webapp, "background_refresh_event_details", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(webapp, "log_sampled_background_refresh_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webapp, "publish_background_refresh_done", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        webapp,
+        "refresh_tabber_activity_cache",
+        lambda: setattr(webapp.tabber_activity_cache_record, "refresh_worker", replacement_worker),
+    )
+    try:
+        webapp.run_tabber_activity_cache_refresh(old_worker)
+        assert webapp.tabber_activity_cache_record.refresh_worker is replacement_worker
+    finally:
+        webapp.control_server.stop()
 
 
 def test_activity_warm_takeover_reads_disk_cache_without_rebuild_or_rewrite(monkeypatch, tmp_path):
@@ -4884,6 +5662,76 @@ def test_record_user_input_coalesces_heartbeats_off_hot_path(monkeypatch):
         webapp.control_server.stop()
 
 
+def test_input_heartbeat_record_owns_real_worker_coalescing_stop_and_restart(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(app_module, "INPUT_HEARTBEAT_COALESCE_SECONDS", 0.0)
+    heartbeat_times = iter([1012.0, 1012.02, 1020.0])
+    monkeypatch.setattr(app_module.time, "time", lambda: next(heartbeat_times))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    calls = []
+    flushed = [threading.Event(), threading.Event()]
+
+    def record_heartbeat(session, window, *, ts, byte_count, source):
+        calls.append((session, window, ts, byte_count, source))
+        flushed[len(calls) - 1].set()
+
+    real_start = webapp.start_input_heartbeat_worker
+    try:
+        webapp.cached_active_window_for = lambda session: "1"
+        monkeypatch.setattr(webapp.activity_ledger, "heartbeat", record_heartbeat)
+
+        monkeypatch.setattr(webapp, "start_input_heartbeat_worker", lambda: None)
+        webapp.record_user_input("6", 1, data="x")
+        webapp.record_user_input("6", 2, data="yy")
+        assert webapp.input_heartbeat_record.pending[("6", "host")].byte_count == 3
+        monkeypatch.setattr(webapp, "start_input_heartbeat_worker", real_start)
+        real_start()
+        first_worker = webapp.input_heartbeat_record.worker
+        assert first_worker is not None
+        assert flushed[0].wait(timeout=1.0)
+        webapp.stop_input_heartbeat_worker()
+
+        assert calls == [("6", "1", 1012.02, 3, "host")]
+        assert first_worker.is_alive() is False
+        assert webapp.input_heartbeat_record.worker is None
+        assert webapp.input_heartbeat_record.stop_requested is True
+        assert webapp.input_heartbeat_record.flush_active is False
+
+        monkeypatch.setattr(webapp, "start_input_heartbeat_worker", lambda: None)
+        webapp.record_user_input("6", 4, data="zzzz")
+        monkeypatch.setattr(webapp, "start_input_heartbeat_worker", real_start)
+        real_start()
+        second_worker = webapp.input_heartbeat_record.worker
+        assert second_worker is not None and second_worker is not first_worker
+        assert webapp.input_heartbeat_record.stop_requested is False
+        assert flushed[1].wait(timeout=1.0)
+        webapp.stop_input_heartbeat_worker()
+
+        assert calls == [
+            ("6", "1", 1012.02, 3, "host"),
+            ("6", "1", 1020.0, 4, "host"),
+        ]
+        assert second_worker.is_alive() is False
+        assert webapp.input_heartbeat_record.worker is None
+    finally:
+        webapp.stop_input_heartbeat_worker()
+        webapp.control_server.stop()
+
+
+def test_input_heartbeat_parallel_lifecycle_attributes_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    for name in (
+        "input_heartbeat_condition",
+        "input_heartbeat_pending",
+        "input_heartbeat_flush_active",
+        "input_heartbeat_worker_stop",
+        "input_heartbeat_worker_thread",
+    ):
+        assert f"self.{name}" not in source
+    assert source.count("self.flush_input_heartbeat_batch(batch)") == 2
+
+
 def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["7777"])
@@ -4948,7 +5796,8 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
         raise RuntimeError(f"stop after sleeping {seconds}")
 
     try:
-        webapp.tabber_activity_cache_warmer_running = True
+        record = webapp.tabber_activity_warmer_record
+        record.running = True
         webapp.mark_tabber_activity_consumer()
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger: events.append(trigger) or [])
@@ -4956,13 +5805,13 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
         monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
 
         with pytest.raises(RuntimeError, match="stop after sleeping"):
-            webapp.tabber_activity_cache_warmer_loop()
+            webapp.tabber_activity_cache_warmer_loop(record)
     finally:
         webapp.control_server.stop()
 
     assert refreshes == ["refresh"]
     assert events == []
-    assert webapp.tabber_activity_cache_warmer_running is False
+    assert webapp.tabber_activity_warmer_record.running is False
 
 
 def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch):
@@ -4976,13 +5825,14 @@ def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch
         raise RuntimeError(f"stop after sleeping {seconds}")
 
     try:
-        webapp.tabber_activity_cache_warmer_running = True
+        record = webapp.tabber_activity_warmer_record
+        record.running = True
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
         monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
 
         with pytest.raises(RuntimeError, match="stop after sleeping"):
-            webapp.tabber_activity_cache_warmer_loop()
+            webapp.tabber_activity_cache_warmer_loop(record)
     finally:
         webapp.control_server.stop()
 
@@ -4992,7 +5842,54 @@ def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch
     recent = webapp.performance_metrics_payload()["recent"]
     assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
     assert recent[-1]["cache_status"] == "skipped:no-consumer"
-    assert webapp.tabber_activity_cache_warmer_running is False
+    assert webapp.tabber_activity_warmer_record.running is False
+
+
+def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(monkeypatch):
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    now = [100.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
+    try:
+        assert webapp.mark_tabber_activity_consumer() is True
+        assert webapp.tabber_activity_has_recent_consumer() is True
+        now[0] = webapp.tabber_activity_warmer_record.consumer_until
+        assert webapp.tabber_activity_has_recent_consumer() is False
+
+        assert webapp.start_tabber_activity_cache_warmer() is True
+        old_record = webapp.tabber_activity_warmer_record
+        assert webapp.start_tabber_activity_cache_warmer() is False
+        replacement = app_module.TabberActivityWarmerRecord(running=True)
+        with webapp.tabber_activity_cache_lock:
+            webapp.tabber_activity_warmer_record = replacement
+        webapp.tabber_activity_cache_warmer_loop(old_record)
+        assert webapp.tabber_activity_warmer_record is replacement
+        assert replacement.running is True
+    finally:
+        webapp.control_server.stop()
+
+
+def test_tabber_activity_warmer_parallel_state_is_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.tabber_activity_cache_warmer_thread" not in source
+    assert "self.tabber_activity_cache_warmer_running" not in source
+    assert "self.tabber_activity_consumer_until" not in source
 
 
 def test_activity_payload_hidden_consumer_does_not_refresh_stale_cache(monkeypatch):
@@ -5001,8 +5898,7 @@ def test_activity_payload_hidden_consumer_does_not_refresh_stale_cache(monkeypat
     try:
         payload = {"activity": {"5": {"last_user_input_ts": 100}}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": 24.0}
         webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature=webapp.tabber_activity_source_signature())
-        stored_at, cached_payload = webapp.tabber_activity_cache
-        webapp.tabber_activity_cache = (stored_at - webapp.tabber_activity_refresh_seconds() - 1, cached_payload)
+        webapp.tabber_activity_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
         monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: (_ for _ in ()).throw(AssertionError("hidden activity request must not queue refresh")))
 
@@ -5369,6 +6265,162 @@ def test_session_files_disk_cache_prune_removes_old_entries_and_caps_bytes(monke
     assert newest_manifest.exists()
 
 
+def test_session_files_disk_prune_record_coalesces_and_tracks_completion(monkeypatch):
+    workers = []
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            workers.append(self)
+
+        def start(self):
+            return None
+
+    now = [100.0]
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(webapp, "prune_session_files_disk_cache", lambda: {"removed_entries": 0, "kept_bytes": 12})
+    try:
+        assert webapp.request_session_files_disk_cache_prune("first") is True
+        assert webapp.request_session_files_disk_cache_prune("duplicate") is False
+        assert webapp.session_files_disk_prune_record.running is True
+        assert webapp.session_files_disk_prune_record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        workers[0].target()
+        assert webapp.session_files_disk_prune_record.running is False
+        assert webapp.session_files_disk_prune_record.last_result == {"removed_entries": 0, "kept_bytes": 12}
+        assert webapp.request_session_files_disk_cache_prune("too-early") is False
+        now[0] = webapp.session_files_disk_prune_record.next_at
+        assert webapp.request_session_files_disk_cache_prune("due") is True
+        assert len(workers) == 2
+    finally:
+        webapp.control_server.stop()
+
+
+def test_session_files_disk_prune_record_clears_running_after_failure(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "prune_session_files_disk_cache", lambda: (_ for _ in ()).throw(OSError("disk failed")))
+    webapp.session_files_disk_prune_record.running = True
+    try:
+        webapp.run_session_files_disk_cache_prune()
+    finally:
+        webapp.control_server.stop()
+
+    assert webapp.session_files_disk_prune_record.running is False
+    assert webapp.session_files_disk_prune_record.last_result == {"error": "disk failed"}
+
+
+def test_session_files_disk_prune_parallel_state_is_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.session_files_disk_prune_next_at" not in source
+    assert "self.session_files_disk_prune_running" not in source
+    assert "self.session_files_disk_prune_last_result" not in source
+
+
+def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_path):
+    fail_next = [False]
+
+    class FakeThread:
+        def __init__(self, *, target, args=(), kwargs=None, name=None, daemon=None):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+            self.name = name or getattr(target, "__name__", "worker")
+            self.daemon = daemon
+            self.started = False
+
+        def start(self):
+            if fail_next[0]:
+                fail_next[0] = False
+                raise RuntimeError(f"start failed: {self.name}")
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+        def join(self, timeout=None):
+            return None
+
+    def fail_once(call):
+        fail_next[0] = True
+        with pytest.raises(RuntimeError, match="start failed"):
+            call()
+
+    webapp = app_module.TmuxWebtermApp([])
+    signal_starts = []
+    signal_stops = []
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: signal_starts.append(True))
+    monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: signal_stops.append(True))
+    monkeypatch.setattr(webapp, "publish_yoagent_conversation_changed", lambda reason: None)
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda _backend: "codex")
+    try:
+        fail_once(webapp.start_stats_history_sampler)
+        assert webapp.stats_history_sampler_record.running is False
+        assert webapp.stats_history_sampler_record.thread is None
+        assert webapp.start_stats_history_sampler() is True
+
+        fail_once(webapp.start_client_event_watcher)
+        assert webapp.client_event_watcher_record.worker is None
+        assert len(signal_starts) == 1 and len(signal_stops) == 1
+        webapp.start_client_event_watcher()
+        assert webapp.client_event_watcher_record.worker is not None
+
+        event_record = webapp.client_event_watcher_record
+        fail_once(lambda: webapp.start_client_directory_poll(event_record))
+        assert event_record.directory_poll_worker is None
+        assert webapp.start_client_directory_poll(event_record) is True
+
+        fail_once(webapp.request_session_files_disk_cache_prune)
+        assert webapp.session_files_disk_prune_record.running is False
+        assert webapp.session_files_disk_prune_record.worker is None
+        assert webapp.session_files_disk_prune_record.next_at == 0.0
+        assert webapp.request_session_files_disk_cache_prune() is True
+
+        fail_once(webapp.start_input_heartbeat_worker)
+        assert webapp.input_heartbeat_record.worker is None
+        assert webapp.input_heartbeat_record.stop_requested is True
+        webapp.start_input_heartbeat_worker()
+        assert webapp.input_heartbeat_record.worker is not None
+
+        fail_once(webapp.start_tabber_activity_cache_warmer)
+        assert webapp.tabber_activity_warmer_record.running is False
+        assert webapp.tabber_activity_warmer_record.thread is None
+        assert webapp.start_tabber_activity_cache_warmer() is True
+
+        fail_once(lambda: webapp.warm_metadata_cache_async({}))
+        assert webapp.metadata_warm_record.worker is None
+        webapp.warm_metadata_cache_async({})
+        assert webapp.metadata_warm_record.worker is not None
+
+        root_index = app_module.file_index.RootIndex(tmp_path)
+        fail_once(lambda: app_module.file_index._start_build(root_index, set()))
+        assert root_index.building is False
+        assert root_index.thread is None
+        app_module.file_index._start_build(root_index, set())
+        assert root_index.building is True
+        assert root_index.thread is not None
+
+        fail_once(lambda: webapp.start_yoagent_action_result_watcher({"session": "1"}, {}))
+        assert webapp.yoagent_action_waits == {}
+        watch = webapp.start_yoagent_action_result_watcher({"session": "1"}, {})
+        assert watch["started"] is True and watch["id"] in webapp.yoagent_action_waits
+
+        fail_once(webapp.start_yoagent_backend_prewarm)
+        assert webapp.yoagent_prewarm_record.prewarm_running is False
+        assert webapp.yoagent_prewarm_record.prewarm_worker is None
+        prewarm, status = webapp.start_yoagent_backend_prewarm()
+        assert status == HTTPStatus.ACCEPTED and prewarm["started"] is True
+        assert webapp.yoagent_prewarm_record.prewarm_worker is not None
+    finally:
+        webapp.control_server.stop()
+
+
 def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
@@ -5393,10 +6445,10 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
 
     assert disk_signature == hashlib.sha256(b"encoded-1").hexdigest()
     assert payload_signature == hashlib.sha256(b"encoded-2").hexdigest()
-    assert tabber_signature == hashlib.sha256(b"encoded-3").hexdigest()
+    assert tabber_signature == hashlib.sha256(b"encoded-4").hexdigest()
     assert calls[0] == ("payload", {"session": "5"})
     assert calls[1] == {"files": [{"path": "same.py"}]}
-    assert calls[2] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 7}
+    assert calls[3] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 7, "tmux_signature": "encoded-3"}
 
 
 def test_update_client_watch_roots_filters_and_expires(monkeypatch):
@@ -5415,6 +6467,22 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         assert webapp.client_watch_roots_snapshot() == ["/repo"]
         assert webapp.client_watch_files_snapshot() == ["/repo/DOIT.51.md"]
         assert webapp.client_watch_background_files_snapshot() == ["/repo/README.md"]
+
+        background_payload = webapp.update_client_watch_roots({"background_files": ["/repo/DOIT.51.md"]})
+        assert background_payload["files"] == []
+        assert background_payload["background_files"] == ["/repo/DOIT.51.md"]
+        assert webapp.client_watch_files_snapshot() == []
+        assert webapp.client_watch_background_files_snapshot() == ["/repo/DOIT.51.md"]
+
+        active_payload = webapp.update_client_watch_roots({
+            "files": ["/repo/DOIT.51.md"],
+            "background_files": ["/repo/DOIT.51.md"],
+        })
+        assert active_payload["files"] == ["/repo/DOIT.51.md"]
+        assert active_payload["background_files"] == []
+        assert webapp.client_watch_files_snapshot() == ["/repo/DOIT.51.md"]
+        assert webapp.client_watch_background_files_snapshot() == []
+
         monkeypatch.setattr(app_module.time, "monotonic", lambda: 1000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 1000.0)
         assert webapp.client_watch_roots_snapshot() == []
@@ -5422,6 +6490,42 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         assert webapp.client_watch_background_files_snapshot() == []
     finally:
         webapp.control_server.stop()
+
+
+def test_client_watch_file_records_preserve_limits_order_and_exclusive_modes(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
+    try:
+        active_input = [f"/repo/active-{index:03d}" for index in reversed(range(app_module.CLIENT_WATCH_FILE_LIMIT + 3))]
+        background_input = [f"/repo/background-{index:03d}" for index in reversed(range(app_module.CLIENT_WATCH_FILE_LIMIT + 3))]
+        background_input.append("/repo/active-000")
+
+        payload = webapp.update_client_watch_roots({"files": active_input, "background_files": background_input})
+        expected_active = sorted(active_input)[:app_module.CLIENT_WATCH_FILE_LIMIT]
+        expected_background = [
+            path
+            for path in sorted(set(background_input))
+            if path not in set(expected_active)
+        ][:app_module.CLIENT_WATCH_FILE_LIMIT]
+
+        assert payload["files"] == expected_active
+        assert payload["background_files"] == expected_background
+        assert webapp.client_watch_files_snapshot() == expected_active
+        assert webapp.client_watch_background_files_snapshot() == expected_background
+        assert set(webapp.client_watch_files_snapshot()).isdisjoint(webapp.client_watch_background_files_snapshot())
+    finally:
+        webapp.control_server.stop()
+
+
+def test_client_watch_file_parallel_state_maps_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.client_watch_files:" not in source
+    assert "self.client_watch_files =" not in source
+    assert "self.client_watch_files." not in source
+    assert "self.client_watch_background_files:" not in source
+    assert "self.client_watch_background_files =" not in source
+    assert "self.client_watch_background_files." not in source
 
 
 def test_client_watch_roots_are_shared_across_app_instances(monkeypatch, tmp_path):
@@ -5612,7 +6716,8 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     try:
         webapp.client_watch_filesystem_last_full_at = time.monotonic()
         webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
-        webapp.transcripts_payload_cache = (1.0, {"sessions": {}})
+        webapp.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.transcripts_payload_cache_record.payload = {"sessions": {}}
         assert webapp.poll_client_events_once() == []
         assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed"]
     finally:
@@ -5629,7 +6734,8 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert fs_payload["change_summary"]["entries_removed"] == 1
     assert "listing_summary" not in fs_payload
     assert webapp.session_files_cache != {}
-    assert webapp.transcripts_payload_cache is None
+    assert webapp.transcripts_payload_cache_record.payload is None
+    assert webapp.transcripts_payload_cache_record.stored_at is None
 
 
 def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
@@ -5767,7 +6873,8 @@ def test_poll_client_events_once_transcript_change_is_lightweight_timing_regress
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
-        webapp.transcripts_payload_cache = (1.0, {"sessions": {}})
+        webapp.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.transcripts_payload_cache_record.payload = {"sessions": {}}
         assert webapp.poll_client_events_once() == []
         started = time.perf_counter()
         assert webapp.poll_client_events_once() == ["transcripts_changed"]
@@ -5799,7 +6906,8 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": session_file_triggers.append(trigger) or ["session_files_ready"])
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published_events.append((event_type, payload or {})))
     try:
-        webapp.transcripts_payload_cache = (1.0, {"sessions": {"cached": {}}})
+        webapp.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.transcripts_payload_cache_record.payload = {"sessions": {"cached": {}}}
         webapp.transcript_tail_cache = {("tail",): (1.0, "cached")}
         webapp.context_items_cache = {("context",): (1.0, [{"cached": True}])}
         assert webapp.poll_client_events_once() == []
@@ -5810,7 +6918,8 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     assert context_triggers == ["transcript_content_changed"]
     assert session_file_triggers == ["transcript_content_changed"]
     assert published_events == []
-    assert webapp.transcripts_payload_cache == (1.0, {"sessions": {"cached": {}}})
+    assert webapp.transcripts_payload_cache_record.stored_at == 1.0
+    assert webapp.transcripts_payload_cache_record.payload == {"sessions": {"cached": {}}}
     assert webapp.transcript_tail_cache == {}
     assert webapp.context_items_cache == {}
 
@@ -6073,8 +7182,54 @@ def test_yoagent_session_summary_worker_runs_once_per_server_launch(monkeypatch)
 
     assert started_threads == [("yoagent-summary-first-launch", True)]
     assert ticks == [(webapp.yoagent_settings(), {"force": True})]
-    assert webapp.yoagent_summary_first_launch_started is True
-    assert webapp.yoagent_summary_worker_running is False
+    assert webapp.yoagent_summary_worker_record.first_launch_started is True
+    assert webapp.yoagent_summary_worker_record.running is False
+    assert webapp.yoagent_summary_worker_record.worker is None
+
+
+def test_yoagent_session_summary_worker_start_failure_allows_retry(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    start_attempts = []
+    ticks = []
+
+    class FlakyThread:
+        def __init__(self, target, name=None, daemon=False):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            start_attempts.append(self.name)
+            if len(start_attempts) == 1:
+                raise RuntimeError("thread unavailable")
+            self.target()
+
+    monkeypatch.setattr(session_summaries_module.threading, "Thread", FlakyThread)
+    monkeypatch.setattr(webapp, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
+    try:
+        with pytest.raises(RuntimeError, match="thread unavailable"):
+            webapp.maybe_start_yoagent_summary_worker()
+        failed_record = webapp.yoagent_summary_worker_record
+        assert failed_record.worker is None
+        assert failed_record.running is False
+        assert failed_record.first_launch_started is False
+
+        webapp.maybe_start_yoagent_summary_worker()
+    finally:
+        webapp.control_server.stop()
+
+    assert start_attempts == ["yoagent-summary-first-launch", "yoagent-summary-first-launch"]
+    assert ticks == [(webapp.yoagent_settings(), {"force": True})]
+    assert webapp.yoagent_summary_worker_record.first_launch_started is True
+    assert webapp.yoagent_summary_worker_record.running is False
+    assert webapp.yoagent_summary_worker_record.worker is None
+
+
+def test_yoagent_session_summary_parallel_worker_fields_are_retired():
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.yoagent_summary_worker_running" not in source
+    assert "self.yoagent_summary_first_launch_started" not in source
 
 
 def test_visible_yoagent_launch_starts_first_launch_summary_worker(monkeypatch):
@@ -9479,8 +10634,8 @@ def test_yoagent_codex_first_ask_reuses_server_start_prewarm(monkeypatch, tmp_pa
         prewarm, prewarm_status = webapp.start_yoagent_backend_prewarm(reason="server_start")
         for _attempt in range(100):
             with webapp.yoagent_prewarm_lock:
-                if not webapp.yoagent_prewarm_running:
-                    prewarm_state = dict(webapp.yoagent_prewarm_status)
+                if not webapp.yoagent_prewarm_record.prewarm_running:
+                    prewarm_state = dict(webapp.yoagent_prewarm_record.prewarm_status)
                     break
             time.sleep(0.01)
         else:
@@ -9786,6 +10941,136 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
     assert conversation["messages"][0]["responseMs"] > 0
     assert any(event_type == "yoagent_stream_delta" for event_type, _payload in events)
     assert any(event_type == "yoagent_conversation_changed" for event_type, _payload in events)
+
+
+def test_yoagent_prewarm_lifecycle_uses_one_record():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        assert isinstance(webapp.yoagent_prewarm_record, app_module.YoagentPrewarmRecord)
+        assert {
+            "yoagent_prewarm_running",
+            "yoagent_prewarm_status",
+            "yoagent_startup_response_running",
+        }.isdisjoint(webapp.__dict__)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_yoagent_reset_invalidates_blocked_startup_and_blocks_reset_overlap(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    old_started = threading.Event()
+    release_old = threading.Event()
+    reset_clearing = threading.Event()
+    release_reset = threading.Event()
+    stream_events = []
+    real_clear_messages = app_module.yoagent_conversation.clear_messages
+
+    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: None)
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": [], "sessions": {}, "errors": []})
+    monkeypatch.setattr(webapp, "publish_yoagent_stream_delta", lambda *args, **kwargs: stream_events.append((args, kwargs)))
+
+    def blocked_backend(*_args, **_kwargs):
+        old_started.set()
+        assert release_old.wait(timeout=3)
+        return "obsolete startup answer", "", {"transport": "codex-app-server"}
+
+    def blocked_clear_messages():
+        reset_clearing.set()
+        assert release_reset.wait(timeout=3)
+        real_clear_messages()
+
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", blocked_backend)
+    monkeypatch.setattr(app_module.yoagent_conversation, "clear_messages", blocked_clear_messages)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            old_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            assert old_started.wait(timeout=2)
+            reset_future = executor.submit(webapp.reset_yoagent_chat)
+            assert reset_clearing.wait(timeout=2)
+
+            overlap_payload, overlap_status = webapp.yoagent_prewarm({"visible": True})
+            assert overlap_status == HTTPStatus.ACCEPTED
+            assert overlap_payload["started"] is False
+            assert overlap_payload["reason"] == "conversation reset in progress"
+
+            release_reset.set()
+            reset_payload = reset_future.result(timeout=2)
+            release_old.set()
+            old_payload, old_status = old_future.result(timeout=2)
+    finally:
+        release_reset.set()
+        release_old.set()
+        webapp.control_server.stop()
+
+    assert reset_payload["conversation"]["messages"] == []
+    assert old_status == HTTPStatus.OK
+    assert old_payload["aborted"] is True
+    assert old_payload.get("answer", "") == ""
+    assert old_payload["conversation"]["messages"] == []
+    assert webapp.yoagent_conversation_payload()["messages"] == []
+    assert any(event[1].get("phase") == "stopped" and event[1].get("aborted") is True for event in stream_events)
+
+
+def test_yoagent_replacement_startup_survives_stale_request_finally(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    old_started = threading.Event()
+    replacement_started = threading.Event()
+    release_old = threading.Event()
+    release_replacement = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: None)
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli"})
+    monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": [], "sessions": {}, "errors": []})
+
+    def blocked_backend(*_args, **_kwargs):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_index = call_count
+        if call_index == 1:
+            old_started.set()
+            assert release_old.wait(timeout=3)
+            return "obsolete startup answer", "", {"transport": "codex-app-server"}
+        replacement_started.set()
+        assert release_replacement.wait(timeout=3)
+        return "replacement startup answer", "", {"transport": "codex-app-server"}
+
+    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", blocked_backend)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            old_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            assert old_started.wait(timeout=2)
+            assert webapp.reset_yoagent_chat()["conversation"]["messages"] == []
+
+            replacement_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            assert replacement_started.wait(timeout=2)
+            with webapp.yoagent_prewarm_lock:
+                replacement_generation = webapp.yoagent_prewarm_record.active_startup_generation
+            assert replacement_generation is not None
+
+            release_old.set()
+            old_payload, old_status = old_future.result(timeout=2)
+            with webapp.yoagent_prewarm_lock:
+                assert webapp.yoagent_prewarm_record.active_startup_generation == replacement_generation
+
+            release_replacement.set()
+            replacement_payload, replacement_status = replacement_future.result(timeout=2)
+    finally:
+        release_old.set()
+        release_replacement.set()
+        webapp.control_server.stop()
+
+    assert old_status == HTTPStatus.OK and old_payload["aborted"] is True
+    assert replacement_status == HTTPStatus.OK and replacement_payload["answer"] == "replacement startup answer"
+    assert [message["content"] for message in replacement_payload["conversation"]["messages"]] == ["replacement startup answer"]
+    assert [message["content"] for message in webapp.yoagent_conversation_payload()["messages"]] == ["replacement startup answer"]
+    with webapp.yoagent_prewarm_lock:
+        assert webapp.yoagent_prewarm_record.active_startup_generation is None
 
 
 def test_yoagent_conversation_persists_response_ms(tmp_path):

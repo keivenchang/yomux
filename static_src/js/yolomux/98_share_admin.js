@@ -3,12 +3,12 @@
 // Share admin UI, viewer banner, status refresh, and read-only interaction blocking.
 function ensureShareStatusPill() {
   if (shareStatusPill) return shareStatusPill;
-  shareStatusPill = document.createElement('button');
-  shareStatusPill.id = 'shareStatusPill';
-  shareStatusPill.className = 'share-status-pill';
-  shareStatusPill.type = 'button';
-  shareStatusPill.hidden = true;
-  shareStatusPill.onclick = () => showShareModal();
+  shareStatusPill = makeButton({
+    id: 'shareStatusPill',
+    className: 'share-status-pill',
+    hidden: true,
+    onClick: () => showShareModal(),
+  });
   const tabMeta = document.getElementById('tabMetaToggle');
   const notify = document.getElementById('notifyToggle');
   const anchor = tabMeta?.parentElement ? tabMeta : notify;
@@ -501,34 +501,36 @@ function updateShareViewerBanner() {
     mode: share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly'),
     time: shareTimeLeftText(share),
   });
-  const fit = document.createElement('button');
-  fit.type = 'button';
-  fit.className = 'share-view-fit-toggle control-active-hover';
-  fit.dataset.shareViewerControl = 'fit';
-  fit.textContent = shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain');
-  fit.title = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
-  fit.setAttribute('aria-label', fit.title);
-  fit.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    setShareViewFit(shareViewFit === 'cover' ? 'contain' : 'cover');
+  const fitTitle = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
+  const fit = makeButton({
+    className: 'share-view-fit-toggle control-active-hover',
+    dataset: {shareViewerControl: 'fit'},
+    label: shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain'),
+    title: fitTitle,
+    ariaLabel: fitTitle,
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      setShareViewFit(shareViewFit === 'cover' ? 'contain' : 'cover');
+    },
   });
   const mirror = document.createElement('span');
   mirror.className = 'share-viewer-mirror-status';
   mirror.setAttribute('aria-live', 'polite');
   const children = [text, mirror, fit];
   if (shareDebugEnabled) {
-    const debug = document.createElement('button');
-    debug.type = 'button';
-    debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
-    debug.dataset.shareViewerControl = 'debug';
-    debug.textContent = t('common.copy');
-    debug.title = t('share.debug.copyDiagnostics');
-    debug.setAttribute('aria-label', debug.title);
-    debug.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      copyShareDebugDiagnostics().catch(error => console.warn('share debug copy failed', error));
+    const debugTitle = t('share.debug.copyDiagnostics');
+    const debug = makeButton({
+      className: 'share-view-fit-toggle share-debug-copy control-active-hover',
+      dataset: {shareViewerControl: 'debug'},
+      label: t('common.copy'),
+      title: debugTitle,
+      ariaLabel: debugTitle,
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyShareDebugDiagnostics().catch(error => console.warn('share debug copy failed', error));
+      },
     });
     children.push(debug);
   }
@@ -566,8 +568,7 @@ function startShareStatusRefresh() {
   } else if (!readOnlyMode) {
     refreshActiveShare({silent: true});
   }
-  if (shareStatusTimer) clearInterval(shareStatusTimer);
-  shareStatusTimer = setInterval(() => {
+  resetRuntimeInterval('share-status', () => {
     if (redirectExpiredShareViewerToLogin()) return;
     if (shareStatusSurfaceVisible()) {
       renderShareStatusPill();
@@ -641,7 +642,7 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
 function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
   if (!descriptor?.target) return null;
-  const state = shareLastAppliedScrollByTarget.get(descriptor.target);
+  const state = shareScrollTargetRecords.get(descriptor.target);
   if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
@@ -665,7 +666,7 @@ function restoreShareReadonlyScrollTarget(target) {
 function restoreShareScrollTargetByKey(target) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return false;
-  const state = shareLastAppliedScrollByTarget.get(cleanTarget);
+  const state = shareScrollTargetRecords.get(cleanTarget);
   if (!state) return false;
   const payload = {
     ...(state.payload || {}),
@@ -681,11 +682,14 @@ function restoreShareScrollTargetByKey(target) {
 function scheduleShareScrollRestoreByKey(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!shareViewMode || !cleanTarget) return false;
+  const record = shareScrollTargetRecords.get(cleanTarget);
+  if (!record) return false;
   const frames = Math.max(1, Math.min(8, Math.round(Number(options.frames || 4))));
-  const state = {remaining: frames};
-  shareScrollRestoreFrameTimers.set(cleanTarget, state);
+  const restoreGeneration = record.restoreGeneration + 1;
+  record.restoreGeneration = restoreGeneration;
+  record.remainingFrames = frames;
   const run = () => {
-    if (shareScrollRestoreFrameTimers.get(cleanTarget) !== state) return;
+    if (shareScrollTargetRecords.get(cleanTarget) !== record || record.restoreGeneration !== restoreGeneration) return;
     const previous = applyingShareRemoteScroll;
     applyingShareRemoteScroll = true;
     try {
@@ -693,11 +697,11 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
     } finally {
       applyingShareRemoteScroll = previous;
     }
-    state.remaining -= 1;
-    if (state.remaining > 0) {
+    record.remainingFrames -= 1;
+    if (record.remainingFrames > 0) {
       requestAnimationFrame(run);
-    } else if (shareScrollRestoreFrameTimers.get(cleanTarget) === state) {
-      shareScrollRestoreFrameTimers.delete(cleanTarget);
+    } else if (shareScrollTargetRecords.get(cleanTarget) === record && record.restoreGeneration === restoreGeneration) {
+      record.remainingFrames = 0;
     }
   };
   requestAnimationFrame(run);
@@ -707,7 +711,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
 function restoreShareScrollTargetsByPrefix(prefix) {
   const cleanPrefix = String(prefix || '');
   if (!cleanPrefix) return;
-  for (const target of shareLastAppliedScrollByTarget.keys()) {
+  for (const target of shareScrollTargetRecords.keys()) {
     if (String(target).startsWith(cleanPrefix)) scheduleShareScrollRestoreByKey(target);
   }
 }

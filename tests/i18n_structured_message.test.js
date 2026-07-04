@@ -128,9 +128,11 @@ assert.ok(searchStart >= 0 && searchEnd > searchStart && transcriptErrorStart >=
 const i16Context = {
   structuredMessageText: api.structuredMessageText,
   userMessageText: api.userMessageText,
-  transcriptMetaLoadError: {
-    error: 'raw metadata diagnostic',
-    user_message: {key: 'transcript.error.unavailable', params: {error: 'metadata missing'}, fallback: 'raw metadata diagnostic'},
+  transcriptMetadataState: {
+    error: {
+      error: 'raw metadata diagnostic',
+      user_message: {key: 'transcript.error.unavailable', params: {error: 'metadata missing'}, fallback: 'raw metadata diagnostic'},
+    },
   },
   stateDefs: {done: {}},
   stateDef: () => ({label: catalog['state.done']}),
@@ -299,8 +301,8 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(localizedCachedState())), {
 assert.match(editorSource, /function renderErrorEditor[\s\S]*fileErrorText\(state\.error/);
 assert.doesNotMatch(terminalSource, /userMessageSnapshot\(error,\s*t\(/);
 assert.doesNotMatch(terminalSource, /notification\.title \|\| 'YO!agent'/);
-assert.match(panelSource, /function searchHistoryPanelErrors\(\)[\s\S]*runHistoryPayload\?\.errors[\s\S]*searchHistoryErrorText/);
+assert.match(panelSource, /function searchHistoryPanelErrors\(\)[\s\S]*runHistoryState.payload\?\.errors[\s\S]*searchHistoryErrorText/);
 assert.match(terminalSource, /function refreshActivePanelHeaders\(\)[\s\S]*relocalizeTranscriptPanelStatus\(session\)/);
-assert.doesNotMatch(terminalSource, /transcriptMetaLoadError = String\(error\)/);
+assert.doesNotMatch(terminalSource, /transcriptMetadataState\.error = String\(error\)/);
 
 console.log('structured message suite: 1 passed, 0 failed');

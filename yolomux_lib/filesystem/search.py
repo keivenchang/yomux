@@ -12,6 +12,7 @@ from typing import Any
 from .. import file_index
 from ..common import is_generated_upload_name
 from . import paths
+from .errors import raise_os_error
 from .git_ops import git_root_for_path
 from .listing import _directory_is_repo
 
@@ -178,7 +179,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
     visited_dirs = 0
     visited_files = 0
     truncated = False
-    walker = os.walk(search_root, topdown=True, followlinks=False)
+    walker = os.walk(search_root, topdown=True, onerror=raise_os_error, followlinks=False)
     for current, dirs, files in walker:
         visited_dirs += 1
         if visited_dirs > MAX_SEARCH_DIRS:
@@ -345,37 +346,32 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
     visited_dirs = 0
     visited_files = 0
     truncated = False
-    try:
-        if full_tree:
-            visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results)
-        else:
-            visited_dirs = 1
-            direct_names = sorted(os.listdir(root), key=str.lower)
-            for name in direct_names:
-                path = root / name
-                if name in SEARCH_SKIP_DIRS or paths._path_is_secret(path):
-                    continue
-                if path.is_dir() and _directory_is_repo(path):
-                    child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
-                    visited_dirs += child_dirs
-                    visited_files += child_files
-                    truncated = truncated or child_truncated
-                    if len(results) >= max_results or visited_files > MAX_SEARCH_FILES or visited_dirs > MAX_SEARCH_DIRS:
-                        truncated = True
-                        break
-                    continue
-                visited_files += 1
-                if visited_files > MAX_SEARCH_FILES:
+    if full_tree:
+        visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results)
+    else:
+        visited_dirs = 1
+        direct_names = sorted(os.listdir(root), key=str.lower)
+        for name in direct_names:
+            path = root / name
+            if name in SEARCH_SKIP_DIRS or paths._path_is_secret(path):
+                continue
+            if path.is_dir() and _directory_is_repo(path):
+                child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
+                visited_dirs += child_dirs
+                visited_files += child_files
+                truncated = truncated or child_truncated
+                if len(results) >= max_results or visited_files > MAX_SEARCH_FILES or visited_dirs > MAX_SEARCH_DIRS:
                     truncated = True
                     break
-                entry = _search_file_entry(root, path, tokens)
-                if entry is None:
-                    continue
-                results.append(entry)
-    except PermissionError as exc:
-        raise paths.FilesystemError.os_error(exc, status=403) from exc
-    except OSError as exc:
-        raise paths.FilesystemError.os_error(exc) from exc
+                continue
+            visited_files += 1
+            if visited_files > MAX_SEARCH_FILES:
+                truncated = True
+                break
+            entry = _search_file_entry(root, path, tokens)
+            if entry is None:
+                continue
+            results.append(entry)
     results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
     if len(results) > max_results:
         truncated = True

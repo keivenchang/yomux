@@ -82,6 +82,20 @@
   --paint-white-28: rgb(255 255 255 / 0.28);
   --paint-white-85: rgb(255 255 255 / 0.85);
   --paint-white-92: rgb(255 255 255 / 0.92);
+  --paint-overlay-slate-05: rgb(var(--overlay-slate-rgb) / 0.05);
+  --paint-overlay-slate-06: rgb(var(--overlay-slate-rgb) / 0.06);
+  --paint-overlay-slate-07: rgb(var(--overlay-slate-rgb) / 0.07);
+  --paint-overlay-slate-08: rgb(var(--overlay-slate-rgb) / 0.08);
+  --paint-overlay-slate-10: rgb(var(--overlay-slate-rgb) / 0.10);
+  --paint-overlay-slate-12: rgb(var(--overlay-slate-rgb) / 0.12);
+  --paint-overlay-slate-16: rgb(var(--overlay-slate-rgb) / 0.16);
+  --paint-overlay-slate-18: rgb(var(--overlay-slate-rgb) / 0.18);
+  --paint-shadow-35: rgb(var(--shadow-rgb) / 0.35);
+  --paint-shadow-42: rgb(var(--shadow-rgb) / 0.42);
+  --paint-shadow-45: rgb(var(--shadow-rgb) / 0.45);
+  --paint-shadow-50: rgb(var(--shadow-rgb) / 0.50);
+  --paint-shadow-62: rgb(var(--shadow-rgb) / 0.62);
+  --paint-agent-working-glow-transparent: rgb(var(--agent-working-glow-rgb) / 0);
   --accent-lime: #c4f970;
   --radius-pill: 999px;
   --radius-control: 4px;
@@ -156,13 +170,13 @@
   --transport-warning-text: #fff4f5;
   --transport-warning-bg: #b42332;
   --transport-warning-border: #ff8a95;
-  --pr-status-failing: #ff8a95;
-  --pr-status-passing: #52d273;
+  --pr-status-failing: var(--transport-warning-border);
+  --pr-status-passing: var(--good);
   --pr-status-merged: #c084fc;
   --pr-link-merged: var(--pr-status-merged);
   --pr-link-merged-hover: var(--pr-status-merged);
   --pr-status-closed: #aeb8c7;
-  --pr-number-chip-bg: #000;
+  --pr-number-chip-bg: var(--paint-black);
   --git-modified: var(--accent-gold);
   --git-modified-badge: var(--accent-gold);
   --git-untracked-name: #7ee787;
@@ -192,10 +206,10 @@
   /* ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
      ring + glow, chrome strip, file selection, hover tints, YO marker, and Markdown headings). Swapped
      by the appearance.active_color preference; Green is the default = the brand-green values below. */
-  --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
+  --active-accent: var(--brand-green); /* solid: ring, glow, strip, alpha tints */
   --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
   --active-accent-bright: #86d600;   /* active-tab fill + border */
-  --active-accent-text: #071000;     /* text/icon ON the accent tab (contrast color) */
+  --active-accent-text: var(--auto-text); /* text/icon ON the accent tab (contrast color) */
   --active-accent-dim: color-mix(in srgb, var(--active-accent) 26%, var(--panel));  /* chrome strip bg */
   --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);                        /* hover/selection wash */
   --active-control-bg: var(--active-accent-bright);
@@ -250,12 +264,12 @@
      below) so it themes like every other ring instead of being a raw #ff3347 that ignores the theme. */
   --pane-ring-attention: #ff3347;
   --pane-active-ring-opacity: 75%;
-  --pane-tab-panel-head-bg: #3f6f00;
+  --pane-tab-panel-head-bg: var(--brand-green-dark);
   --pane-tab-panel-head-text: #f4ffe8;
   --pane-tab-panel-detail-bg: #1f3026;
   --pane-detail-bg: #202733;
   --pane-meta-branch: #d7dde5;
-  --pane-meta-path: #dfe6ef;
+  --pane-meta-path: var(--pane-tab-text);
   --pane-meta-desc: #b7c0ce;
   --pane-tab-control-bg: #1b2432;
   --pane-tab-control-border: #536074;
@@ -274,7 +288,7 @@
   --pane-resizer-hover-line-size: 5px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
-  --pane-resizer-shadow: rgba(255, 225, 77, 0.72);
+  --pane-resizer-shadow: var(--pane-resizer-bg);
   --pane-resizer-hover-shadow: 0 0 0 1px var(--drop-outline-shadow);
   --pane-resizer-preview-shadow: 0 0 12px var(--pane-resizer-shadow);
   --tab-insert-preview-width: 24px;
@@ -282,16 +296,31 @@
   --motion-interaction-fast: 90ms;
   --motion-interaction-standard: 100ms;
   --motion-disclosure: 120ms;
+  --space-1: 1px;
+  --space-2: 2px;
+  --space-3: 3px;
+  --space-4: 4px;
+  --space-5: 5px;
+  --space-6: 6px;
+  --space-7: 7px;
+  --space-8: 8px;
+  --space-9: 9px;
+  --space-10: 10px;
+  --space-11: 11px;
+  --space-12: 12px;
   --popover-show-delay: 1000ms;
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --dialog-compact-inline-size: 80ch;
+  --dialog-standard-inline-size: 112ch;
+  --dialog-wide-inline-size: 144ch;
   --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
   --app-modal-border-width: max(2px, var(--pane-split-gap));
   --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
-  --share-stage-bg: #000;
+  --share-stage-bg: var(--paint-black);
   /* Shared shadow-cast color, theme-aware. Per-element box-shadows keep their own geometry (offset/blur)
      but read this through rgb(var(--shadow-rgb) / a) so they flip with the theme instead of staying black
      on the light surface. Dark = pure black (identical to the old literals); light = the slate the popover
@@ -386,19 +415,20 @@
   --dense-control-min-height: max(18px, calc(var(--ui-font-size) + 5px));
   --editor-bg: var(--bg);
   --editor-gutter-bg: var(--panel);
-  --editor-scheme-bg: #0f1115;
+  --editor-scheme-bg: var(--bg);
   --editor-scheme-fg: #e6efe2;
   --editor-scheme-muted: var(--text-muted-strong);
-  --editor-scheme-line: #303948;
-  --editor-scheme-panel: #151922;
-  --editor-scheme-panel2: #1e2430;
-  --editor-scheme-gutter-bg: #151922;
+  --editor-scheme-line: var(--line);
+  --editor-scheme-panel: var(--panel);
+  --editor-scheme-panel2: var(--panel2);
+  --editor-scheme-gutter-bg: var(--panel);
   --editor-scheme-preview-bg: #342f22;
   --editor-cursor: #f5f7fb;
   --editor-selection: rgba(96, 165, 250, 0.38);
   --text-selection-bg: #2563eb;
+  --editor-native-selection-bg: transparent;
   --editor-active-line: rgba(255, 255, 255, 0.04);
-  --editor-line-number: #9aa5b1;
+  --editor-line-number: var(--muted);
   --markdown-heading: var(--active-accent-bright);
   --markdown-link: #7ee9ff;
   --markdown-strong: #fff0a6;
@@ -408,14 +438,19 @@
   --code-string: #86efac;
   --code-number: #f8dfa3;
   --code-variable: #fca5a5;
-  --code-function: #93c5fd;
+  --code-function: var(--link-soft);
   --code-type: #67e8f9;
   --code-property: #96d6ff;
   --code-tag: #f0abfc;
   --code-comment: var(--text-muted-strong);
-  --code-inline: #ffe08a;
-  --code-inline-bg: rgba(245, 197, 66, 0.14);
-  --code-inline-border: rgba(245, 197, 66, 0.24);
+  /* The paint owner must not be --code-inline itself: Markdown alert scopes override
+     --code-inline, so making the alert alias point back to it creates a custom-property cycle. */
+  --code-inline-dark-text: #ffe08a;
+  --code-inline-dark-bg: rgba(245, 197, 66, 0.14);
+  --code-inline-dark-border: rgba(245, 197, 66, 0.24);
+  --code-inline: var(--code-inline-dark-text);
+  --code-inline-bg: var(--code-inline-dark-bg);
+  --code-inline-border: var(--code-inline-dark-border);
   --code-invalid: #ff6673;
   --code-control: var(--code-keyword);
   --code-diff-add: #56d364;
@@ -446,46 +481,50 @@
   --lt-muted: #59636e;
   --lt-line: #d0d7de;
   --lt-editor-bg: var(--paint-white);
-  --lt-editor-gutter-bg: #f6f8fa;
+  --lt-editor-gutter-bg: var(--lt-panel);
   --lt-editor-preview-bg: #fff6df;
   --document-preview-bg: var(--paint-white);
   --image-preview-checker-bg: #151a22;
   --image-preview-checker-bg-light: #e9edf2;
   --lt-markdown-heading: var(--active-accent);
   --lt-markdown-heading-bg: transparent;
-  --lt-markdown-link: #075985;
+  --light-link-text: #075985;
+  --lt-markdown-link: var(--light-link-text);
   --lt-markdown-strong: var(--lt-text);
   --lt-markdown-emphasis: #953800;
   --lt-code-keyword: #cf222e;
   --lt-code-atom: #0550ae;
   --lt-code-string: #00843d;
-  --lt-code-number: #0550ae;
+  --lt-code-number: var(--lt-code-atom);
   --lt-code-variable: var(--lt-text);
   --lt-code-function: #8250df;
   --lt-code-type: #953800;
   --lt-code-property: #1d4ed8;
-  --lt-code-tag: #cf222e;
-  --lt-code-comment: #59636e;
-  --lt-code-inline: #a40e26;
-  --lt-code-inline-bg: #fff1d6;
-  --lt-code-inline-border: #d8a657;
-  --markdown-preview-bg: #000000;
+  --lt-code-tag: var(--lt-code-keyword);
+  --lt-code-comment: var(--lt-muted);
+  --code-inline-light-text: #a40e26;
+  --code-inline-light-bg: #fff1d6;
+  --code-inline-light-border: #d8a657;
+  --lt-code-inline: var(--code-inline-light-text);
+  --lt-code-inline-bg: var(--code-inline-light-bg);
+  --lt-code-inline-border: var(--code-inline-light-border);
+  --markdown-preview-bg: var(--paint-black);
   --markdown-code-block-bg: #2a303b;
   --markdown-html-light-text: #111827;
-  --markdown-html-light-link: #075985;
+  --markdown-html-light-link: var(--light-link-text);
   --vanilla-preview-link: #0645ad;
-  --markdown-html-light-code: #a40e26;
-  --markdown-html-light-code-bg: #fff1d6;
-  --markdown-html-light-code-border: #d8a657;
+  --markdown-html-light-code: var(--code-inline-light-text);
+  --markdown-html-light-code-bg: var(--code-inline-light-bg);
+  --markdown-html-light-code-border: var(--code-inline-light-border);
   --markdown-alert-caution-light-bg: #fde7e9;
   --markdown-alert-caution-dark-bg: #6f2632;
   --markdown-html-dark-bg: #6f5a0c;
-  --markdown-html-dark-border: #6f5a0c;
+  --markdown-html-dark-border: var(--markdown-html-dark-bg);
   --markdown-html-dark-text: #e4e8ee;
-  --markdown-html-dark-link: #7ee9ff;
-  --markdown-html-dark-code: #ffe08a;
-  --markdown-html-dark-code-bg: rgba(245, 197, 66, 0.14);
-  --markdown-html-dark-code-border: rgba(245, 197, 66, 0.24);
+  --markdown-html-dark-link: var(--markdown-link);
+  --markdown-html-dark-code: var(--code-inline-dark-text);
+  --markdown-html-dark-code-bg: var(--code-inline-dark-bg);
+  --markdown-html-dark-code-border: var(--code-inline-dark-border);
   --lt-code-block-bg: #f3f4f6;
   --lt-code-block-border: #e4e7ec;
   --lt-code-block-text: #1f2328;
@@ -495,24 +534,25 @@
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
+  --three-row-panel-layout: auto auto minmax(0, 1fr);
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
   --pane-tab-top-radius-scale: 0.7;
   --pane-tab-top-radius: calc(var(--tab-label-size) * var(--pane-tab-top-radius-scale));
   --dockview-tab-min-inline-size: 64px;
-  --pc-control-bg: #1b2432;
-  --pc-control-fg: #dfe6ef;
-  --pc-control-border: #536074;
+  --pc-control-bg: var(--pane-tab-control-bg);
+  --pc-control-fg: var(--pane-tab-text);
+  --pc-control-border: var(--pane-tab-control-border);
   --pc-control-hover-fg: var(--paint-white);
-  --pc-control-hover-bg: #263247;
-  --pc-control-hover-border: #8fa1bc;
+  --pc-control-hover-bg: var(--pane-tab-control-hover-bg);
+  --pc-control-hover-border: var(--pane-tab-control-hover-border);
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
   --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
   --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, var(--paint-white) 22%);
   --panel-close-size: 18px;
   --panel-close-radius: 4px;
-  --panel-close-glyph-width: 9px;
-  --panel-close-glyph-height: 1.5px;
+  --panel-close-glyph-width: 8px;
+  --panel-close-glyph-height: 1.4px;
   --panel-close-hover-bg: rgba(255, 255, 255, 0.08);
   --icon-notify: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 21a2 2 0 0 0 3.4 0'/%3E%3Cpath d='M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9'/%3E%3C/svg%3E");
   --icon-refresh: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 0 1-9 9 9.5 9.5 0 0 1-6.7-2.7'/%3E%3Cpath d='M3 12a9 9 0 0 1 9-9 9.5 9.5 0 0 1 6.7 2.7'/%3E%3Cpath d='M3 3v6h6'/%3E%3Cpath d='M21 21v-6h-6'/%3E%3C/svg%3E");
@@ -527,7 +567,7 @@
   --icon-branch-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='18' cy='18' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Cpath d='M8.5 6H12a4 4 0 0 1 4 4v5.5'/%3E%3Cpath d='M6 8.5v7'/%3E%3C/svg%3E");
   --icon-yoagent: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5A3.5 3.5 0 0 1 7.5 3h9A3.5 3.5 0 0 1 20 6.5v5A3.5 3.5 0 0 1 16.5 15H12l-5 4v-4A3 3 0 0 1 4 12z'/%3E%3Cpath d='M8 8h8'/%3E%3Cpath d='M8 11h5'/%3E%3C/svg%3E");
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
-  --editor-preview-bg: #342f22;
+  --editor-preview-bg: var(--editor-scheme-preview-bg);
   --topbar-height: 38px;
   /* Default for --pulse-duration; Preferences -> Notifications -> performance.agent_status_pulse_period_ms overrides this at runtime. */
   --pulse-duration: 1.55s;
@@ -579,16 +619,15 @@ body.theme-light {
   color-scheme: light;
   --neutral-text-cool: var(--lt-muted-strong);
   --pr-number-chip-bg: #2b3242;
-  --share-stage-bg: #000;
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
   --accent-lime: #2f7d20;
   /* light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
      these per preset; supplied (not derived) so Green stays the exact current light values. */
-  --active-accent: #5f9800;
+  --active-accent: var(--brand-green);
   --active-accent-rgb: 95 152 0;
   --active-accent-bright: #4f9e3a;
-  --active-accent-text: #071000;
+  --active-accent-text: var(--auto-text);
   --active-accent-dim: #e1edda;
   --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);
   --active-control-bg: var(--active-accent-bright);
@@ -643,7 +682,7 @@ body.theme-light {
   --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
   --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
-  --pane-tab-panel-head-text: #1f2937;
+  --pane-tab-panel-head-text: var(--pane-tab-text);
   --pane-tab-panel-detail-bg: #dce8d2;
   --file-missing-active-bg: #f7d2d8;
   --pane-detail-bg: #e7edf5;
@@ -691,7 +730,7 @@ body.theme-light {
   --icon-doc: #a16207;
   --icon-image: #15803d;
   --icon-archive: #c2410c;
-  --link-soft: #075985;
+  --link-soft: var(--light-link-text);
   --link-soft-hover: #0369a1;
   --pr-link-merged: var(--lt-code-function);
   --pr-link-merged-hover: #6639ba;
@@ -700,7 +739,7 @@ body.theme-light {
   --git-untracked-name: #116329;
   --git-untracked-badge: #0f766e;
   --git-deleted: #b42332;
-  --git-deleted-badge: #dc2626;
+  --git-deleted-badge: var(--danger-strong);
   --git-staged: #3f6f00;
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
@@ -711,7 +750,6 @@ body.theme-light {
   --drop-outline-strong: rgba(29, 78, 216, 0.92);
   --drop-outline-shadow: rgba(29, 78, 216, 0.42);
   --drop-outline-surface: rgba(255, 255, 255, 0.90);
-  --auto-text: #071000;
   --auto-surface: #e9f7dd;
   --auto-surface-active: #d5efbf;
   --auto-muted-text: #2d4f0b;
@@ -720,16 +758,8 @@ body.theme-light {
   --auto-border-muted: #7baa42;
   --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
-  --bad: #b91c1c;
+  --bad: var(--danger-strong-hover);
   --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */
-  --danger-text: #fff3f4;
-  --danger-bg: #c61f38;
-  --danger-border: #ff7a86;
-  --danger-muted-bg: #5b1e28;
-  --danger-strong: #dc2626;
-  --danger-strong-hover: #b91c1c;
-  --danger-strong-border: #991b1b;
-  --danger-light-text: #7f1d1d;
   --danger-panel-light-bg: #fff5f5;
   --danger-panel-light-confirming-bg: #fff1f0;
   --danger-panel-light-confirming-border: #d9534f;
@@ -742,7 +772,7 @@ body.theme-light {
   --inactive-pane-overlay-alpha: 0.09;
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
-  --inactive-tab-border: #9aa6b6;
+  --inactive-tab-border: var(--pane-tab-control-border);
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
   --shadow-rgb: 15 23 42;
@@ -760,12 +790,12 @@ body.theme-light {
   --file-tree-recency-recent: #4d7f21;
   --file-tree-recency-warm: #566271;
   --file-tree-recency-old: var(--muted);
-  --pc-control-bg: #f7f9fc;
-  --pc-control-fg: #1f2937;
-  --pc-control-border: #9aa6b6;
+  --pc-control-bg: var(--pane-tab-control-bg);
+  --pc-control-fg: var(--pane-tab-text);
+  --pc-control-border: var(--pane-tab-control-border);
   --pc-control-hover-fg: #0f172a;
-  --pc-control-hover-bg: #e9eef6;
-  --pc-control-hover-border: #6b7788;
+  --pc-control-hover-bg: var(--pane-tab-control-hover-bg);
+  --pc-control-hover-border: var(--pane-tab-control-hover-border);
   --pc-zoom-bg: var(--active-control-bg);
   --pc-zoom-border: var(--active-control-border);
   --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, var(--paint-white) 12%);
@@ -773,6 +803,20 @@ body.theme-light {
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
 * { box-sizing: border-box; }
+
+/* Preformatted text that can contain terminal output, paths, or diagnostics shares one wrapping
+   contract; each surface keeps its own scrolling, size, font, and paint behavior. */
+.tmux-snapshot,
+.transcript-text,
+.yoagent-message-body,
+.yoagent-details-preview,
+.yoagent-message-details pre,
+.modal pre,
+.drop-action-result pre,
+.file-editor-conflict-compare pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .actions button,
 .info-refresh,
 .info-tree-preset,
@@ -802,6 +846,98 @@ body.theme-light {
   cursor: pointer;
   font: inherit;
 }
+.share-view-fit-toggle,
+.pane-drag-image-tabs span,
+.info-refresh,
+.changes-control select,
+.changes-refresh,
+.diff-ref-input,
+.diff-ref-control input,
+.preferences-setting-control input[type="number"],
+.preferences-setting-control input[type="text"],
+.preferences-setting-control select,
+.preferences-setting-control textarea,
+.info-tree-search-control input,
+.info-tree-group-select select,
+.info-lookback-control select,
+.yoagent-chat,
+.yoagent-jobs-list,
+.info-tree-chip,
+.share-field select,
+.share-field input[type="number"],
+.share-field input[type="text"],
+.file-explorer-path,
+.file-explorer-path-inline,
+.js-debug-hover-tooltip {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--text);
+}
+:where(button),
+.diff-ref-suggestion-popover,
+.yoagent-message,
+.yoagent-composer-pill,
+.yoagent-backend-pill,
+.terminal-drop-suggestions,
+.file-editor-preview-fallback,
+.markdown-image-error,
+.mermaid-preview-error {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--text);
+}
+:where(button) {
+  min-width: 34px;
+  border-radius: var(--radius-md);
+  padding: var(--space-6) var(--space-9);
+  cursor: pointer;
+}
+:where(button:hover) {
+  border-color: var(--pc-control-hover-border);
+}
+:where(button:disabled) {
+  color: var(--text-muted-soft);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+:where(button:disabled:hover) {
+  border-color: var(--line);
+}
+.js-debug-stat,
+.js-debug-log,
+.changes-toolbar,
+.changes-comparison-head,
+.changes-error,
+.changes-warning,
+.changes-empty,
+.changes-repo-group,
+.preferences-path-row,
+.preferences-section,
+.search-history-error,
+.search-history-empty,
+.search-history-result,
+.search-history-run,
+.mermaid-preview,
+.mermaid-preview-host,
+.file-editor-preview-zoom-viewport {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.file-editor-icon-blame::before,
+.file-editor-icon-blame::after,
+.file-editor-icon-diff::before,
+.file-editor-icon-eye::before,
+.file-editor-icon-eye::after,
+.file-editor-icon-split::before,
+.file-editor-icon-split::after,
+.file-editor-icon-theme::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
 .app-menu-bar,
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
@@ -809,8 +945,96 @@ body.theme-light {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 1px;
+  gap: var(--space-1);
   overflow: visible;
+}
+.actions,
+.popover-value:has(.popover-copy-value),
+.js-debug-toolbar,
+.js-debug-graph-controls,
+.preferences-setting-advisory,
+.preferences-search-row,
+.panel-popover-zone,
+.info-subtab-actions,
+.info-tree-primary-controls,
+.info-tree-presets,
+.info-tree-group-selects,
+.info-tree-sort-controls,
+.yoagent-transcript-path,
+.yoagent-chat-error,
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label-line,
+.info-tree-field-branch .info-tree-field-value,
+.info-tree-field-path .info-tree-field-value,
+.info-tree-field-ai .info-tree-field-value,
+.share-result-meta,
+.js-debug-range-slider-control,
+.file-explorer-head,
+.file-editor-head,
+.file-explorer-toolbar-row,
+.file-explorer-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+.js-debug-chart-heading-row,
+.js-debug-x-axis,
+.share-url-primary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.brand-cell,
+.topbar-search,
+.app-menu-line,
+.command-palette-title,
+.file-explorer-title,
+.file-explorer-actions-row .file-explorer-date-reload-cluster,
+.file-editor-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+.app-menu-setting-control,
+.session-button-text,
+.js-debug-legend-item,
+.changes-control,
+.diff-ref-controls,
+.preferences-radio,
+.attention-toast-controls,
+.info-tree-search-control,
+.info-lookback-control,
+.yoagent-composer-pill,
+.yoagent-backend-pill,
+.info-tree-ai-value,
+.file-editor-codemirror .cm-search label,
+.file-editor-codemirror-panel .cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.js-debug-toolbar,
+.js-debug-summary,
+.js-debug-actions,
+.js-debug-graph-controls,
+.preferences-setting-advisory,
+.info-tree-primary-controls,
+.info-tree-presets,
+.info-tree-group-selects,
+.info-tree-sort-controls,
+.yoagent-job-controls,
+.yoagent-chat-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+.pane-info-bar-popover-zone .pane-info-bar-meta,
+.file-editor-toolbar-right {
+  flex: 0 1 auto;
+  margin-inline-start: auto;
+  justify-content: flex-end;
 }
 .control-active-hover:hover,
 .control-active-hover:focus-visible {

@@ -35,6 +35,46 @@ const {
 } = require('./layout_test_helper');
 
 async function runLayoutRestoreSuite() {
+  test('shared button builder owns attributes, accessibility state, dataset, and events', () => {
+    const api = loadYolomux();
+    const clicks = [];
+    const contexts = [];
+    const button = api.makeButtonForTest({
+      id: 'shared-button',
+      className: 'shared-button-class',
+      role: 'menuitemcheckbox',
+      label: 'Shared',
+      title: 'Shared title',
+      ariaLabel: 'Shared aria',
+      pressed: true,
+      checked: true,
+      disabled: true,
+      hidden: true,
+      dataset: {action: 'shared'},
+      attributes: {'aria-haspopup': 'true', 'aria-expanded': 'false'},
+      onClick: event => clicks.push(event.type),
+      events: {contextmenu: event => contexts.push(event.type)},
+    });
+    assert.equal(button.id, 'shared-button');
+    assert.equal(button.type, 'button');
+    assert.equal(button.textContent, 'Shared');
+    assert.equal(button.title, 'Shared title');
+    assert.equal(button.getAttribute('role'), 'menuitemcheckbox');
+    assert.equal(button.getAttribute('aria-label'), 'Shared aria');
+    assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.equal(button.getAttribute('aria-checked'), 'true');
+    assert.equal(button.getAttribute('aria-haspopup'), 'true');
+    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    assert.equal(button.dataset.action, 'shared');
+    assert.equal(button.dataset.checked, 'true');
+    assert.equal(button.disabled, true);
+    assert.equal(button.hidden, true);
+    button.listeners.get('click')[0]({type: 'click'});
+    button.listeners.get('contextmenu')[0]({type: 'contextmenu'});
+    assert.deepStrictEqual(clicks, ['click']);
+    assert.deepStrictEqual(contexts, ['contextmenu']);
+  });
+
   test('saved Preferences layout state does not translate before i18n initialization', () => {
     const state = encodeURIComponent(JSON.stringify({
       v: 1,
@@ -66,8 +106,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/group: t\('palette\.group\.fileActions'\)[\s\S]*group: options\.group \|\| t\('palette\.group\.files'\)/.test(layoutSource), 'quick-open groups use localized labels');
     assert.ok(/commandPaletteDropActionItems\(\)[\s\S]*const label = dropActionDisplayLabel\(action\)[\s\S]*label,[\s\S]*searchFields: \[t\('palette\.group\.fileActions'\), label/.test(layoutSource), 'command-palette drop actions reuse one localized label for display and search');
     assert.ok(/function fileQuickOpenScopeLabel[\s\S]*tPlural\('palette\.scope\.indexedRoot', roots\.length - 1, \{path: compactHomePath\(roots\[0\]\)\}\)/.test(layoutSource), 'quick-open indexed-root scope uses the shared plural locale family');
-    assert.ok((layoutSource.match(/fileQuickOpenError = userMessageSnapshot\(/g) || []).length === 2
-      && !/fileQuickOpenError = error;/.test(layoutSource), 'quick-open retains every search failure through the shared relocalizable user-message snapshot');
+    assert.ok((layoutSource.match(/fileQuickOpenState.error = userMessageSnapshot\(/g) || []).length === 2
+      && !/fileQuickOpenState.error = error;/.test(layoutSource), 'quick-open retains every search failure through the shared relocalizable user-message snapshot');
     assert.ok(/function runDropAction[\s\S]*const displayLabel = dropActionDisplayLabel\(action\)[\s\S]*status\.insertedDropAction[\s\S]*\{name: displayLabel\}/.test(dropSource), 'drop-action status reuses the same localized display-label owner as menus and search');
     assert.ok(/label: t\(previewMediaKindForPath\(path\) === 'image' \? 'palette\.openImage' : 'palette\.openFile', \{name\}\)/.test(layoutSource)
       && /t\('common\.indexedPath', \{path: compactHomePath\(indexedRoot\)\}\)/.test(layoutSource), 'quick-open file and indexed-root labels resolve lazily');
@@ -160,7 +200,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function shareReplayMirrorLabel[\s\S]*share\.replay\.mirrorAria/.test(shareStateSource), 'share replay mirror aria text has one shared localized owner');
     assert.ok(shareStateSource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());") && shareReplaySource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());"), 'both replay-root paths consume the same mirror-label helper');
     assert.ok(shareReplaySource.includes("t('share.replay.sharedTerminalAria', {session: entry.session})"), 'replayed terminal placeholders expose a localized accessibility label');
-    assert.ok(shareAdminSource.includes("debug.textContent = t('common.copy');") && shareAdminSource.includes("debug.title = t('share.debug.copyDiagnostics');"), 'share diagnostics control reuses the existing Copy label and localizes its specific tooltip');
+    assert.ok(shareAdminSource.includes("label: t('common.copy')") && shareAdminSource.includes("const debugTitle = t('share.debug.copyDiagnostics')"), 'share diagnostics control reuses the existing Copy label and localizes its specific tooltip through the shared button builder');
     assert.ok(/function terminalTmuxWindowShortcut\(key, options = \{\}\)[\s\S]*terminalTmuxWindowShortcutDefs[\s\S]*t\(definition\.labelKey\)/.test(terminalBootSource), 'tmux prefix and Alt shortcuts share one lazy localized semantic classifier');
     assert.ok(/function terminalTmuxPrefixWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key, \{includePrefixOnly: true, includeNumbers: true\}\)[\s\S]*function terminalTmuxAltWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key\)/.test(terminalBootSource), 'tmux prefix and Alt wrappers contain no duplicated shortcut labels');
     assert.ok(/function infoDimensionCountText[\s\S]*tPlural\(infoDimensionCountKeys\[key\]/.test(terminalBootSource), 'YO!info child counts use plural-aware locale keys');
@@ -264,7 +304,7 @@ async function runLayoutRestoreSuite() {
 
     assert.ok(finderSource.includes("`${t('common.field.branch')}: ${data.branchText}`"), 'Tabber branch hover metadata uses the shared localized branch label');
     assert.ok(/data\.label \|\| stripTrailingEllipsisText\(t\('common\.loading'\)\)/.test(finderSource), 'Tabber loading fallback uses the shared localized loading label');
-    assert.ok(/button\.title = t\('finder\.quickAccess\.openPath', \{path\}\)/.test(finderSource), 'Finder quick paths use their exact localized path-opening label');
+    assert.ok(/const title = t\('finder\.quickAccess\.openPath', \{path\}\)[\s\S]*makeButton\(\{[\s\S]*title,/.test(finderSource), 'Finder quick paths use their exact localized path-opening label through the shared button builder');
     assert.ok(/function repoInfoSummary[\s\S]*t\('git\.dirty'[\s\S]*t\('git\.ahead'[\s\S]*t\('git\.behind'/.test(finderSource), 'Finder repo summaries reuse shared localized git counts');
     assert.ok(/function repoBranchDisplayText\(repo\)[\s\S]*t\('git\.detached'\)/.test(finderSource)
       && /function setFileExplorerRepoSummary[\s\S]*repoBranchDisplayText\(repo\)/.test(finderSource), 'Finder repo title metadata shares the exact localized detached-branch fallback');
@@ -1003,6 +1043,19 @@ async function runLayoutRestoreSuite() {
     const sanitizedSvg = api.sanitizeStandaloneSvg(unsafeSvg);
     assert.equal(/<script|foreignObject|onclick=|evil\.test|@import|url\(/i.test(sanitizedSvg), false, 'Mermaid SVG sanitizer removes scripts, event handlers, external references, and stylesheet imports');
     assert.equal(sanitizedSvg.includes('href="#local"'), true, 'Mermaid SVG sanitizer keeps local fragment references');
+    const standaloneSvgBlockedTags = api.standaloneSvgBlockedTagsForTest();
+    standaloneSvgBlockedTags.forEach(tag => {
+      const tagName = tag === 'foreignobject' ? 'foreignObject' : tag;
+      const source = `<svg><a href="#local">ok</a><${tagName}>blocked-${tag}</${tagName}></svg>`;
+      const blockedTag = new RegExp(`<\\s*${tagName}\\b`, 'i');
+      const stringSanitized = api.sanitizeStandaloneSvgString(source);
+      assert.equal(blockedTag.test(stringSanitized), false, `string SVG sanitizer removes ${tagName}`);
+      assert.equal(stringSanitized.includes('href="#local"'), true, `string SVG sanitizer preserves local fragments while removing ${tagName}`);
+    });
+    const standaloneSvgSanitizerSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
+    assert.ok(/STANDALONE_SVG_BLOCKED_TAG_SET = new Set\(STANDALONE_SVG_BLOCKED_TAGS\)/.test(standaloneSvgSanitizerSource), 'DOM SVG sanitizer consumes the shared blocked-tag owner');
+    assert.ok(/STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS\.map\(escapeRegExpLiteral\)\.join\('\|'\)/.test(standaloneSvgSanitizerSource), 'string SVG sanitizer derives its regex source from the shared blocked-tag owner');
+    assert.equal(/\(\?:script\|foreignObject\|iframe\|object\|embed\|audio\|video\|canvas\|link\|meta\)/.test(standaloneSvgSanitizerSource), false, 'SVG sanitizer has no copied blocked-tag regex alternation');
     assert.ok(/function mermaidPreviewConfig[\s\S]*htmlLabels:\s*true[\s\S]*flowchart:\s*\{[\s\S]*htmlLabels:\s*true/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid HTML labels are allowed only as sanitizer input');
     assert.ok(/function svgForeignObjectTextNode[\s\S]*createElementNS\('http:\/\/www\.w3\.org\/2000\/svg', 'text'\)[\s\S]*node\.textContent = text/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels convert to safe SVG text in browser runtime');
     assert.ok(/tagName === 'foreignobject'[\s\S]*svgForeignObjectTextNode\(child\)[\s\S]*child\.replaceWith\(textNode\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels are converted before foreignObject stripping');
@@ -1011,7 +1064,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
     const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
-    assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
+    assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }'), 'Markdown thematic breaks render as preview rules');
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
     assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
@@ -1412,6 +1465,44 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.runtimeIntervalDelay(0), 1);
   });
 
+  await testAsync('named runtime intervals wait for async work before scheduling the next run', async () => {
+    const scheduled = [];
+    const cleared = new Set();
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        scheduled.push({timer, callback, delay});
+        return timer;
+      },
+      clearTimeout(timer) { cleared.add(timer); },
+    });
+    let finishWork;
+    const work = new Promise(resolve => { finishWork = resolve; });
+    let runs = 0;
+    api.resetRuntimeIntervalForTest('unit-runtime-loop', () => {
+      runs += 1;
+      return work;
+    }, 1237);
+    assert.deepStrictEqual(canonical(api.runtimeIntervalStateForTest('unit-runtime-loop')), {active: true, delay: 1237, timer: scheduled.find(item => item.delay === 1237).timer});
+    const first = scheduled.filter(item => item.delay === 1237);
+    assert.equal(first.length, 1, 'one named loop owns one pending timer');
+    first[0].callback();
+    await flushAsyncWork();
+    assert.equal(runs, 1, 'the pending timer invokes its callback once');
+    assert.equal(scheduled.filter(item => item.delay === 1237).length, 1, 'no next timer is scheduled while async work is unresolved');
+    finishWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    const afterSettle = scheduled.filter(item => item.delay === 1237);
+    assert.equal(afterSettle.length, 2, 'the next full delay starts only after async work settles');
+    api.resetRuntimeIntervalForTest('unit-runtime-loop', () => {}, 1237);
+    assert.equal(scheduled.filter(item => item.delay === 1237).length, 2, 'resetting the same named cadence updates the callback without adding a timer');
+    assert.equal(api.clearRuntimeIntervalForTest('unit-runtime-loop'), true);
+    assert.equal(api.runtimeIntervalActiveForTest('unit-runtime-loop'), false);
+    assert.equal(cleared.has(afterSettle[1].timer), true, 'clearing the named loop cancels its pending timer');
+  });
+
   test('t@1842', () => {
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('foo bar foo', 'foo')), [
@@ -1476,18 +1567,18 @@ async function runLayoutRestoreSuite() {
     assert.ok(activePreferenceBody.includes('[data-preferences-reset-all]'), 'global reset button is preserved through search focusout');
     assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
     assert.equal(source.includes('let sessionFilesRequestId = 0;'), false, 'standalone Changes request id is removed');
-    assert.ok(source.includes('const fileExplorerSessionFilesGuard = makeGenerationGuard();'), 'Finder diff fetches have their own stale-response generation guard');
-    assert.ok(source.includes('const requestIsCurrent = fileExplorerSessionFilesGuard.begin();'), 'Finder diff fetches reject stale responses through the shared guard');
+    assert.ok(/const fileExplorerSessionFilesState = \{[\s\S]*guard: makeGenerationGuard\(\)/.test(source), 'Finder diff payload, signature, loading, and stale-response guard share one record');
+    assert.ok(source.includes('const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();'), 'Finder diff fetches reject stale responses through the shared guard');
     assert.ok(source.includes('function activeChangesControl'), 'Finder diff renders can detect active controls');
     assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
     assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
     assert.ok(source.includes('const loadingPromise = (async () => {'), 'editor file loading keeps a promise handle for guarded cleanup');
     assert.ok(source.includes('if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;'), 'editor file loading clears stale loading promises after failure or success');
-    assert.ok(source.includes('const activitySummaryGuard = makeGenerationGuard();'), 'activity summary refreshes carry a stale-response generation guard');
-    assert.ok(source.includes('if (activitySummaryRefreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
-    assert.ok(source.includes('let transcriptMetaRefreshPromise = null;'), 'metadata refreshes keep one in-flight promise');
-    assert.ok(source.includes('if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;'), 'metadata refreshes dedupe overlapping loads');
-    assert.ok(source.includes('transcriptMetaLoading = true;'), 'metadata refreshes expose a loading state');
+    assert.ok(source.includes('const activitySummaryState = {') && source.includes('guard: makeGenerationGuard()'), 'activity summary payload and refresh generation share one record');
+    assert.ok(source.includes('if (activitySummaryState.refreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
+    assert.ok(source.includes('const transcriptMetadataState = {') && source.includes('guard: makeGenerationGuard()'), 'metadata payload and request generation share one record');
+    assert.ok(source.includes('if (transcriptMetadataState.request) return transcriptMetadataState.request;'), 'metadata refreshes dedupe overlapping loads');
+    assert.ok(source.includes('transcriptMetadataState.loading = true;'), 'metadata refreshes expose a loading state');
     assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
     assert.ok(source.includes('const sessionStatusRecords = new Map();'), 'session status, notification throttle, working tone, and badge pulse state share one session-keyed owner');
@@ -1518,7 +1609,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
     const codeMirrorLoaderSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     assert.ok(codeMirrorLoaderSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loading reports local bundle failures through a localized reason');
-    assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision)'), 'the metadata poll checks the live server version and client bundle revision');
+    assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision)'), 'the metadata poll checks the live server version and client bundle revision');
     // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
     // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
     assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in !== false/.test(source), '#39: agentLoggedIn treats only confirmed logged-out status as unavailable');
@@ -1529,7 +1620,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function agentUnavailableReason\(agent\)[\s\S]*unavailable_reason/.test(source), '#62: unavailable agents carry a server-provided reason');
     assert.ok(/agentUnavailableReason\(agent\) === 'not-on-path'[\s\S]*t\('menu\.tmux\.agentUnavailablePath'\)/.test(source), '#62: missing agent CLIs show the server-PATH detail');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['menu.tmux.agentUnavailablePath'], 'Not on server PATH', '#62: missing-agent detail is localized in English');
-    assert.ok(/function applyAgentAvailabilityPayload[\s\S]*payload\.agentAuth[\s\S]*payload\.availableAgents/.test(source) && source.includes('applyAgentAvailabilityPayload(transcriptMeta)'), '#39: the metadata poll refreshes agent login and installed-agent status');
+    assert.ok(/function applyAgentAvailabilityPayload[\s\S]*payload\.agentAuth[\s\S]*payload\.availableAgents/.test(source) && source.includes('applyAgentAvailabilityPayload(transcriptMetadataState.payload)'), '#39: the metadata poll refreshes agent login and installed-agent status');
     // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
     // so the chat input enables to match what the backend will run, and defaults to auto.
     assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
@@ -1615,8 +1706,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.info-tree-record\s*\{[\s\S]*?border:\s*1px solid var\(--info-tree-record-border\)/.test(infoCss), 'YO!info tree records use the shared tree border token');
     assert.ok(/\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*?background:\s*var\(--info-tree-line\)/.test(infoCss), 'YO!info tree connectors use the shared tree line token');
     assert.equal(infoCss.includes('--info-column-resizer-hit-width'), false, 'old YO!info column resize tokens are removed');
-    assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'info-style panels reserve a row for action controls');
-    assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(infoCss), 'action row survives a collapsed detail header');
+    assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(infoCss), 'info-style panels inherit the shared three-row action scaffold');
+    assert.ok(/\.info-panel\.details-collapsed\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(infoCss), 'action row survives a collapsed detail header through the shared scaffold token');
     // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
     assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
@@ -1636,7 +1727,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/if \(isTmuxSession\(session\) && !sessionTerminalIsLive\(session\)\) \{\s*const ensured = await ensureSession/.test(source), 'C12 F1: moveSessionToSlot only awaits ensureSession when the pane is not already live');
     assert.equal(source.includes('function startCustomDragPreview'), false, '#47: the tab clone-follow preview is removed');
     assert.ok(/function paneTabDropPlacement[\s\S]*?dragMeasureStrip\(strip\)/.test(source), '#47: drop placement measures the strip via the per-drag cache');
-    assert.ok(/function dragMeasureStrip\([\s\S]*?dragSession != null[\s\S]*?dragTabRectCache/.test(source), '#47: the rect cache is only active during a live drag');
+    assert.ok(/function dragMeasureStrip\([\s\S]*?dragState\.item != null[\s\S]*?dragState\.tabRectCache/.test(source), '#47: the record-owned rect cache is only active during a live drag');
     assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the YO!summary panel is a markdown-body container, not a raw <pre>');
     assert.ok(/transcript-head">\$\{esc\(t\('menu\.tmux\.aiTranscript'/.test(source), 'the YO!summary panel head names the session via the localized aiTranscript key');
     assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the YO!summary stream renders accumulated text through the markdown pipeline');
@@ -1972,10 +2063,10 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
 	    assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
 	    assert.ok(/\.topbar-owner-status-part\[data-owner-role="leader"\]/.test(css), 'topbar ownership indicator highlights leader state');
-	    assert.ok(/\.topbar-activity\s*\{[\s\S]*gap:\s*4px[\s\S]*padding:\s*0 6px/.test(css), 'topbar activity pill uses the narrower spacing contract');
+	    assert.ok(/\.topbar-activity\s*\{[\s\S]*gap:\s*var\(--space-4\)[\s\S]*padding:\s*0 var\(--space-6\)/.test(css), 'topbar activity pill uses the narrower shared spacing contract');
 	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*display:\s*inline-flex/.test(css), 'activity counts align their number and shared status ball');
-	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*gap:\s*2px/.test(css), 'topbar activity count keeps number-to-dot spacing compact');
-	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*-1px/.test(css), 'topbar activity separator adds no extra horizontal padding');
+	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*gap:\s*var\(--space-2\)/.test(css), 'topbar activity count keeps number-to-dot spacing compact');
+	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*calc\(-1 \* var\(--space-1\)\)/.test(css), 'topbar activity separator adds no extra horizontal padding');
 	    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)[\s\S]*width:\s*var\(--agent-status-ball-size\)/.test(css), 'topbar activity balls reuse the shared status-ball size parent');
 	    assert.ok(/body\.app-vw-lte-1100 \.topbar-activity-idle\s*\{[\s\S]*display:\s*none/.test(css), 'topbar idle label still hides at the existing narrow-viewport breakpoint');
 	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
@@ -2560,7 +2651,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function installPreviewZoomSurface'), 'visual previews share one zoom installer');
     assert.ok(source.includes('const previewZoomPolicy = Object.freeze'), 'visual preview zoom limits are owned by one policy object');
     assert.ok(source.includes('const previewZoomActions = Object.freeze'), 'visual preview zoom toolbar actions are owned by one action table');
-    assert.ok(/function previewZoomButton[\s\S]*button\.dataset\.previewZoomAction = action\.id/.test(source), 'visual preview zoom buttons come from one helper');
+    assert.ok(/function previewZoomButton[\s\S]*return makeButton\(\{[\s\S]*dataset: \{previewZoomAction: action\.id\}/.test(source), 'visual preview zoom buttons come from the shared button helper');
     assert.ok(source.includes('function previewZoomOptionsForKind'), 'visual preview fit caps come from one renderer options helper');
     assert.ok(/mermaidFull: Object\.freeze\(\{[\s\S]*wheelZoom: true[\s\S]*panDrag: true/.test(source), 'Mermaid preview zoom owns wheel zoom and drag pan through renderer defaults');
     assert.ok(/function bindPreviewZoomDragPan[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*viewport\.scrollLeft/.test(source), 'Mermaid preview drag pan is routed through the shared zoom surface');
@@ -2650,7 +2741,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'editor theme button always cycles Bright/Dark/Vanilla');
     assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'editor theme button always renders the visible three-state label');
     assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
-    assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
+    assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
+    assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');
     assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
     // Editor toolbar alignment: left/center/right are owned by parent groups, not per-button spacer hacks.
     assert.ok(/\.file-editor-toolbar-zone\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center/.test(css), 'editor toolbar children inherit shared zone behavior');

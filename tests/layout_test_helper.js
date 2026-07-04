@@ -552,7 +552,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     },
     Notification: notification,
     performance: {now: () => 0},
-    requestAnimationFrame(callback) { return callback(); },
+    requestAnimationFrame: options.requestAnimationFrame || (callback => callback()),
+    cancelAnimationFrame: options.cancelAnimationFrame || (() => {}),
     setInterval: testSetInterval,
     // The bundle schedules the batched /api/fs/batch directory-listing flush via
     // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
@@ -668,10 +669,20 @@ globalThis.__layoutTestApi = {
   createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
   showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {
-    backgroundOwnerStatusPayload = payload;
-    backgroundOwnerStatusLoaded = Boolean(payload);
-    backgroundOwnerStatusLoading = false;
-    backgroundOwnerStatusError = '';
+    backgroundOwnerStatusState.guard.invalidate();
+    backgroundOwnerStatusState.payload = payload;
+    backgroundOwnerStatusState.loading = false;
+    backgroundOwnerStatusState.error = '';
+  },
+  refreshBackgroundOwnerStatusForTest: refreshBackgroundOwnerStatus,
+  applyBackgroundOwnerStatusPayloadForTest: applyBackgroundOwnerStatusPayload,
+  backgroundOwnerStatusStateForTest() {
+    return {
+      payload: backgroundOwnerStatusState.payload,
+      loading: backgroundOwnerStatusState.loading,
+      error: backgroundOwnerStatusState.error,
+      request: backgroundOwnerStatusState.request,
+    };
   },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
@@ -682,7 +693,18 @@ globalThis.__layoutTestApi = {
   transcriptMetadataLoadErrorLabelForTest: transcriptMetadataLoadErrorLabel,
   transcriptMetadataLoadErrorSnapshotForTest: transcriptMetadataLoadErrorSnapshot,
   fetchAndApplySessionMetadataForTest: fetchAndApplySessionMetadata,
-  setTranscriptMetadataLoadErrorForTest(value) { transcriptMetaLoadError = value; },
+  setTranscriptMetadataLoadErrorForTest(value) { transcriptMetadataState.error = value; },
+  refreshSessionMetadataForTest: refreshSessionMetadata,
+  applySessionMetadataPayloadForTest: applySessionMetadataPayload,
+  transcriptMetadataStateForTest() {
+    return {
+      payload: transcriptMetadataState.payload,
+      loading: transcriptMetadataState.loading,
+      loaded: transcriptMetadataState.loaded,
+      error: transcriptMetadataState.error,
+      request: transcriptMetadataState.request,
+    };
+  },
   repoComparisonErrorHtmlForTest: repoComparisonErrorHtml,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
   updateNotificationAllowsVersionForTest: updateNotificationAllowsVersion,
@@ -760,6 +782,8 @@ globalThis.__layoutTestApi = {
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fetchSessionFilesForTest: fetchSessionFiles,
+  fileExplorerSessionFilesStateForTest() { return {...fileExplorerSessionFilesState}; },
+  sessionFilesPayloadSignatureForPayloadForTest: sessionFilesPayloadSignatureForPayload,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
@@ -771,6 +795,25 @@ globalThis.__layoutTestApi = {
   diffRefResetButtonHtml,
   diffRefSelectOptionsHtml,
   diffRefPopoverItems,
+  ensureDiffRefPopoverForTest: ensureDiffRefPopover,
+  hideDiffRefPopoverForTest: hideDiffRefPopover,
+  handleDiffRefPopoverKeydownForTest: handleDiffRefPopoverKeydown,
+  setDiffRefPopoverStateForTest(input, items = [], activeIndex = -1) {
+    diffRefPopoverState.input = input;
+    diffRefPopoverState.items = items;
+    diffRefPopoverState.activeIndex = activeIndex;
+    if (diffRefPopoverState.node) diffRefPopoverState.node.hidden = false;
+  },
+  diffRefPopoverStateForTest() {
+    return {
+      hasNode: Boolean(diffRefPopoverState.node),
+      input: diffRefPopoverState.input,
+      itemCount: diffRefPopoverState.items.length,
+      activeIndex: diffRefPopoverState.activeIndex,
+      listenersInstalled: diffRefPopoverState.listenersInstalled,
+      hidden: diffRefPopoverState.node?.hidden !== false,
+    };
+  },
   diffRefCompactDisplayForTest: diffRefCompactDisplay,
   diffRefPopoverSubjectPartsForTest: diffRefPopoverSubjectParts,
   diffRefParams,
@@ -788,17 +831,22 @@ globalThis.__layoutTestApi = {
   yoagentResolvedBackendForTest: yoagentResolvedBackend,
   yoagentAvailableBackendOptionsForTest: yoagentAvailableBackendOptions,
   yoagentChatEnabledForTest: yoagentChatEnabled,
-  setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
-  setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
-  setYoagentActiveChatRequestForTest(value) { yoagentActiveChatRequest = value; },
-  yoagentActiveChatRequestForTest() { return yoagentActiveChatRequest; },
-  yoagentChatQueueForTest() { return yoagentChatQueue.slice(); },
+  setYoagentDraftForTest(value) { yoagentChatState.draft = String(value || ''); },
+  setYoagentBusyForTest(value) { yoagentChatState.busy = Boolean(value); },
+  setYoagentActiveChatRequestForTest(value) { yoagentChatState.activeRequest = value; },
+  yoagentActiveChatRequestForTest() { return yoagentChatState.activeRequest; },
+  yoagentChatQueueForTest() { return yoagentChatState.queue.slice(); },
+  yoagentChatStateForTest() { return {...yoagentChatState, queue: yoagentChatState.queue.slice()}; },
+  yoagentStartupStateForTest() { return {...yoagentStartupState}; },
   cancelQueuedYoagentChatMessageForTest: cancelQueuedYoagentChatMessage,
   cancelActiveYoagentChatRequestForTest: cancelActiveYoagentChatRequest,
   sendYoagentChatMessageForTest: sendYoagentChatMessage,
-  setYoagentErrorForTest(value) { yoagentError = value && typeof value === 'object' ? value : String(value || ''); },
-  setYoagentNoticeForTest(value) { yoagentNotice = value; },
-  setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
+  executeYoagentActionSendForTest: executeYoagentActionSend,
+  prewarmYoagentForTest: prewarmYoagent,
+  clearYoagentConversationForTest: clearYoagentConversation,
+  setYoagentErrorForTest(value) { yoagentChatState.error = value && typeof value === 'object' ? value : String(value || ''); },
+  setYoagentNoticeForTest(value) { yoagentChatState.notice = value; },
+  setYoagentMessagesForTest(value) { yoagentConversationState.guard.invalidate(); yoagentConversationState.messages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
   applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
   refreshActivitySummaryForTest: refreshActivitySummary,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
@@ -811,9 +859,25 @@ globalThis.__layoutTestApi = {
   yoagentNavigateChatHistoryForTest: yoagentNavigateChatHistory,
   resetYoagentComposerHistoryForTest: resetYoagentComposerHistory,
   applyYoagentConversationPayloadForTest: applyYoagentConversationPayload,
+  loadYoagentConversationForTest: loadYoagentConversation,
+  yoagentConversationStateForTest() {
+    return {
+      messages: yoagentConversationState.messages,
+      pendingWaits: yoagentConversationState.pendingWaits,
+      loaded: yoagentConversationState.loaded,
+      loading: yoagentConversationState.loading,
+      path: yoagentConversationState.path,
+      displayPath: yoagentConversationState.displayPath,
+      streamingCount: yoagentConversationState.streamingMessages.size,
+      request: yoagentConversationState.request,
+    };
+  },
   applyYoagentJobsPayloadForTest: applyYoagentJobsPayload,
   yoagentJobsHtmlForTest: yoagentJobsHtml,
   loadYoagentJobsForTest: loadYoagentJobs,
+  yoagentJobsStateForTest() {
+    return {items: yoagentJobsState.items, loading: yoagentJobsState.loading, request: yoagentJobsState.request};
+  },
   confirmYoagentJobForTest: confirmYoagentJob,
   cancelYoagentJobForTest: cancelYoagentJob,
   clearYoagentPendingWaitForTest: clearYoagentPendingWait,
@@ -827,6 +891,27 @@ globalThis.__layoutTestApi = {
   commonAncestorPath,
   cancelPendingFileExplorerActiveSync,
   fileExplorerSyncPlanForTest: fileExplorerSyncPlan,
+  fileExplorerSyncStateForTest() { return {...fileExplorerSyncState}; },
+  setFileExplorerVisibleSyncTargetForTest: setFileExplorerVisibleSyncTarget,
+  rememberFileExplorerSyncExpandedStateForTest: rememberFileExplorerSyncExpandedState,
+  resetFileExplorerSyncManualCollapsesForTest: resetFileExplorerSyncManualCollapsesIfNeeded,
+  rememberFileExplorerSyncManualCollapseForTest: rememberFileExplorerSyncManualCollapse,
+  fileExplorerSyncManualCollapsedPathsForTest() { return Array.from(fileExplorerSyncManualCollapsedPaths).sort(); },
+  fileExplorerSyncTargetRecordForTest(targetKey, create = false, touch = false) {
+    const record = fileExplorerSyncTargetRecord(targetKey, create, touch);
+    return record ? {
+      expandedPaths: [...record.expandedPaths],
+      manualCollapsedPaths: [...record.manualCollapsedPaths].sort(),
+    } : null;
+  },
+  touchFileExplorerSyncTargetRecordForTest(targetKey) { return Boolean(fileExplorerSyncTargetRecord(targetKey, true, true)); },
+  fileExplorerSyncTargetRecordKeysForTest() { return [...fileExplorerSyncTargetRecords.keys()]; },
+  fileExplorerMemoryCacheLimitForTest: fileExplorerMemoryCacheLimit,
+  setFileExplorerSyncStateForTest(value = {}) {
+    fileExplorerSyncState.inFlightSignature = String(value.inFlightSignature || '');
+    fileExplorerSyncState.appliedPlanKey = String(value.appliedPlanKey || '');
+    fileExplorerSyncState.generation = Number(value.generation || 0);
+  },
   fileExplorerSessionHighlightClassForPath,
   fileExplorerSessionHighlightClassForTest(path, kind = 'dir', preferredItem = null) {
     return fileExplorerSessionHighlightClassForPath(path, kind, {sessionHighlightSets: fileExplorerSessionHighlightSets(preferredItem)});
@@ -852,9 +937,30 @@ globalThis.__layoutTestApi = {
   clientServerWatchStateForTest: clientServerWatchState,
   clientPushCanSupplyDataForTest: clientPushCanSupplyData,
   readOnlyModeForTest() { return readOnlyMode; },
-  setClientEventsSourceForTest(value = {}) { clientEventsSource = value; },
+  setClientEventsSourceForTest(value = {}) { clientEventTransportState.source = value; },
+  clientEventTransportStateForTest() {
+    return {
+      source: clientEventTransportState.source,
+      connected: clientEventTransportState.connected,
+      queued: clientEventTransportState.queue.size,
+      frame: clientEventTransportState.frame,
+      resyncTimer: clientEventTransportState.resyncTimer,
+    };
+  },
   syncServerWatchRootsForTest: syncServerWatchRoots,
+  syncServerWatchRootsNowForTest: syncServerWatchRootsNow,
+  serverWatchRootsStateForTest() {
+    return {
+      signature: serverWatchRootsState.signature,
+      inFlight: serverWatchRootsState.inFlight,
+      syncedAt: serverWatchRootsState.syncedAt,
+      timer: serverWatchRootsState.timer,
+      pendingOptions: {...serverWatchRootsState.pendingOptions},
+    };
+  },
+  setServerWatchRootsSyncedAtForTest(value) { serverWatchRootsState.syncedAt = Number(value) || 0; },
   fileExplorerPaneTabHtml,
+  makeButtonForTest: makeButton,
   fetchDirectoryForTest: fetchDirectory,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
@@ -883,6 +989,16 @@ globalThis.__layoutTestApi = {
   debugPanelHtmlForTest: debugPanelHtml,
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
+  debugGraphEventRecordsForTest() {
+    return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
+      id,
+      bucketStartMs: Number(record?.bucket?.startMs || 0),
+      responseBytes: Number(record?.responseBytes || 0),
+      lastSeenAt: Number(record?.lastSeenAt || 0),
+    }));
+  },
+  compactJsDebugGraphBucketsForTest: compactJsDebugGraphBuckets,
+  recordApiDebugResponseBytesForGraphForTest: recordApiDebugResponseBytesForGraph,
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
@@ -895,10 +1011,10 @@ globalThis.__layoutTestApi = {
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {
-      firstSampleReceived: jsDebugStatsFirstSampleReceived,
-      inFlight: jsDebugStatsPollInFlight,
-      pending: jsDebugStatsPollPending,
-      pendingForceGraphRefresh: jsDebugStatsPollPendingForceGraphRefresh,
+      firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,
+      inFlight: jsDebugStatsPollState.inFlight,
+      pending: jsDebugStatsPollState.pending,
+      pendingForceGraphRefresh: jsDebugStatsPollState.pendingForceGraphRefresh,
       historyStartSeconds: jsDebugHistoryReadiness.loadedStartSeconds,
       historyReadiness: jsDebugHistoryReadinessSnapshot(),
     };
@@ -916,6 +1032,15 @@ globalThis.__layoutTestApi = {
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
+  clearJsDebugServerHistoryForTest: clearJsDebugServerHistory,
+  jsDebugStatsUploadStateForTest() {
+    return {
+      timer: jsDebugStatsUploadState.timer,
+      worker: Boolean(jsDebugStatsUploadState.worker),
+      generation: jsDebugStatsUploadState.generation,
+      pendingBuckets: jsDebugGraphPendingServerBuckets.size,
+    };
+  },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
   recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
@@ -968,13 +1093,21 @@ globalThis.__layoutTestApi = {
   runSearchHistoryQueryForTest: runSearchHistoryQuery,
   refreshRunHistoryDataForTest: refreshRunHistoryData,
   setSearchHistoryStateForTest(query = '', searchPayload = {query: '', results: []}, historyPayload = {runs: []}) {
-    searchHistoryQuery = String(query || '');
-    searchHistoryPayload = searchPayload || {query: '', results: []};
-    runHistoryPayload = historyPayload || {runs: []};
-    searchHistoryLoading = false;
-    runHistoryLoading = false;
-    searchHistoryError = '';
-    runHistoryError = '';
+    searchHistoryState.guard.invalidate();
+    runHistoryState.guard.invalidate();
+    searchHistoryState.query = String(query || '');
+    searchHistoryState.payload = searchPayload || {query: '', results: []};
+    runHistoryState.payload = historyPayload || {runs: []};
+    searchHistoryState.loading = false;
+    runHistoryState.loading = false;
+    searchHistoryState.error = '';
+    runHistoryState.error = '';
+  },
+  searchHistoryStateForTest() {
+    return {...searchHistoryState};
+  },
+  runHistoryStateForTest() {
+    return {...runHistoryState};
   },
   infoPanelSubTabForTest() { return infoPanelSubTab; },
   setInfoPanelSubTabForTest(value) { infoPanelSubTab = normalizedInfoSubTab(value); },
@@ -1075,10 +1208,10 @@ globalThis.__layoutTestApi = {
   reloadIsSafeForTest: reloadIsSafe,
   selfUpdateReloadStateForTest() {
     return {
-      pending: selfUpdateReloadPending,
-      target: selfUpdateReloadTarget,
-      attempts: selfUpdateReloadAttempts,
-      deferredToastShown: selfUpdateReloadDeferredToastShown,
+      pending: selfUpdateReloadState.pending,
+      target: selfUpdateReloadState.target,
+      attempts: selfUpdateReloadState.attempts,
+      deferredToastShown: selfUpdateReloadState.deferredToastShown,
       serverVersionReloadHandled,
     };
   },
@@ -1113,6 +1246,9 @@ globalThis.__layoutTestApi = {
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   setDocumentVisibilityForTest(value) { Object.defineProperty(document, 'visibilityState', {value: String(value || 'visible'), configurable: true}); },
   queueClientPushEventForTest: queueClientPushEvent,
+  flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
+  scheduleReconnectResyncForTest: scheduleReconnectResync,
+  installClientEventStreamForTest: installClientEventStream,
   commandPaletteItemScore,
   commandPaletteRankItems,
   commandPaletteCandidateItems,
@@ -1121,12 +1257,13 @@ globalThis.__layoutTestApi = {
   commandPaletteCommandItems,
   commandPaletteItems,
   invokeCommandPaletteItemForTest(item, event = null) {
-    commandPaletteItemsCache = item ? [item] : [];
-    commandPaletteIndex = 0;
+    commandPaletteState.items = item ? [item] : [];
+    commandPaletteState.index = 0;
     return invokeCommandPaletteSelection(event);
   },
   dedupeFileSearchResults,
-  setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteQuery = query || ''; },
+  setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteState.query = query || ''; },
+  commandPaletteStateForTest() { return {...commandPaletteState, items: commandPaletteState.items.slice()}; },
   commandPaletteMatches,
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
@@ -1139,7 +1276,7 @@ globalThis.__layoutTestApi = {
   terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
   syncTerminalAttentionHighlightForTest: syncTerminalAttentionHighlight,
   clearTerminalAttentionHighlightForTest: clearTerminalAttentionHighlight,
-  transcriptInfoForTest(session) { return transcriptMeta.sessions?.[session]; },
+  transcriptInfoForTest(session) { return transcriptMetadataState.payload.sessions?.[session]; },
   applyTranscriptsPayloadForTest: applyTranscriptsPayload,
   applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,
   syncAgentWindowActivityAnimationDelaysForTest: syncAgentWindowActivityAnimationDelays,
@@ -1354,6 +1491,28 @@ globalThis.__layoutTestApi = {
   paneSwapIntentAllowed,
   swapPaneSlots,
   directoryEntriesSignature,
+  fileExplorerDirectoryRecordForTest(path) {
+    const record = fileExplorerDirectoryRecord(path);
+    return record ? {
+      signature: record.signature,
+      knownEntryNames: Array.from(record.knownEntryNames || []),
+    } : null;
+  },
+  recordDirectorySignatureForTest: recordDirectorySignature,
+  markNewDirectoryEntriesForTest: markNewDirectoryEntries,
+  fileExplorerEntryIsNewForTest: fileExplorerEntryIsNew,
+  invalidateFileExplorerFsCachesForTest: invalidateFileExplorerFsCaches,
+  invalidateFileExplorerRootsForTest: invalidateFileExplorerRoots,
+  fileExplorerFsResourceRecordsForTest() {
+    return [...fileExplorerFsResourceRecords.entries()].map(([key, record]) => ({
+      key,
+      generation: record.generation,
+      hasValue: record.value !== undefined,
+      value: record.value,
+      storedAt: record.storedAt,
+      requestActive: Boolean(record.request),
+    }));
+  },
   editorModeLabel,
   editorWrapValue,
   editorViewModeFor,
@@ -1427,6 +1586,12 @@ globalThis.__layoutTestApi = {
   applyAttentionAcknowledgementResponseForTest: applyAttentionAcknowledgementResponse,
   acknowledgeAttentionKeysForTest: acknowledgeAttentionKeys,
   postAttentionAcknowledgementKeysForTest: postAttentionAcknowledgementKeys,
+  setAttentionAcknowledgementPendingForTest(key) {
+    const record = attentionAcknowledgementRecord(key, true);
+    if (!record) return null;
+    record.pending = true;
+    return {...record};
+  },
   clearSessionAttentionAcknowledgementRecordsForTest: clearSessionAttentionAcknowledgementRecords,
   attentionAcknowledgementRecordForTest(key) {
     const record = attentionAcknowledgementRecord(key);
@@ -1466,6 +1631,8 @@ globalThis.__layoutTestApi = {
   markdownPreviewHtml,
   markdownPreviewImageTarget,
   sanitizeStandaloneSvg,
+  sanitizeStandaloneSvgString,
+  standaloneSvgBlockedTagsForTest() { return Array.from(STANDALONE_SVG_BLOCKED_TAGS); },
   isMermaidFenceLanguage,
   keyboardShortcutsHtml,
   openFileEditorItems,
@@ -1561,7 +1728,8 @@ globalThis.__layoutTestApi = {
   paneTabDisplayContext,
   fileTabParentDisambiguators,
   ensureFileTabStateForItem,
-  setDragSessionForTest(session) { dragSession = session; },
+  setDragSessionForTest(session) { dragState.item = session; },
+  dragStateForTest() { return {...dragState}; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
   renderSessionButtonsForTest: renderSessionButtons,
   sessionButtonsForTest() { return sessionButtons; },
@@ -1611,28 +1779,60 @@ globalThis.__layoutTestApi = {
   removePaneFromLayout,
   removeSessionFromLayout,
   runtimeIntervalDelay,
+  resetRuntimeIntervalForTest: resetRuntimeInterval,
+  clearRuntimeIntervalForTest: clearRuntimeInterval,
+  runtimeIntervalActiveForTest: runtimeIntervalActive,
+  runtimeIntervalStateForTest(name) {
+    const state = runtimeIntervals.get(name);
+    return state ? {active: state.active === true, delay: state.delay, timer: state.timer} : null;
+  },
   sessionPopoverHtml,
   setFileQuickOpenCandidatesForTest(root, files) {
-    fileQuickOpenRoot = root;
-    fileQuickOpenCandidates = files;
-    fileQuickOpenLoading = false;
-    fileQuickOpenError = '';
+    fileQuickOpenState.root = root;
+    fileQuickOpenState.candidates = files;
+    fileQuickOpenState.loading = false;
+    fileQuickOpenState.error = '';
     commandPaletteMode = 'files';
   },
   setFileQuickOpenLoadingForTest(loading) {
-    fileQuickOpenLoading = Boolean(loading);
-    fileQuickOpenError = '';
+    fileQuickOpenState.loading = Boolean(loading);
+    fileQuickOpenState.error = '';
     commandPaletteMode = 'files';
   },
   setFileQuickOpenErrorForTest(error) {
-    fileQuickOpenCandidates = [];
-    fileQuickOpenLoading = false;
-    fileQuickOpenError = error;
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.loading = false;
+    fileQuickOpenState.error = error;
     commandPaletteMode = 'files';
   },
+  fileQuickOpenStateForTest() { return {...fileQuickOpenState, candidates: fileQuickOpenState.candidates.slice()}; },
+  installCommandPaletteFixtureForTest() {
+    const node = document.createElement('div');
+    node.className = 'app-modal-overlay command-palette';
+    const dialog = document.createElement('div');
+    dialog.className = 'command-palette-dialog';
+    const input = document.createElement('input');
+    input.className = 'command-palette-input';
+    input.focus = () => {};
+    const status = document.createElement('div');
+    status.className = 'command-palette-status';
+    const results = document.createElement('div');
+    results.className = 'command-palette-results';
+    dialog.appendChild(input);
+    dialog.appendChild(status);
+    dialog.appendChild(results);
+    node.appendChild(dialog);
+    commandPaletteState.node = node;
+    return node;
+  },
+  openCommandPaletteForTest: openCommandPalette,
+  closeCommandPaletteForTest: closeCommandPalette,
+  scheduleFileQuickOpenSearchForTest: scheduleFileQuickOpenSearch,
+  refreshFileQuickOpenCandidatesForTest: refreshFileQuickOpenCandidates,
+  abortFileQuickOpenSearchForTest: abortFileQuickOpenSearch,
   setCommandPaletteQueryForTest(value) {
-    commandPaletteQuery = String(value || '');
-    commandPaletteIndex = 0;
+    commandPaletteState.query = String(value || '');
+    commandPaletteState.index = 0;
   },
   commandPaletteResultsHtmlForTest() {
     const query = commandPaletteSearchQuery();
@@ -1669,6 +1869,8 @@ globalThis.__layoutTestApi = {
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
   startPaneDrag,
+  beginFileDragForTest: beginFileDrag,
+  cancelDragOperationStateForTest: cancelDragOperationState,
   paneDragPayload,
   endSessionDrag,
   startFileTreeDrag,
@@ -1815,20 +2017,25 @@ globalThis.__layoutTestApi = {
   setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
   fileExplorerRootForTest() { return fileExplorerRoot; },
   setFileExplorerDirListingForTest(path, entries) {
-    fileExplorerDirListingCache.set(normalizeDirectoryPath(path), {entries, at: Date.now()});
+    setFileExplorerFsResourceValue('list', path, entries);
   },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
   },
   setTranscriptInfoForTest(session, info) {
-    transcriptMeta.sessions = {...(transcriptMeta.sessions || {}), [session]: info};
+    transcriptMetadataState.payload.sessions = {...(transcriptMetadataState.payload.sessions || {}), [session]: info};
   },
   setTranscriptSessionOrderForTest(values) {
-    transcriptMeta.session_order = Array.isArray(values) ? values.map(value => String(value)) : [];
+    transcriptMetadataState.payload.session_order = Array.isArray(values) ? values.map(value => String(value)) : [];
   },
   setActivitySummaryPayloadForTest(payload) {
-    activitySummaryPayload = payload;
-    yoagentStartupActivitySummaryPayload = null;
+    activitySummaryState.guard.invalidate();
+    activitySummaryState.payload = payload;
+    activitySummaryState.refreshing = false;
+    yoagentStartupState.activityPayload = null;
+  },
+  activitySummaryStateForTest() {
+    return {payload: activitySummaryState.payload, refreshing: activitySummaryState.refreshing};
   },
   yoagentRecentAgentsHtmlForTest: yoagentRecentAgentsHtml,
   applyServerMetadataPulsesForTest(session, pulses) {
@@ -1856,8 +2063,16 @@ globalThis.__layoutTestApi = {
   shareCreatePayloadFromFormForTest: shareCreatePayloadFromForm,
   shareBuildUiMessageForTest: shareBuildUiMessage,
   setActiveSharesForTest(shares) { setActiveShares(shares || []); },
-  setShareHostSocketForTest(token, socket) { shareHostSockets.set(String(token || ''), socket); },
-  shareHostQueueForTest(token) { return [...(shareHostQueues.get(String(token || '')) || [])]; },
+  setShareHostSocketForTest(token, socket) {
+    const record = shareHostConnectionRecord(token, {create: true});
+    if (record) record.socket = socket;
+  },
+  shareHostQueueForTest(token) { return [...(shareHostConnectionRecord(token)?.queue || [])]; },
+  shareHostConnectionCountForTest() { return shareHostConnectionRecords.size; },
+  shareHostConnectionRecordForTest(token) { return shareHostConnectionRecord(token); },
+  enqueueShareHostMessageForTest: enqueueShareHostMessage,
+  ensureShareHostSocketForTest: ensureShareHostSocket,
+  ensureShareHostSocketsForTest: ensureShareHostSockets,
   sharePublishPointerEventForTest: sharePublishPointerEvent,
   applyShareUiMessageForTest: applyShareUiMessage,
   shareMirrorProtocolForTest: shareMirrorProtocol,
@@ -1955,23 +2170,28 @@ globalThis.__layoutTestApi = {
   shareWrappedTextDigestSnapshotForTest: shareWrappedTextDigestSnapshot,
   applyShareUiStateForTest: applyShareUiState,
   applyShareScrollStateForTest: applyShareScrollState,
+  applyShareScrollSnapshotForTest: applyShareScrollSnapshot,
   shareCanPublishUiForTest: shareCanPublishUi,
   shareCanPublishScrollForTest: shareCanPublishScroll,
-  setShareLastAppliedScrollForTest(target, state, payload = {}) {
+  setShareScrollTargetRecordForTest(target, state, payload = {}) {
     const cleanTarget = String(target || '');
     const cleanState = state || {};
-    shareLastAppliedScrollByTarget.set(cleanTarget, {
-      ...cleanState,
-      payload: {...payload, target: cleanTarget, ...cleanState},
-    });
+    const record = shareScrollTargetRecord(cleanTarget);
+    record.top = Number(cleanState.top || 0);
+    record.left = Number(cleanState.left || 0);
+    record.payload = {...payload, target: cleanTarget, ...cleanState};
   },
-  shareLastAppliedScrollForTest(target) {
-    const state = shareLastAppliedScrollByTarget.get(String(target || ''));
+  shareScrollTargetPositionForTest(target) {
+    const state = shareScrollTargetRecords.get(String(target || ''));
     return state ? {top: state.top, left: state.left} : null;
   },
-  shareLastAppliedScrollPayloadForTest(target) {
-    const state = shareLastAppliedScrollByTarget.get(String(target || ''))?.payload;
+  shareScrollTargetPayloadForTest(target) {
+    const state = shareScrollTargetRecords.get(String(target || ''))?.payload;
     return state ? {...state} : null;
+  },
+  shareScrollTargetRecordForTest(target) {
+    const record = shareScrollTargetRecords.get(String(target || ''));
+    return record ? {...record, payload: {...record.payload}} : null;
   },
   restoreShareReadonlyScrollTargetForTest: restoreShareReadonlyScrollTarget,
   restoreShareScrollTargetByKeyForTest: restoreShareScrollTargetByKey,
@@ -1985,20 +2205,24 @@ globalThis.__layoutTestApi = {
   shareReadonlyShouldPreventDefault,
   blockShareReadonlyInteraction,
   setSessionFilesPayloadForTest(payload) {
-    fileExplorerSessionFilesPayload = payload;
+    setSessionFilesPayloadForDestination('finder', payload);
   },
   setSessionFilesPayloadForDestinationForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
   setSessionFilesLoadingForTest(loading) {
-    fileExplorerSessionFilesLoading = Boolean(loading);
+    fileExplorerSessionFilesState.loading = Boolean(loading);
   },
   setFileExplorerSessionFilesPayloadForTest(payload) {
-    fileExplorerSessionFilesPayload = payload;
+    setSessionFilesPayloadForDestination('finder', payload);
   },
   sessionFilesPayloadForTest() {
-    return fileExplorerSessionFilesPayload;
+    return fileExplorerSessionFilesState.payload;
   },
+  applyLayoutUrlStateSeedForTest: applyLayoutUrlStateSeed,
+  applyPendingLayoutUrlStateForTest: applyPendingLayoutUrlState,
+  scheduleLayoutUrlStateRefreshForTest: scheduleLayoutUrlStateRefresh,
+  layoutUrlStateForTest() { return {...layoutUrlState}; },
   setSessionFilesCachePayloadForTest(session, payload) {
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {
       payload: {...payload, session},
@@ -2043,12 +2267,15 @@ globalThis.__layoutTestApi = {
   normalizeFileExplorerMode,
   setTabberActivityForTest(payload) {
     tabberActivityPayload = payload;
-    tabberActivityRequestGeneration = 0;
-    tabberActivityAppliedRequestGeneration = 0;
-    tabberActivityLoaded = true;
-    tabberActivityFetchPromise = null;
+    tabberActivityState.requestGeneration = 0;
+    tabberActivityState.appliedGeneration = 0;
+    tabberActivityState.loaded = true;
+    tabberActivityState.request = null;
   },
   applyTabberActivityPayloadForTest: applyTabberActivityPayload,
+  fetchTabberActivityForTest: fetchTabberActivity,
+  tabberActivityPayloadForTest() { return tabberActivityPayload; },
+  tabberActivityStateForTest() { return {...tabberActivityState}; },
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) {
     const state = tabberSessionFilesState(session);
@@ -2232,7 +2459,7 @@ globalThis.__layoutTestApi = {
     return globalThis.__layoutTestApi.serialize(defaultLayoutSlots());
   },
   customDragPreviewForTest() {
-    return customDragPreview;
+    return dragState.customPreview;
   },
   clampToViewport,
   createHoverPopoverForTest(options) {

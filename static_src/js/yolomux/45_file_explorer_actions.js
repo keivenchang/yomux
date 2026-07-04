@@ -26,7 +26,7 @@ function startFileTreeDrag(event, row, fullPath, entry) {
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const paths = fileTreeActionPaths(fullPath);
   const payloadObject = {path: fullPath, paths, kind: entry.kind, name: entry.name};
-  dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+  beginFileDrag(payloadObject);
   const payload = JSON.stringify(payloadObject);
   event.dataTransfer.effectAllowed = 'copy';
   event.dataTransfer.setData('application/x-yolomux-file', payload);
@@ -36,18 +36,13 @@ function startFileTreeDrag(event, row, fullPath, entry) {
 
 async function fetchFilePathInfo(path, options = {}) {
   const normalized = normalizeDirectoryPath(path);
-  const canReuse = options.fresh !== true;
-  const pathInfoTtlMs = fileExplorerFsCacheTtlMs();
-  if (canReuse && pathInfoTtlMs > 0) {
-    const cached = fileExplorerPathInfoCache.get(normalized);
-    if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
-  }
-  if (suppressBackgroundFilesystemFetch(options)) return null;
-  return dedupeInflight(fileExplorerPathInfoInflight, normalized, canReuse, () => (async () => {
-    const payload = await fetchFilesystemBatchItem('info', normalized, {dedupe: canReuse});
-    setLimitedMapEntry(fileExplorerPathInfoCache, normalized, {payload, at: Date.now()}, fileExplorerMemoryCacheLimit);
-    return payload;
-  })());
+  return requestFileExplorerFsResource(
+    'info',
+    normalized,
+    options,
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
+    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+  );
 }
 
 async function fetchDirectoryFileCount(path) {
@@ -361,14 +356,14 @@ async function expandSyncFileExplorerAffectedDirectories() {
     const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
     if (!opened) return false;
   }
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   let changed = false;
   for (const path of paths) {
     changed = addFileExplorerExpandedPathAncestors(path, root) || changed;
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   for (const path of paths) {
-    if (generation !== fileExplorerSyncGeneration) return changed;
+    if (generation !== fileExplorerSyncState.generation) return changed;
     changed = await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false, auto: true}) || changed;
   }
   setFileExplorerVisibleSyncTarget(plan.session, root);
@@ -1317,6 +1312,7 @@ function fileErrorState(message = null, fallbackKey = 'editor.fileLoadFailed', f
 function missingFileState(message = null) {
   const state = fileErrorState(message, 'dialog.missingOnDisk');
   state.externalMissing = true;
+  state.externalMissingCheckedAt = Date.now();
   return state;
 }
 
@@ -1324,10 +1320,17 @@ function openFileIsMissing(path) {
   return openFiles.get(path)?.externalMissing === true;
 }
 
+function clearOpenFileMissingState(state) {
+  if (!state) return state;
+  delete state.externalMissing;
+  delete state.externalMissingCheckedAt;
+  return state;
+}
+
 function clearOpenFileExternalState(state) {
   if (!state) return state;
+  clearOpenFileMissingState(state);
   delete state.externalChanged;
-  delete state.externalMissing;
   delete state.externalError;
   delete state.externalChangeEditPrompted;
   delete state.externalReloadDeferred;
@@ -2028,16 +2031,34 @@ async function openFileStateFromDisk(path, entry = null) {
 }
 
 function markOpenFileMissing(path) {
-  const state = openFiles.get(path);
-  if (!state) return;
+  let state = openFiles.get(path);
+  clearFileAutosaveTimer(path);
+  if (!state) state = setFileState(path, missingFileState());
   if (state.dirty) {
     state.externalMissing = true;
+    state.externalMissingCheckedAt = Date.now();
     delete state.externalChanged;
     delete state.externalError;
   } else {
-    setFileState(path, missingFileState());
+    state = setFileState(path, missingFileState());
   }
   renderOpenFilePath(path);
+}
+
+async function recoverOpenFileAfterMissing(path, entry = null) {
+  const state = openFiles.get(path);
+  if (!state?.externalMissing) return false;
+  clearFileAutosaveTimer(path);
+  if (state.dirty) {
+    state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
+    clearOpenFileMissingState(state);
+    delete state.externalError;
+    delete state.externalReloadDeferred;
+    delete state.externalChangeEditPrompted;
+    renderOpenFilePath(path);
+    return true;
+  }
+  return replaceOpenFileStateFromDisk(path, entry);
 }
 
 function markOpenFileExternalError(path, error) {
@@ -2099,7 +2120,7 @@ function markOpenFileReloadDeferred(path, state, entry) {
   state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
   state.externalReloadDeferred = {mtime: state.externalChanged.mtime, size: state.externalChanged.size, at: Date.now()};
   delete state.externalChangeEditPrompted;
-  delete state.externalMissing;
+  clearOpenFileMissingState(state);
   delete state.externalError;
   for (const panel of fileEditorPanelsForPath(path)) {
     updateFileEditorPanelChrome(panel, path);
@@ -2132,7 +2153,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   }
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
-      delete state.externalMissing;
+      clearOpenFileMissingState(state);
       delete state.externalError;
       if (!state.dirty) delete state.externalChanged;
       if (!state.dirty) delete state.externalReloadDeferred;
@@ -2152,7 +2173,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     state.externalChanged = externalChanged;
     delete state.externalReloadDeferred;
     delete state.externalChangeEditPrompted;
-    delete state.externalMissing;
+    clearOpenFileMissingState(state);
     delete state.externalError;
     clearFileAutosaveTimer(path);
     renderOpenFilePath(path);
@@ -2213,11 +2234,11 @@ function backgroundFileEditorWatchFiles() {
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
   if (fileExplorerSessionFilesPaneIsVisible()) {
-    for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+    for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (path && path !== '/') roots.add(path);
     }
-    for (const file of fileExplorerSessionFilesPayload?.files || []) {
+    for (const file of fileExplorerSessionFilesState.payload?.files || []) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (path && path !== '/') roots.add(dirnameOf(path));
     }
@@ -2263,38 +2284,38 @@ function clientServerWatchState() {
 }
 
 function syncServerWatchRootsNow(options = {}) {
-  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
+  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
-  const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
-  if (signature === serverWatchRootsSignature && !renewDue) return;
-  serverWatchRootsSignature = signature;
-  serverWatchRootsInFlight = true;
+  const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;
+  if (signature === serverWatchRootsState.signature && !renewDue) return;
+  serverWatchRootsState.signature = signature;
+  serverWatchRootsState.inFlight = true;
   apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
   }).then(() => {
-    serverWatchRootsSyncedAt = Date.now();
+    serverWatchRootsState.syncedAt = Date.now();
   }).catch(() => {
-    serverWatchRootsSignature = '';
+    serverWatchRootsState.signature = '';
   }).finally(() => {
-    serverWatchRootsInFlight = false;
+    serverWatchRootsState.inFlight = false;
   });
 }
 
 function syncServerWatchRoots(options = {}) {
-  serverWatchRootsPendingOptions = {
-    ...serverWatchRootsPendingOptions,
+  serverWatchRootsState.pendingOptions = {
+    ...serverWatchRootsState.pendingOptions,
     ...options,
-    renew: serverWatchRootsPendingOptions.renew === true || options.renew === true,
+    renew: serverWatchRootsState.pendingOptions.renew === true || options.renew === true,
   };
-  if (serverWatchRootsTimer) clearTimeout(serverWatchRootsTimer);
+  if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
-  serverWatchRootsTimer = setTimeout(() => {
-    serverWatchRootsTimer = null;
-    const pending = serverWatchRootsPendingOptions;
-    serverWatchRootsPendingOptions = {};
+  serverWatchRootsState.timer = setTimeout(() => {
+    serverWatchRootsState.timer = null;
+    const pending = serverWatchRootsState.pendingOptions;
+    serverWatchRootsState.pendingOptions = {};
     syncServerWatchRootsNow(pending);
   }, delay);
 }
@@ -2316,7 +2337,7 @@ async function refreshFileExplorerIfChanged() {
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     signaturesByDir.set(normalizedDirectory, signature);
-    const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
+    const previous = fileExplorerDirectoryRecord(normalizedDirectory)?.signature;
     if (previous !== undefined && previous !== signature) changed = true;
   }
   if (changed && fileExplorerUserIsActive()) {
@@ -2324,7 +2345,7 @@ async function refreshFileExplorerIfChanged() {
     return;
   }
   for (const [directory, signature] of signaturesByDir.entries()) {
-    setLimitedMapEntry(fileExplorerDirectorySignatures, directory, signature, fileExplorerMemoryCacheLimit);
+    updateFileExplorerDirectoryRecord(directory, {signature});
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }

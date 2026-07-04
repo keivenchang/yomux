@@ -784,7 +784,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
     for (const session of activePaneItems()) {
       if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
-      updatePanelWindowStepButtons(session, transcriptMeta.sessions?.[session]);
+      updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
@@ -812,7 +812,7 @@ function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null
 function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return null;
-  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  const info = transcriptMetadataState.payload.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
   let summaryIndex = null;
   if (explicitIndex === null && options.preferSummary === true) {

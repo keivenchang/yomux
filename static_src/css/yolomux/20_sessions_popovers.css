@@ -23,14 +23,11 @@
 .session-label-agent {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
 }
 .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -86,14 +83,14 @@
 }
 .status-indicator--inline {
   min-width: 0;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1.15;
 }
 .status-indicator--text {
   min-width: 26px;
-  padding: 1px 3px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--divider);
   border-radius: 5px;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
@@ -101,7 +98,7 @@
 }
 .status-indicator--label {
   max-width: 100%;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1;
@@ -226,7 +223,7 @@
 .file-tree-agent {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   flex: 0 0 auto;
   vertical-align: middle;
 }
@@ -239,7 +236,7 @@
   --agent-status-ball-border: var(--paint-black);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  margin-inline-start: 2px;
+  margin-inline-start: var(--space-2);
 }
 .agent-window-activity .agent-icon {
   width: var(--agent-window-icon-size);
@@ -340,8 +337,8 @@
   55%, 85% {
     opacity: 0.15;
     transform: scale(0.9);
-    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 rgb(var(--agent-working-glow-rgb) / 0));
-    box-shadow: 0 0 0 0 rgb(var(--agent-working-glow-rgb) / 0);
+    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 var(--paint-agent-working-glow-transparent));
+    box-shadow: 0 0 0 0 var(--paint-agent-working-glow-transparent);
   }
 }
 .session-state-badge {
@@ -480,7 +477,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 1px 0;
+  padding: var(--space-1) 0;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
@@ -554,7 +551,7 @@ body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .se
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   border-radius: 0;
   border: 1px solid var(--divider);
   color: var(--pr-status-closed);
@@ -569,7 +566,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   color: #e9edf3;
   background: var(--pr-number-chip-bg);
   border-color: var(--pr-number-chip-bg);
-  padding: 0 4px;
+  padding: 0 var(--space-4);
 }
 .popover-chip-link {
   display: inline-flex;
@@ -611,7 +608,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
 .ci-indicator.pr-review-chip {
-  padding: 0 5px;
+  padding: 0 var(--space-5);
   font-weight: 700;
 }
 .ci-indicator.pr-review-required {
@@ -705,7 +702,7 @@ body.theme-light .ci-indicator.branch-indicator {
   max-width: var(--popover-max-inline-size);
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
@@ -715,7 +712,7 @@ body.theme-light .ci-indicator.branch-indicator {
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 18px 50px var(--paint-shadow-42);
   transform: translateY(-2px);
   transition:
     opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
@@ -739,17 +736,18 @@ body.theme-light .ci-indicator.branch-indicator {
    it to select-all, then copy. Theme-aware (no hardcoded colors). */
 .drag-timing-overlay {
   position: fixed;
-  top: 8px;
-  right: 8px;
+  inset-block-start: var(--popover-edge-gap);
+  inset-inline-end: var(--popover-edge-gap);
   z-index: var(--z-terminal-popover);
-  max-width: 460px;
+  inline-size: max-content;
+  max-inline-size: min(88ch, var(--popover-max-inline-size));
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
+  box-shadow: 0 8px 24px var(--paint-shadow-50);
   font: var(--ui-font-size-xs)/1.4 var(--mono-font);
   white-space: pre;
   user-select: text;
@@ -760,7 +758,7 @@ body.theme-light .session-popover {
   color: var(--pc-control-fg);
   background: var(--paint-white);
   border-color: var(--active-control-soft-border);
-  box-shadow: 0 18px 50px rgb(var(--overlay-slate-rgb) / 0.16);
+  box-shadow: 0 18px 50px var(--paint-overlay-slate-16);
 }
 body.theme-light .session-popover::before {
   background: var(--paint-white);
@@ -768,7 +766,7 @@ body.theme-light .session-popover::before {
   border-top-color: var(--active-control-soft-border);
 }
 body.theme-light .popover-row {
-  border-top-color: rgb(var(--overlay-slate-rgb) / 0.10);
+  border-top-color: var(--paint-overlay-slate-10);
 }
 body.theme-light .popover-subtitle,
 body.theme-light .popover-label,
@@ -791,21 +789,21 @@ body.theme-light .branch-link {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 5px;
+  gap: var(--space-8);
+  margin-bottom: var(--space-5);
 }
 .popover-title {
   font-weight: 600;
   font-size: var(--ui-font-size);
 }
 .popover-subtitle {
-  margin-top: 1px;
+  margin-top: var(--space-1);
   color: var(--muted);
   font: inherit;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-4);
   overflow-wrap: anywhere;
 }
 .popover-subtitle-text {
@@ -813,9 +811,9 @@ body.theme-light .branch-link {
 }
 .session-agent-list {
   display: grid;
-  gap: 2px;
-  margin: 1px 0 6px;
-  padding: 4px 0 5px;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-6);
+  padding: var(--space-4) 0 var(--space-5);
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
@@ -828,7 +826,7 @@ body.theme-light .branch-link {
   white-space: normal;
 }
 .session-agent-window-block > .session-agent-row {
-  padding: 3px 5px;
+  padding: var(--space-3) var(--space-5);
   border-radius: 5px;
   background: var(--pane-inactive-tab-bg);
 }
@@ -841,8 +839,8 @@ body.theme-light .branch-link {
 .session-agent-kind {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  margin-inline-end: 3px;
+  gap: var(--space-3);
+  margin-inline-end: var(--space-3);
   vertical-align: text-bottom;
   font-weight: 600;
 }
@@ -855,7 +853,7 @@ body.theme-light .branch-link {
   color: var(--muted);
 }
 .session-agent-sep {
-  margin-inline: 3px;
+  margin-inline: var(--space-3);
 }
 .session-agent-row.attention .session-agent-status {
   color: var(--danger-text);
@@ -869,29 +867,29 @@ body.theme-light .branch-link {
 }
 .session-window-metadata-list {
   display: grid;
-  gap: 4px;
-  margin: 0 0 6px;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-6);
 }
 .session-window-metadata,
 .session-window-metadata-list.shared {
-  padding: 4px 0 2px;
+  padding: var(--space-4) 0 var(--space-2);
   border-top: 1px solid var(--line);
 }
 .session-window-metadata-title {
   color: var(--text);
   font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
-  padding: 2px 0;
+  padding: var(--space-2) 0;
 }
 .popover-row {
   display: grid;
   grid-template-columns: 62px minmax(0, 1fr);
-  gap: 6px;
-  padding: 2px 0;
+  gap: var(--space-6);
+  padding: var(--space-2) 0;
   border-top: 1px solid var(--line);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
-  gap: 6px 8px;
+  gap: var(--space-6) var(--space-8);
 }
 .popover-label {
   color: var(--active-accent-bright);
@@ -901,11 +899,6 @@ body.theme-light .branch-link {
   min-width: 0;
   overflow-wrap: anywhere;
   font-weight: 400;
-}
-.popover-value:has(.popover-copy-value) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 .popover-copy-value {
   min-width: 0;
@@ -925,7 +918,7 @@ body.theme-light .branch-link {
 .file-drag-image.drag-image {
   width: min(36ch, 42vw, var(--popover-max-inline-size));
   max-width: min(36ch, 42vw, var(--popover-max-inline-size));
-  padding: 4px 6px;
+  padding: var(--space-4) var(--space-6);
   color: var(--text);
   background: color-mix(in srgb, var(--panel2) 96%, black 4%);
   border: 1px solid var(--active-control-soft-border);
@@ -938,18 +931,18 @@ body.theme-light .branch-link {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 2px dotted var(--pane-resizer-hover-bg);
   border-radius: var(--radius-lg);
-  box-shadow: 0 14px 34px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 14px 34px var(--paint-shadow-42);
   overflow: hidden;
   opacity: 0.86 !important;
 }
 .tabber-drag-image.drag-image {
   max-height: min(56vh, 520px);
-  padding: 4px;
+  padding: var(--space-4);
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 94%, black 6%);
   border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 12px 30px var(--paint-shadow-42);
   overflow: hidden;
   opacity: 0.88 !important;
 }
@@ -960,12 +953,10 @@ body.theme-light .branch-link {
   display: none !important;
 }
 .pane-drag-image-frame {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 4px;
+  gap: var(--space-4);
   width: 100%;
   height: 100%;
-  padding: 9px 10px;
+  padding: var(--space-9) var(--space-10);
   background:
     linear-gradient(to bottom, var(--pane-bar-bg, var(--panel2)) 0 30px, transparent 30px),
     color-mix(in srgb, var(--panel) 94%, black 6%);
@@ -985,25 +976,22 @@ body.theme-light .branch-link {
   display: flex;
   flex-wrap: wrap;
   align-content: flex-start;
-  gap: 4px;
+  gap: var(--space-4);
   min-height: 0;
   overflow: hidden;
-  padding-top: 4px;
+  padding-top: var(--space-4);
 }
 .pane-drag-image-tabs span {
   max-width: min(18ch, 42%);
-  padding: 2px 5px;
-  color: var(--text);
+  padding: var(--space-2) var(--space-5);
   background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-xs);
   line-height: 1.15;
 }
 .file-drag-main {
   display: flex;
   align-items: flex-start;
-  gap: 5px;
+  gap: var(--space-5);
   min-width: 0;
 }
 .file-drag-thumb {
@@ -1029,7 +1017,7 @@ body.theme-light .branch-link {
   flex: 1;
 }
 .file-drag-title {
-  margin-bottom: 1px;
+  margin-bottom: var(--space-1);
   color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
@@ -1044,12 +1032,12 @@ body.theme-light .branch-link {
 .state-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 9px;
+  gap: var(--space-6) var(--space-9);
 }
 .state-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
@@ -1062,11 +1050,11 @@ body.theme-light .branch-link {
   font-weight: 700;
 }
 .popover-desc-body {
-  margin-top: 4px;
+  margin-top: var(--space-4);
   color: var(--muted);
 }
 .popover-desc-line + .popover-desc-line {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 .popover-value a,
 .branch-link,

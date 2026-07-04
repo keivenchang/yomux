@@ -106,11 +106,8 @@ def list_directory(raw_path: str) -> dict[str, Any]:
         raise paths.FilesystemError.path_not_found(path)
     if not path.is_dir():
         raise paths.FilesystemError.not_directory(path)
-    try:
-        names, truncated = _visible_directory_names(path)
-        entries = [_entry_info(path / name, name) for name in names]
-    except PermissionError as exc:
-        raise paths.FilesystemError.os_error(exc, status=403) from exc
+    names, truncated = _visible_directory_names(path)
+    entries = [_entry_info(path / name, name) for name in names]
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
     parent = str(path.parent) if str(path) != "/" else None
     return {

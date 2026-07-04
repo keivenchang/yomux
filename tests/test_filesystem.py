@@ -289,6 +289,97 @@ def test_path_info_returns_sniffed_preview_mime_for_misleading_extension(tmp_pat
     assert result["preview_mime"] == "image/png"
 
 
+def test_package_path_info_normalizes_required_stat_permission_failure(monkeypatch):
+    class DeniedFile:
+        name = "item"
+        suffix = ".txt"
+
+        def exists(self):
+            return True
+
+        def is_symlink(self):
+            return False
+
+        def is_dir(self):
+            return False
+
+        def stat(self):
+            raise PermissionError(13, "permission denied", "/restricted/item")
+
+    monkeypatch.setattr(filesystem.io_ops.paths, "_validated_path", lambda _raw_path: DeniedFile())
+
+    with pytest.raises(FilesystemError) as info:
+        filesystem.path_info("/restricted/item")
+
+    assert info.value.status == 403
+    assert info.value.message_key == "fs.error.operationFailed"
+    assert "permission denied" in info.value.diagnostic
+
+
+def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path):
+    def denied_list(_path):
+        raise PermissionError(13, "list denied", str(tmp_path))
+
+    monkeypatch.setattr(filesystem.listing, "_visible_directory_names", denied_list)
+    with pytest.raises(FilesystemError) as listed:
+        filesystem.list_directory(str(tmp_path))
+    assert listed.value.status == 403
+    assert "list denied" in listed.value.diagnostic
+
+    monkeypatch.setattr(filesystem.search, "git_root_for_path", lambda _path: "")
+    monkeypatch.setattr(filesystem.search.os, "listdir", lambda _path: (_ for _ in ()).throw(OSError("search failed")))
+    with pytest.raises(FilesystemError) as searched:
+        filesystem.search_files(str(tmp_path), query="item")
+    assert searched.value.status == 500
+    assert "search failed" in searched.value.diagnostic
+
+
+def test_package_walk_archive_and_write_normalize_raw_os_failures(monkeypatch, tmp_path):
+    def denied_walk(_path, *, onerror, **_kwargs):
+        onerror(PermissionError(13, "walk denied", str(tmp_path)))
+        return iter(())
+
+    monkeypatch.setattr(filesystem.io_ops.os, "walk", denied_walk)
+    with pytest.raises(FilesystemError) as walked:
+        filesystem.count_directory_files(str(tmp_path))
+    assert walked.value.status == 403
+    assert "walk denied" in walked.value.diagnostic
+
+    archive_file = tmp_path / "archive.txt"
+    archive_file.write_text("archive", encoding="utf-8")
+    monkeypatch.setattr(filesystem.io_ops, "_walk_zip_sources", lambda _path, _max_bytes: ([], [archive_file], archive_file.stat().st_size))
+    monkeypatch.setattr(filesystem.io_ops.zipfile.ZipFile, "write", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("archive failed")))
+    with pytest.raises(FilesystemError) as archived:
+        filesystem.zip_directory(str(tmp_path))
+    assert archived.value.status == 500
+    assert "archive failed" in archived.value.diagnostic
+
+    original_open = Path.open
+    write_target = tmp_path / "write.txt"
+
+    def denied_open(path, *args, **kwargs):
+        if path == write_target:
+            raise PermissionError(13, "write denied", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_open)
+    with pytest.raises(FilesystemError) as written:
+        filesystem.write_file(str(write_target), "content")
+    assert written.value.status == 403
+    assert "write denied" in written.value.diagnostic
+
+
+def test_filesystem_implementations_leave_os_error_normalization_to_package_facade():
+    source_root = Path(filesystem.__file__).parent
+    implementations = "\n".join((source_root / name).read_text(encoding="utf-8") for name in ("io_ops.py", "listing.py", "search.py"))
+    package_source = (source_root / "__init__.py").read_text(encoding="utf-8")
+
+    assert "FilesystemError.os_error" not in implementations
+    assert "_fs_io_errors" not in implementations
+    assert "_fs_io_errors" not in package_source
+    assert implementations.count("onerror=raise_os_error") == 2
+
+
 def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):
     monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
     with pytest.raises(FilesystemError) as info:

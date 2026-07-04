@@ -131,7 +131,7 @@ function refreshPaneTabSessionPopovers() {
       ? paneTabPopoverForAnchor(tab)
       : tab?.querySelector?.(':scope > .session-popover');
     if (!popover || popover.classList?.contains?.('file-popover')) return;
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const auto = autoApproveStates.get(session)?.enabled === true;
     const state = sessionState(session, info);
     const agentKind = sessionAgentKind(session);
@@ -660,7 +660,7 @@ function sessionTabDescription(session, info) {
   return sessionWorkDescription(session, info, 72);
 }
 
-function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
+function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
@@ -1206,8 +1206,8 @@ function otherBranchesHtml(session, info) {
 
 function dragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
-  if (!raw && dragPaneSlot) return null;
-  if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
+  if (!raw && dragState.paneSlot) return null;
+  if (!raw && dragState.item) return {session: dragState.item, sourceSlot: dragState.sourceSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -1219,7 +1219,7 @@ function dragPayload(event) {
 
 function paneDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
-  if (!raw && dragPaneSlot) return {slot: dragPaneSlot};
+  if (!raw && dragState.paneSlot) return {slot: dragState.paneSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -1250,7 +1250,7 @@ function hasYolomuxFileDrag(event) {
 
 function fileDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
-  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragFilePayloadState : null);
+  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragState.filePayload : null);
 }
 
 async function openDraggedFilesInEditor(payload, options = {}) {
@@ -1285,7 +1285,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       // with a clean baseline). A dirty file keeps its conflict state so real unsaved-edit warnings stay.
       if (draggedState && !draggedState.dirty) {
         delete draggedState.externalChanged;
-        delete draggedState.externalMissing;
+        clearOpenFileMissingState(draggedState);
         delete draggedState.externalError;
         delete draggedState.externalChangeEditPrompted;
         renderOpenFilePath(path);
@@ -1301,7 +1301,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
 function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
@@ -1326,23 +1326,33 @@ function terminalFileReferences(session, payload) {
 }
 
 function transparentNativeDragImage() {
-  if (transparentDragImage) return transparentDragImage;
+  if (dragState.transparentImage) return dragState.transparentImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
   document.body.appendChild(node);
-  transparentDragImage = node;
+  dragState.transparentImage = node;
   return node;
 }
 
 function clearNativeDragImagePreview() {
-  nativeDragImagePreview?.remove?.();
-  nativeDragImagePreview = null;
+  dragState.nativePreview?.remove?.();
+  dragState.nativePreview = null;
+}
+
+function beginFileDrag(payloadObject) {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  dragState.filePayload = normalizeFileDragPayload(payloadObject);
+  return dragState.filePayload;
 }
 
 function moveCustomDragPreview(event) {
-  if (!customDragPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
-  customDragPreview.style.left = `${Math.round(event.clientX - customDragPreviewOffset.x)}px`;
-  customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
+  if (!dragState.customPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  dragState.customPreview.style.left = `${Math.round(event.clientX - dragState.customPreviewOffset.x)}px`;
+  dragState.customPreview.style.top = `${Math.round(event.clientY - dragState.customPreviewOffset.y)}px`;
 }
 
 const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
@@ -1356,7 +1366,7 @@ function bindCustomDragPreviewListeners() {
     target.addEventListener?.('dragover', moveCustomDragPreview, true);
     target.addEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+      target.addEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
@@ -1366,16 +1376,27 @@ function unbindCustomDragPreviewListeners() {
     target.removeEventListener?.('dragover', moveCustomDragPreview, true);
     target.removeEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+      target.removeEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
 
 function stopCustomDragPreview() {
   unbindCustomDragPreviewListeners();
-  customDragPreview?.remove();
-  customDragPreview = null;
+  dragState.customPreview?.remove();
+  dragState.customPreview = null;
   closeFileImagePreview();
+}
+
+function cancelDragOperationState() {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  stopCustomDragPreview();
+  clearDropPreview();
 }
 
 function paneDragPreviewMetrics(slot, event) {
@@ -1433,8 +1454,8 @@ function startPaneDragPreview(event, slot, options = {}) {
   preview.style.width = `${metrics.width}px`;
   preview.style.height = `${metrics.height}px`;
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
   moveCustomDragPreview(event);
   if (options.nativeDrag === true) {
     bindCustomDragPreviewListeners();
@@ -1468,8 +1489,8 @@ function startFileDragPreview(event, paths, entry) {
   preview.style.pointerEvents = 'none';
   preview.style.zIndex = '99999';
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: -14, y: -14};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: -14, y: -14};
   moveCustomDragPreview(event);
   bindCustomDragPreviewListeners();
   preview.getBoundingClientRect();
@@ -1547,9 +1568,10 @@ function showDragTimingOverlay(rows) {
 function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   dragTimingMark('startSessionDrag:begin');
   clearNativeDragImagePreview();
-  dragSession = session;
-  dragSourceSlot = sourceSlot;
-  dragPaneSlot = null;
+  dragState.item = session;
+  dragState.sourceSlot = sourceSlot;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
   const payload = JSON.stringify({session, sourceSlot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
@@ -1585,9 +1607,10 @@ function startPaneDrag(event, sourceSlot) {
     return;
   }
   dragTimingMark('startPaneDrag');
-  dragSession = active;
-  dragSourceSlot = slot;
-  dragPaneSlot = slot;
+  dragState.item = active;
+  dragState.sourceSlot = slot;
+  dragState.paneSlot = slot;
+  dragState.filePayload = null;
   const payload = JSON.stringify({slot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-pane', payload);
@@ -1596,14 +1619,8 @@ function startPaneDrag(event, sourceSlot) {
 }
 
 function endSessionDrag(event) {
-  dragSession = null;
-  dragSourceSlot = null;
-  dragPaneSlot = null;
-  resetDragTabRectCache();
-  clearNativeDragImagePreview();
-  stopCustomDragPreview();
+  cancelDragOperationState();
   sessionButtons.classList.remove(CLS.dragOver);
-  clearDropPreview();
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }

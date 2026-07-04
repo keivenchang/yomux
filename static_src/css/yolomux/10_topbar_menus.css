@@ -8,8 +8,8 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  padding: 3px 8px;
+  gap: var(--space-8);
+  padding: var(--space-3) var(--space-8);
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
   transition: background var(--motion-interaction-standard) ease;
@@ -34,18 +34,14 @@
 }
 .brand-cell {
   justify-self: start;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 1px;
+  padding-top: var(--space-1);
 }
 .brand {
   min-width: 92px;
 }
 .brand-update-badge {
-  margin-inline-start: 8px;
-  padding: 1px 7px;
+  margin-inline-start: var(--space-8);
+  padding: var(--space-1) var(--space-7);
   border: 1px solid var(--active-control-border, var(--line));
   border-radius: var(--radius-pill);
   color: var(--active-control-text);
@@ -88,12 +84,12 @@
   left: var(--popover-edge-gap);
   z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   color: var(--danger-text-soft);
   background: rgba(42, 14, 18, 0.98);
   border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
-  box-shadow: 0 14px 38px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 14px 38px var(--paint-shadow-42);
   white-space: normal;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   opacity: 0;
@@ -109,10 +105,7 @@
 .actions {
   justify-self: end;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 1px;
+  padding-top: var(--space-1);
 }
 .actions button {
   width: var(--compact-icon-button-size);
@@ -167,7 +160,7 @@
   inset-block-start: -5px;
   min-width: 14px;
   height: 14px;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--panel);
   border-radius: var(--radius-pill);
   background: var(--active-control-bg);
@@ -267,10 +260,10 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   max-height: none !important;
 }
 .share-popup-mirror-item > .modal.about-open .modal-dialog {
-  width: min(520px, calc(100% - 28px)) !important;
+  width: min(var(--dialog-compact-inline-size), 100%) !important;
 }
 .share-popup-mirror-item > .modal.share-open .modal-dialog {
-  width: min(960px, calc(100% - 28px)) !important;
+  width: min(var(--dialog-wide-inline-size), 100%) !important;
 }
 
 .share-viewer-banner {
@@ -280,11 +273,11 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   z-index: var(--z-share-viewer-banner);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   justify-content: center;
   min-height: 26px;
   max-width: calc(100vw - 16px);
-  padding: 5px 10px;
+  padding: var(--space-5) var(--space-10);
   border: 1px solid var(--active-control-border);
   border-radius: var(--radius-md);
   background: var(--active-control-soft-bg);
@@ -316,11 +309,8 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-view-fit-toggle {
   flex: 0 0 auto;
   min-height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  padding: 0 var(--space-8);
   background: var(--panel);
-  color: var(--text);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
@@ -342,7 +332,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   transition: transform 45ms linear, opacity var(--motion-interaction-standard) ease;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px var(--paint-shadow-45);
 }
 .share-ghost-cursor::before {
   content: "";
@@ -374,7 +364,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   z-index: var(--z-share-presence);
   width: 8px;
   height: 8px;
-  margin: -4px 0 0 -4px;
+  margin: calc(-1 * var(--space-4)) 0 0 calc(-1 * var(--space-4));
   pointer-events: none;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
@@ -430,8 +420,8 @@ button.topbar-status-surface:focus-visible {
   display: inline-grid;
   grid-template-columns: 44px auto;
   align-items: center;
-  gap: 7px;
-  padding: 2px 6px;
+  gap: var(--space-7);
+  padding: var(--space-2) var(--space-6);
 }
 .latency-meter.good { color: var(--good); }
 .latency-meter.warn { color: var(--accent-gold); }
@@ -459,7 +449,7 @@ button.topbar-status-surface:focus-visible {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: var(--space-8);
   min-height: var(--compact-control-height);
   overflow: visible;
 }
@@ -470,7 +460,7 @@ button.topbar-status-surface:focus-visible {
   margin-inline-start: auto;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
 }
 .topbar-nav-button {
   flex: 0 0 auto;
@@ -489,7 +479,7 @@ button.topbar-status-surface:focus-visible {
   cursor: pointer;
 }
 body.theme-light .topbar-nav-button {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  background: var(--paint-overlay-slate-05);
 }
 .topbar-nav-button:hover:not(:disabled) {
   border-color: var(--accent);
@@ -500,15 +490,11 @@ body.theme-light .topbar-nav-button {
 }
 .topbar-search {
   margin-block: 0;
-  margin-inline: 6px auto;
-  flex: 0 1 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 320px;
+  margin-inline: var(--space-6) auto;
+  flex: 1 1 36ch;
+  max-inline-size: min(50%, 64ch);
   height: var(--compact-control-height);
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--input-bg);
@@ -520,10 +506,9 @@ body.theme-light .topbar-nav-button {
 .topbar-search:hover {
   border-color: var(--accent);
 }
-/* --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
-   In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
+/* Keep the light search surface subtly distinct from the topbar while reusing the shared input token. */
 body.theme-light .topbar-search {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  background: var(--paint-overlay-slate-05);
 }
 /* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
@@ -540,14 +525,14 @@ body.theme-light .topbar-search {
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
-  padding: 0 6px;
+  padding: 0 var(--space-6);
   cursor: pointer;
 }
 .topbar-language-menu > .topbar-language {
   min-width: 72px;
 }
 body.theme-light .topbar-language {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  background: var(--paint-overlay-slate-05);
 }
 .topbar-language:hover {
   border-color: var(--accent);
@@ -569,7 +554,7 @@ body.theme-light .topbar-language {
   font-size: var(--ui-font-size-3xs, 10px);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   color: var(--muted);
   background: transparent;
 }
@@ -578,12 +563,13 @@ body.app-vw-lte-1100 .topbar-search-hint {
   display: none;
 }
 body.app-vw-lte-1100 .topbar-search {
-  max-width: none;
-  padding: 0 6px;
+  flex: 0 1 auto;
+  max-inline-size: none;
+  padding: 0 var(--space-6);
 }
 .topbar-owner-status {
-  gap: 6px;
-  padding: 0 8px;
+  gap: var(--space-6);
+  padding: 0 var(--space-8);
 }
 .topbar-owner-status-key {
   color: var(--text-muted-cool);
@@ -601,8 +587,8 @@ body.app-vw-lte-1100 .topbar-search {
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
-  gap: 4px;
-  padding: 0 6px;
+  gap: var(--space-4);
+  padding: 0 var(--space-6);
 }
 .topbar-activity.has-attention {
   border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
@@ -617,7 +603,7 @@ body.app-vw-lte-1100 .topbar-search {
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   font-weight: 600;
 }
 .topbar-activity-count-number {
@@ -635,7 +621,7 @@ body.app-vw-lte-1100 .topbar-search {
   display: inline-flex;
   align-items: center;
   line-height: 1;
-  margin-inline: -1px;
+  margin-inline: calc(-1 * var(--space-1));
   opacity: 0.5;
 }
 body.app-vw-lte-1100 .topbar-activity-idle {
@@ -657,7 +643,7 @@ body.app-vw-lte-760 .topbar-search {
   min-height: var(--compact-control-height);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   padding: 0 0.46em;
   color: var(--pane-tab-text);
   background: transparent;
@@ -672,7 +658,7 @@ body.app-vw-lte-760 .topbar-search {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border: 1px solid var(--active-control-border);
@@ -710,7 +696,7 @@ body.app-vw-lte-760 .topbar-search {
   max-height: var(--app-menu-max-block-size);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 7px;
+  padding: var(--space-7);
   color: var(--chrome-text-strong);
   background: var(--overlay-surface);
   border: 1px solid var(--sep-muted);
@@ -743,9 +729,9 @@ body.app-vw-lte-760 .topbar-search {
   --app-submenu-inline-offset: 22px;
   width: var(--app-menu-fit-width, max-content);
   max-width: calc(100% - var(--app-submenu-inline-offset));
-  margin-block: 2px 5px;
+  margin-block: var(--space-2) var(--space-5);
   margin-inline: var(--app-submenu-inline-offset) 0;
-  padding: 4px;
+  padding: var(--space-4);
   color: var(--chrome-text-strong);
   background: #0d131b;
   border: 1px solid #2f3a4b;
@@ -767,7 +753,7 @@ body.app-vw-lte-760 .topbar-search {
   display: block;
 }
 .app-menu-section {
-  padding: 4px 7px 5px;
+  padding: var(--space-4) var(--space-7) var(--space-5);
   color: var(--pr-status-closed);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
@@ -776,7 +762,7 @@ body.app-vw-lte-760 .topbar-search {
 }
 .app-menu-separator {
   height: 1px;
-  margin: 6px 2px;
+  margin: var(--space-6) var(--space-2);
   background: var(--divider);
 }
 .app-menu-submenu-wrap {
@@ -789,8 +775,8 @@ body.app-vw-lte-760 .topbar-search {
   display: grid;
   grid-template-columns: 4px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  padding: 5px 7px;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-7);
   color: var(--pane-tab-text);
   background: transparent;
   border: 1px solid transparent;
@@ -817,7 +803,7 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-submenu-wrap + .app-menu-command,
 .app-menu-command + .app-menu-submenu-wrap,
 .app-menu-submenu-wrap + .app-menu-submenu-wrap {
-  margin-top: 2px;
+  margin-top: var(--space-2);
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,
@@ -840,24 +826,19 @@ body.app-vw-lte-760 .topbar-search {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 5px 7px 5px 17px;
+  gap: var(--space-10);
+  padding: var(--space-5) var(--space-7) var(--space-5) 17px;
   color: var(--pane-tab-text);
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-setting-label {
   font-weight: 600;
 }
-.app-menu-setting-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
 .app-menu-setting-control input[type="number"] {
   width: 8ch;
   min-width: 0;
   height: var(--compact-control-height);
-  padding: 0 5px;
+  padding: 0 var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--input-bg);
@@ -879,13 +860,7 @@ body.app-vw-lte-760 .topbar-search {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-.app-menu-line {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .app-menu-icon {
   flex: 0 0 auto;
@@ -991,14 +966,14 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command {
   min-height: 20px;
   grid-template-columns: 4px minmax(0, 1fr);
-  gap: 4px;
-  padding: 1px 5px;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-5);
   border-radius: var(--radius-control);
   font-size: var(--ui-font-size-sm);
   line-height: 1;
 }
 .app-menu-tab-command + .app-menu-tab-command {
-  margin-top: 1px;
+  margin-top: var(--space-1);
   border-top-color: rgba(174, 184, 199, 0.16);
 }
 .app-menu-tab-command .app-menu-content {
@@ -1012,10 +987,10 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command .session-button-text {
   min-width: 0;
   height: 16px;
-  gap: 3px;
+  gap: var(--space-3);
 }
 .app-menu-tab-command .session-button-prefix {
-  gap: 1px;
+  gap: var(--space-1);
 }
 .app-menu-tab-command .pane-tab-core > .session-yolo-marker {
   min-width: 16px;
@@ -1043,14 +1018,14 @@ body.app-vw-lte-760 .topbar-search {
 }
 .app-menu-tab-command .session-state-badge {
   min-width: 20px;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
 }
 .app-menu-tab-command .ci-indicator {
   min-width: 15px;
   height: 13px;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   font-size: var(--ui-font-size-3xs);
 }
 .app-menu-yolo-session-command {
@@ -1105,7 +1080,7 @@ body.theme-light .app-menu-popover {
   background: var(--paint-white);
   border-color: var(--pc-control-border);
   box-shadow:
-    0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
+    0 -3px 12px var(--paint-overlay-slate-10),
     var(--shadow-popover);
 }
 body.theme-light .app-submenu-popover {
@@ -1113,8 +1088,8 @@ body.theme-light .app-submenu-popover {
   background: var(--app-submenu-light-bg);
   border-color: var(--line);
   box-shadow:
-    0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),
-    0 12px 32px rgb(var(--overlay-slate-rgb) / 0.18);
+    0 -2px 10px var(--paint-overlay-slate-10),
+    0 12px 32px var(--paint-overlay-slate-18);
 }
 body.theme-light .app-menu-section,
 body.theme-light .app-menu-detail {

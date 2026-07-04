@@ -1132,9 +1132,25 @@ function styleStandaloneSvgText(svg) {
   });
 }
 
+const STANDALONE_SVG_BLOCKED_TAGS = Object.freeze([
+  'script',
+  'foreignobject',
+  'iframe',
+  'object',
+  'embed',
+  'audio',
+  'video',
+  'canvas',
+  'link',
+  'meta',
+]);
+const STANDALONE_SVG_BLOCKED_TAG_SET = new Set(STANDALONE_SVG_BLOCKED_TAGS);
+const STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS.map(escapeRegExpLiteral).join('|');
+const STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[\\s\\S]*?<\\s*\\/\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\s*>`, 'gi');
+const STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[^>]*\\/?\\s*>`, 'gi');
+
 function sanitizeStandaloneSvgNode(root) {
   const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
-  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
   for (const child of Array.from(root?.childNodes || [])) {
     if (child.nodeType !== elementNode) {
       if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
@@ -1147,7 +1163,7 @@ function sanitizeStandaloneSvgNode(root) {
       else child.remove();
       continue;
     }
-    if (blocked.has(tagName)) {
+    if (STANDALONE_SVG_BLOCKED_TAG_SET.has(tagName)) {
       child.remove();
       continue;
     }
@@ -1177,8 +1193,8 @@ function sanitizeStandaloneSvgNode(root) {
 function sanitizeStandaloneSvgString(svgText) {
   return String(svgText || '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
+    .replace(STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE, '')
+    .replace(STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
     .replace(/@import[^;]+;?/gi, '')

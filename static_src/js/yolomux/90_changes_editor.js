@@ -48,10 +48,10 @@ function fileRepoForPath(path) {
     const repo = normalizeDirectoryPath(root || '');
     if (repo && repo !== '/' && pathIsInsideDirectory(normalized, repo)) roots.push(repo);
   };
-  for (const file of fileExplorerSessionFilesPayload?.files || []) {
+  for (const file of fileExplorerSessionFilesState.payload?.files || []) {
     if (file?.abs_path === path && file.repo) return file.repo;
   }
-  for (const repoInfo of fileExplorerSessionFilesPayload?.repos || []) {
+  for (const repoInfo of fileExplorerSessionFilesState.payload?.repos || []) {
     addRoot(repoInfo?.repo);
   }
   addRoot(openFiles.get(path)?.gitRoot);
@@ -78,7 +78,7 @@ function diffRefQueryString(repo) {
 
 function sessionFilesRelevantDiffRefRepos() {
   const session = fileExplorerSessionFilesTargetSession();
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   if (!sessionFilesPayloadIsLoadedForSession(payload, session)) return new Set();
   return new Set(sessionFilesRepoRoots(payload));
 }
@@ -185,7 +185,7 @@ function changedFileOwnerSessionForPath(path, options = {}) {
     if (ownerSet && !ownerSet.has(session)) return;
     if (sessionFilesPayloadHasDifferPath(payload, path)) matches.add(session);
   };
-  considerPayload(fileExplorerSessionFilesPayload);
+  considerPayload(fileExplorerSessionFilesState.payload);
   for (const cached of fileExplorerSessionFilesCache.values()) {
     considerPayload(cached?.payload || cached);
   }
@@ -195,11 +195,13 @@ function changedFileOwnerSessionForPath(path, options = {}) {
 const diffRefSuggestionLimit = 60;
 const diffRefPopoverCompactLimit = 12;
 const diffRefPopoverFullLimit = 18;
-let diffRefPopover = null;
-let diffRefPopoverInput = null;
-let diffRefPopoverItemsCurrent = [];
-let diffRefPopoverActiveIndex = -1;
-let diffRefPopoverListenersInstalled = false;
+const diffRefPopoverState = {
+  node: null,
+  input: null,
+  items: [],
+  activeIndex: -1,
+  listenersInstalled: false,
+};
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
@@ -252,8 +254,8 @@ function diffRefSuggestions(repo) {
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
   };
-  const refsByRepo = fileExplorerSessionFilesPayload?.refs_by_repo && typeof fileExplorerSessionFilesPayload.refs_by_repo === 'object'
-    ? fileExplorerSessionFilesPayload.refs_by_repo
+  const refsByRepo = fileExplorerSessionFilesState.payload?.refs_by_repo && typeof fileExplorerSessionFilesState.payload.refs_by_repo === 'object'
+    ? fileExplorerSessionFilesState.payload.refs_by_repo
     : {};
   if (repo) {
     addRefs(diffRefRepoRefs(refsByRepo, repo));
@@ -538,28 +540,29 @@ function diffRefInputContext(input) {
 }
 
 function ensureDiffRefPopover() {
-  if (diffRefPopover) return diffRefPopover;
-  diffRefPopover = document.createElement('div');
-  diffRefPopover.className = 'diff-ref-suggestion-popover';
-  diffRefPopover.id = 'diff-ref-suggestion-popover';
-  diffRefPopover.role = 'listbox';
-  diffRefPopover.hidden = true;
-  diffRefPopover.addEventListener('pointerdown', event => {
+  if (diffRefPopoverState.node) return diffRefPopoverState.node;
+  const popover = document.createElement('div');
+  popover.className = 'diff-ref-suggestion-popover';
+  popover.id = 'diff-ref-suggestion-popover';
+  popover.role = 'listbox';
+  popover.hidden = true;
+  popover.addEventListener('pointerdown', event => {
     event.preventDefault();
   });
-  diffRefPopover.addEventListener('click', event => {
+  popover.addEventListener('click', event => {
     const option = event.target.closest?.('[data-diff-ref-option-index]');
-    if (!option || !diffRefPopover.contains(option)) return;
+    if (!option || !popover.contains(option)) return;
     event.preventDefault();
     chooseDiffRefPopoverOption(Number(option.dataset.diffRefOptionIndex));
   });
-  appOverlayRootElement()?.appendChild(diffRefPopover);
+  diffRefPopoverState.node = popover;
+  appOverlayRootElement()?.appendChild(popover);
   installDiffRefPopoverListeners();
-  return diffRefPopover;
+  return popover;
 }
 
 function installDiffRefPopoverListeners() {
-  if (diffRefPopoverListenersInstalled) return;
+  if (diffRefPopoverState.listenersInstalled) return;
   document.addEventListener('pointerdown', event => {
     const target = event.target;
     if (target?.closest?.('[data-diff-ref-input]') || target?.closest?.('#diff-ref-suggestion-popover')) return;
@@ -568,16 +571,17 @@ function installDiffRefPopoverListeners() {
   window.addEventListener('resize', () => hideDiffRefPopover());
   document.addEventListener('scroll', event => {
     const target = event.target;
-    if (diffRefPopover && (target === diffRefPopover || diffRefPopover.contains(target))) return;
-    if (!diffRefPopoverInput || !diffRefPopover || diffRefPopover.hidden) return;
-    if (!diffRefPopoverInput.isConnected) {
+    const {node, input} = diffRefPopoverState;
+    if (node && (target === node || node.contains(target))) return;
+    if (!input || !node || node.hidden) return;
+    if (!input.isConnected) {
       hideDiffRefPopover();
       return;
     }
-    const context = diffRefInputContext(diffRefPopoverInput);
-    positionDiffRefPopover(diffRefPopoverInput, context.compact);
+    const context = diffRefInputContext(input);
+    positionDiffRefPopover(input, context.compact);
   }, true);
-  diffRefPopoverListenersInstalled = true;
+  diffRefPopoverState.listenersInstalled = true;
 }
 
 function positionDiffRefPopover(input, compact) {
@@ -608,16 +612,16 @@ function renderDiffRefPopover(input, options = {}) {
     suggestions: context.suggestions,
     showAll: options.showAll === true,
   });
-  diffRefPopoverInput = input;
-  diffRefPopoverItemsCurrent = items;
-  diffRefPopoverActiveIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
+  diffRefPopoverState.input = input;
+  diffRefPopoverState.items = items;
+  diffRefPopoverState.activeIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
   popover.classList.toggle('compact', context.compact);
   if (!items.length) {
     hideDiffRefPopover();
     return;
   }
   popover.innerHTML = items.map((item, index) => {
-    const active = index === diffRefPopoverActiveIndex;
+    const active = index === diffRefPopoverState.activeIndex;
     const ref = diffRefCompactDisplay(item) || item?.ref || '';
     const subject = diffRefPopoverSubjectParts(item);
     const subjectText = [subject.description, subject.pr].filter(Boolean).join(' ');
@@ -634,20 +638,21 @@ function renderDiffRefPopover(input, options = {}) {
 }
 
 function hideDiffRefPopover() {
-  if (diffRefPopover) diffRefPopover.hidden = true;
-  if (diffRefPopoverInput) {
-    diffRefPopoverInput.setAttribute('aria-expanded', 'false');
-    diffRefPopoverInput.removeAttribute('aria-controls');
+  if (diffRefPopoverState.node) diffRefPopoverState.node.hidden = true;
+  if (diffRefPopoverState.input) {
+    diffRefPopoverState.input.setAttribute('aria-expanded', 'false');
+    diffRefPopoverState.input.removeAttribute('aria-controls');
   }
-  diffRefPopoverInput = null;
-  diffRefPopoverItemsCurrent = [];
-  diffRefPopoverActiveIndex = -1;
+  diffRefPopoverState.input = null;
+  diffRefPopoverState.items = [];
+  diffRefPopoverState.activeIndex = -1;
 }
 
 function syncDiffRefPopoverActiveOption() {
-  if (!diffRefPopover || diffRefPopover.hidden) return;
-  diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
-    const active = index === diffRefPopoverActiveIndex;
+  const popover = diffRefPopoverState.node;
+  if (!popover || popover.hidden) return;
+  popover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
+    const active = index === diffRefPopoverState.activeIndex;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
     if (active) button.scrollIntoView?.({block: 'nearest'});
@@ -655,8 +660,8 @@ function syncDiffRefPopoverActiveOption() {
 }
 
 function chooseDiffRefPopoverOption(index) {
-  const input = diffRefPopoverInput;
-  const item = diffRefPopoverItemsCurrent[index];
+  const input = diffRefPopoverState.input;
+  const item = diffRefPopoverState.items[index];
   if (!input || !item) return false;
   const context = diffRefInputContext(input);
   input.value = diffRefInputDisplayValue(item.ref, context.suggestions);
@@ -668,21 +673,21 @@ function chooseDiffRefPopoverOption(index) {
 
 function handleDiffRefPopoverKeydown(event, input) {
   if (!input?.matches?.('[data-diff-ref-input]')) return false;
-  const open = diffRefPopover && !diffRefPopover.hidden && diffRefPopoverInput === input;
+  const open = diffRefPopoverState.node && !diffRefPopoverState.node.hidden && diffRefPopoverState.input === input;
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
     if (!open) renderDiffRefPopover(input, {showAll: true});
-    if (!diffRefPopoverItemsCurrent.length) return true;
+    if (!diffRefPopoverState.items.length) return true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
-    diffRefPopoverActiveIndex = diffRefPopoverActiveIndex < 0
-      ? (delta > 0 ? 0 : diffRefPopoverItemsCurrent.length - 1)
-      : (diffRefPopoverActiveIndex + delta + diffRefPopoverItemsCurrent.length) % diffRefPopoverItemsCurrent.length;
+    diffRefPopoverState.activeIndex = diffRefPopoverState.activeIndex < 0
+      ? (delta > 0 ? 0 : diffRefPopoverState.items.length - 1)
+      : (diffRefPopoverState.activeIndex + delta + diffRefPopoverState.items.length) % diffRefPopoverState.items.length;
     syncDiffRefPopoverActiveOption();
     return true;
   }
-  if (event.key === 'Enter' && open && diffRefPopoverActiveIndex >= 0) {
+  if (event.key === 'Enter' && open && diffRefPopoverState.activeIndex >= 0) {
     event.preventDefault();
-    chooseDiffRefPopoverOption(diffRefPopoverActiveIndex);
+    chooseDiffRefPopoverOption(diffRefPopoverState.activeIndex);
     return true;
   }
   return false;
@@ -695,8 +700,8 @@ function showDiffRefPicker(input, options = {}) {
 
 function refreshDiffRefToDatalist(controls) {
   if (!controls) return;
-  if (diffRefPopoverInput && controls.contains(diffRefPopoverInput)) {
-    renderDiffRefPopover(diffRefPopoverInput, {showAll: false});
+  if (diffRefPopoverState.input && controls.contains(diffRefPopoverState.input)) {
+    renderDiffRefPopover(diffRefPopoverState.input, {showAll: false});
   }
 }
 
@@ -806,7 +811,7 @@ function fileExplorerSessionFilesTargetSession() {
     fileExplorerChangesSelectedSession = fileExplorerExplicitSyncSession;
     return fileExplorerExplicitSyncSession;
   }
-  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
 }
@@ -865,7 +870,7 @@ function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
 }
 
 function sessionFilesPanelIsLoading(payload, files = null) {
-  if (fileExplorerSessionFilesLoading) return true;
+  if (fileExplorerSessionFilesState.loading) return true;
   if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
@@ -898,13 +903,13 @@ function switchFileExplorerChangesSession(session) {
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
-    fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
-  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
-    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesPayload);
+    fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesState.payload, session)) {
+    fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesState.payload);
   } else {
     const pendingPayload = emptySessionFilesPayload(session, false);
     setSessionFilesPayloadForDestination('finder', pendingPayload);
-    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
+    fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanels();
@@ -925,11 +930,12 @@ function noteFileExplorerChangesSessionInteraction(session) {
 }
 
 function sessionFilesPayloadForDestination(destination) {
-  return fileExplorerSessionFilesPayload;
+  return fileExplorerSessionFilesState.payload;
 }
 
-function setSessionFilesPayloadForDestination(destination, payload) {
-  fileExplorerSessionFilesPayload = payload;
+function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
+  if (options.invalidateRequest !== false) fileExplorerSessionFilesState.guard.invalidate();
+  fileExplorerSessionFilesState.payload = payload;
   updateFileExplorerSessionHighlightRows();
   if (
     destination === 'finder'
@@ -977,19 +983,19 @@ function sessionFilesPayloadSignatureForPayload(payload) {
 }
 
 function sessionFilesSignatureForDestination(destination) {
-  return fileExplorerSessionFilesPayloadSignature;
+  return fileExplorerSessionFilesState.signature;
 }
 
 function setSessionFilesSignatureForDestination(destination, signature) {
-  fileExplorerSessionFilesPayloadSignature = signature;
+  fileExplorerSessionFilesState.signature = signature;
 }
 
 function sessionFilesLoadingForDestination(destination) {
-  return fileExplorerSessionFilesLoading;
+  return fileExplorerSessionFilesState.loading;
 }
 
 function setSessionFilesLoadingForDestination(destination, loading) {
-  fileExplorerSessionFilesLoading = loading;
+  fileExplorerSessionFilesState.loading = loading;
 }
 
 function sessionFilesRenderOptions(options = {}) {
@@ -1018,14 +1024,14 @@ async function fetchSessionFiles(options = {}) {
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
+  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, emptyPayload);
+    setSessionFilesPayloadForDestination(destination, emptyPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
@@ -1050,7 +1056,7 @@ async function fetchSessionFiles(options = {}) {
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -1062,7 +1068,7 @@ async function fetchSessionFiles(options = {}) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
@@ -1247,7 +1253,7 @@ function writeStoredChangesRepoCollapsed() {
   storageSet(changesRepoCollapsedStorageKey, JSON.stringify(Array.from(changesRepoCollapsed).sort()));
 }
 
-function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesState.payload) {
   const repos = new Set();
   const visibleFiles = fileExplorerDifferFiles(payload);
   for (const item of visibleFiles) {
@@ -1257,7 +1263,7 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
   return Array.from(repos).sort();
 }
 
-function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesState.payload) {
   const folders = new Set();
   for (const item of fileExplorerDifferFiles(payload)) {
     const repoRoot = item?.repo && item.repo !== changesOutsideRepoKey ? normalizeDirectoryPath(item.repo) : '/';
@@ -1272,7 +1278,7 @@ function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload
   return Array.from(folders).sort((left, right) => left.localeCompare(right));
 }
 
-function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesState.payload) {
   const repos = fileExplorerChangesRepoKeys(payload);
   return Boolean(repos.length) && repos.every(repo => changesRepoCollapsed.has(repo));
 }
@@ -1333,7 +1339,7 @@ function sessionFileIsDifferVisible(item) {
   return String(item?.status || 'M').toUpperCase() !== 'T';
 }
 
-function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerDifferFiles(payload = fileExplorerSessionFilesState.payload) {
   return (Array.isArray(payload?.files) ? payload.files : []).filter(sessionFileIsDifferVisible);
 }
 
@@ -1659,9 +1665,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
-      head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'changes-repo-head';
+      head = makeButton({className: 'changes-repo-head'});
       section.prepend(head);
     }
     head.dataset.changesRepoToggle = repo;
@@ -1778,7 +1782,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       </div>
       <div class="changes-groups"></div>`;
   }
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   const files = fileExplorerDifferFiles(payload);
   const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
@@ -1872,12 +1876,12 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
   const files = fileExplorerDifferFiles();
-  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, files);
+  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, files);
   const groupsHtml = changesGroupsSnapshotHtml(files, {
-    payload: fileExplorerSessionFilesPayload,
+    payload: fileExplorerSessionFilesState.payload,
     compact: fileExplorerMode !== 'diff',
     loading,
-    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesPayload)),
+    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -1945,7 +1949,7 @@ function setFileExplorerMode(mode, options = {}) {
   applyFileExplorerMode();
   if (typeof updateActiveSessionParam === 'function') updateActiveSessionParam();
   renderFileExplorerChangesPanels({force: true});
-  // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
+  // Tabber renders from the already-polled transcriptMetadataState.payload + the activity ledger (recency sort), so it
   // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
   if (fileExplorerMode === 'tabber') {
     fetchTabberActivity();
@@ -1995,7 +1999,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
   // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
   const payloadRepoRefs = (() => {
-    const refsMap = fileExplorerSessionFilesPayload?.refs_by_repo;
+    const refsMap = fileExplorerSessionFilesState.payload?.refs_by_repo;
     const key = repo || fileRepoForPath(path);
     const refs = refsMap && typeof refsMap === 'object' ? refsMap[key] : null;
     if (refs?.from_ref || refs?.to_ref) return {fromRef: refs.from_ref, toRef: refs.to_ref};
@@ -2193,16 +2197,14 @@ function bindChangesPanel(panel) {
     if (!path) return;
     closeFileImagePreview();
     const payloadObject = {path, paths: [path], kind: 'file', name: basenameOf(path)};
-    dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+    beginFileDrag(payloadObject);
     event.dataTransfer.effectAllowed = 'copy';
     event.dataTransfer.setData('application/x-yolomux-file', JSON.stringify(payloadObject));
     event.dataTransfer.setData('text/plain', path);
     startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
   });
   panel.addEventListener('dragend', () => {
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
+    cancelDragOperationState();
   });
   // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
   // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
@@ -2522,14 +2524,14 @@ async function saveSettingsPatch(patch, options = {}) {
 
 function showUploadRsyncRecommendation(options = {}) {
   const command = uploadRsyncExampleCommand();
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.textContent = t('pref.advisory.copyRsync');
-  action.addEventListener('click', event => {
-    event.stopPropagation();
-    copyTextToClipboard(command)
-      .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-      .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
+  const action = makeButton({
+    label: t('pref.advisory.copyRsync'),
+    onClick: event => {
+      event.stopPropagation();
+      copyTextToClipboard(command)
+        .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
+        .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
+    },
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
   return showToast(t('common.rsyncLargeFiles'), [
@@ -2760,7 +2762,7 @@ function createFileExplorerPanel() {
   }
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
-  if (!fileExplorerSessionFilesPayload.loaded || fileExplorerSessionFilesPayload.session !== fileExplorerSessionFilesTargetSession()) {
+  if (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession()) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
@@ -2813,9 +2815,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
       fileExplorerChangesPanelStaticHtml({full: fileExplorerMode === 'diff'}),
       fileExplorerDifferFiles(),
       {
-        payload: fileExplorerSessionFilesPayload,
+        payload: fileExplorerSessionFilesState.payload,
         compact: fileExplorerMode !== 'diff',
-        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, fileExplorerDifferFiles()),
+        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: fileExplorerMode === 'diff',
       },
       {force: options.force === true},

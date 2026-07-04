@@ -106,6 +106,10 @@ viewer browser
   requests keyframe on gap, digest mismatch, or replay error
 ```
 
+The browser keeps one `shareHostConnectionRecords` entry per share token. That record owns both the current UI WebSocket and its bounded pending-frame queue, and every host/replay publication goes through the same send-or-queue helper. A socket close clears only the matching socket field so an intended reconnect can flush queued frames; once active-share reconciliation says the token is inactive, YOLOmux closes the socket and deletes the entire record. Socket and queue state must not be split into parallel token-keyed maps because close-before-expiry otherwise leaves an unreachable queue.
+
+The server uses the same one-record lifecycle rule. One `ShareReplayRecord` per token owns the current keyframe and every epoch delta ring under one lock; a late viewer receives one deep-copied snapshot of that record, so a host update cannot combine an old keyframe with new-generation deltas. Invalid-token and inactive-share cleanup delete the whole record. One separate `SharePointerRecord` per token owns coalesced pointer motion, the bounded click queue, and the worker draining them. Pointer workers carry their record identity and may remove state only while that exact record is still current, so an exiting old worker cannot delete a replacement generation.
+
 ## Frame Types
 
 Replay frames should be explicit and versioned.
@@ -287,12 +291,14 @@ The server should not render YOLOmux DOM. It should coordinate host-authored fra
 - Authenticate share host and viewers.
 - Store latest keyframe per share id.
 - Store bounded delta ring per share id and epoch.
+- Read the keyframe and its contiguous deltas from one atomic per-share record snapshot.
 - Broadcast frames to UI clients and terminal viewers.
 - Track per-viewer acked epoch/sequence.
 - Drop or disconnect slow viewers using existing queue pressure rules.
 - Request host keyframe when the server lacks a usable base for a viewer.
 - Redact logs and debug output.
 - Keep share status, expiry, and viewer accounting outside mirrored DOM.
+- Keep pointer latest/click/worker state in one per-share record and reject invalid tokens before retaining it.
 
 If the host disconnects, viewers should enter a host-disconnected state. The server may keep the last keyframe for a short grace period, but it must not pretend the mirror is live.
 

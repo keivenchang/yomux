@@ -152,8 +152,7 @@ if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.
 let activeShare = null;
 let activeShares = [];
 let shareCreateErrorPayload = null;
-let shareHostSockets = new Map();
-let shareHostQueues = new Map();
+const shareHostConnectionRecords = new Map();
 let shareMirrorEpoch = 1;
 let shareMirrorSequence = 0;
 let shareReplayMirrorEpoch = 1;
@@ -166,8 +165,8 @@ let sharePointerFramePending = false;
 let sharePointerLastEvent = null;
 let sharePointerLastPublishedAt = -Infinity;
 const shareScrollPublishTimers = new Map();
-const shareScrollRestoreFrameTimers = new Map();
-let shareGeometryDigestTimer = null;
+const shareScrollTargetRecords = new Map();
+let shareScrollSnapshotGeneration = 0;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
@@ -213,7 +212,6 @@ let shareReplayTopologyKeyframeTimer = null;
 let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
 const sharePopupLayerLastSeqBySender = new Map();
-const shareLastAppliedScrollByTarget = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -229,15 +227,7 @@ const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
 const refreshMeta = document.getElementById('refreshMeta');
-const tabMetaToggle = (() => {
-  const button = document.createElement('button');
-  button.id = 'tabMetaToggle';
-  button.className = 'tab-meta-toggle';
-  button.type = 'button';
-  button.textContent = '#';
-  button.setAttribute('aria-pressed', 'true');
-  return button;
-})();
+const tabMetaToggle = makeButton({id: 'tabMetaToggle', className: 'tab-meta-toggle', label: '#', pressed: true});
 const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
 const fileExplorer = document.getElementById('fileExplorer');
@@ -559,8 +549,7 @@ const openFiles = fileState;  // compatibility alias during the file-state migra
 const fileIdentityByPath = new Map();  // display path -> backend physical-file identity
 const openFilePathByIdentity = new Map();  // backend physical-file identity -> primary open display path
 const fileOpenPromisesByPath = new Map();  // display path -> in-flight text-editor open promise
-const fileExplorerDirectorySignatures = new Map();
-const fileExplorerKnownEntryNames = new Map();
+const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
@@ -575,9 +564,11 @@ const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
-let layoutUrlStateFromQuery = null;
-let layoutUrlStateApplied = false;
-let layoutUrlStateRefreshTimer = null;
+const layoutUrlState = {
+  pending: null,
+  applied: false,
+  refreshTimer: null,
+};
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = shareBootstrapFinderRoot() || null;
@@ -660,21 +651,24 @@ const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStora
 let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
-let tabberActivityRequestGeneration = 0;
-let tabberActivityAppliedRequestGeneration = 0;
-let tabberActivityLoaded = false;
-let tabberActivityFetchPromise = null;
+const tabberActivityState = {
+  requestGeneration: 0,
+  appliedGeneration: 0,
+  loaded: false,
+  request: null,
+};
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
-let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
-let fileExplorerSessionFilesPayloadSignature = '';
-let fileExplorerSessionFilesLoading = false;
-const fileExplorerSessionFilesGuard = makeGenerationGuard();
+const fileExplorerSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+};
 let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
-const fileExplorerExpandedBySyncTarget = new Map();
+const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
-const fileExplorerSyncManualCollapsedByTarget = new Map();
 let fileExplorerSyncManualCollapsedPaths = new Set();
 let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
@@ -696,24 +690,28 @@ let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: glob
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
 let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
-let commandPaletteNode = null;
+const commandPaletteState = {
+  node: null,
+  query: '',
+  index: 0,
+  items: [],
+};
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
 let pendingGlobalShortcutChordTimer = null;
 const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
-let commandPaletteQuery = '';
-let commandPaletteIndex = 0;
-let commandPaletteItemsCache = [];
 const commandPaletteRecentKeys = new Map();
 let commandPaletteRecentSequence = 0;
-let fileQuickOpenRoot = '';
-let fileQuickOpenCandidates = [];
-let fileQuickOpenLoading = false;
-let fileQuickOpenError = '';
-let fileQuickOpenRequestId = 0;
-let fileQuickOpenDebounce = null;
-let fileQuickOpenAbortController = null;
+const fileQuickOpenState = {
+  root: '',
+  candidates: [],
+  loading: false,
+  error: '',
+  requestId: 0,
+  debounce: null,
+  abortController: null,
+};
 let tabsMenuSearchText = '';
 // P0 menu-bar: how the Tabs ▾ navigator orders its list — 'default' (tmux/editors/other), 'attention'
 // (needs-* sessions first, the "Needs me" view), or 'name'. Persisted; set from View → Sort tab list.
@@ -799,11 +797,13 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let serverWatchRootsSignature = '';
-let serverWatchRootsInFlight = false;
-let serverWatchRootsSyncedAt = 0;
-let serverWatchRootsTimer = null;
-let serverWatchRootsPendingOptions = {};
+const serverWatchRootsState = {
+  signature: '',
+  inFlight: false,
+  syncedAt: 0,
+  timer: null,
+  pendingOptions: {},
+};
 let fileExplorerFilesystemWatchToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
 const fileExplorerFilesystemKeyframeMs = 60001;
@@ -1328,62 +1328,93 @@ let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
-let transcriptMeta = {};
-let transcriptMetaLoading = false;
-let transcriptMetaLoaded = false;
-let transcriptMetaLoadError = null;
-let transcriptMetaRefreshPromise = null;
-let infoPanelRenderPending = false;
-let infoPanelLastRenderSignature = '';
-let infoPanelLastRenderHtml = '';
-let clientEventsSource = null;
-let clientEventsConnected = false;
-const clientPushEventQueue = new Map();
-let clientPushEventFrame = 0;
-let reconnectResyncTimer = null;
+const transcriptMetadataState = {
+  payload: {},
+  loading: false,
+  loaded: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+function setTranscriptMetadataPayload(payload, options = {}) {
+  if (options.invalidateRequest !== false) transcriptMetadataState.guard.invalidate();
+  transcriptMetadataState.payload = payload && typeof payload === 'object' ? payload : {};
+  return transcriptMetadataState.payload;
+}
+const infoPanelRenderCache = {signature: '', html: ''};
+const clientEventTransportState = {
+  source: null,
+  connected: false,
+  queue: new Map(),
+  frame: 0,
+  resyncTimer: null,
+};
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
-let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
-let activitySummaryRefreshing = false;
-let activitySummaryLastRefreshTs = 0;
-const activitySummaryGuard = makeGenerationGuard();
-let backgroundOwnerStatusPayload = null;
-let backgroundOwnerStatusLoading = false;
-let backgroundOwnerStatusLoaded = false;
-let backgroundOwnerStatusError = '';
-let backgroundOwnerStatusRefreshPromise = null;
-let yoagentStartupActivitySummaryPayload = null;
-let yoagentMessages = [];
-let yoagentPendingWaits = [];
-let yoagentJobs = [];
-let yoagentJobsLoading = false;
-let yoagentConversationLoaded = false;
-let yoagentConversationLoading = false;
-let yoagentConversationPath = '';
-let yoagentConversationDisplayPath = '';
-let yoagentBusy = false;
-let yoagentPrewarming = false;
-let yoagentPrewarmStarted = false;
-let yoagentStartupLlmRequested = false;
-let yoagentStreamingMessages = new Map();
-let yoagentActiveChatRequest = null;
-let yoagentChatQueue = [];
-let yoagentChatQueueSerial = 0;
-let yoagentError = null;
-let yoagentDraft = '';
-let yoagentHistoryCursor = null;
-let yoagentHistoryDraft = '';
-let yoagentNotice = null;
+const activitySummaryState = {
+  payload: {sessions: {}, global: {lines: []}, session_order: []},
+  refreshing: false,
+  guard: makeGenerationGuard(),
+};
+const backgroundOwnerStatusState = {
+  payload: null,
+  loading: false,
+  error: '',
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentStartupState = {
+  activityPayload: null,
+  prewarming: false,
+  prewarmStarted: false,
+  llmRequested: false,
+  infoShown: false,
+  infoVisible: false,
+};
+const yoagentConversationState = {
+  messages: [],
+  pendingWaits: [],
+  loaded: false,
+  loading: false,
+  path: '',
+  displayPath: '',
+  streamingMessages: new Map(),
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentJobsState = {
+  items: [],
+  loading: false,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentChatState = {
+  busy: false,
+  activeRequest: null,
+  queue: [],
+  queueSerial: 0,
+  error: null,
+  draft: '',
+  historyCursor: null,
+  historyDraft: '',
+  notice: null,
+};
 let yoagentScrollbackLocked = false;
-let yoagentStartupInfoShown = false;
-let yoagentStartupInfoVisible = false;
-let searchHistoryQuery = '';
-let searchHistoryPayload = {query: '', results: []};
-let searchHistoryLoading = false;
-let searchHistoryError = null;
-let runHistoryPayload = {runs: []};
-let runHistoryLoading = false;
-let runHistoryError = null;
+const searchHistoryState = {
+  query: '',
+  payload: {query: '', results: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const runHistoryState = {
+  payload: {runs: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
@@ -1438,9 +1469,17 @@ let focusedPanelItem = null;
 let lastActivePaneItem = null;
 let lastActiveNonFileExplorerPaneItem = null;
 let lastFocusedTmuxSession = null;
-let dragSession = null;
-let dragSourceSlot = null;
-let dragPaneSlot = null;
+const dragState = {
+  item: null,
+  sourceSlot: null,
+  paneSlot: null,
+  filePayload: null,
+  customPreview: null,
+  customPreviewOffset: {x: 0, y: 0},
+  nativePreview: null,
+  transparentImage: null,
+  tabRectCache: null,
+};
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
@@ -1449,14 +1488,8 @@ let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
-let dragFilePayloadState = null;
-let customDragPreview = null;
-let customDragPreviewOffset = {x: 0, y: 0};
-let nativeDragImagePreview = null;
-let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
-let dragTabRectCache = null;
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
@@ -1489,9 +1522,11 @@ let authRedirectStarted = false;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
-let fileExplorerSyncPathInFlight = '';
-let fileExplorerLastAppliedSyncPlanKey = '';
-let fileExplorerSyncGeneration = 0;
+const fileExplorerSyncState = {
+  inFlightSignature: '',
+  appliedPlanKey: '',
+  generation: 0,
+};
 // Hardcoded frontend timing values live here. Settings-backed intervals stay in settings.py and are read through initialSetting/numberSetting.
 const FILE_TREE_RECENCY_JUST_UPDATED_MAX_AGE_SECONDS = 15;
 const uiDelayMs = Object.freeze({
@@ -1504,6 +1539,7 @@ const uiDelayMs = Object.freeze({
   tmuxWindowReadbackRetry: 80,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
+  commandPaletteMissingPathRetry: 1001,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
 });
@@ -1521,6 +1557,7 @@ const yolomuxTiming = Object.freeze({
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
+  commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
   yolomuxFontReadyTimeoutMs: 2500,
@@ -1544,6 +1581,7 @@ const {
   tmuxWindowReadbackRetryMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
+  commandPaletteMissingPathRetryMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
   yolomuxFontReadyTimeoutMs,
@@ -1980,11 +2018,11 @@ function worktreeDisplayText(worktree) {
 }
 
 function clientPushCanSupplyData() {
-  return Boolean(clientEventsSource && location.protocol !== 'file:');
+  return Boolean(clientEventTransportState.source && location.protocol !== 'file:');
 }
 
 function clientPushConnectedForData() {
-  return clientPushCanSupplyData() && clientEventsConnected === true;
+  return clientPushCanSupplyData() && clientEventTransportState.connected === true;
 }
 
 function loginRedirectUrlForCurrentLocation() {
@@ -2916,7 +2954,7 @@ function setFileConflictDialogOpen(path, open) {
 // Normalized view of a session's transcript metadata — prevents each call site from re-implementing
 // the same `?.[session]?.project?.git?.root` chain differently.
 function sessionTranscriptInfo(session) {
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const git = info.project?.git || {};
   return {
     gitRoot: git.root || '',
@@ -3542,7 +3580,7 @@ function tmuxWindowUserInteractionIndex(session) {
     .find(button => String(button.dataset.windowSession || '').trim() === sessionKey);
   const activeIndex = tmuxWindowIndexKey(activeButton?.dataset.windowIndex);
   if (activeIndex !== null) return activeIndex;
-  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  const info = transcriptMetadataState.payload.sessions?.[sessionKey] || null;
   return typeof tmuxWindowCurrentActiveIndex === 'function'
     ? tmuxWindowCurrentActiveIndex(sessionKey, info)
     : null;
@@ -4778,25 +4816,17 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  if (options.id) button.id = options.id;
-  if (options.className) button.className = options.className;
-  if (options.role) button.setAttribute('role', options.role);
-  if (options.html !== undefined) button.innerHTML = options.html;
-  else if (options.label !== undefined) button.textContent = options.label;
+  setDomBuilderOptions(button, options);
   button.disabled = options.disabled === true;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
     button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
     if (options.checked === true) button.dataset.checked = 'true';
   }
-  if (options.dataset) {
-    for (const [key, value] of Object.entries(options.dataset)) {
-      if (value !== undefined && value !== null) button.dataset[key] = String(value);
-    }
-  }
   if (typeof options.onClick === 'function') button.addEventListener('click', options.onClick);
+  for (const [type, listener] of Object.entries(options.events || {})) {
+    if (typeof listener === 'function') button.addEventListener(type, listener);
+  }
   return button;
 }
 
@@ -6355,8 +6385,8 @@ function applyLayoutUrlStateSeed(state) {
   applyLayoutUrlFinderSeed(state.finder || {});
   applyLayoutUrlEditorSeed(state.editor || {});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
-  layoutUrlStateFromQuery = state;
-  layoutUrlStateApplied = false;
+  layoutUrlState.pending = state;
+  layoutUrlState.applied = false;
   return true;
 }
 
@@ -6403,10 +6433,10 @@ function layoutUrlStateParamValue() {
 }
 
 function applyPendingLayoutUrlState() {
-  if (layoutUrlStateApplied) return false;
-  const state = layoutUrlStateFromQuery;
+  if (layoutUrlState.applied) return false;
+  const state = layoutUrlState.pending;
   if (!state || typeof state !== 'object') {
-    layoutUrlStateApplied = true;
+    layoutUrlState.applied = true;
     return false;
   }
   applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
@@ -6415,23 +6445,25 @@ function applyPendingLayoutUrlState() {
     requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
     setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
   }
-  layoutUrlStateApplied = true;
+  layoutUrlState.applied = true;
   return true;
 }
 
 function schedulePendingLayoutUrlStateApply() {
-  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  if (!layoutUrlState.pending || layoutUrlState.applied) return;
   requestAnimationFrame(applyPendingLayoutUrlState);
   setTimeout(applyPendingLayoutUrlState, 0);
 }
 
 function scheduleLayoutUrlStateRefresh() {
   if (shareViewMode) return;
-  if (layoutUrlStateRefreshTimer) return;
-  layoutUrlStateRefreshTimer = setTimeout(() => {
-    layoutUrlStateRefreshTimer = null;
+  if (layoutUrlState.refreshTimer) return;
+  const timer = setTimeout(() => {
+    if (layoutUrlState.refreshTimer !== timer) return;
+    layoutUrlState.refreshTimer = null;
     updateActiveSessionParam();
   }, 250);
+  layoutUrlState.refreshTimer = timer;
 }
 
 function refreshLayoutUrlStateSoon() {
@@ -7054,10 +7086,12 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
+  const record = attentionAcknowledgementRecord(value);
   // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
   // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
-  if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
-  const record = attentionAcknowledgementRecord(value);
+  // The one exception is this exact acknowledgement while its request is still pending: after the
+  // gray fade retires, the preceding snapshot is stale and must not flash red/yellow again.
+  if ((payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) && record?.pending !== true) return false;
   if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -7228,7 +7262,7 @@ function terminalDisconnected(session) {
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }
 
-function sessionState(session, info = transcriptMeta.sessions?.[session]) {
+function sessionState(session, info = transcriptMetadataState.payload.sessions?.[session]) {
   if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
@@ -7364,7 +7398,7 @@ function autoApproveScreenIsWorking(payload) {
     : String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
-function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMetadataState.payload.sessions?.[session]) {
   return typeof sessionAgentWindowHasWorkingSignal === 'function'
     ? sessionAgentWindowHasWorkingSignal(session, info, payload)
     : false;
@@ -7380,8 +7414,8 @@ function yoloWorkingSessions() {
   return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
-function runningAgentCount() {
-  return yoloWorkingSessions().length;
+function runningAgentCount(counts = globalActivityCounts()) {
+  return Math.max(0, Number(counts?.running || 0));
 }
 
 function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
@@ -7389,7 +7423,7 @@ function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.g
   const key = String(payload?.screen?.key || '');
   if (key && key !== STATE_KEY.idle) return true;
   if (autoApproveEnabledForSession(payload)) return true;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
 }
 
@@ -7733,7 +7767,7 @@ function browserFaviconLink() {
 }
 
 function updateBrowserFavicon(options = {}) {
-  const count = browserFaviconBadgeCount();
+  const count = browserFaviconBadgeCount(options.counts);
   // Include the accent in the dedupe signature so a theme/active-color change re-renders
   // on the next refresh tick even when the badge count is unchanged.
   const accent = browserFaviconAccentColors();
@@ -7749,8 +7783,9 @@ function updateBrowserFavicon(options = {}) {
 }
 
 function updateDocumentTitle() {
-  updateBrowserFavicon();
-  const count = runningAgentCount();
+  const counts = globalActivityCounts();
+  updateBrowserFavicon({counts});
+  const count = runningAgentCount(counts);
   if (count > 0) {
     documentTitleIdleSinceMs = null;
     document.title = t('document.title.running', {count});
@@ -7831,8 +7866,8 @@ function globalActivityCounts() {
 
 function globalActivityCountSessions() {
   if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
-  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
-  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
+  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const sessions = [];
   for (const value of [...order, ...all]) {
@@ -7856,7 +7891,7 @@ function globalActivityCountsFromAgentWindows() {
   let blocked = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
-    const info = transcriptMeta.sessions?.[session] || {};
+    const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const autoPayload = autoApproveStates.get(session) || {};
     const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
     for (const agent of rows) {
@@ -7900,14 +7935,13 @@ function topbarActivityCountBallHtml(count, tone, extraClass = '') {
 }
 
 function createTopbarActivityStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarActivity';
-  button.className = 'topbar-activity topbar-status-surface';
-  button.title = t('topbar.activity.title');
-  button.setAttribute('aria-label', t('topbar.activity.aria'));
-  button.onclick = () => openTabberActivityOverview();
-  return button;
+  return makeButton({
+    id: 'topbarActivity',
+    className: 'topbar-activity topbar-status-surface',
+    title: t('topbar.activity.title'),
+    ariaLabel: t('topbar.activity.aria'),
+    onClick: () => openTabberActivityOverview(),
+  });
 }
 
 function updateTopbarActivityStatus() {
@@ -7943,7 +7977,7 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   return lines.filter(Boolean).join('\n');
 }
 
-function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusState.payload) {
   if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
   return [
     {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
@@ -7952,12 +7986,12 @@ function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
   ];
 }
 
-function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusState.payload) {
   const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
   return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
 }
 
-function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusState.payload, nowSeconds = Date.now() / 1000) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
   const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
@@ -7995,7 +8029,7 @@ function showBackgroundOwnerContextMenu(event) {
     appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
   } else {
     appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
-      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
       const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
       if (backgroundOwnerCurrentOwnerLive(payload)) {
         const label = backgroundServerLabel(owner, t('common.unknown'));
@@ -8010,29 +8044,28 @@ function showBackgroundOwnerContextMenu(event) {
 
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
-  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+  if (backgroundOwnerStatusState.loading && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
   }
-  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+  if (backgroundOwnerStatusState.error && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload));
 }
 
 function createTopbarOwnerStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarOwnerStatus';
-  button.className = 'topbar-owner-status topbar-status-surface';
-  button.title = t('backgroundOwner.refresh');
-  button.setAttribute('aria-label', t('backgroundOwner.aria'));
-  button.onclick = () => {
-    if (typeof refreshBackgroundOwnerStatus === 'function') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-    }
-  };
-  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
-  return button;
+  return makeButton({
+    id: 'topbarOwnerStatus',
+    className: 'topbar-owner-status topbar-status-surface',
+    title: t('backgroundOwner.refresh'),
+    ariaLabel: t('backgroundOwner.aria'),
+    onClick: () => {
+      if (typeof refreshBackgroundOwnerStatus === 'function') {
+        refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+      }
+    },
+    events: {contextmenu: showBackgroundOwnerContextMenu},
+  });
 }
 
 function updateTopbarOwnerStatus() {
@@ -8043,12 +8076,12 @@ function updateTopbarOwnerStatus() {
   node.hidden = !html;
   node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload);
   if (summaries.length) {
     const [indexSummary, statsSummary, sessionSummary] = summaries;
     node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
-  } else if (backgroundOwnerStatusError) {
-    node.title = userMessageText(backgroundOwnerStatusError, t('common.requestFailed'));
+  } else if (backgroundOwnerStatusState.error) {
+    node.title = userMessageText(backgroundOwnerStatusState.error, t('common.requestFailed'));
   } else {
     node.title = t('backgroundOwner.refresh');
   }
@@ -8605,12 +8638,19 @@ function commandPaletteAllTabItems() {
   return Array.from(new Set([...activePaneItems(), ...backgroundTabItems(), ...inactiveTabItems()]));
 }
 
-const commandPaletteMissingFileTabPaths = new Set();
 const commandPaletteFileTabValidationInflight = new Set();
 
 function commandPaletteFilePathKnownMissing(path) {
   const normalized = normalizeDirectoryPath(path || '');
-  return Boolean(normalized && (openFileIsMissing(normalized) || commandPaletteMissingFileTabPaths.has(normalized)));
+  const state = normalized ? fileStateFor(normalized) : null;
+  return Boolean(state?.externalMissing === true && state?.dirty !== true);
+}
+
+function commandPaletteFilePathValidationDue(path, now = Date.now()) {
+  const state = fileStateFor(path);
+  if (state?.externalMissing !== true) return true;
+  const checkedAt = Math.max(0, Number(state.externalMissingCheckedAt) || 0);
+  return now - checkedAt >= commandPaletteMissingPathRetryMs;
 }
 
 function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems()) {
@@ -8618,17 +8658,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
   for (const item of items) {
     const path = fileItemPath(item);
     const normalized = normalizeDirectoryPath(path || '');
-    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || openFileIsMissing(normalized)) continue;
+    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
     fetchFilePathInfo(normalized, {user: true})
-      .then(info => {
-        if (info?.kind) commandPaletteMissingFileTabPaths.delete(normalized);
+      .then(async info => {
+        if (info?.kind === 'file') {
+          await recoverOpenFileAfterMissing(normalized, info);
+        } else if (info?.kind) {
+          markOpenFileMissing(normalized);
+        }
       })
       .catch(error => {
         if (Number(error?.status) === 404) {
-          commandPaletteMissingFileTabPaths.add(normalized);
           markOpenFileMissing(normalized);
-          if (commandPaletteNode && !commandPaletteNode.hidden) renderCommandPaletteResults();
+          if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
       })
       .finally(() => {
@@ -8854,7 +8897,7 @@ function fileQuickOpenDoitNeedle(query = commandPaletteSearchQuery()) {
 }
 
 function fileQuickOpenRepoFamilyBase() {
-  return normalizeDirectoryPath(fileQuickOpenRoot || repoRoot || '');
+  return normalizeDirectoryPath(fileQuickOpenState.root || repoRoot || '');
 }
 
 function fileQuickOpenRepoFamilyPrefix() {
@@ -8910,17 +8953,17 @@ function fileQuickOpenRootForSearch() {
   return repoRoot || homePath || '/';
 }
 
-function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
+function fileQuickOpenRootsForSearch(root = fileQuickOpenState.root || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
   return fileExplorerIndexedSearchRoots(root, fileQuickOpenExtraRootsForSearchQuery(query));
 }
 
-function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
+function fileQuickOpenScopeLabel(root = fileQuickOpenState.root || fileQuickOpenRootForSearch()) {
   const roots = fileQuickOpenRootsForSearch(root);
   if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
   return tPlural('palette.scope.indexedRoot', roots.length - 1, {path: compactHomePath(roots[0])});
 }
 
-function fileQuickOpenQueryParts(query = commandPaletteQuery) {
+function fileQuickOpenQueryParts(query = commandPaletteState.query) {
   const raw = String(query || '').trim();
   const match = raw.match(/^(.*?)(?::(\d+))?$/);
   return {
@@ -8931,11 +8974,11 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
-function fileQuickOpenSearchText(query = commandPaletteQuery) {
+function fileQuickOpenSearchText(query = commandPaletteState.query) {
   return fileQuickOpenQueryParts(query).query.replace(/[:.]+$/g, '').trim();
 }
 
-function fileQuickOpenPathQuery(query = commandPaletteQuery) {
+function fileQuickOpenPathQuery(query = commandPaletteState.query) {
   const text = fileQuickOpenQueryParts(query).query;
   if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
   if (text === '~') return {active: true, directory: '~', filter: ''};
@@ -8954,12 +8997,12 @@ function joinDirectoryPath(directory, name) {
 
 function descendFileQuickOpenDirectory(path) {
   const directory = normalizeDirectoryPath(path);
-  commandPaletteQuery = `${directory}${directory.endsWith('/') ? '' : '/'}`;
-  commandPaletteIndex = 0;
-  const input = commandPaletteNode?.querySelector?.('.command-palette-input');
-  if (input) input.value = commandPaletteQuery;
+  commandPaletteState.query = `${directory}${directory.endsWith('/') ? '' : '/'}`;
+  commandPaletteState.index = 0;
+  const input = commandPaletteState.node?.querySelector?.('.command-palette-input');
+  if (input) input.value = commandPaletteState.query;
   renderCommandPaletteResults();
-  refreshFileQuickOpenCandidates(commandPaletteQuery);
+  refreshFileQuickOpenCandidates(commandPaletteState.query);
 }
 
 function revealOpenFileLineSoon(path, line) {
@@ -9070,7 +9113,7 @@ function fileQuickOpenOpenFolderItem() {
   let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
-    const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    const match = fileQuickOpenState.candidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
     if (match?.path) target = match.path;
   }
   if (!target) return null;
@@ -9120,7 +9163,7 @@ function fileQuickOpenItems() {
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
-  for (const file of fileQuickOpenCandidates) {
+  for (const file of fileQuickOpenState.candidates) {
     const path = file.path || '';
     if (!path) continue;
     if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
@@ -9128,7 +9171,7 @@ function fileQuickOpenItems() {
     // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
-    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
+    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenState.root || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
@@ -9143,8 +9186,8 @@ function fileQuickOpenItems() {
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
-  if (fileQuickOpenError) {
-    const errorText = userMessageText(fileQuickOpenError, t('common.searchFailed'));
+  if (fileQuickOpenState.error) {
+    const errorText = userMessageText(fileQuickOpenState.error, t('common.searchFailed'));
     items.push({
       group: t('palette.group.files'),
       label: t('common.searchFailed'),
@@ -9154,11 +9197,11 @@ function fileQuickOpenItems() {
       run: null,
     });
   }
-  if (fileQuickOpenLoading) {
+  if (fileQuickOpenState.loading) {
     items.push({
       group: t('palette.group.files'),
       label: t('palette.searchingFiles'),
-      detail: compactHomePath(fileQuickOpenRoot),
+      detail: compactHomePath(fileQuickOpenState.root),
       loading: true,
       searchFields: ['searching'],
       disabled: true,
@@ -9178,7 +9221,7 @@ function commandPaletteMergedItems() {
   return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
 
-function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteQuery) {
+function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteState.query) {
   // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
   // candidate universe and differ only in searchRankWeights.domainPrior.
   const parts = fileQuickOpenQueryParts(rawQuery);
@@ -9196,7 +9239,7 @@ function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = comm
 }
 
 function commandPaletteItems() {
-  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteQuery);
+  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteState.query);
 }
 
 function commandPaletteRankItems(items, query, options = {}) {
@@ -9401,7 +9444,7 @@ function commandPaletteEffectiveMode() {
   return commandPaletteMode === 'files' && !fileQuickOpenQueryParts().commandMode ? 'files' : 'command';
 }
 
-function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPaletteMode) {
+function commandPaletteSearchQuery(query = commandPaletteState.query, mode = commandPaletteMode) {
   if (mode !== 'files') return String(query || '').trim();
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
@@ -9413,7 +9456,7 @@ function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPa
 
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
-  const q = commandPaletteQuery.trim();
+  const q = commandPaletteState.query.trim();
   if (q.startsWith('>')) return t('palette.placeholderCommand');
   if (q.startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.placeholderWithFiles');
@@ -9425,13 +9468,13 @@ function commandPaletteLabel() {
 }
 
 function commandPaletteEmptyText() {
-  if (fileQuickOpenLoading) return t('search.searching');
-  if (commandPaletteQuery.trim().startsWith('@')) return t('palette.symbolUnavailable');
+  if (fileQuickOpenState.loading) return t('search.searching');
+  if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
+  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -9439,12 +9482,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
 }
 
 function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
-    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
+    <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
       <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
@@ -9457,7 +9500,7 @@ function commandPaletteItemLabelHtml(item, query) {
 }
 
 function ensureCommandPalette() {
-  if (commandPaletteNode) return commandPaletteNode;
+  if (commandPaletteState.node) return commandPaletteState.node;
   const node = document.createElement('div');
   node.className = 'app-modal-overlay command-palette';
   node.hidden = true;
@@ -9472,8 +9515,8 @@ function ensureCommandPalette() {
   });
   const input = node.querySelector('.command-palette-input');
   input.addEventListener('input', () => {
-    commandPaletteQuery = input.value || '';
-    commandPaletteIndex = 0;
+    commandPaletteState.query = input.value || '';
+    commandPaletteState.index = 0;
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -9484,11 +9527,11 @@ function ensureCommandPalette() {
       closeCommandPalette();
     } else if (event.key === 'ArrowDown') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex + 1) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index + 1) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex - 1 + commandPaletteItemsCache.length) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index - 1 + commandPaletteState.items.length) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'Enter') {
       event.preventDefault();
@@ -9507,11 +9550,11 @@ function ensureCommandPalette() {
     }
     const row = event.target.closest('[data-command-index]');
     if (!row || !node.contains(row)) return;
-    commandPaletteIndex = Number(row.dataset.commandIndex || 0);
+    commandPaletteState.index = Number(row.dataset.commandIndex || 0);
     invokeCommandPaletteSelection();
   });
   appOverlayRootElement().appendChild(node);
-  commandPaletteNode = node;
+  commandPaletteState.node = node;
   return node;
 }
 
@@ -9526,7 +9569,7 @@ function renderCommandPaletteResults() {
   if (input) {
     input.placeholder = commandPalettePlaceholder();
     input.setAttribute('aria-label', commandPaletteLabel());
-    input.setAttribute('aria-busy', fileQuickOpenLoading ? 'true' : 'false');
+    input.setAttribute('aria-busy', fileQuickOpenState.loading ? 'true' : 'false');
   }
   if (status) {
     const text = commandPaletteStatusText();
@@ -9535,31 +9578,32 @@ function renderCommandPaletteResults() {
     status.setAttribute('aria-label', text);
     status.innerHTML = html;
   }
-  commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
-  commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
-  if (!commandPaletteItemsCache.length) {
+  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+  commandPaletteState.index = Math.min(commandPaletteState.index, Math.max(0, commandPaletteState.items.length - 1));
+  if (!commandPaletteState.items.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
-  results.innerHTML = commandPaletteResultsHtml(commandPaletteItemsCache, query);
+  results.innerHTML = commandPaletteResultsHtml(commandPaletteState.items, query);
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
 function openCommandPalette(options = {}) {
   const node = ensureCommandPalette();
   closeAppMenus();
+  abortFileQuickOpenSearch();
   commandPaletteMode = options.mode === 'files' ? 'files' : 'command';
-  commandPaletteQuery = '';
-  commandPaletteIndex = 0;
+  commandPaletteState.query = '';
+  commandPaletteState.index = 0;
   node.hidden = false;
   node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
-  fileQuickOpenRoot = fileQuickOpenRootForSearch();
-  fileQuickOpenCandidates = [];
-  fileQuickOpenLoading = false;
-  fileQuickOpenError = '';
+  fileQuickOpenState.root = fileQuickOpenRootForSearch();
+  fileQuickOpenState.candidates = [];
+  fileQuickOpenState.loading = false;
+  fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
   if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
@@ -9572,11 +9616,12 @@ function openFileQuickOpen() {
 }
 
 function closeCommandPalette() {
-  if (!commandPaletteNode) return;
-  commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove(CLS.open);
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
-  fileQuickOpenDebounce = null;
+  if (!commandPaletteState.node) return;
+  commandPaletteState.node.hidden = true;
+  commandPaletteState.node.classList.remove(CLS.open);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
+  fileQuickOpenState.debounce = null;
+  abortFileQuickOpenSearch();
 }
 
 function focusCommandPaletteTarget(item) {
@@ -9588,7 +9633,7 @@ function focusCommandPaletteTarget(item) {
 }
 
 async function invokeCommandPaletteSelection(event = null) {
-  const item = commandPaletteItemsCache[commandPaletteIndex];
+  const item = commandPaletteState.items[commandPaletteState.index];
   if (!item || item.disabled) return;
   rememberCommandPaletteItem(item);
   closeCommandPalette();
@@ -9598,22 +9643,23 @@ async function invokeCommandPaletteSelection(event = null) {
 }
 
 function scheduleFileQuickOpenSearch(options = {}) {
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
   const run = () => {
-    const q = commandPaletteQuery.trim();
-    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
+    fileQuickOpenState.debounce = null;
+    const q = commandPaletteState.query.trim();
+    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteState.query);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
+  else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {
-  if (fileQuickOpenAbortController) {
-    try { fileQuickOpenAbortController.abort(); } catch (_) {}
+  if (fileQuickOpenState.abortController) {
+    try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
-  fileQuickOpenAbortController = null;
-  fileQuickOpenRequestId += 1;
-  fileQuickOpenLoading = false;
+  fileQuickOpenState.abortController = null;
+  fileQuickOpenState.requestId += 1;
+  fileQuickOpenState.loading = false;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -9635,22 +9681,22 @@ function dedupeFileSearchResults(files) {
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
-  const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
+  const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
   abortFileQuickOpenSearch();
-  const requestId = ++fileQuickOpenRequestId;
-  fileQuickOpenAbortController = typeof AbortController === 'function' ? new AbortController() : null;
-  const fetchOptions = fileQuickOpenAbortController ? {signal: fileQuickOpenAbortController.signal} : {};
-  fileQuickOpenLoading = true;
+  const requestId = ++fileQuickOpenState.requestId;
+  fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
+  fileQuickOpenState.loading = true;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
-      if (requestId !== fileQuickOpenRequestId) return;
-      fileQuickOpenRoot = payload.path || pathQuery.directory || root;
+      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`, fetchOptions);
+      if (requestId !== fileQuickOpenState.requestId) return;
+      fileQuickOpenState.root = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
-      fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
+      fileQuickOpenState.candidates = (Array.isArray(payload.entries) ? payload.entries : [])
         .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
         .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
         .map(entry => ({
@@ -9673,34 +9719,34 @@ async function refreshFileQuickOpenCandidates(query = '') {
           return {ok: false, root: searchRoot, error};
         }
       }));
-      if (requestId !== fileQuickOpenRequestId) return;
+      if (requestId !== fileQuickOpenState.requestId) return;
       const successful = results.filter(result => result.ok);
       if (!successful.length) {
         const firstError = results.find(result => result.error)?.error;
         if (firstError) throw firstError;
         const fallback = t('common.searchFailed');
-        fileQuickOpenError = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
+        fileQuickOpenState.error = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
         return;
       }
-      fileQuickOpenRoot = root;
-      fileQuickOpenCandidates = dedupeFileSearchResults(
+      fileQuickOpenState.root = root;
+      fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
     }
-    fileQuickOpenError = '';
+    fileQuickOpenState.error = '';
   } catch (error) {
-    if (requestId !== fileQuickOpenRequestId) return;
+    if (requestId !== fileQuickOpenState.requestId) return;
     if (error?.name === 'AbortError') return;
-    fileQuickOpenCandidates = [];
-    fileQuickOpenError = userMessageSnapshot(error, {
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},
       fallback: t('common.searchFailed'),
     });
   } finally {
-    if (requestId === fileQuickOpenRequestId) {
-      fileQuickOpenAbortController = null;
-      fileQuickOpenLoading = false;
+    if (requestId === fileQuickOpenState.requestId) {
+      fileQuickOpenState.abortController = null;
+      fileQuickOpenState.loading = false;
       renderCommandPaletteResults();
     }
   }
@@ -9955,35 +10001,31 @@ function startupHelperWrappedIndex(index, count) {
   return ((Math.floor(Number(index)) % count) + count) % count;
 }
 
-function startupHelperAction(label, onClick, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if (options.className) button.className = options.className;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick?.();
-  });
-  return button;
-}
-
 function startupHelperNavigationGroup(index, total, showRelativeTip) {
   const group = document.createElement('span');
   group.className = 'startup-helper-nav';
   group.setAttribute('role', 'group');
   group.setAttribute('aria-label', t('startupHelper.navigation'));
   group.append(
-    startupHelperAction('<', () => showRelativeTip(-1), {
+    makeButton({
+      label: '<',
       className: 'startup-helper-nav-button',
       title: t('startupHelper.action.previous'),
       ariaLabel: t('startupHelper.action.previous'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(-1);
+      },
     }),
-    startupHelperAction('>', () => showRelativeTip(1), {
+    makeButton({
+      label: '>',
       className: 'startup-helper-nav-button',
       title: t('startupHelper.action.next'),
       ariaLabel: t('startupHelper.action.next'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(1);
+      },
     }),
   );
   return group;
@@ -10021,12 +10063,16 @@ function showStartupHelperTip(options = {}) {
     showStartupHelperTip({manual: true});
   };
   const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
-  const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
-    startupHelpersEnabled = false;
-    closeStartupHelperToast(node);
-    saveSettingsPatch(settingPatch('general.startup_tips', false))
-      .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
+  const offAction = makeButton({
+    label: t('startupHelper.action.offForever'),
+    onClick: event => {
+      event.stopPropagation();
+      startupHelpersEnabled = false;
+      closeStartupHelperToast(node);
+      saveSettingsPatch(settingPatch('general.startup_tips', false))
+        .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+        .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
+    },
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -10068,7 +10114,7 @@ function compactNotificationTitle(scope, message, options = {}) {
 
 function sessionNotificationScope(session) {
   const label = sessionLabel(session);
-  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  const desc = sessionTabDescription(session, transcriptMetadataState.payload.sessions?.[session]);
   return desc ? `${label} ${desc}` : label;
 }
 
@@ -10085,7 +10131,7 @@ function attentionToastAgent(session, state) {
   if (agentWindowIsAttentionState(agent?.state)) {
     return {agent, item: state?.attentionAgentItem || null};
   }
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const summary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session))
     : null;
@@ -10124,7 +10170,7 @@ function agentToastTargetLine(session, agent, options = {}) {
       line.classList.add('toast-line--attention');
       const marker = document.createElement('span');
       marker.className = 'attention-toast-controls';
-      const info = transcriptMeta.sessions?.[session];
+      const info = transcriptMetadataState.payload.sessions?.[session];
       const auto = autoApproveStates.get(session)?.enabled === true;
       const status = options.state || sessionState(session, info);
       const tabHtml = tmuxPaneTabTokenHtml(session, {
@@ -10246,7 +10292,7 @@ function sendTestNotification(options = {}) {
 
 function notifyCurrentAttentionStates() {
   for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     if (shouldNotifyState(state)) maybeNotifyState(session, state, {force: true});
   }
 }
@@ -10261,7 +10307,7 @@ function stateSignature(state) {
 
 function trackSessionStateChanges() {
   for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     const record = sessionStatusRecord(session, true);
     const previous = record?.state || null;
     const signature = stateSignature(state);
@@ -10299,7 +10345,7 @@ function maybeNotifyState(session, state, options = {}) {
   const lastSent = sessionNotificationLastSentAt(session, key);
   if (options.force !== true && now - lastSent < 60_000) return;
   recordSessionNotificationSent(session, key, now);
-  const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
+  const body = `${state.reason} · ${projectDirName(session, transcriptMetadataState.payload.sessions?.[session])}`;
   if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {
     state: state.key,
@@ -10477,7 +10523,7 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
   const pendingMap = record?.workingAgentTransitionNotificationPending;
   if (!toneMap || !pendingMap) return 0;
   const rows = typeof sessionAgentWindowStatusPayloads === 'function'
-    ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
+    ? sessionAgentWindowStatusPayloads(session, transcriptMetadataState.payload.sessions?.[session], payload)
     : typeof agentWindowPayloadRows === 'function'
       ? agentWindowPayloadRows(payload.agent_windows)
       : [];
@@ -10757,7 +10803,7 @@ function performLayoutRender(request = {}) {
 
 function requestLayoutRender(request = {}) {
   const renderRequest = layoutRenderRequest(request);
-  if (dragSession != null) {
+  if (dragState.item != null) {
     pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
     return;
   }
@@ -10982,12 +11028,12 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  return tabMenuDetailText(item, transcriptMetadataState.payload.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -11003,7 +11049,7 @@ function commandPaletteTabDetail(item) {
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
   const pr = displayPullRequest(info);
@@ -11344,7 +11390,7 @@ function finderSearchAliases(item) {
 }
 
 function tabSearchFields(item) {
-  const info = transcriptMeta.sessions?.[item] || {};
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
@@ -11898,31 +11944,30 @@ function createAppMenu(menu) {
   const wrapper = document.createElement('div');
   wrapper.className = 'app-menu';
   wrapper.dataset.appMenu = menu.id;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'app-menu-button';
-  button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', openAppMenuId === menu.id ? 'true' : 'false');
-  button.setAttribute('role', 'menuitem');
-  button.innerHTML = `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
   popover.setAttribute('role', 'menu');
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
   fitAppMenuPopover(popover);
-  button.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (wrapper.classList.contains(CLS.open)) {
-      const openMs = Date.now() - openAppMenuOpenedAt;
-      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
-      else openAppMenu(wrapper, {focusFirst: false, pinned: true});
-      return;
-    }
-    openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  const button = makeButton({
+    className: 'app-menu-button',
+    role: 'menuitem',
+    html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
+    attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (wrapper.classList.contains(CLS.open)) {
+        const openMs = Date.now() - openAppMenuOpenedAt;
+        if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+        else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+        return;
+      }
+      openAppMenu(wrapper, {focusFirst: false, pinned: true});
+    },
+    events: {keydown: event => handleAppMenuButtonKeydown(event, wrapper)},
   });
-  button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
   if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
@@ -12089,24 +12134,22 @@ function bindAppMenuCommandMirrorActive(button, owner = button) {
 }
 
 function createAppMenuCommand(item, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
-  button.setAttribute('role', item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem');
-  if (item.checked !== undefined) {
-    button.dataset.checked = item.checked ? 'true' : 'false';
-    button.setAttribute('aria-checked', item.checked ? 'true' : 'false');
-  }
-  if (item.disabled) button.disabled = true;
   const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
-  if (ariaLabel) button.setAttribute('aria-label', ariaLabel);
   const richHtml = item.html ? stripTitleAttrs(item.html) : '';
   const iconHtml = item.iconHtml ? stripTitleAttrs(item.iconHtml) : '';
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
   const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
-  button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
+  const button = makeButton({
+    className: ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
+    role: item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
+    checked: item.checked,
+    disabled: item.disabled,
+    ariaLabel,
+    dataset: item.checked !== undefined ? {checked: item.checked ? 'true' : 'false'} : undefined,
+    html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
+  });
   if (!options.asSubmenu) {
     button.addEventListener('click', event => {
       event.preventDefault();
@@ -12366,7 +12409,7 @@ async function openFileExplorerAt(path, options = {}) {
 }
 
 function resetFileExplorerAppliedSyncPlan() {
-  fileExplorerLastAppliedSyncPlanKey = '';
+  fileExplorerSyncState.appliedPlanKey = '';
 }
 
 async function saveFileExplorerRootMode(mode) {
@@ -12380,10 +12423,7 @@ async function saveFileExplorerRootMode(mode) {
 // second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
-const fileExplorerDirListingCache = new Map();
-const fileExplorerDirListingInflight = new Map();
-const fileExplorerPathInfoCache = new Map();
-const fileExplorerPathInfoInflight = new Map();
+const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
@@ -12464,6 +12504,80 @@ function fileExplorerFsCacheTtlMs() {
 
 function fileExplorerFsBatchKey(type, path) {
   return `${type}\x1f${normalizeDirectoryPath(path)}`;
+}
+
+function fileExplorerFsResourceRecord(type, path) {
+  const key = fileExplorerFsBatchKey(type, path);
+  let record = fileExplorerFsResourceRecords.get(key);
+  if (!record) {
+    record = {value: undefined, storedAt: 0, request: null, generation: 0};
+    setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
+  }
+  return {key, record};
+}
+
+function fileExplorerFsResourceCurrent(key, record, generation) {
+  return fileExplorerFsResourceRecords.get(key) === record && record.generation === generation;
+}
+
+function setFileExplorerFsResourceValue(type, path, value) {
+  const {record} = fileExplorerFsResourceRecord(type, path);
+  record.generation += 1;
+  record.request = null;
+  record.value = value;
+  record.storedAt = Date.now();
+  return value;
+}
+
+function fileExplorerFsResourceHasValue(type, path) {
+  const record = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey(type, path));
+  return record?.value !== undefined;
+}
+
+function invalidateFileExplorerFsResourceRecord(key, record) {
+  record.generation += 1;
+  record.value = undefined;
+  record.storedAt = 0;
+  record.request = null;
+  if (fileExplorerFsResourceRecords.get(key) === record) fileExplorerFsResourceRecords.delete(key);
+}
+
+function requestFileExplorerFsResource(type, path, options, makeRequest, lifecycle = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const canReuse = options.fresh !== true;
+  const {key, record} = fileExplorerFsResourceRecord(type, normalized);
+  const cacheTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && cacheTtlMs > 0 && record.value !== undefined && Date.now() - record.storedAt < cacheTtlMs) {
+    lifecycle.onReuse?.(record.value);
+    return Promise.resolve(record.value);
+  }
+  if (canReuse && record.request) return record.request;
+  if (lifecycle.skipRequest?.() === true) {
+    lifecycle.onSkip?.();
+    return Promise.resolve(lifecycle.skipValue);
+  }
+  record.generation += 1;
+  const generation = record.generation;
+  let request = null;
+  request = (async () => {
+    try {
+      const value = await makeRequest();
+      if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
+        record.value = value;
+        record.storedAt = Date.now();
+        lifecycle.onPublish?.(value);
+      }
+      return value;
+    } catch (error) {
+      if (fileExplorerFsResourceCurrent(key, record, generation)) lifecycle.onError?.(error);
+      if (Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue')) return lifecycle.errorValue;
+      throw error;
+    } finally {
+      if (fileExplorerFsResourceCurrent(key, record, generation) && record.request === request) record.request = null;
+    }
+  })();
+  record.request = request;
+  return request;
 }
 
 function fileExplorerFsBatchSingleUrl(type, path) {
@@ -12553,35 +12667,22 @@ async function flushFileExplorerFsBatch() {
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  const canReuse = options.fresh !== true;
-  const dirListingTtlMs = fileExplorerFsCacheTtlMs();
-  if (canReuse && dirListingTtlMs > 0) {
-    const cached = fileExplorerDirListingCache.get(root);
-    if (cached && Date.now() - cached.at < dirListingTtlMs) {
-      clearFileExplorerListError(root);
-      return cached.entries;
-    }
-  }
-  if (fileExplorerPushRefreshDepth > 0) {
-    clearFileExplorerListError(root);
-    return null;
-  }
-  if (suppressBackgroundFilesystemFetch(options)) {
-    clearFileExplorerListError(root);
-    return null;
-  }
-  return dedupeInflight(fileExplorerDirListingInflight, root, canReuse, () => (async () => {
-    try {
+  return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
-      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
-      const entries = payload.entries || [];
+      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: options.fresh !== true});
+      return payload.entries || [];
+    }, {
+      onReuse: () => clearFileExplorerListError(root),
+      skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
+      onSkip: () => clearFileExplorerListError(root),
+      skipValue: null,
+      onPublish: entries => {
       clearFileExplorerListError(root);
       cacheFileExplorerRepoInfoEntries(root, entries);
       markNewDirectoryEntries(root, entries);
       if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-      setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
-      return entries;
-    } catch (err) {
+      },
+      onError: err => {
       const status = Number(err?.status) || 0;
       const openFailed = t('preview.openFailed', {path: root});
       fileExplorerPathError = status
@@ -12589,15 +12690,18 @@ async function fetchDirectory(path, options = {}) {
         : `${openFailed}: ${err}`;
       setFileExplorerListError(root, err, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
-      return null;
-    }
-  })());
+      },
+      errorValue: null,
+    });
 }
 
 function invalidateFileExplorerFsCaches() {
-  fileExplorerDirListingCache.clear();
-  fileExplorerPathInfoCache.clear();
-  fileExplorerDirectorySignatures.clear();
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    invalidateFileExplorerFsResourceRecord(key, record);
+  }
+  for (const [root, record] of Array.from(fileExplorerDirectoryRecords.entries())) {
+    updateFileExplorerDirectoryRecord(root, {signature: undefined}, record);
+  }
 }
 
 function invalidateFileExplorerRoots(roots = []) {
@@ -12607,16 +12711,11 @@ function invalidateFileExplorerRoots(roots = []) {
     .map(root => normalizeDirectoryPath(root));
   if (!normalizedRoots.length) return false;
   const shouldDrop = path => normalizedRoots.some(root => pathIsInsideDirectory(path, root));
-  for (const cache of [
-    fileExplorerDirListingCache,
-    fileExplorerPathInfoCache,
-    fileExplorerDirectorySignatures,
-    fileExplorerKnownEntryNames,
-    fileExplorerNewEntryUntil,
-  ]) {
-    for (const key of Array.from(cache.keys())) {
-      if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
-    }
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    if (shouldDrop(normalizeDirectoryPath(key.split('\x1f').at(-1)))) invalidateFileExplorerFsResourceRecord(key, record);
+  }
+  for (const cache of [fileExplorerDirectoryRecords, fileExplorerNewEntryUntil]) {
+    for (const key of Array.from(cache.keys())) if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
   }
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
@@ -12633,7 +12732,7 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     cacheFileExplorerRepoInfoEntries(path, entries);
     markNewDirectoryEntries(path, entries);
     recordDirectorySignature(path, entries);
-    setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
+    setFileExplorerFsResourceValue('list', path, entries);
   }
   return entriesByDir;
 }
@@ -12739,7 +12838,7 @@ async function refreshFileExplorerFromPush(payload = {}) {
         });
       }
       const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
-      if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+      if (openFileDirs.every(path => fileExplorerFsResourceHasValue('list', path))) await refreshOpenFilesIfChanged();
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
     }
@@ -12769,8 +12868,23 @@ function directoryEntriesSignature(entries) {
     .join('\x1e');
 }
 
+function fileExplorerDirectoryRecord(path) {
+  return fileExplorerDirectoryRecords.get(normalizeDirectoryPath(path)) || null;
+}
+
+function updateFileExplorerDirectoryRecord(path, patch = {}, existing = fileExplorerDirectoryRecord(path)) {
+  const root = normalizeDirectoryPath(path);
+  const next = {
+    signature: existing?.signature,
+    knownEntryNames: existing?.knownEntryNames || null,
+    ...patch,
+  };
+  setLimitedMapEntry(fileExplorerDirectoryRecords, root, next, fileExplorerMemoryCacheLimit);
+  return next;
+}
+
 function recordDirectorySignature(path, entries) {
-  setLimitedMapEntry(fileExplorerDirectorySignatures, normalizeDirectoryPath(path), directoryEntriesSignature(entries), fileExplorerMemoryCacheLimit);
+  updateFileExplorerDirectoryRecord(path, {signature: directoryEntriesSignature(entries)});
 }
 
 function pruneExpiredNewFileEntries(now = Date.now()) {
@@ -12782,7 +12896,8 @@ function pruneExpiredNewFileEntries(now = Date.now()) {
 function markNewDirectoryEntries(path, entries) {
   const root = normalizeDirectoryPath(path);
   const names = new Set((Array.isArray(entries) ? entries : []).map(entry => entry?.name).filter(Boolean));
-  const previous = fileExplorerKnownEntryNames.get(root);
+  const record = fileExplorerDirectoryRecord(root);
+  const previous = record?.knownEntryNames;
   const now = Date.now();
   pruneExpiredNewFileEntries(now);
   if (previous && fileExplorerNewEntryHighlightMs > 0) {
@@ -12790,7 +12905,7 @@ function markNewDirectoryEntries(path, entries) {
       if (!previous.has(name)) setLimitedMapEntry(fileExplorerNewEntryUntil, childPath(root, name), now + fileExplorerNewEntryHighlightMs, fileExplorerMemoryCacheLimit);
     }
   }
-  setLimitedMapEntry(fileExplorerKnownEntryNames, root, names, fileExplorerMemoryCacheLimit);
+  updateFileExplorerDirectoryRecord(root, {knownEntryNames: names}, record);
 }
 
 function fileExplorerEntryIsNew(path) {
@@ -12961,18 +13076,19 @@ function renderQuickAccessInto(container) {
   container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
     const expanded = normalizeDirectoryPath(expandQuickAccessPath(path));
     const active = !sync && expanded === currentRoot;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'file-explorer-quick-access-button';
-    button.textContent = displayQuickAccessPath(path);
-    button.title = t('finder.quickAccess.openPath', {path});
-    button.dataset.quickPath = path;
-    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      openFileExplorerQuickAccessPath(path);
+    const title = t('finder.quickAccess.openPath', {path});
+    const button = makeButton({
+      className: 'file-explorer-quick-access-button',
+      label: displayQuickAccessPath(path),
+      title,
+      dataset: {quickPath: path},
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openFileExplorerQuickAccessPath(path);
+      },
     });
+    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
     return button;
   }));
 }
@@ -13030,7 +13146,7 @@ function tmuxDirectoryForItem(item) {
 
 function tmuxGitRootForItem(item) {
   if (!isTmuxSession(item)) return '';
-  const root = transcriptMeta.sessions?.[item]?.project?.git?.root || '';
+  const root = transcriptMetadataState.payload.sessions?.[item]?.project?.git?.root || '';
   return root ? normalizeDirectoryPath(root) : '';
 }
 
@@ -13069,7 +13185,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -13114,16 +13230,30 @@ function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerE
     ));
 }
 
+function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) {
+  const key = String(targetKey || '');
+  if (!key) return null;
+  let record = fileExplorerSyncTargetRecords.get(key) || null;
+  if (!record && create) {
+    record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+  }
+  if (record && (touch || !fileExplorerSyncTargetRecords.has(key))) {
+    setLimitedMapEntry(fileExplorerSyncTargetRecords, key, record, fileExplorerMemoryCacheLimit);
+  }
+  return record;
+}
+
 function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSyncSession, root = fileExplorerVisibleSyncRoot) {
   if (fileExplorerRootMode !== 'sync') return;
   const key = fileExplorerSyncTargetKey(session, root);
   if (!key) return;
-  setLimitedMapEntry(fileExplorerExpandedBySyncTarget, key, fileExplorerExpandedPathsForRoot(root), fileExplorerMemoryCacheLimit);
+  const record = fileExplorerSyncTargetRecord(key, true, true);
+  record.expandedPaths = fileExplorerExpandedPathsForRoot(root);
 }
 
 function rememberedFileExplorerSyncExpandedPaths(session, root) {
   const key = fileExplorerSyncTargetKey(session, root);
-  const paths = key ? fileExplorerExpandedBySyncTarget.get(key) : null;
+  const paths = fileExplorerSyncTargetRecord(key)?.expandedPaths;
   return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
 }
 
@@ -13132,7 +13262,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesPayload) {
+function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -13150,7 +13280,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesPayload) {
+function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -13233,7 +13363,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -13287,12 +13417,12 @@ function fileExplorerSyncPlanKey(plan) {
 function fileExplorerSyncPlanAlreadyApplied(plan) {
   const key = fileExplorerSyncPlanKey(plan);
   return Boolean(key)
-    && key === fileExplorerLastAppliedSyncPlanKey
+    && key === fileExplorerSyncState.appliedPlanKey
     && normalizeDirectoryPath(plan.root) === normalizeDirectoryPath(currentFileExplorerRoot());
 }
 
 function markFileExplorerSyncPlanApplied(plan) {
-  fileExplorerLastAppliedSyncPlanKey = fileExplorerSyncPlanKey(plan);
+  fileExplorerSyncState.appliedPlanKey = fileExplorerSyncPlanKey(plan);
 }
 
 function fileExplorerSyncManualCollapseKey(plan) {
@@ -13301,15 +13431,19 @@ function fileExplorerSyncManualCollapseKey(plan) {
 
 function rememberFileExplorerSyncManualCollapseState(targetKey = fileExplorerSyncManualCollapseTargetKey) {
   if (!targetKey) return;
-  setLimitedMapEntry(fileExplorerSyncManualCollapsedByTarget, targetKey, Array.from(fileExplorerSyncManualCollapsedPaths), fileExplorerMemoryCacheLimit);
+  const record = fileExplorerSyncTargetRecord(targetKey, true, true);
+  record.manualCollapsedPaths = fileExplorerSyncManualCollapsedPaths;
 }
 
 function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
   const targetKey = fileExplorerSyncManualCollapseKey(plan);
   if (targetKey !== fileExplorerSyncManualCollapseTargetKey) {
+    let record = fileExplorerSyncTargetRecord(targetKey);
     rememberFileExplorerSyncManualCollapseState();
     fileExplorerSyncManualCollapseTargetKey = targetKey;
-    fileExplorerSyncManualCollapsedPaths = new Set(fileExplorerSyncManualCollapsedByTarget.get(targetKey) || []);
+    if (!record && targetKey) record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    if (record) setLimitedMapEntry(fileExplorerSyncTargetRecords, targetKey, record, fileExplorerMemoryCacheLimit);
+    fileExplorerSyncManualCollapsedPaths = record?.manualCollapsedPaths || new Set();
   }
   return targetKey;
 }
@@ -13410,7 +13544,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -13769,12 +13903,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const syncPlan = fileSyncPath ? fileExplorerSyncPlanForFile(fileSyncPath) : fileExplorerSyncPlan(syncItem);
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
-  const staleInFlightSync = Boolean(fileExplorerSyncPathInFlight && fileExplorerSyncPathInFlight !== syncSignature);
+  const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
     && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
-    && fileExplorerSyncPathInFlight !== syncSignature
+    && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
     const interactionGeneration = fileExplorerInteractionGeneration;
@@ -13803,8 +13937,8 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
 function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
   if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
-  fileExplorerSyncGeneration += 1;
-  fileExplorerSyncPathInFlight = '';
+  fileExplorerSyncState.generation += 1;
+  fileExplorerSyncState.inFlightSignature = '';
   resetFileExplorerAppliedSyncPlan();
 }
 
@@ -13828,14 +13962,14 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
-  if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
+  if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     updateFileExplorerSessionHighlightRows(preferredItem);
     return false;
   }
-  fileExplorerSyncPathInFlight = signature;
+  fileExplorerSyncState.inFlightSignature = signature;
   try {
     let changed = false;
     const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
@@ -13867,9 +14001,9 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     if (expandPaths.length) {
-      const generation = ++fileExplorerSyncGeneration;
+      const generation = ++fileExplorerSyncState.generation;
       for (const path of expandPaths) {
-        if (generation !== fileExplorerSyncGeneration) return changed;
+        if (generation !== fileExplorerSyncState.generation) return changed;
         changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
         if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
       }
@@ -13880,7 +14014,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     updateFileExplorerSessionHighlightRows(preferredItem);
     return changed;
   } finally {
-    if (fileExplorerSyncPathInFlight === signature) fileExplorerSyncPathInFlight = '';
+    if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
 }
 
@@ -13889,15 +14023,15 @@ async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
-  if (!path || fileExplorerSyncPathInFlight === path) return false;
+  if (!path || fileExplorerSyncState.inFlightSignature === path) return false;
   const root = currentFileExplorerRoot();
   if (!pathIsInsideDirectory(path, root) || path === root) return false;
-  fileExplorerSyncPathInFlight = path;
-  const generation = ++fileExplorerSyncGeneration;
+  fileExplorerSyncState.inFlightSignature = path;
+  const generation = ++fileExplorerSyncState.generation;
   try {
     return await expandFileExplorerTreesToPath(path, root, generation);
   } finally {
-    if (fileExplorerSyncPathInFlight === path) fileExplorerSyncPathInFlight = '';
+    if (fileExplorerSyncState.inFlightSignature === path) fileExplorerSyncState.inFlightSignature = '';
   }
 }
 
@@ -14046,12 +14180,12 @@ function scrollFileTreeRowIntoView(container, row) {
   return true;
 }
 
-async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncGeneration, options = {}) {
+async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncState.generation, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
   const rendered = await ensureFileTreeRootRendered(container, root);
   if (!rendered) return false;
-  if (generation !== fileExplorerSyncGeneration) return false;
+  if (generation !== fileExplorerSyncState.generation) return false;
   let scope = container;
   let parent = root;
   let row = null;
@@ -14070,7 +14204,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
         return false;
       }
       const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
-      if (generation !== fileExplorerSyncGeneration) return false;
+      if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
         scope = childScope;
@@ -14081,18 +14215,18 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
     parent = fullPath;
   }
   await nextAnimationFrame();
-  if (generation !== fileExplorerSyncGeneration) return false;
+  if (generation !== fileExplorerSyncState.generation) return false;
   if (options.scrollIntoView !== false) scrollFileTreeRowIntoView(container, row);
   updateFileExplorerCurrentFileHighlight();
   return Boolean(row);
 }
 
-async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration, options = {}) {
+async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncState.generation, options = {}) {
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
   setFileExplorerPathDisplay(root);
   for (const container of fileExplorerTreeContainers()) {
-    if (generation !== fileExplorerSyncGeneration) return false;
+    if (generation !== fileExplorerSyncState.generation) return false;
     expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
   }
   return expanded;
@@ -14103,9 +14237,9 @@ async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplore
     .filter(path => pathIsInsideDirectory(path, root) && path !== root)
     .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path))
     .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   for (const path of expandedPaths) {
-    if (generation !== fileExplorerSyncGeneration) return false;
+    if (generation !== fileExplorerSyncState.generation) return false;
     await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
   }
   return true;
@@ -14116,7 +14250,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -14130,7 +14264,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -14198,12 +14332,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
+  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
@@ -14850,9 +14984,7 @@ function bindFinderRowHandlers(row, state) {
   };
   row.ondragend = () => {
     row.__fileTreeDragging = false;
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
+    cancelDragOperationState();
   };
 }
 
@@ -15050,10 +15182,10 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   updateFileExplorerCurrentFileHighlight();
   if (!fileExplorerIsOpen() || !pathIsInsideDirectory(target, root)) return;
   if (!fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'))) return;
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
   schedule(() => {
-    if (generation !== fileExplorerSyncGeneration) return;
+    if (generation !== fileExplorerSyncState.generation) return;
     expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
       console.warn('Finder active file reveal failed', error);
     });
@@ -15878,16 +16010,18 @@ function tabberActivityPayloadIsRefreshPlaceholder(payload) {
 
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (!payload || typeof payload !== 'object' || !payload.activity || typeof payload.activity !== 'object') return false;
-  const generation = Number(requestGeneration) || 0;
-  if (generation > 0 && generation < tabberActivityAppliedRequestGeneration) return false;
+  // Generation zero denotes a direct/pushed snapshot rather than an HTTP completion. Give it a new
+  // generation so any request started before that snapshot cannot roll the cache back afterward.
+  const generation = Number(requestGeneration) || ++tabberActivityState.requestGeneration;
+  if (generation > 0 && generation < tabberActivityState.appliedGeneration) return false;
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
-  tabberActivityLoaded = true;
+  tabberActivityState.loaded = true;
   // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
-  if (!refreshPlaceholder && generation > tabberActivityAppliedRequestGeneration) {
-    tabberActivityAppliedRequestGeneration = generation;
+  if (!refreshPlaceholder && generation > tabberActivityState.appliedGeneration) {
+    tabberActivityState.appliedGeneration = generation;
   }
   return true;
 }
@@ -15895,9 +16029,9 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
 async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
-  if (tabberActivityFetchPromise) return tabberActivityFetchPromise;
-  const requestGeneration = ++tabberActivityRequestGeneration;
-  tabberActivityFetchPromise = (async () => {
+  if (tabberActivityState.request) return tabberActivityState.request;
+  const requestGeneration = ++tabberActivityState.requestGeneration;
+  const request = (async () => {
     try {
       const params = new URLSearchParams();
       params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
@@ -15907,17 +16041,20 @@ async function fetchTabberActivity(options = {}) {
     } catch (_) {
       // Keep the last snapshot; the interval retries without a render-triggered request loop.
     } finally {
-      tabberActivityLoaded = true;
-      tabberActivityFetchPromise = null;
+      if (tabberActivityState.request === request) {
+        tabberActivityState.loaded = true;
+        tabberActivityState.request = null;
+      }
     }
     if (fileExplorerMode === 'tabber') refreshTabberPanels();
     return true;
   })();
-  return tabberActivityFetchPromise;
+  tabberActivityState.request = request;
+  return request;
 }
 
 function warmTabberDataOnLaunch() {
-  if (tabberLaunchWarmupStarted || !transcriptMetaLoaded || !tabberActivityVisibleConsumer()) return false;
+  if (tabberLaunchWarmupStarted || !transcriptMetadataState.loaded || !tabberActivityVisibleConsumer()) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
   return true;
@@ -16032,15 +16169,15 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
 
 // Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
 function tabberOrderedSessions() {
-  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
-  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
+  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const ordered = [];
   for (const session of [...order, ...all]) {
     if (seen.has(session)) continue;
     seen.add(session);
     if (!isTmuxSession(session)) continue;
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     if (!Array.isArray(info?.panes) || !info.panes.length) continue;
     ordered.push(session);
   }
@@ -16055,7 +16192,7 @@ function tabberWindowIsAgent(name) {
 function tabberAgentSessions() {
   const sessions = [];
   for (const session of tabberOrderedSessions()) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) sessions.push(session);
   }
   return sessions;
@@ -16064,7 +16201,7 @@ function tabberAgentSessions() {
 function ensureTabberSessionFilesFetches() {
   // Agent-window paths now come from the cached /api/activity agent_windows payload.
   // The session-files fetchers remain for the modified-files UI and focused tests.
-  if (!tabberActivityLoaded && !tabberActivityFetchPromise) fetchTabberActivity();
+  if (!tabberActivityState.loaded && !tabberActivityState.request) fetchTabberActivity();
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -16101,7 +16238,7 @@ function buildTabberTree() {
   const visibleItems = new Set(activePaneItems());
   const focusedItem = visualActivePaneItem();
   tabberOrderedSessions().forEach(session => {
-    const info = transcriptMeta.sessions?.[session] || {};
+    const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
@@ -16290,7 +16427,7 @@ function tabberWindowButtonHtml(data, label) {
 function tabberSessionChromeHtml(data) {
   const classes = ['tabber-session-tab', 'session-popover-host'];
   const session = String(data.session || '').trim();
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
@@ -16356,7 +16493,7 @@ function tabberNativeDragImageForRow(row) {
   else preview.style.width = `${width}px`;
   for (const item of rows) preview.appendChild(cloneTabberDragPreviewRow(item));
   document.body.appendChild(preview);
-  nativeDragImagePreview = preview;
+  dragState.nativePreview = preview;
   return preview;
 }
 
@@ -16365,7 +16502,7 @@ function bindTabberSessionChrome(row, session) {
   if (!tab || tab.dataset.tabberChromeBound === 'true') return;
   tab.dataset.tabberChromeBound = 'true';
   tab.dataset.paneTab = session;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
   applySessionStateClasses(tab, state);
   bindPaneTabPopover(tab, session);
@@ -16585,7 +16722,7 @@ function activeTabberRowPath() {
   if (!item || isFileExplorerItem(item)) return '';
   if (!isTmuxSession(item)) return tabberTabPath(item);
   const session = item;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const override = tmuxWindowDisplayActiveIndex(session);
   if (override !== undefined) {
     return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);
@@ -17557,7 +17694,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
     for (const session of activePaneItems()) {
       if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
-      updatePanelWindowStepButtons(session, transcriptMeta.sessions?.[session]);
+      updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
@@ -17585,7 +17722,7 @@ function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null
 function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return null;
-  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  const info = transcriptMetadataState.payload.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
   let summaryIndex = null;
   if (explicitIndex === null && options.preferSummary === true) {
@@ -18017,7 +18154,7 @@ function startFileTreeDrag(event, row, fullPath, entry) {
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const paths = fileTreeActionPaths(fullPath);
   const payloadObject = {path: fullPath, paths, kind: entry.kind, name: entry.name};
-  dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+  beginFileDrag(payloadObject);
   const payload = JSON.stringify(payloadObject);
   event.dataTransfer.effectAllowed = 'copy';
   event.dataTransfer.setData('application/x-yolomux-file', payload);
@@ -18027,18 +18164,13 @@ function startFileTreeDrag(event, row, fullPath, entry) {
 
 async function fetchFilePathInfo(path, options = {}) {
   const normalized = normalizeDirectoryPath(path);
-  const canReuse = options.fresh !== true;
-  const pathInfoTtlMs = fileExplorerFsCacheTtlMs();
-  if (canReuse && pathInfoTtlMs > 0) {
-    const cached = fileExplorerPathInfoCache.get(normalized);
-    if (cached && Date.now() - cached.at < pathInfoTtlMs) return cached.payload;
-  }
-  if (suppressBackgroundFilesystemFetch(options)) return null;
-  return dedupeInflight(fileExplorerPathInfoInflight, normalized, canReuse, () => (async () => {
-    const payload = await fetchFilesystemBatchItem('info', normalized, {dedupe: canReuse});
-    setLimitedMapEntry(fileExplorerPathInfoCache, normalized, {payload, at: Date.now()}, fileExplorerMemoryCacheLimit);
-    return payload;
-  })());
+  return requestFileExplorerFsResource(
+    'info',
+    normalized,
+    options,
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
+    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+  );
 }
 
 async function fetchDirectoryFileCount(path) {
@@ -18352,14 +18484,14 @@ async function expandSyncFileExplorerAffectedDirectories() {
     const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
     if (!opened) return false;
   }
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   let changed = false;
   for (const path of paths) {
     changed = addFileExplorerExpandedPathAncestors(path, root) || changed;
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   for (const path of paths) {
-    if (generation !== fileExplorerSyncGeneration) return changed;
+    if (generation !== fileExplorerSyncState.generation) return changed;
     changed = await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false, auto: true}) || changed;
   }
   setFileExplorerVisibleSyncTarget(plan.session, root);
@@ -19308,6 +19440,7 @@ function fileErrorState(message = null, fallbackKey = 'editor.fileLoadFailed', f
 function missingFileState(message = null) {
   const state = fileErrorState(message, 'dialog.missingOnDisk');
   state.externalMissing = true;
+  state.externalMissingCheckedAt = Date.now();
   return state;
 }
 
@@ -19315,10 +19448,17 @@ function openFileIsMissing(path) {
   return openFiles.get(path)?.externalMissing === true;
 }
 
+function clearOpenFileMissingState(state) {
+  if (!state) return state;
+  delete state.externalMissing;
+  delete state.externalMissingCheckedAt;
+  return state;
+}
+
 function clearOpenFileExternalState(state) {
   if (!state) return state;
+  clearOpenFileMissingState(state);
   delete state.externalChanged;
-  delete state.externalMissing;
   delete state.externalError;
   delete state.externalChangeEditPrompted;
   delete state.externalReloadDeferred;
@@ -20019,16 +20159,34 @@ async function openFileStateFromDisk(path, entry = null) {
 }
 
 function markOpenFileMissing(path) {
-  const state = openFiles.get(path);
-  if (!state) return;
+  let state = openFiles.get(path);
+  clearFileAutosaveTimer(path);
+  if (!state) state = setFileState(path, missingFileState());
   if (state.dirty) {
     state.externalMissing = true;
+    state.externalMissingCheckedAt = Date.now();
     delete state.externalChanged;
     delete state.externalError;
   } else {
-    setFileState(path, missingFileState());
+    state = setFileState(path, missingFileState());
   }
   renderOpenFilePath(path);
+}
+
+async function recoverOpenFileAfterMissing(path, entry = null) {
+  const state = openFiles.get(path);
+  if (!state?.externalMissing) return false;
+  clearFileAutosaveTimer(path);
+  if (state.dirty) {
+    state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
+    clearOpenFileMissingState(state);
+    delete state.externalError;
+    delete state.externalReloadDeferred;
+    delete state.externalChangeEditPrompted;
+    renderOpenFilePath(path);
+    return true;
+  }
+  return replaceOpenFileStateFromDisk(path, entry);
 }
 
 function markOpenFileExternalError(path, error) {
@@ -20090,7 +20248,7 @@ function markOpenFileReloadDeferred(path, state, entry) {
   state.externalChanged = {mtime: fileEntryMtime(entry), size: entry?.size ?? null};
   state.externalReloadDeferred = {mtime: state.externalChanged.mtime, size: state.externalChanged.size, at: Date.now()};
   delete state.externalChangeEditPrompted;
-  delete state.externalMissing;
+  clearOpenFileMissingState(state);
   delete state.externalError;
   for (const panel of fileEditorPanelsForPath(path)) {
     updateFileEditorPanelChrome(panel, path);
@@ -20123,7 +20281,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   }
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
-      delete state.externalMissing;
+      clearOpenFileMissingState(state);
       delete state.externalError;
       if (!state.dirty) delete state.externalChanged;
       if (!state.dirty) delete state.externalReloadDeferred;
@@ -20143,7 +20301,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     state.externalChanged = externalChanged;
     delete state.externalReloadDeferred;
     delete state.externalChangeEditPrompted;
-    delete state.externalMissing;
+    clearOpenFileMissingState(state);
     delete state.externalError;
     clearFileAutosaveTimer(path);
     renderOpenFilePath(path);
@@ -20204,11 +20362,11 @@ function backgroundFileEditorWatchFiles() {
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
   if (fileExplorerSessionFilesPaneIsVisible()) {
-    for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
+    for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (path && path !== '/') roots.add(path);
     }
-    for (const file of fileExplorerSessionFilesPayload?.files || []) {
+    for (const file of fileExplorerSessionFilesState.payload?.files || []) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (path && path !== '/') roots.add(dirnameOf(path));
     }
@@ -20254,38 +20412,38 @@ function clientServerWatchState() {
 }
 
 function syncServerWatchRootsNow(options = {}) {
-  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsInFlight) return;
+  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
-  const renewDue = options.renew === true && Date.now() - serverWatchRootsSyncedAt >= 240000;
-  if (signature === serverWatchRootsSignature && !renewDue) return;
-  serverWatchRootsSignature = signature;
-  serverWatchRootsInFlight = true;
+  const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;
+  if (signature === serverWatchRootsState.signature && !renewDue) return;
+  serverWatchRootsState.signature = signature;
+  serverWatchRootsState.inFlight = true;
   apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
   }).then(() => {
-    serverWatchRootsSyncedAt = Date.now();
+    serverWatchRootsState.syncedAt = Date.now();
   }).catch(() => {
-    serverWatchRootsSignature = '';
+    serverWatchRootsState.signature = '';
   }).finally(() => {
-    serverWatchRootsInFlight = false;
+    serverWatchRootsState.inFlight = false;
   });
 }
 
 function syncServerWatchRoots(options = {}) {
-  serverWatchRootsPendingOptions = {
-    ...serverWatchRootsPendingOptions,
+  serverWatchRootsState.pendingOptions = {
+    ...serverWatchRootsState.pendingOptions,
     ...options,
-    renew: serverWatchRootsPendingOptions.renew === true || options.renew === true,
+    renew: serverWatchRootsState.pendingOptions.renew === true || options.renew === true,
   };
-  if (serverWatchRootsTimer) clearTimeout(serverWatchRootsTimer);
+  if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
-  serverWatchRootsTimer = setTimeout(() => {
-    serverWatchRootsTimer = null;
-    const pending = serverWatchRootsPendingOptions;
-    serverWatchRootsPendingOptions = {};
+  serverWatchRootsState.timer = setTimeout(() => {
+    serverWatchRootsState.timer = null;
+    const pending = serverWatchRootsState.pendingOptions;
+    serverWatchRootsState.pendingOptions = {};
     syncServerWatchRootsNow(pending);
   }, delay);
 }
@@ -20307,7 +20465,7 @@ async function refreshFileExplorerIfChanged() {
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     signaturesByDir.set(normalizedDirectory, signature);
-    const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
+    const previous = fileExplorerDirectoryRecord(normalizedDirectory)?.signature;
     if (previous !== undefined && previous !== signature) changed = true;
   }
   if (changed && fileExplorerUserIsActive()) {
@@ -20315,7 +20473,7 @@ async function refreshFileExplorerIfChanged() {
     return;
   }
   for (const [directory, signature] of signaturesByDir.entries()) {
-    setLimitedMapEntry(fileExplorerDirectorySignatures, directory, signature, fileExplorerMemoryCacheLimit);
+    updateFileExplorerDirectoryRecord(directory, {signature});
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
@@ -23102,7 +23260,7 @@ function refreshActiveTerminalCursor() {
 
 function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
-  const loading = transcriptMetaLoading === true;
+  const loading = transcriptMetadataState.loading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
   refreshMeta.textContent = t('common.refresh');
   refreshMeta.title = loading
@@ -23255,7 +23413,7 @@ function resetRuntimeInterval(name, callback, delay) {
   const existing = runtimeIntervals.get(name);
   if (existing?.delay === normalizedDelay) {
     existing.callback = callback;
-    return;
+    return existing;
   }
   if (existing) {
     existing.active = false;
@@ -23279,14 +23437,20 @@ function resetRuntimeInterval(name, callback, delay) {
   };
   scheduleNext();
   runtimeIntervals.set(name, state);
+  return state;
 }
 
 function clearRuntimeInterval(name) {
   const existing = runtimeIntervals.get(name);
-  if (!existing) return;
+  if (!existing) return false;
   existing.active = false;
   clearTimeout(existing.timer);
   runtimeIntervals.delete(name);
+  return true;
+}
+
+function runtimeIntervalActive(name) {
+  return runtimeIntervals.get(name)?.active === true;
 }
 
 function renewServerWatchRootsFromRuntime() {
@@ -23299,7 +23463,7 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('auto-approve', () => {
-    if (clientEventsConnected === true) return null;
+    if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
@@ -23445,7 +23609,7 @@ function refreshPaneTabSessionPopovers() {
       ? paneTabPopoverForAnchor(tab)
       : tab?.querySelector?.(':scope > .session-popover');
     if (!popover || popover.classList?.contains?.('file-popover')) return;
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const auto = autoApproveStates.get(session)?.enabled === true;
     const state = sessionState(session, info);
     const agentKind = sessionAgentKind(session);
@@ -23974,7 +24138,7 @@ function sessionTabDescription(session, info) {
   return sessionWorkDescription(session, info, 72);
 }
 
-function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
+function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
@@ -24520,8 +24684,8 @@ function otherBranchesHtml(session, info) {
 
 function dragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
-  if (!raw && dragPaneSlot) return null;
-  if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
+  if (!raw && dragState.paneSlot) return null;
+  if (!raw && dragState.item) return {session: dragState.item, sourceSlot: dragState.sourceSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -24533,7 +24697,7 @@ function dragPayload(event) {
 
 function paneDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
-  if (!raw && dragPaneSlot) return {slot: dragPaneSlot};
+  if (!raw && dragState.paneSlot) return {slot: dragState.paneSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -24564,7 +24728,7 @@ function hasYolomuxFileDrag(event) {
 
 function fileDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
-  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragFilePayloadState : null);
+  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragState.filePayload : null);
 }
 
 async function openDraggedFilesInEditor(payload, options = {}) {
@@ -24599,7 +24763,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       // with a clean baseline). A dirty file keeps its conflict state so real unsaved-edit warnings stay.
       if (draggedState && !draggedState.dirty) {
         delete draggedState.externalChanged;
-        delete draggedState.externalMissing;
+        clearOpenFileMissingState(draggedState);
         delete draggedState.externalError;
         delete draggedState.externalChangeEditPrompted;
         renderOpenFilePath(path);
@@ -24615,7 +24779,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
 function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
@@ -24640,23 +24804,33 @@ function terminalFileReferences(session, payload) {
 }
 
 function transparentNativeDragImage() {
-  if (transparentDragImage) return transparentDragImage;
+  if (dragState.transparentImage) return dragState.transparentImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
   document.body.appendChild(node);
-  transparentDragImage = node;
+  dragState.transparentImage = node;
   return node;
 }
 
 function clearNativeDragImagePreview() {
-  nativeDragImagePreview?.remove?.();
-  nativeDragImagePreview = null;
+  dragState.nativePreview?.remove?.();
+  dragState.nativePreview = null;
+}
+
+function beginFileDrag(payloadObject) {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  dragState.filePayload = normalizeFileDragPayload(payloadObject);
+  return dragState.filePayload;
 }
 
 function moveCustomDragPreview(event) {
-  if (!customDragPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
-  customDragPreview.style.left = `${Math.round(event.clientX - customDragPreviewOffset.x)}px`;
-  customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
+  if (!dragState.customPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  dragState.customPreview.style.left = `${Math.round(event.clientX - dragState.customPreviewOffset.x)}px`;
+  dragState.customPreview.style.top = `${Math.round(event.clientY - dragState.customPreviewOffset.y)}px`;
 }
 
 const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
@@ -24670,7 +24844,7 @@ function bindCustomDragPreviewListeners() {
     target.addEventListener?.('dragover', moveCustomDragPreview, true);
     target.addEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+      target.addEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
@@ -24680,16 +24854,27 @@ function unbindCustomDragPreviewListeners() {
     target.removeEventListener?.('dragover', moveCustomDragPreview, true);
     target.removeEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+      target.removeEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
 
 function stopCustomDragPreview() {
   unbindCustomDragPreviewListeners();
-  customDragPreview?.remove();
-  customDragPreview = null;
+  dragState.customPreview?.remove();
+  dragState.customPreview = null;
   closeFileImagePreview();
+}
+
+function cancelDragOperationState() {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  stopCustomDragPreview();
+  clearDropPreview();
 }
 
 function paneDragPreviewMetrics(slot, event) {
@@ -24747,8 +24932,8 @@ function startPaneDragPreview(event, slot, options = {}) {
   preview.style.width = `${metrics.width}px`;
   preview.style.height = `${metrics.height}px`;
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
   moveCustomDragPreview(event);
   if (options.nativeDrag === true) {
     bindCustomDragPreviewListeners();
@@ -24782,8 +24967,8 @@ function startFileDragPreview(event, paths, entry) {
   preview.style.pointerEvents = 'none';
   preview.style.zIndex = '99999';
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: -14, y: -14};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: -14, y: -14};
   moveCustomDragPreview(event);
   bindCustomDragPreviewListeners();
   preview.getBoundingClientRect();
@@ -24861,9 +25046,10 @@ function showDragTimingOverlay(rows) {
 function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   dragTimingMark('startSessionDrag:begin');
   clearNativeDragImagePreview();
-  dragSession = session;
-  dragSourceSlot = sourceSlot;
-  dragPaneSlot = null;
+  dragState.item = session;
+  dragState.sourceSlot = sourceSlot;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
   const payload = JSON.stringify({session, sourceSlot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
@@ -24899,9 +25085,10 @@ function startPaneDrag(event, sourceSlot) {
     return;
   }
   dragTimingMark('startPaneDrag');
-  dragSession = active;
-  dragSourceSlot = slot;
-  dragPaneSlot = slot;
+  dragState.item = active;
+  dragState.sourceSlot = slot;
+  dragState.paneSlot = slot;
+  dragState.filePayload = null;
   const payload = JSON.stringify({slot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-pane', payload);
@@ -24910,14 +25097,8 @@ function startPaneDrag(event, sourceSlot) {
 }
 
 function endSessionDrag(event) {
-  dragSession = null;
-  dragSourceSlot = null;
-  dragPaneSlot = null;
-  resetDragTabRectCache();
-  clearNativeDragImagePreview();
-  stopCustomDragPreview();
+  cancelDragOperationState();
   sessionButtons.classList.remove(CLS.dragOver);
-  clearDropPreview();
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
@@ -25711,7 +25892,7 @@ function selectAdjacentPaneTab(direction, options = {}) {
 }
 
 function sessionAgentKind(session) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
   return kind === 'claude' || kind === 'codex' ? kind : '';
@@ -26236,7 +26417,7 @@ function paneInfoBarMetaHtml(session, info) {
 const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';
 
 function refreshSessionRepoDisplay(session) {
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   renderSessionButtons();
   renderPaneTabStrips();
 }
@@ -26247,7 +26428,7 @@ function activateRepoSelectorControl(event, button, panelSession) {
   const cycleSession = button.dataset.repoCycle;
   if (cycleSession !== undefined) {
     const session = cycleSession || panelSession;
-    cycleSessionRepoDisplay(session, transcriptMeta.sessions?.[session], button.dataset.repoCycleDir || 1);
+    cycleSessionRepoDisplay(session, transcriptMetadataState.payload.sessions?.[session], button.dataset.repoCycleDir || 1);
     refreshSessionRepoDisplay(session);
     return;
   }
@@ -26272,7 +26453,7 @@ function repoChipMenuRowHtml(repo) {
 }
 
 function showRepoChipMenu(session, x, y) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const repos = sessionRepoSummaries(info);
   if (repos.length < 2) return;
   const menu = document.createElement('div');
@@ -26494,15 +26675,24 @@ function replaceSessionMetadata(oldSession, newSession) {
   ]) {
     rekeyMap(map, oldSession, newSession);
   }
-  if (transcriptMeta.sessions?.[oldSession]) {
-    transcriptMeta.sessions = {
-      ...(transcriptMeta.sessions || {}),
-      [newSession]: transcriptMeta.sessions[newSession] || transcriptMeta.sessions[oldSession],
+  const hasTranscriptSession = Boolean(transcriptMetadataState.payload.sessions?.[oldSession]);
+  const hasTranscriptOrderEntry = Array.isArray(transcriptMetadataState.payload.session_order)
+    && transcriptMetadataState.payload.session_order.includes(oldSession);
+  if (hasTranscriptSession || hasTranscriptOrderEntry) {
+    const nextSessions = {
+      ...(transcriptMetadataState.payload.sessions || {}),
     };
-    delete transcriptMeta.sessions[oldSession];
-  }
-  if (Array.isArray(transcriptMeta.session_order)) {
-    transcriptMeta.session_order = transcriptMeta.session_order.map(item => item === oldSession ? newSession : item);
+    if (hasTranscriptSession) {
+      nextSessions[newSession] = nextSessions[newSession] || nextSessions[oldSession];
+      delete nextSessions[oldSession];
+    }
+    setTranscriptMetadataPayload({
+      ...transcriptMetadataState.payload,
+      sessions: nextSessions,
+      session_order: Array.isArray(transcriptMetadataState.payload.session_order)
+        ? transcriptMetadataState.payload.session_order.map(item => item === oldSession ? newSession : item)
+        : transcriptMetadataState.payload.session_order,
+    });
   }
 }
 
@@ -26872,7 +27062,7 @@ function terminalAttentionQuestionChromeHintText(value) {
 }
 
 function terminalAttentionQuestionTexts(session) {
-  const state = sessionState(session, transcriptMeta.sessions?.[session]);
+  const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
   if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
   const payload = autoApproveStates.get(session) || {};
   const candidates = [
@@ -29738,7 +29928,7 @@ function createDockviewHeaderActionsRenderer() {
     const html = dockviewHeaderActionsHtml(activeItem);
     element.hidden = !html;
     element.innerHTML = html;
-    updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
+    updatePanelWindowStepButtons(activeItem, transcriptMetadataState.payload.sessions?.[activeItem]);
     const panel = document.getElementById(panelDomId(activeItem));
     if (panel) {
       updatePaneExpandButton(panel, activeItem);
@@ -29904,7 +30094,7 @@ function syncDockviewTabShell(tab, item, api = null) {
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
   tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
-  applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMeta.sessions?.[item]));
+  applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMetadataState.payload.sessions?.[item]));
   tab.setAttribute('aria-label', dockviewTabAriaLabel(item));
 }
 
@@ -30154,7 +30344,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
   // not get mistaken for a cheap same-shape layout update on drop.
-  if (dragSession != null) {
+  if (dragState.item != null) {
     requestLayoutRender({
       previousActive,
       options,
@@ -30522,7 +30712,7 @@ function renderPaneTabStripsMeasured() {
   }
   // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
-  if (dragSession != null) { pendingTabStripRender = true; return; }
+  if (dragState.item != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
@@ -30683,7 +30873,7 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
@@ -30742,7 +30932,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
@@ -30830,7 +31020,7 @@ function paneTabAriaLabel(item) {
   }
   const type = tabTypeForItem(item);
   if (type) return itemLabel(item);
-  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMetadataState.payload.sessions?.[item], 140)}`.trim();
 }
 
 function beginPaneTabRename(tab, session) {
@@ -31052,7 +31242,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
 function tmuxPaneTabTokenHtml(session, options = {}) {
   const item = String(options.item || session || '').trim();
   if (!item) return '';
-  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMeta.sessions?.[item];
+  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMetadataState.payload.sessions?.[item];
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(item, info);
   const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
   const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
@@ -31151,7 +31341,7 @@ function clearPaneTabDropPreview(strip) {
 
 // #47: reset the per-drag tab-rect cache (called at drag start/end). See dragMeasureStrip.
 function resetDragTabRectCache() {
-  dragTabRectCache = null;
+  dragState.tabRectCache = null;
 }
 
 // During a live drag the tabs do not move (renders are deferred, #30), so measure each strip's rect +
@@ -31159,11 +31349,11 @@ function resetDragTabRectCache() {
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
   dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
-  if (dragSession != null) {
-    if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
-      dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+  if (dragState.item != null) {
+    if (!dragState.tabRectCache || dragState.tabRectCache.strip !== strip) {
+      dragState.tabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
     }
-    return dragTabRectCache;
+    return dragState.tabRectCache;
   }
   return {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
 }
@@ -31757,13 +31947,13 @@ function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
 }
 
 function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
   if (!nextInfo) return false;
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render === true) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -31790,7 +31980,7 @@ function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   };
 }
 
-function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMeta) {
+function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMetadataState.payload) {
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   const previousSessions = previousPayload?.sessions && typeof previousPayload.sessions === 'object' ? previousPayload.sessions : {};
   let nextSessions = null;
@@ -31883,7 +32073,7 @@ function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}
   setTimeout(() => {
     if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return;
     if (tmuxWindowActiveIndexOverride(session) !== indexKey) return;
-    if (tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]) === indexKey) {
+    if (tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]) === indexKey) {
       clearTmuxWindowActiveIndexOverride(session, {sequence});
     }
   }, tmuxWindowConfirmedOverrideHoldMs);
@@ -32244,11 +32434,11 @@ function updatePanelControlLabels(session, info) {
 }
 
 function searchHistoryResults() {
-  return Array.isArray(searchHistoryPayload?.results) ? searchHistoryPayload.results : [];
+  return Array.isArray(searchHistoryState.payload?.results) ? searchHistoryState.payload.results : [];
 }
 
 function runHistoryRows() {
-  return Array.isArray(runHistoryPayload?.runs) ? runHistoryPayload.runs : [];
+  return Array.isArray(runHistoryState.payload?.runs) ? runHistoryState.payload.runs : [];
 }
 
 function searchHistoryTimestampSeconds(value) {
@@ -32308,8 +32498,8 @@ function searchHistoryErrorText(payload) {
 }
 
 function searchHistoryPanelErrors() {
-  const payloadErrors = Array.isArray(runHistoryPayload?.errors) ? runHistoryPayload.errors : [];
-  return [searchHistoryError, runHistoryError, ...payloadErrors]
+  const payloadErrors = Array.isArray(runHistoryState.payload?.errors) ? runHistoryState.payload.errors : [];
+  return [searchHistoryState.error, runHistoryState.error, ...payloadErrors]
     .filter(Boolean)
     .map(searchHistoryErrorText)
     .filter(Boolean);
@@ -32344,8 +32534,8 @@ function searchHistoryResultHtml(result, index) {
 
 function searchHistoryResultsHtml() {
   const results = searchHistoryResults();
-  if (searchHistoryLoading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
-  if (!searchHistoryQuery.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
+  if (searchHistoryState.loading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (!searchHistoryState.query.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
   if (!results.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
   return `<div class="search-history-list">${results.map(searchHistoryResultHtml).join('')}</div>`;
 }
@@ -32366,13 +32556,13 @@ function runHistoryRowHtml(row) {
 
 function runHistoryRowsHtml() {
   const rows = runHistoryRows();
-  if (runHistoryLoading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (runHistoryState.loading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
   if (!rows.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyRuns'))}</div>`;
   return `<div class="search-history-list">${rows.map(runHistoryRowHtml).join('')}</div>`;
 }
 
 function searchHistoryPanelStatusText() {
-  if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
+  if (searchHistoryState.loading || runHistoryState.loading) return t('common.loading');
   const [error] = searchHistoryPanelErrors();
   if (error) return error;
   return t('searchHistory.detail');
@@ -32383,7 +32573,7 @@ function searchHistoryPanelHtml() {
   const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
   return `
     <form class="search-history-search" data-search-history-form>
-      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryQuery)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
+      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
       <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
       <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
     </form>
@@ -32411,49 +32601,74 @@ function renderSearchHistoryPanels() {
 }
 
 async function refreshRunHistoryData() {
-  runHistoryLoading = true;
-  runHistoryError = null;
+  const requestIsCurrent = runHistoryState.guard.begin();
+  runHistoryState.loading = true;
+  runHistoryState.error = null;
   renderSearchHistoryPanels();
-  try {
-    runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
-  } catch (error) {
-    runHistoryError = error?.payload && typeof error.payload === 'object'
-      ? error.payload
-      : {error: String(error?.message || error)};
-  } finally {
-    runHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return runHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
+      if (requestIsCurrent()) runHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        runHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (runHistoryState.request === request) {
+        runHistoryState.loading = false;
+        runHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return runHistoryState.payload;
+  })();
+  runHistoryState.request = request;
+  return request;
 }
 
-async function runSearchHistoryQuery(query = searchHistoryQuery) {
-  searchHistoryQuery = String(query || '').trim();
-  searchHistoryError = null;
-  if (!searchHistoryQuery) {
-    searchHistoryPayload = {query: '', results: []};
+async function runSearchHistoryQuery(query = searchHistoryState.query) {
+  const normalizedQuery = String(query || '').trim();
+  searchHistoryState.query = normalizedQuery;
+  searchHistoryState.error = null;
+  const requestIsCurrent = searchHistoryState.guard.begin();
+  if (!normalizedQuery) {
+    searchHistoryState.payload = {query: '', results: []};
+    searchHistoryState.loading = false;
+    searchHistoryState.request = null;
     renderSearchHistoryPanels();
-    return searchHistoryPayload;
+    return searchHistoryState.payload;
   }
-  searchHistoryLoading = true;
+  searchHistoryState.loading = true;
   renderSearchHistoryPanels();
-  try {
-    searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
-  } catch (error) {
-    searchHistoryError = error?.payload && typeof error.payload === 'object'
-      ? error.payload
-      : {error: String(error?.message || error)};
-  } finally {
-    searchHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return searchHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/search?q=${encodeURIComponent(normalizedQuery)}`, {cache: 'no-store'});
+      if (requestIsCurrent()) searchHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        searchHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (searchHistoryState.request === request) {
+        searchHistoryState.loading = false;
+        searchHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return searchHistoryState.payload;
+  })();
+  searchHistoryState.request = request;
+  return request;
 }
 
 async function loadSearchHistoryPanelData(options = {}) {
   renderSearchHistoryPanels();
   await refreshRunHistoryData();
-  const query = options.query == null ? searchHistoryQuery : String(options.query || '');
+  const query = options.query == null ? searchHistoryState.query : String(options.query || '');
   if (query.trim()) await runSearchHistoryQuery(query);
   else renderSearchHistoryPanels();
 }
@@ -32498,7 +32713,7 @@ function bindSearchHistoryPanel(panel) {
     const refresh = event.target.closest('[data-run-history-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryQuery});
+      loadSearchHistoryPanelData({query: searchHistoryState.query});
       return;
     }
     const result = event.target.closest('[data-search-result-index]');
@@ -32547,7 +32762,7 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
   infoSessionFileLookbackHours = writeStoredInfoLookbackHours(hours);
   if (infoSessionFileLookbackHours !== previous) {
-    activitySummaryPayload = {...activitySummaryPayload, session_file_hours: infoSessionFileLookbackHours};
+    activitySummaryState.payload = {...activitySummaryState.payload, session_file_hours: infoSessionFileLookbackHours};
     if (options.refresh !== false) refreshActivitySummary({force: true, silent: options.silent === true});
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   }
@@ -32744,7 +32959,7 @@ function bindYoagentPanel(panel) {
     const input = form.querySelector('[data-yoagent-chat-input]');
     const value = input?.value || '';
     if (input) input.value = '';
-    yoagentDraft = '';
+    yoagentChatState.draft = '';
     resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
   });
@@ -32759,7 +32974,7 @@ function bindYoagentPanel(panel) {
     if (retry && panel.contains(retry)) {
       event.preventDefault();
       const input = panel.querySelector('[data-yoagent-chat-input]');
-      sendYoagentChatMessage(input?.value || yoagentDraft);
+      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
       return;
     }
     const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
@@ -32807,8 +33022,8 @@ function bindYoagentPanel(panel) {
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) {
-      yoagentDraft = input.value || '';
-      if (yoagentHistoryCursor === null) yoagentHistoryDraft = '';
+      yoagentChatState.draft = input.value || '';
+      if (yoagentChatState.historyCursor === null) yoagentChatState.historyDraft = '';
     }
   });
   panel.addEventListener('keydown', event => {
@@ -32832,7 +33047,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
     } else {
       const label = t('common.refresh');
       refresh.textContent = label;
@@ -32980,7 +33195,7 @@ function openYoagentRightPane() {
 // YO!agent panel rendering, conversation controls, and activity summary refresh split from 80_panes_preferences.js.
 
 function sessionActivitySummary(session) {
-  return activitySummaryPayload?.sessions?.[session] || null;
+  return activitySummaryState.payload?.sessions?.[session] || null;
 }
 
 function activitySummaryMarkdownBlockHtml(text, className) {
@@ -33255,7 +33470,7 @@ function yoagentMessageDetailRowsHtml(message) {
   return `<div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>`;
 }
 
-function relativeActivityGeneratedText(payload = activitySummaryPayload) {
+function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('state.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
@@ -33286,12 +33501,12 @@ function activitySummaryGlobalDetailLines(summary) {
 }
 
 function globalActivitySummaryHtml() {
-  const summary = activitySummaryPayload?.global || {};
+  const summary = activitySummaryState.payload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
   const detailLines = activitySummaryGlobalDetailLines(summary);
   const generated = relativeActivityGeneratedText();
-  const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
+  const refreshBar = activitySummaryState.refreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
   return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-global-head">
       <span>${esc(yoagentTabLabel())}</span>
@@ -33304,8 +33519,8 @@ function globalActivitySummaryHtml() {
 }
 
 function yoagentStreamingMessagesList() {
-  if (!(yoagentStreamingMessages instanceof Map)) return [];
-  return [...yoagentStreamingMessages.values()]
+  if (!(yoagentConversationState.streamingMessages instanceof Map)) return [];
+  return [...yoagentConversationState.streamingMessages.values()]
     .filter(message => message && (message.content || message.streaming || message.aborted || message.details || message.auxiliaryText || message.auxiliaryPreview))
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
@@ -33336,8 +33551,8 @@ function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
 }
 
 function yoagentChatMessagesHtml() {
-  const messages = [...(Array.isArray(yoagentMessages) ? yoagentMessages : []), ...yoagentStreamingMessagesList()];
-  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
+  const messages = [...(Array.isArray(yoagentConversationState.messages) ? yoagentConversationState.messages : []), ...yoagentStreamingMessagesList()];
+  const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
   if (!messages.length) {
     if (startupInfo) return startupInfo;
     if (!yoagentChatEnabled()) {
@@ -33379,7 +33594,7 @@ function yoagentActionCardHtml(action) {
   const status = String(action.status || 'ready');
   const transport = String(target.transport || 'tmux-legacy');
   const transportLabel = yoagentActionTransportText(transport, target.transport_label);
-  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentBusy;
+  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentChatState.busy;
   const button = canSend
     ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
     : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
@@ -33426,7 +33641,7 @@ function yoagentActionErrorStatusPatch(error) {
 }
 
 function yoagentStartupActivityPayload() {
-  return yoagentStartupActivitySummaryPayload || activitySummaryPayload;
+  return yoagentStartupState.activityPayload || activitySummaryState.payload;
 }
 
 function cloneYoagentActivitySummaryPayload(payload) {
@@ -33434,15 +33649,15 @@ function cloneYoagentActivitySummaryPayload(payload) {
 }
 
 function captureYoagentStartupActivitySummarySnapshot(options = {}) {
-  if (options.replace !== true && yoagentStartupActivitySummaryPayload) return yoagentStartupActivitySummaryPayload;
-  yoagentStartupActivitySummaryPayload = activitySummaryPayload && typeof activitySummaryPayload === 'object'
-    ? cloneYoagentActivitySummaryPayload(activitySummaryPayload)
+  if (options.replace !== true && yoagentStartupState.activityPayload) return yoagentStartupState.activityPayload;
+  yoagentStartupState.activityPayload = activitySummaryState.payload && typeof activitySummaryState.payload === 'object'
+    ? cloneYoagentActivitySummaryPayload(activitySummaryState.payload)
     : {sessions: {}, global: {lines: []}, session_order: []};
-  return yoagentStartupActivitySummaryPayload;
+  return yoagentStartupState.activityPayload;
 }
 
 function resetYoagentStartupActivitySummarySnapshot() {
-  yoagentStartupActivitySummaryPayload = null;
+  yoagentStartupState.activityPayload = null;
 }
 
 function yoagentIntroMessageText(payload = yoagentStartupActivityPayload()) {
@@ -33471,30 +33686,30 @@ function yoagentStartupInfoHtml() {
 }
 
 function showYoagentStartupInfoOnce() {
-  if (yoagentStartupInfoShown) return false;
+  if (yoagentStartupState.infoShown) return false;
   captureYoagentStartupActivitySummarySnapshot();
-  yoagentStartupInfoShown = true;
-  yoagentStartupInfoVisible = true;
+  yoagentStartupState.infoShown = true;
+  yoagentStartupState.infoVisible = true;
   return true;
 }
 
 function showYoagentStartupInfoForLatestActivity() {
   resetYoagentStartupActivitySummarySnapshot();
-  yoagentStartupInfoShown = false;
+  yoagentStartupState.infoShown = false;
   return showYoagentStartupInfoOnce();
 }
 
 function hideYoagentStartupInfo() {
-  yoagentStartupInfoVisible = false;
+  yoagentStartupState.infoVisible = false;
 }
 
 function yoagentNoticeHtml() {
-  if (!yoagentNotice?.reason) return '';
-  const backendText = yoagentNotice.backend ? yoagentBackendLabel(yoagentNotice.backend) : '';
+  if (!yoagentChatState.notice?.reason) return '';
+  const backendText = yoagentChatState.notice.backend ? yoagentBackendLabel(yoagentChatState.notice.backend) : '';
   const backend = backendText ? `<span class="yoagent-chat-notice-backend">${esc(backendText)}</span> ` : '';
-  const reason = typeof yoagentNotice.reason === 'object'
-    ? messageDescriptorText(yoagentNotice.reason)
-    : String(yoagentNotice.reason || '');
+  const reason = typeof yoagentChatState.notice.reason === 'object'
+    ? messageDescriptorText(yoagentChatState.notice.reason)
+    : String(yoagentChatState.notice.reason || '');
   return `<div class="yoagent-chat-notice">${backend}${esc(reason)}</div>`;
 }
 
@@ -33506,7 +33721,7 @@ function yoagentFallbackNotice(payload = {}) {
 }
 
 function yoagentPendingWaitsHtml() {
-  const waits = Array.isArray(yoagentPendingWaits) ? yoagentPendingWaits : [];
+  const waits = Array.isArray(yoagentConversationState.pendingWaits) ? yoagentConversationState.pendingWaits : [];
   if (!waits.length) return '';
   const title = tPlural('yoagent.waiting.count', waits.length);
   const rows = waits.map(wait => {
@@ -33541,9 +33756,15 @@ function yoagentPendingWaitsHtml() {
   </div>`;
 }
 
-function applyYoagentJobsPayload(payload = {}) {
+function setYoagentJobs(items, options = {}) {
+  if (options.invalidateRequest !== false) yoagentJobsState.guard.invalidate();
+  yoagentJobsState.items = Array.isArray(items) ? items : [];
+  return yoagentJobsState.items;
+}
+
+function applyYoagentJobsPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  yoagentJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+  setYoagentJobs(payload.jobs, {invalidateRequest: options.source !== 'request'});
   return true;
 }
 
@@ -33586,7 +33807,7 @@ function yoagentJobClassificationText(classification, value) {
 }
 
 function yoagentJobRowsHtml() {
-  const jobs = Array.isArray(yoagentJobs) ? yoagentJobs : [];
+  const jobs = Array.isArray(yoagentJobsState.items) ? yoagentJobsState.items : [];
   if (!jobs.length) return '';
   return jobs.map(job => {
     const id = String(job?.id || job?.job_id || '');
@@ -33631,7 +33852,7 @@ function yoagentJobsHtml() {
 }
 
 function yoagentChatQueueHtml() {
-  const items = Array.isArray(yoagentChatQueue) ? yoagentChatQueue : [];
+  const items = Array.isArray(yoagentChatState.queue) ? yoagentChatState.queue : [];
   if (!items.length) return '';
   const rows = items.map((item, index) => {
     const id = String(item?.id || '');
@@ -33649,18 +33870,20 @@ function yoagentChatQueueHtml() {
   </div>`;
 }
 
-function applyYoagentConversationPayload(payload = {}) {
+function applyYoagentConversationPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
+  if (options.source !== 'request') yoagentConversationState.guard.invalidate();
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
-  const hadPendingWaits = Array.isArray(yoagentPendingWaits) && yoagentPendingWaits.length > 0;
-  yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
-  if (messages.length && yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
-  yoagentMessages = messages;
-  yoagentConversationPath = String(payload.transcript_path || '');
-  yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
-  yoagentConversationLoaded = true;
-  if (hadPendingWaits && !yoagentPendingWaits.length && yoagentChatQueue.length) {
+  const hadPendingWaits = Array.isArray(yoagentConversationState.pendingWaits) && yoagentConversationState.pendingWaits.length > 0;
+  yoagentConversationState.pendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
+  if (messages.length && yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
+  yoagentConversationState.messages = messages;
+  yoagentConversationState.path = String(payload.transcript_path || '');
+  yoagentConversationState.displayPath = String(payload.transcript_display_path || yoagentConversationState.path);
+  yoagentConversationState.loaded = true;
+  yoagentConversationState.loading = false;
+  if (hadPendingWaits && !yoagentConversationState.pendingWaits.length && yoagentChatState.queue.length) {
     if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
     else Promise.resolve().then(() => drainYoagentChatQueue());
   }
@@ -33671,12 +33894,13 @@ function applyYoagentStreamPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const streamId = String(payload.stream_id || '').trim();
   if (!streamId) return false;
-  if (!(yoagentStreamingMessages instanceof Map)) yoagentStreamingMessages = new Map();
+  yoagentConversationState.guard.invalidate();
+  if (!(yoagentConversationState.streamingMessages instanceof Map)) yoagentConversationState.streamingMessages = new Map();
   const createdAt = String(payload.created_at || new Date().toISOString());
   const content = String(payload.content || '');
   const phase = String(payload.phase || '');
   const hiddenThinking = Boolean(payload.hidden_thinking_removed);
-  const previous = yoagentStreamingMessages.get(streamId) || {};
+  const previous = yoagentConversationState.streamingMessages.get(streamId) || {};
   const auxiliaryLines = Array.isArray(payload.auxiliary_lines)
     ? payload.auxiliary_lines.map(line => String(line || '')).filter(Boolean)
     : (Array.isArray(previous.auxiliaryLines) ? previous.auxiliaryLines : []);
@@ -33697,7 +33921,7 @@ function applyYoagentStreamPayload(payload = {}) {
   if (phase) detailRows.push({key: 'yoagent.details.streamPhase', params: {phase}, fallback: `stream phase: ${phase}`});
   if (hiddenThinking) detailRows.push({key: 'yoagent.details.hiddenThinking', params: {}, fallback: 'raw model thinking was hidden'});
   if (payload.auxiliary_truncated) detailRows.push({key: 'yoagent.details.auxiliaryTruncated', params: {}, fallback: 'auxiliary stream truncated'});
-  yoagentStreamingMessages.set(streamId, {
+  yoagentConversationState.streamingMessages.set(streamId, {
     role: 'assistant',
     content: content || previous.content || '',
     createdAt: previous.createdAt || createdAt,
@@ -33714,17 +33938,17 @@ function applyYoagentStreamPayload(payload = {}) {
     aborted: Boolean(payload.aborted) || previous.aborted || false,
     streaming: payload.done !== true,
   });
-  yoagentPrewarming = payload.done === true ? false : yoagentPrewarming;
+  yoagentStartupState.prewarming = payload.done === true ? false : yoagentStartupState.prewarming;
   return true;
 }
 
 function resetYoagentComposerHistory() {
-  yoagentHistoryCursor = null;
-  yoagentHistoryDraft = '';
+  yoagentChatState.historyCursor = null;
+  yoagentChatState.historyDraft = '';
 }
 
 function yoagentUserMessageHistory() {
-  return (Array.isArray(yoagentMessages) ? yoagentMessages : [])
+  return (Array.isArray(yoagentConversationState.messages) ? yoagentConversationState.messages : [])
     .filter(message => message?.role === 'user')
     .map(message => String(message.content || '').trim())
     .filter(Boolean);
@@ -33734,7 +33958,7 @@ function setYoagentChatInputValue(input, value) {
   if (!input) return;
   const nextValue = String(value || '');
   input.value = nextValue;
-  yoagentDraft = nextValue;
+  yoagentChatState.draft = nextValue;
   const end = nextValue.length;
   try { input.setSelectionRange(end, end); } catch (_) {}
 }
@@ -33742,28 +33966,28 @@ function setYoagentChatInputValue(input, value) {
 function yoagentNavigateChatHistory(input, direction) {
   if (!input || input.disabled) return false;
   const history = yoagentUserMessageHistory();
-  const latest = yoagentHistoryCursor === null;
+  const latest = yoagentChatState.historyCursor === null;
   if (direction === 'up') {
     if (!history.length) return false;
     if (latest) {
-      yoagentHistoryDraft = input.value || yoagentDraft || '';
-      yoagentHistoryCursor = history.length - 1;
+      yoagentChatState.historyDraft = input.value || yoagentChatState.draft || '';
+      yoagentChatState.historyCursor = history.length - 1;
     } else {
-      yoagentHistoryCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentHistoryCursor) - 1));
+      yoagentChatState.historyCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentChatState.historyCursor) - 1));
     }
-    setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    setYoagentChatInputValue(input, history[yoagentChatState.historyCursor] || '');
     return true;
   }
   if (direction === 'down') {
     if (latest) return false;
-    const next = Math.min(history.length, Number(yoagentHistoryCursor) + 1);
+    const next = Math.min(history.length, Number(yoagentChatState.historyCursor) + 1);
     if (next >= history.length) {
-      yoagentHistoryCursor = null;
-      setYoagentChatInputValue(input, yoagentHistoryDraft);
-      yoagentHistoryDraft = '';
+      yoagentChatState.historyCursor = null;
+      setYoagentChatInputValue(input, yoagentChatState.historyDraft);
+      yoagentChatState.historyDraft = '';
     } else {
-      yoagentHistoryCursor = next;
-      setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+      yoagentChatState.historyCursor = next;
+      setYoagentChatInputValue(input, history[yoagentChatState.historyCursor] || '');
     }
     return true;
   }
@@ -33781,9 +34005,9 @@ function handleYoagentChatHistoryKeydown(event, input) {
 
 function yoagentTranscriptPathHtml() {
   if (readOnlyMode) return '';
-  const path = yoagentConversationPath || '';
-  const display = yoagentConversationDisplayPath || path;
-  if (!path && !yoagentConversationLoading && !yoagentConversationLoaded) return '';
+  const path = yoagentConversationState.path || '';
+  const display = yoagentConversationState.displayPath || path;
+  if (!path && !yoagentConversationState.loading && !yoagentConversationState.loaded) return '';
   const value = path
     ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('common.copyTranscriptPath')})}`
     : `<span class="yoagent-transcript-loading">${esc(t('yoagent.transcript.loading'))}</span>`;
@@ -33936,35 +34160,55 @@ function yoagentRecentAgentsMessageHtml() {
 }
 
 async function loadYoagentConversation(options = {}) {
-  if (readOnlyMode || yoagentConversationLoading) return;
-  if (yoagentConversationLoaded && options.force !== true) return;
-  yoagentConversationLoading = true;
+  if (readOnlyMode) return false;
+  if (yoagentConversationState.request && options.force !== true) return yoagentConversationState.request;
+  if (yoagentConversationState.loaded && options.force !== true) return;
+  const requestIsCurrent = yoagentConversationState.guard.begin();
+  yoagentConversationState.loading = true;
   if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
-  try {
-    const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
-    applyYoagentConversationPayload(payload);
-  } catch (error) {
-    if (!options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
-  } finally {
-    yoagentConversationLoading = false;
-    if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
-  }
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      return applyYoagentConversationPayload(payload, {source: 'request'});
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
+      return false;
+    } finally {
+      if (yoagentConversationState.request === request) {
+        yoagentConversationState.loading = false;
+        yoagentConversationState.request = null;
+        if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+      }
+    }
+  })();
+  yoagentConversationState.request = request;
+  return request;
 }
 
 async function loadYoagentJobs(options = {}) {
-  if (yoagentJobsLoading) return false;
-  yoagentJobsLoading = true;
-  try {
-    const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
-    applyYoagentJobsPayload(payload);
-    if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
-    return true;
-  } catch (error) {
-    if (!options.silent) console.warn('YO!agent jobs refresh failed', error);
-    return false;
-  } finally {
-    yoagentJobsLoading = false;
-  }
+  if (yoagentJobsState.request && options.force !== true) return yoagentJobsState.request;
+  const requestIsCurrent = yoagentJobsState.guard.begin();
+  yoagentJobsState.loading = true;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      applyYoagentJobsPayload(payload, {source: 'request'});
+      if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+      return true;
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) console.warn('YO!agent jobs refresh failed', error);
+      return false;
+    } finally {
+      if (yoagentJobsState.request === request) {
+        yoagentJobsState.loading = false;
+        yoagentJobsState.request = null;
+      }
+    }
+  })();
+  yoagentJobsState.request = request;
+  return request;
 }
 
 let yoagentAgentAvailabilityRefreshPromise = null;
@@ -34102,28 +34346,28 @@ function yoagentComposerControlsHtml(disabled) {
 function yoagentChatHtml() {
   const chatEnabled = yoagentChatEnabled();
   const disabled = !chatEnabled ? ' disabled' : '';
-  const backendDisabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const backendDisabled = yoagentChatState.busy || readOnlyMode ? ' disabled' : '';
   const placeholder = t('yoagent.chatPlaceholder');
-  const isThinking = yoagentBusy || yoagentPrewarming;
-  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
-  const hasConversation = Boolean(yoagentMessages.length || yoagentChatQueue.length || yoagentPendingWaits.length || yoagentJobs.length || yoagentNotice || isThinking || yoagentError || startupInfo || !chatEnabled);
+  const isThinking = yoagentChatState.busy || yoagentStartupState.prewarming;
+  const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
+  const hasConversation = Boolean(yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
     ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
-  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
+  const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
-  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
+  const error = yoagentChatState.error ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
-  const clearDisabled = yoagentBusy || readOnlyMode || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
-  const submitButton = yoagentBusy
+  const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
+  const submitButton = yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
     : `<button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
           <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>`;
   const form = `<form class="yoagent-chat-form" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
+      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
       <div class="yoagent-chat-controls">
         ${yoagentComposerControlsHtml(backendDisabled)}
         <span class="yoagent-chat-controls-spacer"></span>
@@ -34157,8 +34401,8 @@ function yoagentChatErrorState(error) {
 }
 
 function yoagentErrorText() {
-  if (yoagentError && typeof yoagentError === 'object') return messageDescriptorText(yoagentError);
-  return String(yoagentError || '');
+  if (yoagentChatState.error && typeof yoagentChatState.error === 'object') return messageDescriptorText(yoagentChatState.error);
+  return String(yoagentChatState.error || '');
 }
 
 let yoagentFocusSerial = 0;
@@ -34212,8 +34456,8 @@ function startYoagentLocalThinkingStream(streamId) {
 function enqueueYoagentChatMessage(text) {
   const value = String(text || '').trim();
   if (!value) return false;
-  yoagentChatQueue.push({id: `queued-${++yoagentChatQueueSerial}`, text: value, createdAt: new Date().toISOString()});
-  yoagentDraft = '';
+  yoagentChatState.queue.push({id: `queued-${++yoagentChatState.queueSerial}`, text: value, createdAt: new Date().toISOString()});
+  yoagentChatState.draft = '';
   resetYoagentComposerHistory();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true, allowBusyRebuild: true, focusInput: true});
   return true;
@@ -34222,17 +34466,15 @@ function enqueueYoagentChatMessage(text) {
 function cancelQueuedYoagentChatMessage(queueId) {
   const id = String(queueId || '');
   if (!id) return false;
-  const previousLength = yoagentChatQueue.length;
-  yoagentChatQueue = yoagentChatQueue.filter(item => String(item?.id || '') !== id);
-  const changed = yoagentChatQueue.length !== previousLength;
+  const previousLength = yoagentChatState.queue.length;
+  yoagentChatState.queue = yoagentChatState.queue.filter(item => String(item?.id || '') !== id);
+  const changed = yoagentChatState.queue.length !== previousLength;
   if (changed) renderYoagentPanel({preserveDraft: true, scrollBottom: false, allowBusyRebuild: true});
   return changed;
 }
 
-function finishYoagentActiveRequest(requestId, options = {}) {
-  if (!yoagentActiveChatRequest || yoagentActiveChatRequest.id !== requestId) return false;
-  yoagentActiveChatRequest = null;
-  yoagentBusy = false;
+function finishYoagentBusyWork(options = {}) {
+  yoagentChatState.busy = false;
   renderYoagentPanel({
     preserveDraft: options.preserveDraft !== false,
     scrollBottom: options.scrollBottom !== false,
@@ -34244,16 +34486,22 @@ function finishYoagentActiveRequest(requestId, options = {}) {
   return true;
 }
 
+function finishYoagentActiveRequest(requestId, options = {}) {
+  if (!yoagentChatState.activeRequest || yoagentChatState.activeRequest.id !== requestId) return false;
+  yoagentChatState.activeRequest = null;
+  return finishYoagentBusyWork(options);
+}
+
 function drainYoagentChatQueue() {
-  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length || !yoagentChatEnabled() || !yoagentChatQueue.length) return false;
-  const next = yoagentChatQueue.shift();
+  if (yoagentChatState.busy || yoagentChatState.activeRequest || yoagentConversationState.pendingWaits.length || !yoagentChatEnabled() || !yoagentChatState.queue.length) return false;
+  const next = yoagentChatState.queue.shift();
   if (!next) return false;
   startYoagentChatRequest(next.text, {fromQueue: true});
   return true;
 }
 
 function cancelActiveYoagentChatRequest() {
-  const active = yoagentActiveChatRequest;
+  const active = yoagentChatState.activeRequest;
   if (!active || active.cancelled) return false;
   active.cancelled = true;
   try { active.controller?.abort(); } catch (_) {}
@@ -34276,19 +34524,20 @@ function cancelActiveYoagentChatRequest() {
 }
 
 async function clearYoagentConversation() {
-  yoagentMessages = [];
-  yoagentPendingWaits = [];
-  yoagentChatQueue = [];
-  if (yoagentActiveChatRequest) cancelActiveYoagentChatRequest();
-  yoagentBusy = false;
-  yoagentPrewarming = false;
-  yoagentPrewarmStarted = false;
-  yoagentStartupLlmRequested = false;
-  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
-  yoagentError = null;
-  yoagentDraft = '';
+  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.messages = [];
+  yoagentConversationState.pendingWaits = [];
+  yoagentChatState.queue = [];
+  if (yoagentChatState.activeRequest) cancelActiveYoagentChatRequest();
+  yoagentChatState.busy = false;
+  yoagentStartupState.prewarming = false;
+  yoagentStartupState.prewarmStarted = false;
+  yoagentStartupState.llmRequested = false;
+  if (yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
+  yoagentChatState.error = null;
+  yoagentChatState.draft = '';
   resetYoagentComposerHistory();
-  yoagentNotice = null;
+  yoagentChatState.notice = null;
   showYoagentStartupInfoForLatestActivity();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
@@ -34315,14 +34564,14 @@ async function updateYoagentJob(jobId, action) {
       body: JSON.stringify({id}),
     });
     if (payload?.job) {
-      const next = yoagentJobs.map(job => String(job?.id || job?.job_id || '') === id ? payload.job : job);
+      const next = yoagentJobsState.items.map(job => String(job?.id || job?.job_id || '') === id ? payload.job : job);
       if (!next.some(job => String(job?.id || job?.job_id || '') === id)) next.unshift(payload.job);
-      yoagentJobs = next;
+      setYoagentJobs(next);
     }
     await loadYoagentJobs({silent: true, render: false});
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
-    yoagentError = yoagentChatErrorState(error);
+    yoagentChatState.error = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
@@ -34348,14 +34597,14 @@ async function clearYoagentPendingWait(waitId) {
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
     if (error?.payload?.conversation) applyYoagentConversationPayload(error.payload.conversation);
-    yoagentError = yoagentChatErrorState(error);
+    yoagentChatState.error = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
 
 async function startYoagentChatRequest(rawText, options = {}) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || yoagentActiveChatRequest) return;
+  if (!text || yoagentChatState.busy || yoagentChatState.activeRequest) return;
   if (YOAGENT_CHAT_BACKENDS.includes(yoagentBackendKey())) {
     await refreshYoagentAgentAvailability({force: true, silent: true, render: false});
   }
@@ -34368,16 +34617,17 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  yoagentActiveChatRequest = {id: requestId, streamId, controller, text, cancelled: false};
+  yoagentConversationState.guard.invalidate();
+  yoagentChatState.activeRequest = {id: requestId, streamId, controller, text, cancelled: false};
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
-  yoagentMessages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
-  yoagentDraft = '';
-  yoagentBusy = true;
-  yoagentPrewarming = false;
-  yoagentError = null;
-  yoagentNotice = null;
-  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
+  yoagentConversationState.messages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
+  yoagentChatState.draft = '';
+  yoagentChatState.busy = true;
+  yoagentStartupState.prewarming = false;
+  yoagentChatState.error = null;
+  yoagentChatState.notice = null;
+  if (yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
   startYoagentLocalThinkingStream(streamId);
   renderYoagentPanel({preserveDraft: false, scrollBottom: true, allowBusyRebuild: true});
   try {
@@ -34387,16 +34637,16 @@ async function startYoagentChatRequest(rawText, options = {}) {
       body: JSON.stringify({message: text, locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
       signal: controller?.signal,
     });
-    if (yoagentActiveChatRequest?.id !== requestId) return;
+    if (yoagentChatState.activeRequest?.id !== requestId) return;
     if (payload.cancelled) {
       applyYoagentStreamPayload({stream_id: streamId, phase: 'stopped', done: true, aborted: true, auxiliary_done: true});
       return;
     }
     if (payload.fallback && payload.fallback_reason) {
-      yoagentNotice = yoagentFallbackNotice(payload);
+      yoagentChatState.notice = yoagentFallbackNotice(payload);
     }
     if (!applyYoagentConversationPayload(payload.conversation || {})) {
-      yoagentMessages.push({
+      yoagentConversationState.messages.push({
         role: 'assistant',
         content: payload.answer || '',
         ...(!payload.answer ? structuredMessageSnapshot({content: '', content_key: 'yoagent.noAnswer', content_params: {}}, 'content') : {}),
@@ -34407,9 +34657,9 @@ async function startYoagentChatRequest(rawText, options = {}) {
     }
     statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
-    if (yoagentActiveChatRequest?.id !== requestId || yoagentChatAbortError(error)) return;
-    if (yoagentChatNetworkError(error)) yoagentDraft = text;
-    yoagentError = yoagentChatErrorState(error);
+    if (yoagentChatState.activeRequest?.id !== requestId || yoagentChatAbortError(error)) return;
+    if (yoagentChatNetworkError(error)) yoagentChatState.draft = text;
+    yoagentChatState.error = yoagentChatErrorState(error);
   } finally {
     finishYoagentActiveRequest(requestId, {
       preserveDraft: true,
@@ -34422,7 +34672,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text) return;
-  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length) {
+  if (yoagentChatState.busy || yoagentChatState.activeRequest || yoagentConversationState.pendingWaits.length) {
     enqueueYoagentChatMessage(text);
     return;
   }
@@ -34431,7 +34681,7 @@ async function sendYoagentChatMessage(rawText) {
 
 function updateYoagentActionPreview(previewId, patch) {
   let changed = false;
-  for (const message of yoagentMessages) {
+  for (const message of yoagentConversationState.messages) {
     if (!Array.isArray(message.actions)) continue;
     message.actions = message.actions.map(action => {
       if (action?.id !== previewId) return action;
@@ -34443,9 +34693,10 @@ function updateYoagentActionPreview(previewId, patch) {
 }
 
 async function executeYoagentActionSend(previewId) {
-  if (!previewId || readOnlyMode || yoagentBusy) return;
+  if (!previewId || readOnlyMode || yoagentChatState.busy) return;
+  yoagentConversationState.guard.invalidate();
   hideYoagentStartupInfo();
-  yoagentBusy = true;
+  yoagentChatState.busy = true;
   updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));
   renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   try {
@@ -34459,23 +34710,22 @@ async function executeYoagentActionSend(previewId) {
     const answer = payload.answer
       ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
       : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
-    if (!payload.conversation) yoagentMessages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
+    if (!payload.conversation) yoagentConversationState.messages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
     statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
   } catch (error) {
     updateYoagentActionPreview(previewId, yoagentActionErrorStatusPatch(error));
-    yoagentError = yoagentChatErrorState(error);
+    yoagentChatState.error = yoagentChatErrorState(error);
   } finally {
-    yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+    finishYoagentBusyWork({preserveDraft: true, scrollBottom: true});
   }
 }
 
 async function prewarmYoagent(options = {}) {
-  if (yoagentPrewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
-  const shouldRequestStartupAnswer = !yoagentStartupLlmRequested && !yoagentMessages.length && !yoagentConversationLoaded;
-  if (shouldRequestStartupAnswer) yoagentStartupLlmRequested = true;
-  yoagentPrewarmStarted = true;
-  yoagentPrewarming = true;
+  if (yoagentStartupState.prewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
+  const shouldRequestStartupAnswer = !yoagentStartupState.llmRequested && !yoagentConversationState.messages.length && !yoagentConversationState.loaded;
+  if (shouldRequestStartupAnswer) yoagentStartupState.llmRequested = true;
+  yoagentStartupState.prewarmStarted = true;
+  yoagentStartupState.prewarming = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   try {
     const payload = await apiFetchJson('/api/yoagent/prewarm', {
@@ -34484,16 +34734,16 @@ async function prewarmYoagent(options = {}) {
       body: JSON.stringify({locale: i18nActiveLocaleId(), visible: shouldRequestStartupAnswer}),
     });
     if (payload?.fallback && payload.fallback_reason) {
-      yoagentNotice = yoagentFallbackNotice(payload);
+      yoagentChatState.notice = yoagentFallbackNotice(payload);
     }
     if (payload?.conversation) applyYoagentConversationPayload(payload.conversation || {});
   } catch (error) {
     if (shouldRequestStartupAnswer) {
-      yoagentError = yoagentChatErrorState(error);
+      yoagentChatState.error = yoagentChatErrorState(error);
     }
     // Non-visible process warm-up is opportunistic; visible chat requests handle real errors.
   } finally {
-    yoagentPrewarming = false;
+    yoagentStartupState.prewarming = false;
     renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   }
 }
@@ -34511,9 +34761,9 @@ async function refreshActivitySummary(options = {}) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
-  if (activitySummaryRefreshing && options.force !== true) return;
-  const requestIsCurrent = activitySummaryGuard.begin();
-  activitySummaryRefreshing = true;
+  if (activitySummaryState.refreshing && options.force !== true) return;
+  const requestIsCurrent = activitySummaryState.guard.begin();
+  activitySummaryState.refreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
     const params = new URLSearchParams();
@@ -34523,12 +34773,12 @@ async function refreshActivitySummary(options = {}) {
     params.set('hours', String(infoSessionFileLookbackHours));
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true});
+    applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true, source: 'request'});
   } catch (error) {
     if (!requestIsCurrent()) return;
     const errorDescriptor = userMessageSnapshot(error, error?.message || String(error || '')).user_message;
-    activitySummaryPayload = {
-      ...activitySummaryPayload,
+    activitySummaryState.payload = {
+      ...activitySummaryState.payload,
       errors: [String(error)],
       global: {
         headline: '',
@@ -34544,7 +34794,7 @@ async function refreshActivitySummary(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
     if (requestIsCurrent()) {
-      activitySummaryRefreshing = false;
+      activitySummaryState.refreshing = false;
       renderInfoPanel();
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
       if (yoagentPanelIsActive()) prewarmYoagent();
@@ -34554,12 +34804,12 @@ async function refreshActivitySummary(options = {}) {
 
 function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (options.source !== 'request') activitySummaryState.guard.invalidate();
   if (payload.session_file_hours != null) {
     infoSessionFileLookbackHours = writeStoredInfoLookbackHours(payload.session_file_hours);
   }
-  activitySummaryPayload = payload;
-  activitySummaryLastRefreshTs = Date.now();
-  activitySummaryRefreshing = false;
+  activitySummaryState.payload = payload;
+  activitySummaryState.refreshing = false;
   if (options.refreshStartupSnapshot === true) captureYoagentStartupActivitySummarySnapshot({replace: true});
   if (options.render === true || options.refreshStartupSnapshot === true) {
     renderInfoPanel();
@@ -35318,7 +35568,7 @@ function createPreferencesPanel() {
 function focusPreferencesSearch(panel = null, options = {}) {
   // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
-  if (dragSession != null) return false;
+  if (dragState.item != null) return false;
   return focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options});
 }
 
@@ -35348,7 +35598,7 @@ function notePreferencesScrollActivity(now = Date.now()) {
 function renderPreferencesPanels(options = {}) {
   // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
-  if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (dragState.item != null) { pendingPreferencesRender = true; return; }
   scheduleDeferredSettingsMetadataRefresh();
   if (options.force !== true && preferencesScrollIsActive()) {
     pendingPreferencesRender = true;
@@ -35607,13 +35857,17 @@ const jsDebugHistoryReadiness = {
 };
 let jsDebugSubTab = 'graph';
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
-let jsDebugStatsPollTimer = null;
-let jsDebugStatsPollInFlight = false;
-let jsDebugStatsPollPending = false;
-let jsDebugStatsPollPendingForceGraphRefresh = false;
-let jsDebugStatsFirstSampleReceived = false;
-let jsDebugStatsHistoryFlushTimer = null;
-let jsDebugStatsHistoryFlushInFlight = false;
+const jsDebugStatsPollState = {
+  inFlight: false,
+  pending: false,
+  pendingForceGraphRefresh: false,
+  firstSampleReceived: false,
+};
+const jsDebugStatsUploadState = {
+  timer: null,
+  worker: null,
+  generation: 0,
+};
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsAgentTokenSequence = 0;
 let jsDebugStatsAgentTokenResolutionSeconds = 0;
@@ -35756,9 +36010,7 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
 const jsDebugGraphAgentTokenBuckets = new Map();
-const jsDebugGraphEventBuckets = new Map();
-const jsDebugGraphEventResponseBytes = new Map();
-const jsDebugGraphEventRefTimes = new Map();
+const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
@@ -36747,11 +36999,9 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     }
   }
   const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, timeMs] of [...jsDebugGraphEventRefTimes.entries()]) {
-    if (timeMs >= refCutoff) continue;
-    jsDebugGraphEventRefTimes.delete(id);
-    jsDebugGraphEventBuckets.delete(id);
-    jsDebugGraphEventResponseBytes.delete(id);
+  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
+    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
+    jsDebugGraphEventRecords.delete(id);
   }
 }
 
@@ -36776,26 +37026,24 @@ function recordJsDebugEventForGraph(event) {
   debugGraphAddBucketData(debugGraphBucketForTime(debugGraphEventTimeMs(event), nowMs), data);
   debugGraphQueueServerDelta(bucketRef, data);
   if (event.type === 'api' && Number.isFinite(event.id)) {
-    jsDebugGraphEventBuckets.set(event.id, bucketRef);
-    jsDebugGraphEventResponseBytes.set(event.id, responseBytes);
-    jsDebugGraphEventRefTimes.set(event.id, nowMs);
+    jsDebugGraphEventRecords.set(event.id, {bucket: bucketRef, responseBytes, lastSeenAt: nowMs});
   }
   compactJsDebugGraphBuckets(nowMs);
 }
 
 function recordApiDebugResponseBytesForGraph(event, responseBytes) {
   if (!jsDebugCollectionEnabled || !event || !Number.isFinite(event.id)) return;
-  const bucket = jsDebugGraphEventBuckets.get(event.id);
-  if (!bucket) return;
+  const record = jsDebugGraphEventRecords.get(event.id);
+  if (!record?.bucket) return;
   const nextBytes = Number(responseBytes);
   if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(jsDebugGraphEventResponseBytes.get(event.id) || 0);
+  const previousBytes = Number(record.responseBytes || 0);
   const delta = nextBytes - previousBytes;
-  jsDebugGraphEventResponseBytes.set(event.id, nextBytes);
-  jsDebugGraphEventRefTimes.set(event.id, Date.now());
+  record.responseBytes = nextBytes;
+  record.lastSeenAt = Date.now();
   if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(bucket, {bandwidthBytes: delta});
+  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
+  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -36871,9 +37119,9 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     payload.cpu_percent,
     payload.system_cpu_percent,
   ].some(value => Number.isFinite(Number(value)));
-  const firstSampleApplied = sampleApplied && !jsDebugStatsFirstSampleReceived;
+  const firstSampleApplied = sampleApplied && !jsDebugStatsPollState.firstSampleReceived;
   if (firstSampleApplied) {
-    jsDebugStatsFirstSampleReceived = true;
+    jsDebugStatsPollState.firstSampleReceived = true;
     armJsDebugStatsPolling();
   }
   debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: advanceHistoryCursor, replaceCoverage});
@@ -36885,8 +37133,8 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     clearJsDebugGraphData();
     resetJsDebugHistoryReadiness();
     jsDebugStatsServerSequence = 0;
-    jsDebugStatsPollPending = true;
-    jsDebugStatsPollPendingForceGraphRefresh = true;
+    jsDebugStatsPollState.pending = true;
+    jsDebugStatsPollState.pendingForceGraphRefresh = true;
   }
   if (payload.history && typeof payload.history === 'object') {
     if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
@@ -36910,9 +37158,7 @@ function clearJsDebugGraphData() {
   jsDebugGraphRollupBuckets.clear();
   resetDebugGraphAgentTokenHistory();
   jsDebugStatsAgentTokenSchemaVersion = 0;
-  jsDebugGraphEventBuckets.clear();
-  jsDebugGraphEventResponseBytes.clear();
-  jsDebugGraphEventRefTimes.clear();
+  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
 }
 
@@ -38566,7 +38812,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventBuckets.size,
+    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
     rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
@@ -38600,12 +38846,11 @@ function jsDebugStatsTokenConsumerEnabled() {
 }
 
 function stopJsDebugStatsPolling() {
-  if (jsDebugStatsPollTimer && typeof clearInterval === 'function') clearInterval(jsDebugStatsPollTimer);
-  jsDebugStatsPollTimer = null;
+  clearRuntimeInterval('debug-stats');
 }
 
 function jsDebugStatsPollIntervalMs() {
-  return jsDebugStatsFirstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+  return jsDebugStatsPollState.firstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
 }
 
 function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {}) {
@@ -38614,8 +38859,8 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
     return;
   }
   stopJsDebugStatsPolling();
-  if (pollNow) pollJsDebugStatsSample({forceGraphRefresh});
-  if (typeof setInterval === 'function') jsDebugStatsPollTimer = setInterval(pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+  if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
+  resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
 }
 
 async function fetchJsDebugStatsJson(url, options = {}) {
@@ -38658,14 +38903,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     stopJsDebugStatsPolling();
     return;
   }
-  if (jsDebugStatsPollInFlight) {
-    jsDebugStatsPollPending = true;
-    jsDebugStatsPollPendingForceGraphRefresh ||= forceGraphRefresh;
+  if (jsDebugStatsPollState.inFlight) {
+    jsDebugStatsPollState.pending = true;
+    jsDebugStatsPollState.pendingForceGraphRefresh ||= forceGraphRefresh;
     return;
   }
   if (typeof apiFetchJsonQuiet !== 'function') return;
-  jsDebugStatsPollPending = false;
-  jsDebugStatsPollInFlight = true;
+  jsDebugStatsPollState.pending = false;
+  jsDebugStatsPollState.inFlight = true;
   let readinessRequest = null;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
@@ -38725,8 +38970,8 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
       if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
-        jsDebugStatsPollPending = true;
-        jsDebugStatsPollPendingForceGraphRefresh = true;
+        jsDebugStatsPollState.pending = true;
+        jsDebugStatsPollState.pendingForceGraphRefresh = true;
         return;
       }
       await paintJsDebugHistoryResponse(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds);
@@ -38736,26 +38981,27 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
     }
   } finally {
-    jsDebugStatsPollInFlight = false;
-    if (jsDebugStatsPollPending) {
-      const pendingForceGraphRefresh = jsDebugStatsPollPendingForceGraphRefresh;
-      jsDebugStatsPollPending = false;
-      jsDebugStatsPollPendingForceGraphRefresh = false;
+    jsDebugStatsPollState.inFlight = false;
+    if (jsDebugStatsPollState.pending) {
+      const pendingForceGraphRefresh = jsDebugStatsPollState.pendingForceGraphRefresh;
+      jsDebugStatsPollState.pending = false;
+      jsDebugStatsPollState.pendingForceGraphRefresh = false;
       pollJsDebugStatsSample({forceGraphRefresh: pendingForceGraphRefresh});
     }
   }
 }
 
 function scheduleJsDebugStatsHistoryFlush() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushTimer || typeof setTimeout !== 'function') return;
-  jsDebugStatsHistoryFlushTimer = setTimeout(() => {
-    jsDebugStatsHistoryFlushTimer = null;
+  if (!jsDebugCollectionEnabled || jsDebugStatsUploadState.timer || typeof setTimeout !== 'function') return;
+  jsDebugStatsUploadState.timer = setTimeout(() => {
+    jsDebugStatsUploadState.timer = null;
     flushJsDebugStatsHistory();
   }, jsDebugStatsHistoryFlushMs);
 }
 
 async function flushJsDebugStatsHistory() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsHistoryFlushInFlight || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  if (!jsDebugCollectionEnabled || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
+  if (jsDebugStatsUploadState.worker) return jsDebugStatsUploadState.worker;
   const records = [...jsDebugGraphPendingServerBuckets.values()]
     .map(record => ({...record}))
     .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
@@ -38767,58 +39013,87 @@ async function flushJsDebugStatsHistory() {
     jsDebugGraphPendingServerBuckets.delete(key);
   }
   if (!records.length) return;
-  jsDebugStatsHistoryFlushInFlight = true;
-  try {
-    await apiFetchJsonQuiet('/api/stats-history', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
-    });
-    scheduleJsDebugPanelRefresh();
-  } catch (_error) {
-    for (const record of chunk) {
-      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-      const existing = jsDebugGraphPendingServerBuckets.get(key);
-      if (existing) {
-        for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
-          existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
+  const generation = jsDebugStatsUploadState.generation;
+  let worker = null;
+  worker = (async () => {
+    try {
+      await apiFetchJsonQuiet('/api/stats-history', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
+      });
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      scheduleJsDebugPanelRefresh();
+    } catch (_error) {
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      for (const record of chunk) {
+        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+        const existing = jsDebugGraphPendingServerBuckets.get(key);
+        if (existing) {
+          for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
+            existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
+          }
+        } else {
+          jsDebugGraphPendingServerBuckets.set(key, record);
         }
-      } else {
-        jsDebugGraphPendingServerBuckets.set(key, record);
       }
+    } finally {
+      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
+      for (const record of held) {
+        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
+        if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
+      }
+      jsDebugStatsUploadState.worker = null;
+      if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
     }
-  } finally {
-    for (const record of held) {
-      const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-      if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
-    }
-    jsDebugStatsHistoryFlushInFlight = false;
-    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
-  }
+  })();
+  jsDebugStatsUploadState.worker = worker;
+  return worker;
 }
 
-function clearJsDebugServerHistory() {
-  jsDebugStatsFirstSampleReceived = false;
+async function clearJsDebugServerHistory() {
+  const priorWorker = jsDebugStatsUploadState.worker;
+  const generation = ++jsDebugStatsUploadState.generation;
+  const restartPolling = runtimeIntervalActive('debug-stats');
+  stopJsDebugStatsPolling();
+  jsDebugStatsPollState.firstSampleReceived = false;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
   jsDebugStatsServerStartedAt = null;
   jsDebugStatsServerRssBytes = null;
   resetJsDebugHistoryReadiness();
-  if (jsDebugStatsHistoryFlushTimer) {
-    clearTimeout(jsDebugStatsHistoryFlushTimer);
-    jsDebugStatsHistoryFlushTimer = null;
+  jsDebugGraphPendingServerBuckets.clear();
+  if (jsDebugStatsUploadState.timer) {
+    clearTimeout(jsDebugStatsUploadState.timer);
+    jsDebugStatsUploadState.timer = null;
   }
-  if (jsDebugStatsPollTimer) armJsDebugStatsPolling({pollNow: true});
-  if (typeof apiFetchJsonQuiet !== 'function') return;
-  apiFetchJsonQuiet('/api/stats-history', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
-  }).then(payload => {
+  if (priorWorker) {
+    try {
+      await priorWorker;
+    } catch (_error) {}
+  }
+  if (jsDebugStatsUploadState.generation !== generation) return;
+  if (jsDebugStatsUploadState.worker === priorWorker) jsDebugStatsUploadState.worker = null;
+  if (typeof apiFetchJsonQuiet !== 'function') {
+    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
+    return;
+  }
+  try {
+    const payload = await apiFetchJsonQuiet('/api/stats-history', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
+    });
+    if (jsDebugStatsUploadState.generation !== generation) return;
     debugGraphApplyServerHistory(payload?.history);
     scheduleJsDebugPanelRefresh();
-  }).catch(() => {});
+  } catch (_error) {
+  } finally {
+    if (jsDebugStatsUploadState.generation !== generation) return;
+    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
+    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
+  }
 }
 
 function startJsDebugStatsPolling() {
@@ -38830,15 +39105,15 @@ function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {
     stopJsDebugStatsPolling();
     return false;
   }
-  if (jsDebugStatsPollTimer && !pollNow) return true;
+  if (runtimeIntervalActive('debug-stats') && !pollNow) return true;
   armJsDebugStatsPolling({pollNow, forceGraphRefresh});
   return true;
 }
 
 async function primeJsDebugStatsBeforeLongLivedStreams() {
-  if (!jsDebugStatsPanelVisible() || jsDebugStatsFirstSampleReceived) return false;
+  if (!jsDebugStatsPanelVisible() || jsDebugStatsPollState.firstSampleReceived) return false;
   await pollJsDebugStatsSample();
-  return jsDebugStatsFirstSampleReceived;
+  return jsDebugStatsPollState.firstSampleReceived;
 }
 
 if (typeof document !== 'undefined' && document?.addEventListener) {
@@ -38933,7 +39208,7 @@ function createDebugPanel() {
 }
 
 function renderDebugPanels(options = {}) {
-  if (dragSession != null) return;
+  if (dragState.item != null) return;
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     refreshDebugPanelFromEvents(panel, options);
@@ -39423,10 +39698,10 @@ function fileRepoForPath(path) {
     const repo = normalizeDirectoryPath(root || '');
     if (repo && repo !== '/' && pathIsInsideDirectory(normalized, repo)) roots.push(repo);
   };
-  for (const file of fileExplorerSessionFilesPayload?.files || []) {
+  for (const file of fileExplorerSessionFilesState.payload?.files || []) {
     if (file?.abs_path === path && file.repo) return file.repo;
   }
-  for (const repoInfo of fileExplorerSessionFilesPayload?.repos || []) {
+  for (const repoInfo of fileExplorerSessionFilesState.payload?.repos || []) {
     addRoot(repoInfo?.repo);
   }
   addRoot(openFiles.get(path)?.gitRoot);
@@ -39453,7 +39728,7 @@ function diffRefQueryString(repo) {
 
 function sessionFilesRelevantDiffRefRepos() {
   const session = fileExplorerSessionFilesTargetSession();
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   if (!sessionFilesPayloadIsLoadedForSession(payload, session)) return new Set();
   return new Set(sessionFilesRepoRoots(payload));
 }
@@ -39560,7 +39835,7 @@ function changedFileOwnerSessionForPath(path, options = {}) {
     if (ownerSet && !ownerSet.has(session)) return;
     if (sessionFilesPayloadHasDifferPath(payload, path)) matches.add(session);
   };
-  considerPayload(fileExplorerSessionFilesPayload);
+  considerPayload(fileExplorerSessionFilesState.payload);
   for (const cached of fileExplorerSessionFilesCache.values()) {
     considerPayload(cached?.payload || cached);
   }
@@ -39570,11 +39845,13 @@ function changedFileOwnerSessionForPath(path, options = {}) {
 const diffRefSuggestionLimit = 60;
 const diffRefPopoverCompactLimit = 12;
 const diffRefPopoverFullLimit = 18;
-let diffRefPopover = null;
-let diffRefPopoverInput = null;
-let diffRefPopoverItemsCurrent = [];
-let diffRefPopoverActiveIndex = -1;
-let diffRefPopoverListenersInstalled = false;
+const diffRefPopoverState = {
+  node: null,
+  input: null,
+  items: [],
+  activeIndex: -1,
+  listenersInstalled: false,
+};
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
@@ -39627,8 +39904,8 @@ function diffRefSuggestions(repo) {
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
   };
-  const refsByRepo = fileExplorerSessionFilesPayload?.refs_by_repo && typeof fileExplorerSessionFilesPayload.refs_by_repo === 'object'
-    ? fileExplorerSessionFilesPayload.refs_by_repo
+  const refsByRepo = fileExplorerSessionFilesState.payload?.refs_by_repo && typeof fileExplorerSessionFilesState.payload.refs_by_repo === 'object'
+    ? fileExplorerSessionFilesState.payload.refs_by_repo
     : {};
   if (repo) {
     addRefs(diffRefRepoRefs(refsByRepo, repo));
@@ -39913,28 +40190,29 @@ function diffRefInputContext(input) {
 }
 
 function ensureDiffRefPopover() {
-  if (diffRefPopover) return diffRefPopover;
-  diffRefPopover = document.createElement('div');
-  diffRefPopover.className = 'diff-ref-suggestion-popover';
-  diffRefPopover.id = 'diff-ref-suggestion-popover';
-  diffRefPopover.role = 'listbox';
-  diffRefPopover.hidden = true;
-  diffRefPopover.addEventListener('pointerdown', event => {
+  if (diffRefPopoverState.node) return diffRefPopoverState.node;
+  const popover = document.createElement('div');
+  popover.className = 'diff-ref-suggestion-popover';
+  popover.id = 'diff-ref-suggestion-popover';
+  popover.role = 'listbox';
+  popover.hidden = true;
+  popover.addEventListener('pointerdown', event => {
     event.preventDefault();
   });
-  diffRefPopover.addEventListener('click', event => {
+  popover.addEventListener('click', event => {
     const option = event.target.closest?.('[data-diff-ref-option-index]');
-    if (!option || !diffRefPopover.contains(option)) return;
+    if (!option || !popover.contains(option)) return;
     event.preventDefault();
     chooseDiffRefPopoverOption(Number(option.dataset.diffRefOptionIndex));
   });
-  appOverlayRootElement()?.appendChild(diffRefPopover);
+  diffRefPopoverState.node = popover;
+  appOverlayRootElement()?.appendChild(popover);
   installDiffRefPopoverListeners();
-  return diffRefPopover;
+  return popover;
 }
 
 function installDiffRefPopoverListeners() {
-  if (diffRefPopoverListenersInstalled) return;
+  if (diffRefPopoverState.listenersInstalled) return;
   document.addEventListener('pointerdown', event => {
     const target = event.target;
     if (target?.closest?.('[data-diff-ref-input]') || target?.closest?.('#diff-ref-suggestion-popover')) return;
@@ -39943,16 +40221,17 @@ function installDiffRefPopoverListeners() {
   window.addEventListener('resize', () => hideDiffRefPopover());
   document.addEventListener('scroll', event => {
     const target = event.target;
-    if (diffRefPopover && (target === diffRefPopover || diffRefPopover.contains(target))) return;
-    if (!diffRefPopoverInput || !diffRefPopover || diffRefPopover.hidden) return;
-    if (!diffRefPopoverInput.isConnected) {
+    const {node, input} = diffRefPopoverState;
+    if (node && (target === node || node.contains(target))) return;
+    if (!input || !node || node.hidden) return;
+    if (!input.isConnected) {
       hideDiffRefPopover();
       return;
     }
-    const context = diffRefInputContext(diffRefPopoverInput);
-    positionDiffRefPopover(diffRefPopoverInput, context.compact);
+    const context = diffRefInputContext(input);
+    positionDiffRefPopover(input, context.compact);
   }, true);
-  diffRefPopoverListenersInstalled = true;
+  diffRefPopoverState.listenersInstalled = true;
 }
 
 function positionDiffRefPopover(input, compact) {
@@ -39983,16 +40262,16 @@ function renderDiffRefPopover(input, options = {}) {
     suggestions: context.suggestions,
     showAll: options.showAll === true,
   });
-  diffRefPopoverInput = input;
-  diffRefPopoverItemsCurrent = items;
-  diffRefPopoverActiveIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
+  diffRefPopoverState.input = input;
+  diffRefPopoverState.items = items;
+  diffRefPopoverState.activeIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
   popover.classList.toggle('compact', context.compact);
   if (!items.length) {
     hideDiffRefPopover();
     return;
   }
   popover.innerHTML = items.map((item, index) => {
-    const active = index === diffRefPopoverActiveIndex;
+    const active = index === diffRefPopoverState.activeIndex;
     const ref = diffRefCompactDisplay(item) || item?.ref || '';
     const subject = diffRefPopoverSubjectParts(item);
     const subjectText = [subject.description, subject.pr].filter(Boolean).join(' ');
@@ -40009,20 +40288,21 @@ function renderDiffRefPopover(input, options = {}) {
 }
 
 function hideDiffRefPopover() {
-  if (diffRefPopover) diffRefPopover.hidden = true;
-  if (diffRefPopoverInput) {
-    diffRefPopoverInput.setAttribute('aria-expanded', 'false');
-    diffRefPopoverInput.removeAttribute('aria-controls');
+  if (diffRefPopoverState.node) diffRefPopoverState.node.hidden = true;
+  if (diffRefPopoverState.input) {
+    diffRefPopoverState.input.setAttribute('aria-expanded', 'false');
+    diffRefPopoverState.input.removeAttribute('aria-controls');
   }
-  diffRefPopoverInput = null;
-  diffRefPopoverItemsCurrent = [];
-  diffRefPopoverActiveIndex = -1;
+  diffRefPopoverState.input = null;
+  diffRefPopoverState.items = [];
+  diffRefPopoverState.activeIndex = -1;
 }
 
 function syncDiffRefPopoverActiveOption() {
-  if (!diffRefPopover || diffRefPopover.hidden) return;
-  diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
-    const active = index === diffRefPopoverActiveIndex;
+  const popover = diffRefPopoverState.node;
+  if (!popover || popover.hidden) return;
+  popover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
+    const active = index === diffRefPopoverState.activeIndex;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
     if (active) button.scrollIntoView?.({block: 'nearest'});
@@ -40030,8 +40310,8 @@ function syncDiffRefPopoverActiveOption() {
 }
 
 function chooseDiffRefPopoverOption(index) {
-  const input = diffRefPopoverInput;
-  const item = diffRefPopoverItemsCurrent[index];
+  const input = diffRefPopoverState.input;
+  const item = diffRefPopoverState.items[index];
   if (!input || !item) return false;
   const context = diffRefInputContext(input);
   input.value = diffRefInputDisplayValue(item.ref, context.suggestions);
@@ -40043,21 +40323,21 @@ function chooseDiffRefPopoverOption(index) {
 
 function handleDiffRefPopoverKeydown(event, input) {
   if (!input?.matches?.('[data-diff-ref-input]')) return false;
-  const open = diffRefPopover && !diffRefPopover.hidden && diffRefPopoverInput === input;
+  const open = diffRefPopoverState.node && !diffRefPopoverState.node.hidden && diffRefPopoverState.input === input;
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
     if (!open) renderDiffRefPopover(input, {showAll: true});
-    if (!diffRefPopoverItemsCurrent.length) return true;
+    if (!diffRefPopoverState.items.length) return true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
-    diffRefPopoverActiveIndex = diffRefPopoverActiveIndex < 0
-      ? (delta > 0 ? 0 : diffRefPopoverItemsCurrent.length - 1)
-      : (diffRefPopoverActiveIndex + delta + diffRefPopoverItemsCurrent.length) % diffRefPopoverItemsCurrent.length;
+    diffRefPopoverState.activeIndex = diffRefPopoverState.activeIndex < 0
+      ? (delta > 0 ? 0 : diffRefPopoverState.items.length - 1)
+      : (diffRefPopoverState.activeIndex + delta + diffRefPopoverState.items.length) % diffRefPopoverState.items.length;
     syncDiffRefPopoverActiveOption();
     return true;
   }
-  if (event.key === 'Enter' && open && diffRefPopoverActiveIndex >= 0) {
+  if (event.key === 'Enter' && open && diffRefPopoverState.activeIndex >= 0) {
     event.preventDefault();
-    chooseDiffRefPopoverOption(diffRefPopoverActiveIndex);
+    chooseDiffRefPopoverOption(diffRefPopoverState.activeIndex);
     return true;
   }
   return false;
@@ -40070,8 +40350,8 @@ function showDiffRefPicker(input, options = {}) {
 
 function refreshDiffRefToDatalist(controls) {
   if (!controls) return;
-  if (diffRefPopoverInput && controls.contains(diffRefPopoverInput)) {
-    renderDiffRefPopover(diffRefPopoverInput, {showAll: false});
+  if (diffRefPopoverState.input && controls.contains(diffRefPopoverState.input)) {
+    renderDiffRefPopover(diffRefPopoverState.input, {showAll: false});
   }
 }
 
@@ -40181,7 +40461,7 @@ function fileExplorerSessionFilesTargetSession() {
     fileExplorerChangesSelectedSession = fileExplorerExplicitSyncSession;
     return fileExplorerExplicitSyncSession;
   }
-  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
 }
@@ -40240,7 +40520,7 @@ function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
 }
 
 function sessionFilesPanelIsLoading(payload, files = null) {
-  if (fileExplorerSessionFilesLoading) return true;
+  if (fileExplorerSessionFilesState.loading) return true;
   if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
@@ -40273,13 +40553,13 @@ function switchFileExplorerChangesSession(session) {
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
-    fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
-  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
-    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesPayload);
+    fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesState.payload, session)) {
+    fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesState.payload);
   } else {
     const pendingPayload = emptySessionFilesPayload(session, false);
     setSessionFilesPayloadForDestination('finder', pendingPayload);
-    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
+    fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanels();
@@ -40300,11 +40580,12 @@ function noteFileExplorerChangesSessionInteraction(session) {
 }
 
 function sessionFilesPayloadForDestination(destination) {
-  return fileExplorerSessionFilesPayload;
+  return fileExplorerSessionFilesState.payload;
 }
 
-function setSessionFilesPayloadForDestination(destination, payload) {
-  fileExplorerSessionFilesPayload = payload;
+function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
+  if (options.invalidateRequest !== false) fileExplorerSessionFilesState.guard.invalidate();
+  fileExplorerSessionFilesState.payload = payload;
   updateFileExplorerSessionHighlightRows();
   if (
     destination === 'finder'
@@ -40352,19 +40633,19 @@ function sessionFilesPayloadSignatureForPayload(payload) {
 }
 
 function sessionFilesSignatureForDestination(destination) {
-  return fileExplorerSessionFilesPayloadSignature;
+  return fileExplorerSessionFilesState.signature;
 }
 
 function setSessionFilesSignatureForDestination(destination, signature) {
-  fileExplorerSessionFilesPayloadSignature = signature;
+  fileExplorerSessionFilesState.signature = signature;
 }
 
 function sessionFilesLoadingForDestination(destination) {
-  return fileExplorerSessionFilesLoading;
+  return fileExplorerSessionFilesState.loading;
 }
 
 function setSessionFilesLoadingForDestination(destination, loading) {
-  fileExplorerSessionFilesLoading = loading;
+  fileExplorerSessionFilesState.loading = loading;
 }
 
 function sessionFilesRenderOptions(options = {}) {
@@ -40393,14 +40674,14 @@ async function fetchSessionFiles(options = {}) {
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
+  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, emptyPayload);
+    setSessionFilesPayloadForDestination(destination, emptyPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
@@ -40425,7 +40706,7 @@ async function fetchSessionFiles(options = {}) {
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -40437,7 +40718,7 @@ async function fetchSessionFiles(options = {}) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
@@ -40622,7 +40903,7 @@ function writeStoredChangesRepoCollapsed() {
   storageSet(changesRepoCollapsedStorageKey, JSON.stringify(Array.from(changesRepoCollapsed).sort()));
 }
 
-function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesState.payload) {
   const repos = new Set();
   const visibleFiles = fileExplorerDifferFiles(payload);
   for (const item of visibleFiles) {
@@ -40632,7 +40913,7 @@ function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) 
   return Array.from(repos).sort();
 }
 
-function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesState.payload) {
   const folders = new Set();
   for (const item of fileExplorerDifferFiles(payload)) {
     const repoRoot = item?.repo && item.repo !== changesOutsideRepoKey ? normalizeDirectoryPath(item.repo) : '/';
@@ -40647,7 +40928,7 @@ function fileExplorerChangesFolderKeys(payload = fileExplorerSessionFilesPayload
   return Array.from(folders).sort((left, right) => left.localeCompare(right));
 }
 
-function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerChangesAllReposCollapsed(payload = fileExplorerSessionFilesState.payload) {
   const repos = fileExplorerChangesRepoKeys(payload);
   return Boolean(repos.length) && repos.every(repo => changesRepoCollapsed.has(repo));
 }
@@ -40708,7 +40989,7 @@ function sessionFileIsDifferVisible(item) {
   return String(item?.status || 'M').toUpperCase() !== 'T';
 }
 
-function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
+function fileExplorerDifferFiles(payload = fileExplorerSessionFilesState.payload) {
   return (Array.isArray(payload?.files) ? payload.files : []).filter(sessionFileIsDifferVisible);
 }
 
@@ -41034,9 +41315,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
-      head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'changes-repo-head';
+      head = makeButton({className: 'changes-repo-head'});
       section.prepend(head);
     }
     head.dataset.changesRepoToggle = repo;
@@ -41153,7 +41432,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       </div>
       <div class="changes-groups"></div>`;
   }
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   const files = fileExplorerDifferFiles(payload);
   const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
@@ -41247,12 +41526,12 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
   const files = fileExplorerDifferFiles();
-  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, files);
+  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, files);
   const groupsHtml = changesGroupsSnapshotHtml(files, {
-    payload: fileExplorerSessionFilesPayload,
+    payload: fileExplorerSessionFilesState.payload,
     compact: fileExplorerMode !== 'diff',
     loading,
-    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesPayload)),
+    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -41320,7 +41599,7 @@ function setFileExplorerMode(mode, options = {}) {
   applyFileExplorerMode();
   if (typeof updateActiveSessionParam === 'function') updateActiveSessionParam();
   renderFileExplorerChangesPanels({force: true});
-  // Tabber renders from the already-polled transcriptMeta + the activity ledger (recency sort), so it
+  // Tabber renders from the already-polled transcriptMetadataState.payload + the activity ledger (recency sort), so it
   // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
   if (fileExplorerMode === 'tabber') {
     fetchTabberActivity();
@@ -41370,7 +41649,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
   // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
   const payloadRepoRefs = (() => {
-    const refsMap = fileExplorerSessionFilesPayload?.refs_by_repo;
+    const refsMap = fileExplorerSessionFilesState.payload?.refs_by_repo;
     const key = repo || fileRepoForPath(path);
     const refs = refsMap && typeof refsMap === 'object' ? refsMap[key] : null;
     if (refs?.from_ref || refs?.to_ref) return {fromRef: refs.from_ref, toRef: refs.to_ref};
@@ -41568,16 +41847,14 @@ function bindChangesPanel(panel) {
     if (!path) return;
     closeFileImagePreview();
     const payloadObject = {path, paths: [path], kind: 'file', name: basenameOf(path)};
-    dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+    beginFileDrag(payloadObject);
     event.dataTransfer.effectAllowed = 'copy';
     event.dataTransfer.setData('application/x-yolomux-file', JSON.stringify(payloadObject));
     event.dataTransfer.setData('text/plain', path);
     startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
   });
   panel.addEventListener('dragend', () => {
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
+    cancelDragOperationState();
   });
   // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
   // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
@@ -41897,14 +42174,14 @@ async function saveSettingsPatch(patch, options = {}) {
 
 function showUploadRsyncRecommendation(options = {}) {
   const command = uploadRsyncExampleCommand();
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.textContent = t('pref.advisory.copyRsync');
-  action.addEventListener('click', event => {
-    event.stopPropagation();
-    copyTextToClipboard(command)
-      .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-      .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
+  const action = makeButton({
+    label: t('pref.advisory.copyRsync'),
+    onClick: event => {
+      event.stopPropagation();
+      copyTextToClipboard(command)
+        .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
+        .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
+    },
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
   return showToast(t('common.rsyncLargeFiles'), [
@@ -42135,7 +42412,7 @@ function createFileExplorerPanel() {
   }
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
-  if (!fileExplorerSessionFilesPayload.loaded || fileExplorerSessionFilesPayload.session !== fileExplorerSessionFilesTargetSession()) {
+  if (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession()) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
@@ -42188,9 +42465,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
       fileExplorerChangesPanelStaticHtml({full: fileExplorerMode === 'diff'}),
       fileExplorerDifferFiles(),
       {
-        payload: fileExplorerSessionFilesPayload,
+        payload: fileExplorerSessionFilesState.payload,
         compact: fileExplorerMode !== 'diff',
-        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesPayload, fileExplorerDifferFiles()),
+        loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: fileExplorerMode === 'diff',
       },
       {force: options.force === true},
@@ -44152,9 +44429,25 @@ function styleStandaloneSvgText(svg) {
   });
 }
 
+const STANDALONE_SVG_BLOCKED_TAGS = Object.freeze([
+  'script',
+  'foreignobject',
+  'iframe',
+  'object',
+  'embed',
+  'audio',
+  'video',
+  'canvas',
+  'link',
+  'meta',
+]);
+const STANDALONE_SVG_BLOCKED_TAG_SET = new Set(STANDALONE_SVG_BLOCKED_TAGS);
+const STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS.map(escapeRegExpLiteral).join('|');
+const STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[\\s\\S]*?<\\s*\\/\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\s*>`, 'gi');
+const STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[^>]*\\/?\\s*>`, 'gi');
+
 function sanitizeStandaloneSvgNode(root) {
   const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
-  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
   for (const child of Array.from(root?.childNodes || [])) {
     if (child.nodeType !== elementNode) {
       if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
@@ -44167,7 +44460,7 @@ function sanitizeStandaloneSvgNode(root) {
       else child.remove();
       continue;
     }
-    if (blocked.has(tagName)) {
+    if (STANDALONE_SVG_BLOCKED_TAG_SET.has(tagName)) {
       child.remove();
       continue;
     }
@@ -44197,8 +44490,8 @@ function sanitizeStandaloneSvgNode(root) {
 function sanitizeStandaloneSvgString(svgText) {
   return String(svgText || '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
+    .replace(STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE, '')
+    .replace(STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
     .replace(/@import[^;]+;?/gi, '')
@@ -44431,14 +44724,13 @@ function previewZoomFitScale(viewport, content, options = {}) {
 }
 
 function previewZoomButton(action) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.dataset.previewZoomAction = action.id;
-  button.textContent = action.labelKey ? t(action.labelKey) : action.label;
   const title = action.titleKey ? t(action.titleKey) : action.title;
-  button.title = title;
-  button.setAttribute('aria-label', title);
-  return button;
+  return makeButton({
+    dataset: {previewZoomAction: action.id},
+    label: action.labelKey ? t(action.labelKey) : action.label,
+    title,
+    ariaLabel: title,
+  });
 }
 
 function previewZoomReadState(options = {}) {
@@ -48603,7 +48895,10 @@ function scheduleFileEditorSplitScrollSync(host, source) {
 const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
-  return Number(panel?._previewLayoutScrollUntil || 0) > nowMs() ? 'editor' : 'preview';
+  const layoutSyncActive = Number(panel?._previewLayoutScrollUntil || 0) > nowMs();
+  return layoutSyncActive && fileEditorPanelMode(panel) === 'split' && fileEditorSourceCanDrive(panel, 'editor')
+    ? 'editor'
+    : 'preview';
 }
 
 function scheduleFileEditorPreviewLayoutSync(panel) {
@@ -48737,7 +49032,6 @@ let shareDefaultReadOnly = initialSetting('share.read_only', true) !== false;
 let shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
 let shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', 'cover'));
 let shareStatusPill = null;
-let shareStatusTimer = null;
 let shareViewerBanner = null;
 let shareMirrorStage = null;
 let shareReplayShellActive = false;
@@ -49095,16 +49389,8 @@ function installShareReplayShell() {
 
 function shareReplaySendUiMessage(message = {}) {
   if (!shareReplayShellActive || !shareToken || !message?.type) return false;
-  const socket = ensureShareHostSocket(shareToken);
-  if (!socket) return false;
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(message));
-    return true;
-  }
-  const shareHostQueue = shareHostQueues.get(shareToken) || [];
-  if (shareHostQueue.length < 32) shareHostQueue.push(message);
-  shareHostQueues.set(shareToken, shareHostQueue);
-  return true;
+  const delivery = sendOrQueueShareHostMessage(shareToken, message);
+  return delivery.sent || delivery.queued;
 }
 
 function shareReplayResetKeyframeRequestBackoff() {
@@ -49363,40 +49649,74 @@ function shareViewerUiWsUrl(token) {
   return `${scheme}//${location.host}/ws/share-ui?${params.toString()}`;
 }
 
+function shareHostConnectionRecord(token, options = {}) {
+  const cleanToken = String(token || '');
+  if (!cleanToken) return null;
+  let record = shareHostConnectionRecords.get(cleanToken) || null;
+  if (!record && options.create === true) {
+    record = {socket: null, queue: []};
+    shareHostConnectionRecords.set(cleanToken, record);
+  }
+  return record;
+}
+
+function shareHostConnectionSockets() {
+  return Array.from(shareHostConnectionRecords.values(), record => record.socket).filter(Boolean);
+}
+
+function shareHostQueuedMessageCount(token) {
+  return shareHostConnectionRecord(token)?.queue.length || 0;
+}
+
+function enqueueShareHostMessage(token, message) {
+  const record = shareHostConnectionRecord(token, {create: true});
+  if (!record || record.queue.length >= 32) return false;
+  record.queue.push(message);
+  return true;
+}
+
+function sendOrQueueShareHostMessage(token, message) {
+  const socket = ensureShareHostSocket(token);
+  if (!socket) return {sent: false, queued: false};
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(typeof message === 'string' ? message : JSON.stringify(message));
+    return {sent: true, queued: false};
+  }
+  return {sent: false, queued: enqueueShareHostMessage(token, message)};
+}
+
 function closeShareHostSocket() {
-  for (const socket of shareHostSockets.values()) {
+  for (const socket of shareHostConnectionSockets()) {
     try { socket?.close?.(); } catch (_) {}
   }
-  shareHostSockets = new Map();
-  shareHostQueues = new Map();
+  shareHostConnectionRecords.clear();
 }
 
 function flushShareHostQueue(token) {
-  const socket = shareHostSockets.get(token);
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const shareHostQueue = shareHostQueues.get(token) || [];
-  const pending = shareHostQueue.splice(0, shareHostQueue.length);
-  shareHostQueues.set(token, shareHostQueue);
-  for (const message of pending) socket.send(typeof message === 'string' ? message : JSON.stringify(message));
+  const record = shareHostConnectionRecord(token);
+  if (!record?.socket || record.socket.readyState !== WebSocket.OPEN) return;
+  const pending = record.queue.splice(0, record.queue.length);
+  for (const message of pending) record.socket.send(typeof message === 'string' ? message : JSON.stringify(message));
 }
 
 function ensureShareHostSocket(token) {
   const cleanToken = String(token || '');
   if ((!shareViewMode && readOnlyMode) || !cleanToken) return null;
-  const current = shareHostSockets.get(cleanToken);
+  const record = shareHostConnectionRecord(cleanToken, {create: true});
+  const current = record.socket;
   if (current && current.readyState !== WebSocket.CLOSED && current.readyState !== WebSocket.CLOSING) {
     return current;
   }
   const socket = new WebSocket(shareViewMode ? shareViewerUiWsUrl(cleanToken) : shareHostWsUrl(cleanToken));
-  shareHostSockets.set(cleanToken, socket);
-  if (!shareHostQueues.has(cleanToken)) shareHostQueues.set(cleanToken, []);
+  record.socket = socket;
   socket.onopen = () => flushShareHostQueue(cleanToken);
   socket.onmessage = event => {
     const message = shareSocketMessage(event.data);
     if (message?.ch === 'ui') applyShareUiMessage(message);
   };
   socket.onclose = () => {
-    if (shareHostSockets.get(cleanToken) === socket) shareHostSockets.delete(cleanToken);
+    const currentRecord = shareHostConnectionRecord(cleanToken);
+    if (currentRecord?.socket === socket) currentRecord.socket = null;
   };
   socket.onerror = () => {};
   return socket;
@@ -49409,11 +49729,10 @@ function ensureShareHostSockets() {
       : activeShares.map(share => share.token).filter(Boolean)
   );
   for (const token of activeTokens) ensureShareHostSocket(token);
-  for (const [token, socket] of shareHostSockets.entries()) {
+  for (const [token, record] of shareHostConnectionRecords.entries()) {
     if (activeTokens.has(token)) continue;
-    try { socket?.close?.(); } catch (_) {}
-    shareHostSockets.delete(token);
-    shareHostQueues.delete(token);
+    try { record.socket?.close?.(); } catch (_) {}
+    shareHostConnectionRecords.delete(token);
   }
 }
 
@@ -51077,19 +51396,9 @@ function sharePublish(type, payload = {}, options = {}) {
   for (const share of targets) {
     const token = share?.token || share;
     if (!token) continue;
-    const socket = ensureShareHostSocket(token);
-    if (!socket) continue;
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(serialized);
-      sent += 1;
-      continue;
-    }
-    const shareHostQueue = shareHostQueues.get(token) || [];
-    if (shareHostQueue.length < 32) {
-      shareHostQueue.push(serialized);
-      queued += 1;
-    }
-    shareHostQueues.set(token, shareHostQueue);
+    const delivery = sendOrQueueShareHostMessage(token, serialized);
+    if (delivery.sent) sent += 1;
+    if (delivery.queued) queued += 1;
   }
   return {sent: sent > 0, sentCount: sent, queued, bytes, message};
 }
@@ -52180,13 +52489,35 @@ function applyShareScrollDescriptorPosition(descriptor, top, left) {
   return true;
 }
 
-function applyShareScrollState(payload = {}) {
+function shareScrollTargetRecord(target, options = {}) {
+  const cleanTarget = String(target || '');
+  if (!cleanTarget) return null;
+  let record = shareScrollTargetRecords.get(cleanTarget);
+  if (!record && options.create !== false) {
+    record = {
+      top: 0,
+      left: 0,
+      payload: {target: cleanTarget, top: 0, left: 0},
+      snapshotGeneration: shareScrollSnapshotGeneration,
+      restoreGeneration: 0,
+      remainingFrames: 0,
+    };
+    shareScrollTargetRecords.set(cleanTarget, record);
+  }
+  return record || null;
+}
+
+function applyShareScrollState(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return;
   const target = String(payload.target || '');
   const top = Math.max(0, Math.round(Number(payload.top || 0)));
   const left = Math.max(0, Math.round(Number(payload.left || 0)));
   if (target) {
-    shareLastAppliedScrollByTarget.set(target, {top, left, payload: {...payload, target, top, left}});
+    const record = shareScrollTargetRecord(target);
+    record.top = top;
+    record.left = left;
+    record.payload = {...payload, target, top, left};
+    record.snapshotGeneration = Number(options.snapshotGeneration || shareScrollSnapshotGeneration);
   }
   if (String(payload.kind || '') === 'editor' || target.startsWith('editor:')) {
     shareRememberEditorViewState(payload, top, left);
@@ -52217,7 +52548,13 @@ function applyShareScrollState(payload = {}) {
 
 function applyShareScrollSnapshot(scroll = []) {
   if (!Array.isArray(scroll)) return;
-  for (const payload of scroll.slice(0, 100)) applyShareScrollState(payload);
+  const payloads = scroll.slice(0, 100).filter(payload => payload && typeof payload === 'object' && String(payload.target || ''));
+  const currentTargets = new Set(payloads.map(payload => String(payload.target)));
+  const snapshotGeneration = ++shareScrollSnapshotGeneration;
+  for (const target of shareScrollTargetRecords.keys()) {
+    if (!currentTargets.has(target)) shareScrollTargetRecords.delete(target);
+  }
+  for (const payload of payloads) applyShareScrollState(payload, {snapshotGeneration});
 }
 
 async function applyShareFileVersion(payload = {}) {
@@ -53155,8 +53492,7 @@ function publishShareGeometryDigest() {
 }
 
 function installShareGeometryDigestLoop() {
-  if (shareGeometryDigestTimer) clearInterval(shareGeometryDigestTimer);
-  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);
+  resetRuntimeInterval('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs);
 }
 
 function applyShareUiMessage(message) {
@@ -53248,12 +53584,12 @@ function applyShareUiMessage(message) {
 // Share admin UI, viewer banner, status refresh, and read-only interaction blocking.
 function ensureShareStatusPill() {
   if (shareStatusPill) return shareStatusPill;
-  shareStatusPill = document.createElement('button');
-  shareStatusPill.id = 'shareStatusPill';
-  shareStatusPill.className = 'share-status-pill';
-  shareStatusPill.type = 'button';
-  shareStatusPill.hidden = true;
-  shareStatusPill.onclick = () => showShareModal();
+  shareStatusPill = makeButton({
+    id: 'shareStatusPill',
+    className: 'share-status-pill',
+    hidden: true,
+    onClick: () => showShareModal(),
+  });
   const tabMeta = document.getElementById('tabMetaToggle');
   const notify = document.getElementById('notifyToggle');
   const anchor = tabMeta?.parentElement ? tabMeta : notify;
@@ -53746,34 +54082,36 @@ function updateShareViewerBanner() {
     mode: share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly'),
     time: shareTimeLeftText(share),
   });
-  const fit = document.createElement('button');
-  fit.type = 'button';
-  fit.className = 'share-view-fit-toggle control-active-hover';
-  fit.dataset.shareViewerControl = 'fit';
-  fit.textContent = shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain');
-  fit.title = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
-  fit.setAttribute('aria-label', fit.title);
-  fit.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    setShareViewFit(shareViewFit === 'cover' ? 'contain' : 'cover');
+  const fitTitle = shareViewFit === 'cover' ? t('share.fit.switchToContain') : t('share.fit.switchToCover');
+  const fit = makeButton({
+    className: 'share-view-fit-toggle control-active-hover',
+    dataset: {shareViewerControl: 'fit'},
+    label: shareViewFit === 'cover' ? t('share.fit.cover') : t('share.fit.contain'),
+    title: fitTitle,
+    ariaLabel: fitTitle,
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      setShareViewFit(shareViewFit === 'cover' ? 'contain' : 'cover');
+    },
   });
   const mirror = document.createElement('span');
   mirror.className = 'share-viewer-mirror-status';
   mirror.setAttribute('aria-live', 'polite');
   const children = [text, mirror, fit];
   if (shareDebugEnabled) {
-    const debug = document.createElement('button');
-    debug.type = 'button';
-    debug.className = 'share-view-fit-toggle share-debug-copy control-active-hover';
-    debug.dataset.shareViewerControl = 'debug';
-    debug.textContent = t('common.copy');
-    debug.title = t('share.debug.copyDiagnostics');
-    debug.setAttribute('aria-label', debug.title);
-    debug.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      copyShareDebugDiagnostics().catch(error => console.warn('share debug copy failed', error));
+    const debugTitle = t('share.debug.copyDiagnostics');
+    const debug = makeButton({
+      className: 'share-view-fit-toggle share-debug-copy control-active-hover',
+      dataset: {shareViewerControl: 'debug'},
+      label: t('common.copy'),
+      title: debugTitle,
+      ariaLabel: debugTitle,
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyShareDebugDiagnostics().catch(error => console.warn('share debug copy failed', error));
+      },
     });
     children.push(debug);
   }
@@ -53811,8 +54149,7 @@ function startShareStatusRefresh() {
   } else if (!readOnlyMode) {
     refreshActiveShare({silent: true});
   }
-  if (shareStatusTimer) clearInterval(shareStatusTimer);
-  shareStatusTimer = setInterval(() => {
+  resetRuntimeInterval('share-status', () => {
     if (redirectExpiredShareViewerToLogin()) return;
     if (shareStatusSurfaceVisible()) {
       renderShareStatusPill();
@@ -53886,7 +54223,7 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
 function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
   if (!descriptor?.target) return null;
-  const state = shareLastAppliedScrollByTarget.get(descriptor.target);
+  const state = shareScrollTargetRecords.get(descriptor.target);
   if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
@@ -53910,7 +54247,7 @@ function restoreShareReadonlyScrollTarget(target) {
 function restoreShareScrollTargetByKey(target) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return false;
-  const state = shareLastAppliedScrollByTarget.get(cleanTarget);
+  const state = shareScrollTargetRecords.get(cleanTarget);
   if (!state) return false;
   const payload = {
     ...(state.payload || {}),
@@ -53926,11 +54263,14 @@ function restoreShareScrollTargetByKey(target) {
 function scheduleShareScrollRestoreByKey(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!shareViewMode || !cleanTarget) return false;
+  const record = shareScrollTargetRecords.get(cleanTarget);
+  if (!record) return false;
   const frames = Math.max(1, Math.min(8, Math.round(Number(options.frames || 4))));
-  const state = {remaining: frames};
-  shareScrollRestoreFrameTimers.set(cleanTarget, state);
+  const restoreGeneration = record.restoreGeneration + 1;
+  record.restoreGeneration = restoreGeneration;
+  record.remainingFrames = frames;
   const run = () => {
-    if (shareScrollRestoreFrameTimers.get(cleanTarget) !== state) return;
+    if (shareScrollTargetRecords.get(cleanTarget) !== record || record.restoreGeneration !== restoreGeneration) return;
     const previous = applyingShareRemoteScroll;
     applyingShareRemoteScroll = true;
     try {
@@ -53938,11 +54278,11 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
     } finally {
       applyingShareRemoteScroll = previous;
     }
-    state.remaining -= 1;
-    if (state.remaining > 0) {
+    record.remainingFrames -= 1;
+    if (record.remainingFrames > 0) {
       requestAnimationFrame(run);
-    } else if (shareScrollRestoreFrameTimers.get(cleanTarget) === state) {
-      shareScrollRestoreFrameTimers.delete(cleanTarget);
+    } else if (shareScrollTargetRecords.get(cleanTarget) === record && record.restoreGeneration === restoreGeneration) {
+      record.remainingFrames = 0;
     }
   };
   requestAnimationFrame(run);
@@ -53952,7 +54292,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
 function restoreShareScrollTargetsByPrefix(prefix) {
   const cleanPrefix = String(prefix || '');
   if (!cleanPrefix) return;
-  for (const target of shareLastAppliedScrollByTarget.keys()) {
+  for (const target of shareScrollTargetRecords.keys()) {
     if (String(target).startsWith(cleanPrefix)) scheduleShareScrollRestoreByKey(target);
   }
 }
@@ -54075,7 +54415,7 @@ function panelControlsHtml(session, options = {}) {
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
@@ -54176,11 +54516,11 @@ function createPanel(session) {
       </div>
       <div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
-          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
+          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
-          ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
+          ${sessionPopoverHtml(session, transcriptMetadataState.payload.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}
         </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMetadataState.payload.sessions?.[session], {infoBar: true}) : ''}
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>
@@ -54227,16 +54567,16 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
 
 function syncTranscriptMetaLoadingUi() {
   document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
+    setMetadataRefreshButtonLoading(button, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
   });
   const metaRefreshButton = refreshMeta;
   if (metaRefreshButton) {
-    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
-    metaRefreshButton.disabled = transcriptMetaLoading;
-    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
+    metaRefreshButton.classList.toggle('loading', transcriptMetadataState.loading);
+    metaRefreshButton.disabled = transcriptMetadataState.loading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetadataState.loading ? 'true' : 'false');
     refreshMetaButtonChrome();
   }
-  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetadataState.loading);
 }
 
 function infoMetadataLoadingHtml() {
@@ -54264,7 +54604,7 @@ function backgroundServerLabel(record, fallback = '') {
   ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
 }
 
-function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
+function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusState.payload, options = {}) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
   const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
@@ -54282,7 +54622,7 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPay
   };
 }
 
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.payload) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
   const summary = backgroundOwnerRoleSummary('search-index', payload);
@@ -54301,20 +54641,20 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayloa
   };
 }
 
-function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('stats-sampler', payload);
 }
 
-function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('session-files', payload);
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusPayload = payload;
-  backgroundOwnerStatusLoaded = true;
-  backgroundOwnerStatusError = '';
-  backgroundOwnerStatusLoading = false;
+  backgroundOwnerStatusState.guard.invalidate();
+  backgroundOwnerStatusState.payload = payload;
+  backgroundOwnerStatusState.error = '';
+  backgroundOwnerStatusState.loading = false;
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   return true;
@@ -54322,26 +54662,30 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
 
 async function refreshBackgroundOwnerStatus(options = {}) {
   if (shareViewMode) return false;
-  if (backgroundOwnerStatusRefreshPromise && options.force !== true) return backgroundOwnerStatusRefreshPromise;
-  backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
-  backgroundOwnerStatusError = '';
+  if (backgroundOwnerStatusState.request && options.force !== true) return backgroundOwnerStatusState.request;
+  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  backgroundOwnerStatusRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
       return applyBackgroundOwnerStatusPayload(payload, options);
     } catch (error) {
-      backgroundOwnerStatusError = userMessageSnapshot(error);
-      backgroundOwnerStatusLoading = false;
+      if (!requestIsCurrent()) return false;
+      backgroundOwnerStatusState.error = userMessageSnapshot(error);
+      backgroundOwnerStatusState.loading = false;
       if (options.render !== false) renderInfoPanel();
       if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
       return false;
     } finally {
-      backgroundOwnerStatusRefreshPromise = null;
+      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
     }
   })();
-  return backgroundOwnerStatusRefreshPromise;
+  backgroundOwnerStatusState.request = request;
+  return request;
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -54492,7 +54836,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
 }
 
 function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
-  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
+  return Boolean(yoagentChatState.busy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
@@ -54583,7 +54927,7 @@ function renderYoagentPanel(options = {}) {
   const inputFocused = input && document.activeElement === input;
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
-  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (input && options.preserveDraft !== false) yoagentChatState.draft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
     if (refreshYoagentSummaryRegions(node)) {
       if (shouldScrollBottom) scrollYoagentChatToBottom(node);
@@ -55528,7 +55872,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const record = status.record;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
@@ -55763,13 +56107,13 @@ function infoPanelRenderVisible() {
 
 function infoPanelRenderSignature() {
   return JSON.stringify({
-    loading: transcriptMetaLoading,
-    loaded: transcriptMetaLoaded,
-    error: transcriptMetaLoadError,
+    loading: transcriptMetadataState.loading,
+    loaded: transcriptMetadataState.loaded,
+    error: transcriptMetadataState.error,
     search: infoSearch,
     grouping: infoGrouping,
     sort: infoSort,
-    meta: transcriptMeta,
+    meta: transcriptMetadataState.payload,
   });
 }
 
@@ -55777,11 +56121,9 @@ function renderInfoPanel(options = {}) {
   const node = document.getElementById('info-content');
   if (!node) return;
   if (options.force !== true && !infoPanelRenderVisible()) {
-    infoPanelRenderPending = true;
     recordClientPerfCounter('renderInfoPanel', 0, {skipped: 1});
     return;
   }
-  infoPanelRenderPending = false;
   let renderedNodes = 0;
   const perf = clientPerfStart('renderInfoPanel');
   try {
@@ -55803,15 +56145,15 @@ function renderInfoPanelMeasured(node, options = {}) {
   };
   syncTranscriptMetaLoadingUi();
   const signature = infoPanelRenderSignature();
-  if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
+  if (options.force !== true && signature === infoPanelRenderCache.signature && infoPanelRenderCache.html) {
     const hasContent = Boolean(node.children?.length || String(node.innerHTML || '').trim());
-    if (!hasContent) renderInfoContent(infoPanelLastRenderHtml);
+    if (!hasContent) renderInfoContent(infoPanelRenderCache.html);
     else syncInfoContent();
     return;
   }
   const commitInfoContent = html => {
-    infoPanelLastRenderSignature = signature;
-    infoPanelLastRenderHtml = html;
+    infoPanelRenderCache.signature = signature;
+    infoPanelRenderCache.html = html;
     renderInfoContent(html);
   };
   const allRecords = infoRelationshipRecords();
@@ -55821,15 +56163,15 @@ function renderInfoPanelMeasured(node, options = {}) {
       commitInfoContent(`<div class="info-empty info-tree-empty">${localizedHtml('info.search.noMatches', {query: infoSearch.trim()})}</div>`);
       return;
     }
-    if (transcriptMetaLoading) {
+    if (transcriptMetadataState.loading) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    if (transcriptMetaLoadError) {
+    if (transcriptMetadataState.error) {
       commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetadataLoadErrorText())}</div>`);
       return;
     }
-    if (!transcriptMetaLoaded) {
+    if (!transcriptMetadataState.loaded) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
@@ -55921,7 +56263,7 @@ function infoBranchSourcesForSession(session, info) {
 }
 
 function infoBranchSourcesForIndexedRepos() {
-  const repos = Array.isArray(transcriptMeta?.indexed_repos) ? transcriptMeta.indexed_repos : [];
+  const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
     .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
@@ -56241,9 +56583,9 @@ function mergeInfoBranchRow(existing, next) {
 
 function rawInfoBranchRows() {
   const rowsByKey = new Map();
-  const infoSessions = Array.isArray(transcriptMeta?.session_order) ? transcriptMeta.session_order : sessions;
+  const infoSessions = Array.isArray(transcriptMetadataState.payload?.session_order) ? transcriptMetadataState.payload.session_order : sessions;
   for (const session of infoSessions) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
       for (const branch of source.git?.other_branches?.branches || []) {
         const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
@@ -57069,7 +57411,7 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -57097,10 +57439,10 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
     selectedPane = synthesized;
   }
   const nextInfo = {...info, selected_pane: selectedPane, panes};
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -57121,7 +57463,7 @@ function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
     changed = applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, {render: false}) || changed;
   }
   if (changed) {
-    for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    for (const session of seen) updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
     renderInfoPanel();
     if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
@@ -57172,7 +57514,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       } else {
-        const info = transcriptMeta.sessions?.[session];
+        const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
       }
     });
@@ -57186,7 +57528,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
 function noteTerminalTmuxWindowSwitch(session, shortcut) {
   if (!shortcut) return false;
   const directIndex = tmuxWindowNumber(shortcut.windowIndex);
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
@@ -57486,7 +57828,7 @@ function tmuxWindow(session, key, label) {
   }
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
-    const previousInfo = transcriptMeta.sessions?.[session] || null;
+    const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
@@ -57499,14 +57841,14 @@ function tmuxWindow(session, key, label) {
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
         if (previousInfo) {
-          transcriptMeta = {
-            ...transcriptMeta,
-            sessions: {...(transcriptMeta.sessions || {}), [session]: previousInfo},
-          };
+          setTranscriptMetadataPayload({
+            ...transcriptMetadataState.payload,
+            sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: previousInfo},
+          });
           updatePanelHeader(session, previousInfo);
           renderInfoPanel();
         } else {
-          reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
+          reconcileTmuxWindowActiveIndexOverride(session, transcriptMetadataState.payload.sessions?.[session], {sequence});
         }
         statusErr(esc(userMessageText(error, t('terminal.window.failed', {error: error.message || error}))));
       });
@@ -57517,7 +57859,7 @@ function tmuxWindow(session, key, label) {
     statusErr(terminalNotConnectedHtml(session));
     return;
   }
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
@@ -57541,7 +57883,7 @@ async function ensureTerminalRunning(session) {
       startTerminal(session);
       return;
     }
-    const knownFromTranscriptPayload = Boolean(transcriptMetaLoaded && transcriptMeta.sessions?.[session]);
+    const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
       const container = document.getElementById(terminalDomId(session));
@@ -57949,7 +58291,7 @@ function applyAutoApprovePayload(payload, options = {}) {
 }
 
 function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const agentWindows = typeof agentWindowPayloadRows === 'function'
     ? agentWindowPayloadRows(payload.agent_windows)
@@ -57977,17 +58319,17 @@ function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
       process_label_pid: agent.pid || null,
     };
   })].sort((left, right) => Number(left.window) - Number(right.window));
-  transcriptMeta = {
-    ...transcriptMeta,
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
     sessions: {
-      ...(transcriptMeta.sessions || {}),
+      ...(transcriptMetadataState.payload.sessions || {}),
       [session]: {
         ...info,
         panes: reconciledPanes,
         selected_pane: reconciledPanes.find(pane => pane.window_active === true) || info.selected_pane,
       },
     },
-  };
+  });
   return true;
 }
 
@@ -58029,7 +58371,7 @@ function renderAutoApproveButton(session, payload) {
     if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
     else button.title = buttonLabel;
   }
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   updateTypingIndicator(session);
 }
 
@@ -58125,11 +58467,13 @@ function reloadIsSafe() {
 }
 
 let selfUpdateAvailableTarget = '';
-let selfUpdateReloadPending = false;
-let selfUpdateReloadTarget = '';
-let selfUpdateReloadAttempts = 0;
-let selfUpdateReloadTimer = null;
-let selfUpdateReloadDeferredToastShown = false;
+const selfUpdateReloadState = {
+  pending: false,
+  target: '',
+  attempts: 0,
+  timer: null,
+  deferredToastShown: false,
+};
 const selfUpdateReloadPollMs = 1500;
 const selfUpdateReloadMaxAttempts = 120;
 
@@ -58169,17 +58513,17 @@ function renderUpdateBadgeChrome() {
 }
 
 function markSelfUpdateReloadPending(target = '') {
-  selfUpdateReloadPending = true;
-  selfUpdateReloadTarget = String(target || selfUpdateReloadTarget || '').trim();
-  selfUpdateReloadAttempts = 0;
-  selfUpdateReloadDeferredToastShown = false;
-  if (selfUpdateReloadTarget) serverVersionReloadHandled = selfUpdateReloadTarget;
+  selfUpdateReloadState.pending = true;
+  selfUpdateReloadState.target = String(target || selfUpdateReloadState.target || '').trim();
+  selfUpdateReloadState.attempts = 0;
+  selfUpdateReloadState.deferredToastShown = false;
+  if (selfUpdateReloadState.target) serverVersionReloadHandled = selfUpdateReloadState.target;
   document.getElementById('serverUpdateBanner')?.remove();
 }
 
 function selfUpdateOwnsServerVersion(serverVersion) {
-  if (!selfUpdateReloadPending) return false;
-  if (!selfUpdateReloadTarget || serverVersion === selfUpdateReloadTarget) {
+  if (!selfUpdateReloadState.pending) return false;
+  if (!selfUpdateReloadState.target || serverVersion === selfUpdateReloadState.target) {
     if (serverVersion) serverVersionReloadHandled = serverVersion;
     return true;
   }
@@ -58198,15 +58542,15 @@ function selfUpdateReloadDeferredReason() {
 }
 
 function showSelfUpdateReloadDeferredToast() {
-  if (selfUpdateReloadDeferredToastShown) return;
-  selfUpdateReloadDeferredToastShown = true;
+  if (selfUpdateReloadState.deferredToastShown) return;
+  selfUpdateReloadState.deferredToastShown = true;
   showToast(t('update.softwareTitle'), [
     t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
   ], {className: 'attention-alert toast toast-update'});
 }
 
 function maybeReloadAfterSelfUpdate() {
-  if (!selfUpdateReloadPending) return false;
+  if (!selfUpdateReloadState.pending) return false;
   if (reloadIsSafe()) {
     location.reload();
     return true;
@@ -58217,25 +58561,25 @@ function maybeReloadAfterSelfUpdate() {
 }
 
 function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
-  if (!selfUpdateReloadPending) return;
-  if (selfUpdateReloadTimer) clearTimeout(selfUpdateReloadTimer);
-  selfUpdateReloadTimer = window.setTimeout(() => {
-    selfUpdateReloadTimer = null;
+  if (!selfUpdateReloadState.pending) return;
+  if (selfUpdateReloadState.timer) clearTimeout(selfUpdateReloadState.timer);
+  selfUpdateReloadState.timer = window.setTimeout(() => {
+    selfUpdateReloadState.timer = null;
     pollSelfUpdateReload();
   }, delayMs);
 }
 
 async function pollSelfUpdateReload() {
-  if (!selfUpdateReloadPending) return false;
-  selfUpdateReloadAttempts += 1;
+  if (!selfUpdateReloadState.pending) return false;
+  selfUpdateReloadState.attempts += 1;
   try {
     await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
     return maybeReloadAfterSelfUpdate();
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
-  if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
-    selfUpdateReloadPending = false;
+  if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
+    selfUpdateReloadState.pending = false;
     showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
     return false;
   }
@@ -58266,17 +58610,13 @@ function showServerUpdateBanner(version) {
   const msg = document.createElement('span');
   msg.className = 'server-update-banner-msg';
   msg.textContent = t('update.available');
-  const reload = document.createElement('button');
-  reload.type = 'button';
-  reload.className = 'server-update-banner-reload';
-  reload.textContent = t('common.reload');
-  reload.addEventListener('click', () => location.reload());
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'server-update-banner-dismiss';
-  dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = t('update.dismiss');
-  dismiss.addEventListener('click', () => banner.remove());
+  const reload = makeButton({className: 'server-update-banner-reload', label: t('common.reload'), onClick: () => location.reload()});
+  const dismiss = makeButton({
+    className: 'server-update-banner-dismiss',
+    label: t('update.dismiss'),
+    ariaLabel: t('update.dismiss'),
+    onClick: () => banner.remove(),
+  });
   banner.append(msg, reload, dismiss);
   document.body.appendChild(banner);
 }
@@ -58306,24 +58646,28 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 
 async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
+  const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
+  if (!requestIsCurrent()) return false;
+  setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
-  for (const session of Object.keys(transcriptMeta.sessions || {})) {
+  for (const session of Object.keys(transcriptMetadataState.payload.sessions || {})) {
     reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
   }
-  transcriptMetaLoaded = true;
-  transcriptMetaLoadError = null;
+  transcriptMetadataState.loaded = true;
+  transcriptMetadataState.error = null;
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
-  applyAgentAvailabilityPayload(transcriptMeta);
-  updateMetadataBadgePulses(transcriptMeta);
+  maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision);
+  applyAgentAvailabilityPayload(transcriptMetadataState.payload);
+  updateMetadataBadgePulses(transcriptMetadataState.payload);
   const previousActive = activeSessions.slice();
-  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
+  if (!requestIsCurrent()) return false;
+  transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   renderSessionButtons();
   renderInfoPanel();
@@ -58331,7 +58675,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
     const preview = document.getElementById(transcriptDomId(session));
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
     renderSummaryContext(session, info, agent);
@@ -58384,12 +58728,13 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
 }
 
 async function refreshSessionMetadata(options = {}) {
-  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
-  transcriptMetaLoading = true;
-  transcriptMetaLoadError = null;
+  if (transcriptMetadataState.request) return transcriptMetadataState.request;
+  const requestIsCurrent = transcriptMetadataState.guard.begin();
+  transcriptMetadataState.loading = true;
+  transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
   renderInfoPanel();
-  transcriptMetaRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
@@ -58400,23 +58745,28 @@ async function refreshSessionMetadata(options = {}) {
           refreshAuto: options.refreshAuto !== false,
           refreshContext: true,
           refreshActivity: options.refreshActivity !== false,
+          source: 'request',
+          requestIsCurrent,
         }),
       );
-      if (!result.ok) {
-        transcriptMetaLoadError = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
+      if (!result.ok && requestIsCurrent()) {
+        transcriptMetadataState.error = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
         console.error(`session metadata ${result.stage} failed`, result.error);
         for (const session of activeSessions.filter(isTmuxSession)) {
           renderTranscriptMetadataLoadError(session);
         }
       }
     } finally {
-      transcriptMetaLoading = false;
-      transcriptMetaRefreshPromise = null;
-      syncTranscriptMetaLoadingUi();
-      renderInfoPanel();
+      if (transcriptMetadataState.request === request) {
+        transcriptMetadataState.loading = false;
+        transcriptMetadataState.request = null;
+        syncTranscriptMetaLoadingUi();
+        renderInfoPanel();
+      }
     }
   })();
-  return transcriptMetaRefreshPromise;
+  transcriptMetadataState.request = request;
+  return request;
 }
 
 async function refreshTranscripts(options = {}) {
@@ -58572,7 +58922,7 @@ function updatePanelHeader(session, info) {
 
 function refreshSessionChrome(session) {
   updateSessionButtonStates();
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
 }
 
 function refreshTrackedSessionChrome(session) {
@@ -58599,7 +58949,7 @@ function relocalizeTerminalPanelChrome(session) {
   relocalizeVirtualPanelChrome(panel);
   const terminalTab = panel.querySelector('.terminal-tab');
   if (terminalTab) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const title = terminalTabTitle(session, info);
     terminalTab.textContent = terminalTabLabel(session, info);
     terminalTab.title = title;
@@ -58609,7 +58959,7 @@ function relocalizeTerminalPanelChrome(session) {
     button.title = t('common.sessionActions');
     button.setAttribute('aria-label', t('common.sessionActions'));
   });
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
     node.textContent = t(node.dataset.localeTextKey);
   });
@@ -58637,14 +58987,14 @@ function updateTranscriptPathRow(session, path, fallback = '') {
 }
 
 function transcriptMetadataLoadErrorText() {
-  const fallback = transcriptMetaLoadError?.stage === 'apply'
+  const fallback = transcriptMetadataState.error?.stage === 'apply'
     ? t('common.requestFailed')
     : t('transcript.lookupFailed');
-  return userMessageText(transcriptMetaLoadError, fallback);
+  return userMessageText(transcriptMetadataState.error, fallback);
 }
 
 function transcriptMetadataLoadErrorLabel() {
-  return transcriptMetaLoadError?.stage === 'apply'
+  return transcriptMetadataState.error?.stage === 'apply'
     ? transcriptMetadataLoadErrorText()
     : t('transcript.lookupFailed');
 }
@@ -58685,7 +59035,7 @@ function renderTranscriptMetadataLoadError(session) {
   updateTranscriptPathRow(session, '', label);
   if (preview) {
     clearTranscriptContextLoadError(preview);
-    preview.textContent = transcriptMetaLoadError?.stage === 'apply'
+    preview.textContent = transcriptMetadataState.error?.stage === 'apply'
       ? error
       : t('transcript.lookupFailedWithError', {error});
   }
@@ -58694,11 +59044,11 @@ function renderTranscriptMetadataLoadError(session) {
 function relocalizeTranscriptPanelStatus(session) {
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
-  if (transcriptMetaLoadError) {
+  if (transcriptMetadataState.error) {
     renderTranscriptMetadataLoadError(session);
     return;
   }
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   if (agent?.transcript) {
     renderTranscriptContextLoadError(preview);
@@ -58958,9 +59308,9 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
-  reconnectResyncTimer = setTimeout(() => {
-    reconnectResyncTimer = null;
+  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  clientEventTransportState.resyncTimer = setTimeout(() => {
+    clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
 }
@@ -59044,8 +59394,8 @@ async function boot() {
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
-    transcriptMeta = {session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))};
-    transcriptMetaLoaded = true;
+    setTranscriptMetadataPayload({session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))});
+    transcriptMetadataState.loaded = true;
     await refreshTranscripts({refreshAuto: false, refreshActivity: false});
   }
   installYolomuxFontMetricRefresh();
@@ -59137,13 +59487,13 @@ function updateDryRunEnabled() {
 }
 
 function updateActionButton(label, onClick) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'toast-action';
-  button.textContent = label;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick(event, button.closest('.toast'));
+  const button = makeButton({
+    className: 'toast-action',
+    label,
+    onClick: event => {
+      event.stopPropagation();
+      onClick(event, button.closest('.toast'));
+    },
   });
   return button;
 }
@@ -59316,26 +59666,26 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 
 function queueClientPushEvent(type, payload = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientPushEventQueue.set(key, {type, payload});
+  clientEventTransportState.queue.set(key, {type, payload});
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
-    if (clientPushEventFrame) cancelAnimationFrame(clientPushEventFrame);
-    clientPushEventFrame = 0;
+    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
-  if (clientPushEventFrame) return;
-  clientPushEventFrame = requestAnimationFrame(() => {
-    clientPushEventFrame = 0;
+  if (clientEventTransportState.frame) return;
+  clientEventTransportState.frame = requestAnimationFrame(() => {
+    clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
 }
 
 function flushQueuedClientPushEvents() {
-  const events = Array.from(clientPushEventQueue.values());
-  clientPushEventQueue.clear();
+  const events = Array.from(clientEventTransportState.queue.values());
+  clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
   for (const event of events) handleClientPushEventNow(event.type, event.payload);
 }
@@ -59376,8 +59726,8 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
-      if (commandPaletteNode && !commandPaletteNode.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteQuery).catch(error => console.warn('search-index quick-open refresh failed', error));
+      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
+        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }
     }
     if (payload.role === 'session-files') {
@@ -59393,7 +59743,7 @@ function handleClientPushEventNow(type, payload = {}) {
     if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
       for (const session of activePaneItems()) {
         if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
-        updatePanelWindowStepButtons(session, transcriptMeta.sessions?.[session]);
+        updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
       }
     }
     return;
@@ -59459,16 +59809,16 @@ function handleClientPushEventNow(type, payload = {}) {
 }
 
 function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+  if (typeof EventSource === 'undefined' || clientEventTransportState.source) return;
   let source;
   try {
     source = new EventSource('/api/client-events');
   } catch (_error) {
     return;
   }
-  clientEventsSource = source;
+  clientEventTransportState.source = source;
   source.addEventListener('ready', event => {
-    clientEventsConnected = true;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -59476,17 +59826,17 @@ function installClientEventStream() {
     refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   });
   source.addEventListener('ping', event => {
-    clientEventsConnected = true;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    clientEventsConnected = false;
+    clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
   for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
-      clientEventsConnected = true;
+      clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);

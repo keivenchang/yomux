@@ -40,6 +40,11 @@ def server_ws_json(frame: bytes) -> dict:
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
 
 
+def init_share_replay_state(server):
+    server.share_replay_lock = server_module.threading.Lock()
+    server.share_replay_records = {}
+
+
 def test_get_agent_auth_honors_force_query():
     writes = []
     calls = []
@@ -399,6 +404,14 @@ def test_websocket_bridge_terminates_tmux_process_group():
     assert "terminate_process_group(process)" in bridge_body
     assert "process.terminate()" not in bridge_body
     assert "process.kill()" not in bridge_body
+
+
+def test_websocket_bridge_treats_close_before_initial_resize_as_normal_disconnect(monkeypatch):
+    handler = object.__new__(Handler)
+    handler.read_initial_ws_payloads = lambda: (_ for _ in ()).throw(ConnectionError("websocket closed"))
+    monkeypatch.setattr(server_module.pty, "openpty", lambda: pytest.fail("PTY must not open after the client closes"))
+
+    Handler.bridge_tmux(handler, "1")
 
 
 def test_websocket_frame_reads_are_timeout_wrapped():
@@ -1030,8 +1043,8 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
     assert "self.start_tmux_signal_event_watcher()" in app_start_body
     assert "self.tmux_signal_cache.clear()" in app_event_body
     assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
-    assert "self.client_event_next_tmux_signal_poll_at = 0.0" in app_event_body
-    assert "self.client_watch_wake_event.set()" in app_event_body
+    assert "record.next_tmux_signal_poll_at = 0.0" in app_event_body
+    assert "record.wake_event.set()" in app_event_body
     assert "self.server.app.start_client_event_watcher()" in stream_body
     assert "self.server.app.stop_client_event_watcher_if_idle()" in stream_body
     assert "self.app.start_client_event_watcher()" not in server_init_body
@@ -1349,6 +1362,32 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
         response["user_message"]["key"] == "request.error.unsupportedFsBatchOperation"
         for response in responses[3:]
     )
+
+
+def test_handle_fs_batch_returns_typed_permission_failure_without_raising(monkeypatch):
+    def denied_path_info(_raw_path):
+        raise PermissionError(13, "permission denied", "/restricted/item")
+
+    monkeypatch.setattr(server_module.filesystem.io_ops, "path_info", denied_path_info)
+    handler, writes = batch_handler({"requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}]})
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes == [(HTTPStatus.OK, {
+        "responses": [{
+            "id": "denied",
+            "ok": False,
+            "path": "/restricted/item",
+            "status": 403,
+            "error": "filesystem operation failed",
+            "user_message": {
+                "key": "fs.error.operationFailed",
+                "params": {},
+                "fallback": "filesystem operation failed",
+            },
+            "diagnostic": "[Errno 13] permission denied: '/restricted/item'",
+        }],
+    })]
 
 
 def test_handle_fs_batch_records_performance(monkeypatch):
@@ -1726,15 +1765,128 @@ def test_share_pointer_events_are_coalesced_server_side():
 
     assert "if msg_type == SHARE_MIRROR_FRAME_POINTER:" in ui_body
     assert "self.server.queue_share_pointer(token, payload, sender=sender)" in ui_body
-    assert "self.share_pointer_latest[clean_token]" in queue_body
+    assert "self.share_pointer_records.setdefault(clean_token, SharePointerRecord())" in queue_body
     assert "SHARE_POINTER_CLICK_QUEUE_LIMIT" in queue_body
     assert "threading.Thread(target=self.share_pointer_loop" in queue_body
+    assert "self.share_pointer_records.get(token) is not record" in loop_body
     assert "signature != last_sent" in loop_body
     assert '"type": SHARE_MIRROR_FRAME_POINTER' in loop_body
     assert "skip_client_id=sender" in loop_body
     assert "SHARE_POINTER_MAX_WRITES_PER_SECOND / viewers" in hz_body
     assert "self.share_ui_client_count(token)" in hz_body
     assert server_module.SHARE_POINTER_MAX_HZ == 30
+
+
+def test_share_pointer_record_coalesces_motion_bounds_clicks_and_reuses_thread(monkeypatch):
+    threads = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            threads.append(self)
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_records = {}
+
+    server.queue_share_pointer("share-token", {"x": 1, "y": 2}, sender="host")
+    for index in range(server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 3):
+        server.queue_share_pointer("share-token", {"x": index, "y": 3, "click": True}, sender="host")
+
+    record = server.share_pointer_records["share-token"]
+    assert len(threads) == 1
+    assert threads[0].args == ("share-token", record)
+    assert record.thread is threads[0]
+    assert record.latest == {"x": server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2, "y": 3, "sender": "host"}
+    assert len(record.clicks) == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT
+    assert record.clicks[0]["x"] == 3
+    assert record.clicks[-1]["x"] == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2
+
+
+def test_share_pointer_loop_coalesces_unchanged_motion_and_cleans_record():
+    class TwoTicks:
+        def __init__(self):
+            self.ticks = 0
+
+        def is_set(self):
+            return self.ticks >= 2
+
+        def wait(self, _timeout):
+            self.ticks += 1
+            return False
+
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_stop = TwoTicks()
+    server.share_pointer_hz = lambda _token: 30
+    broadcasts = []
+    server.broadcast_share_ui = lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id))
+    record = server_module.SharePointerRecord(
+        latest={"x": 2, "sender": "host"},
+        clicks=[{"x": 1, "sender": "host", "click": True}, {"x": 2, "sender": "host", "click": True}],
+    )
+    server.share_pointer_records = {"share-token": record}
+
+    server.share_pointer_loop("share-token", record)
+
+    assert [message["payload"] for _token, message, _skip in broadcasts] == [
+        {"x": 2, "sender": "host"},
+        {"x": 1, "sender": "host", "click": True},
+        {"x": 2, "sender": "host", "click": True},
+    ]
+    assert all(skip == "host" for _token, _message, skip in broadcasts)
+    assert server.share_pointer_records == {}
+
+
+def test_share_pointer_invalid_token_is_rejected_without_retained_state():
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda _token: None)
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_records = {"share-token": server_module.SharePointerRecord()}
+
+    server.queue_share_pointer("share-token", {"x": 1}, sender="host")
+
+    assert server.share_pointer_records == {}
+
+
+def test_share_pointer_old_loop_cannot_delete_replacement_record():
+    class AlreadyStopped:
+        @staticmethod
+        def is_set():
+            return True
+
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_stop = AlreadyStopped()
+    old_record = server_module.SharePointerRecord(latest={"x": 1})
+    replacement = server_module.SharePointerRecord(latest={"x": 2})
+    server.share_pointer_records = {"share-token": replacement}
+
+    server.share_pointer_loop("share-token", old_record)
+
+    assert server.share_pointer_records == {"share-token": replacement}
+
+
+def test_share_pointer_parallel_state_maps_are_retired():
+    source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.share_pointer_latest" not in source
+    assert "self.share_pointer_clicks" not in source
+    assert "self.share_pointer_threads" not in source
 
 
 def test_share_ui_socket_wires_write_clients_and_host_broadcasts():
@@ -2060,10 +2212,7 @@ def test_share_replay_keyframe_cache_fans_out_to_late_viewers_and_prunes():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
 
     server.record_share_replay_keyframe("share-token", {
         "type": "dom-keyframe",
@@ -2098,23 +2247,20 @@ def test_share_replay_keyframe_cache_fans_out_to_late_viewers_and_prunes():
 
     active_tokens.clear()
     assert server.latest_share_replay_keyframe("share-token") is None
-    assert server.share_replay_keyframes == {}
+    assert server.share_replay_records == {}
 
     active_tokens.add("share-token")
     server.record_share_replay_keyframe("share-token", {"type": "dom-keyframe", "payload": {"digest": "sha256:def"}})
     active_tokens.clear()
-    server.prune_inactive_share_replay_keyframes()
-    assert server.share_replay_keyframes == {}
+    server.prune_inactive_share_replay_records()
+    assert server.share_replay_records == {}
 
 
 def test_share_replay_delta_ring_replays_contiguous_frames_to_late_viewer():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
     requests = []
     server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
 
@@ -2155,14 +2301,99 @@ def test_share_replay_delta_ring_replays_contiguous_frames_to_late_viewer():
     assert requests == []
 
 
+def test_share_replay_snapshot_never_mixes_keyframe_generations():
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    init_share_replay_state(server)
+    snapshot_inside_lock = server_module.threading.Event()
+    release_snapshot = server_module.threading.Event()
+    writer_started = server_module.threading.Event()
+    writer_done = server_module.threading.Event()
+    first_snapshot = []
+    original_contiguous = server.contiguous_share_replay_deltas
+
+    server.record_share_replay_keyframe("share-token", {
+        "type": "dom-keyframe",
+        "payload": {"generation": "old"},
+        "epoch": 1,
+        "sequence": 10,
+    })
+    server.record_share_replay_delta("share-token", {
+        "type": "dom-delta",
+        "payload": {"generation": "old"},
+        "epoch": 1,
+        "sequence": 11,
+        "baseSequence": 10,
+    })
+
+    def hooked_contiguous(record, keyframe):
+        snapshot_inside_lock.set()
+        assert release_snapshot.wait(timeout=1)
+        return original_contiguous(record, keyframe)
+
+    def read_snapshot():
+        first_snapshot.append(server.share_replay_frames_snapshot("share-token"))
+
+    def replace_generation():
+        writer_started.set()
+        server.record_share_replay_keyframe("share-token", {
+            "type": "dom-keyframe",
+            "payload": {"generation": "new"},
+            "epoch": 2,
+            "sequence": 20,
+        })
+        server.record_share_replay_delta("share-token", {
+            "type": "dom-delta",
+            "payload": {"generation": "new"},
+            "epoch": 2,
+            "sequence": 21,
+            "baseSequence": 20,
+        })
+        writer_done.set()
+
+    server.contiguous_share_replay_deltas = hooked_contiguous
+    reader = server_module.threading.Thread(target=read_snapshot)
+    reader.start()
+    assert snapshot_inside_lock.wait(timeout=1)
+    writer = server_module.threading.Thread(target=replace_generation)
+    writer.start()
+    assert writer_started.wait(timeout=1)
+    assert not writer_done.is_set()
+
+    release_snapshot.set()
+    reader.join(timeout=1)
+    writer.join(timeout=1)
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert writer_done.is_set()
+
+    old_keyframe, old_deltas, old_contiguous = first_snapshot[0]
+    assert old_contiguous
+    assert old_keyframe["sequence"] == 10
+    assert [delta["sequence"] for delta in old_deltas] == [11]
+
+    server.contiguous_share_replay_deltas = original_contiguous
+    new_keyframe, new_deltas, new_contiguous = server.share_replay_frames_snapshot("share-token")
+    assert new_contiguous
+    assert new_keyframe["sequence"] == 20
+    assert [delta["sequence"] for delta in new_deltas] == [21]
+
+
+def test_share_replay_parallel_state_maps_are_retired():
+    source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.share_replay_keyframes" not in source
+    assert "self.share_replay_keyframes_lock" not in source
+    assert "self.share_replay_deltas" not in source
+    assert "self.share_replay_deltas_lock" not in source
+    assert "share_replay_deltas_after_keyframe" not in source
+
+
 def test_share_replay_delta_ring_overflow_requests_keyframe_without_partial_deltas():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
     requests = []
     server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
 
@@ -2201,10 +2432,7 @@ def test_share_replay_delta_ring_prunes_stopped_shares():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
 
     server.record_share_replay_keyframe("share-token", {
         "type": "dom-keyframe",
@@ -2219,14 +2447,12 @@ def test_share_replay_delta_ring_prunes_stopped_shares():
         "sequence": 2,
         "baseSequence": 1,
     })
-    assert "share-token" in server.share_replay_deltas
+    assert server.share_replay_records["share-token"].deltas_by_epoch
 
     active_tokens.clear()
-    server.prune_inactive_share_replay_keyframes()
-    server.prune_inactive_share_replay_deltas()
+    server.prune_inactive_share_replay_records()
 
-    assert server.share_replay_keyframes == {}
-    assert server.share_replay_deltas == {}
+    assert server.share_replay_records == {}
 
 
 def test_share_replay_live_delta_overflow_requests_keyframe():

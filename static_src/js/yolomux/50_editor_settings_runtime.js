@@ -1052,7 +1052,7 @@ function refreshActiveTerminalCursor() {
 
 function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
-  const loading = transcriptMetaLoading === true;
+  const loading = transcriptMetadataState.loading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
   refreshMeta.textContent = t('common.refresh');
   refreshMeta.title = loading
@@ -1205,7 +1205,7 @@ function resetRuntimeInterval(name, callback, delay) {
   const existing = runtimeIntervals.get(name);
   if (existing?.delay === normalizedDelay) {
     existing.callback = callback;
-    return;
+    return existing;
   }
   if (existing) {
     existing.active = false;
@@ -1229,14 +1229,20 @@ function resetRuntimeInterval(name, callback, delay) {
   };
   scheduleNext();
   runtimeIntervals.set(name, state);
+  return state;
 }
 
 function clearRuntimeInterval(name) {
   const existing = runtimeIntervals.get(name);
-  if (!existing) return;
+  if (!existing) return false;
   existing.active = false;
   clearTimeout(existing.timer);
   runtimeIntervals.delete(name);
+  return true;
+}
+
+function runtimeIntervalActive(name) {
+  return runtimeIntervals.get(name)?.active === true;
 }
 
 function renewServerWatchRootsFromRuntime() {
@@ -1249,7 +1255,7 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('auto-approve', () => {
-    if (clientEventsConnected === true) return null;
+    if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);

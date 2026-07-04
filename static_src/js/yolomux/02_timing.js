@@ -10,6 +10,7 @@ const uiDelayMs = Object.freeze({
   tmuxWindowReadbackRetry: 80,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
+  commandPaletteMissingPathRetry: 1001,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
 });
@@ -27,6 +28,7 @@ const yolomuxTiming = Object.freeze({
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
+  commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
   yolomuxFontReadyTimeoutMs: 2500,
@@ -50,6 +52,7 @@ const {
   tmuxWindowReadbackRetryMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
+  commandPaletteMissingPathRetryMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
   yolomuxFontReadyTimeoutMs,

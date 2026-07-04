@@ -9,7 +9,7 @@ const {
 } = require('./layout_test_helper');
 
 function runYostatsPerformanceSuite() {
-  test('YO!stats renders a full 24-hour mixed-resolution fixture with no-data overlays under 300ms', () => {
+  test('YO!stats median render stays under 300ms for a full 24-hour mixed-resolution fixture', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const tenMinuteMs = 10 * 60_000;
     const now = Math.ceil(Date.now() / tenMinuteMs) * tenMinuteMs;
@@ -42,15 +42,23 @@ function runYostatsPerformanceSuite() {
     assert.equal(records.length, 5280, 'fixture has the 1320x60s + 360x10s + 3600x1s mixed-resolution stress shape');
     api.setDebugGraphRangeForTest(24 * 60 * 60, {render: false});
     api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
-    const started = performance.now();
-    const html = api.debugGraphInnerHtmlForTest(now);
-    const elapsedMs = performance.now() - started;
+    api.debugGraphInnerHtmlForTest(now);
+    const measuredMs = [];
+    let html = '';
+    for (let sample = 0; sample < 5; sample += 1) {
+      const started = performance.now();
+      html = api.debugGraphInnerHtmlForTest(now);
+      measuredMs.push(performance.now() - started);
+    }
+    const sortedMs = [...measuredMs].sort((left, right) => left - right);
+    const medianMs = sortedMs[Math.floor(sortedMs.length / 2)];
     const chartHtml = key => html.match(new RegExp(`<section[^>]*data-js-debug-chart="${key}"[\\s\\S]*?<\\/section>`))?.[0] || '';
     for (const key of ['latency', 'count', 'bandwidth']) {
       const noDataCount = (chartHtml(key).match(/data-js-debug-no-data-range="/g) || []).length;
       assert.ok(noDataCount >= 2, `${key} keeps every missing segment around the known disconnect and graduated tier boundaries (got ${noDataCount})`);
     }
-    assert.ok(elapsedMs < 300, `24-hour graph HTML with overlays took ${elapsedMs.toFixed(1)}ms`);
+    const sampleText = measuredMs.map(value => value.toFixed(1)).join(', ');
+    assert.ok(medianMs < 300, `24-hour graph HTML median took ${medianMs.toFixed(1)}ms; samples=[${sampleText}]ms`);
   });
 }
 

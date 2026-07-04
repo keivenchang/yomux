@@ -499,12 +499,12 @@ async function runTabberSuite() {
     assert.ok(/\.topbar:hover,\s*\.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'topbar bg matches the green tab strip on hover/focus');
     assert.equal(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), false, 'light-mode topbar inherits neutral rest paint from the tokenized base owner');
     assert.equal(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), false, 'light-mode topbar inherits hover/focus paint from the tokenized base owner');
-    // / the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in
+    // The dragState item guard MUST precede movePanelsToPool()/grid.innerHTML in
     // renderPanels, and endSessionDrag MUST flush via the scheduler instead of direct renderPanels().
-    assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragSession != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
+    assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragState\.item != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
     const endDragStart = dragSrc.indexOf('function endSessionDrag');
     const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
-    assert.ok(/dragSession = null;[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag flushes through the shared layout scheduler after clearing dragSession');
+    assert.ok(/cancelDragOperationState\(\);[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag clears the shared drag record before flushing through the layout scheduler');
     assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
   });
 
@@ -1093,8 +1093,10 @@ async function runTabberSuite() {
     assert.ok(source.includes('file-editor-blame-panel'), 'the editor toolbar has a blame toggle button');
     assert.ok(source.includes('file-editor-icon-blame'), 'the blame toggle uses the shared editor icon box, not an unaligned text glyph');
     const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.file-editor-icon-blame::before\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame outer circle is explicitly centered inside the editor icon box');
-    assert.ok(/\.file-editor-icon-blame::after\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame center dot is explicitly centered inside the editor icon box');
+    const centeredBlameOwner = editorCss.match(/(?:^|\n)([^{}]*\.file-editor-icon-blame::before[^{}]*)\{([^}]*)\}/);
+    assert.ok(centeredBlameOwner, 'Blame outer circle participates in the shared centered editor-icon owner');
+    assert.ok(centeredBlameOwner[1].includes('.file-editor-icon-blame::after'), 'Blame center dot participates in the same centered editor-icon owner');
+    assert.ok(/top:\s*50%/.test(centeredBlameOwner[2]) && /left:\s*50%/.test(centeredBlameOwner[2]) && /transform:\s*translate\(-50%, -50%\)/.test(centeredBlameOwner[2]), 'the shared editor-icon owner centers both blame shapes');
     assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'a CodeMirror blame extension decorates the cursor line');
     assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
     assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'the blame extension is wired into the editable editor extensions');
@@ -1158,7 +1160,7 @@ async function runTabberSuite() {
     assert.ok(rankBody.includes('commandPaletteItemScore(item, query, options)'), 'DOIT.55: both surfaces rank through the shared scorer');
     assert.ok(rankBody.includes('commandPaletteMixFirstScreenResults(ranked, query, options)'), 'DOIT.55 follow-up: shared ranker keeps first-screen file/pane results mixed after scoring');
     assert.ok(source.includes('class="command-palette-status" aria-live="polite" hidden'), 'search loading indicator is part of the palette chrome, not just the empty state');
-    assert.ok(/renderCommandPaletteResults[\s\S]*input\.setAttribute\('aria-busy', fileQuickOpenLoading \? 'true' : 'false'\)[\s\S]*status\.innerHTML = html/.test(source), 'search loading indicator updates while local results remain visible');
+    assert.ok(/renderCommandPaletteResults[\s\S]*input\.setAttribute\('aria-busy', fileQuickOpenState.loading \? 'true' : 'false'\)[\s\S]*status\.innerHTML = html/.test(source), 'search loading indicator updates while local results remain visible');
     assert.ok(/function commandPaletteItemLabelHtml\(item, query\)[\s\S]*item\?\.loading === true[\s\S]*commandPaletteLoadingTextHtml\(item\.label\)/.test(source), 'Cmd-P loading rows use the shared moving-dot label renderer');
     assert.equal(api.stripTrailingEllipsisText('Searching files...'), 'Searching files', 'shared moving-dot helper strips static ASCII ellipses before rendering animated dots');
     assert.ok(api.movingEllipsisHtml('test-dots').includes('moving-ellipsis test-dots'), 'shared moving-dot helper accepts per-site classes without duplicating markup');
@@ -1366,7 +1368,7 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row:is\(\.tabber-active-window, \.tabber-active-tab\):not\(\.selected\) \.file-tree-name\s*\{[\s\S]*font-weight:\s*800/.test(css), 'active Tabber windows and non-tmux tabs share one bold row emphasis');
     const sharedPaneTabCss = css.match(/\.pane-tab,\s*\.tmux-pane-tab-token\s*\{([\s\S]*?)\}/)?.[1] || '';
     assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
-    assert.ok(/padding:\s*1px 5px 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
+    assert.ok(/padding:\s*var\(--space-1\) var\(--space-5\) 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
     assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
     assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
     assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab font');
@@ -1413,7 +1415,8 @@ async function runTabberSuite() {
     assert.ok(/function setTabberSessionFileLookbackHours\(hours, options = \{\}\)[\s\S]*clearTabberSessionFilesStates\(\)[\s\S]*fetchTabberActivity\(\)/.test(source), 'changing Tabber lookback reloads the cached activity agent-window records');
     assert.ok(/\.file-tree-row\.tabber-row\s*\{[\s\S]*--tabber-agent-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(css), 'Tabber owns one row-scale agent icon-size token');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-session-tab \.session-agent-activity-marker \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--tabber-agent-icon-size\)/.test(css), 'Tabber parent session tabs use the shared row-scale agent icon-size token');
-    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-token\s*\{[\s\S]*display:\s*inline-flex[\s\S]*max-width:\s*100%/.test(css), 'Tabber child process rows wrap shared tmux-window buttons in a row-sized token');
+    assert.ok(/\.info-tree-ai-value\.tmux-window-bar,\s*\.file-tree-row\.tabber-row \.tabber-window-token\s*\{[\s\S]*max-width:\s*100%[\s\S]*justify-content:\s*flex-start/.test(css), 'YO!info and Tabber child rows share one tmux-window token alignment owner');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-token\s*\{[\s\S]*display:\s*inline-flex[\s\S]*min-width:\s*0/.test(css), 'Tabber child process rows keep only their local inline-flex/min-width shape');
     assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-label \.agent-window-activity\s*\{[\s\S]*--agent-window-icon-size:\s*var\(--tabber-agent-icon-size\)[\s\S]*--agent-window-activity-inline-size:\s*var\(--agent-window-icon-size\)/.test(css), 'Tabber child fallback rows keep row-scale agent icons while sub-window glyphs inherit the shared Tab-circle size reference');
     assert.ok(/\.agent-window-activity--subwindow \.agent-window-status-dot\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*currentColor/.test(css), 'Tabber fallback child process rows inherit the renderer-owned sub-window glyph selector');
     assert.equal(/\.file-tree-row\.tabber-row\[data-tabber-type="session"\][^{]*\.agent-window-status-dot::before/.test(css), false, 'Tabber parent session aggregate status balls never get sub-window pseudo-glyphs');
@@ -1435,7 +1438,7 @@ async function runTabberSuite() {
     assert.ok(/function tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*\.tabber-session-tab\[data-popover-hover-state="open"\][\s\S]*popoverLifecycleActive\(tab, popover\)/.test(source), 'Tabber refresh detects active session-popover hover lifecycle before rebuilding rows');
     assert.ok(/function refreshTabberPanels\(\)[\s\S]*tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*scheduleDeferredTabberRefresh\(\)[\s\S]*return/.test(source), 'Tabber activity refresh defers instead of replacing hovered session-tab DOM');
     assert.ok(/function renderAutoApproveButton\(session, payload\)[\s\S]*button\.setAttribute\('aria-label', buttonLabel\)[\s\S]*button\.closest\('\.tabber-session-tab'\)[\s\S]*button\.removeAttribute\('title'\)/.test(source), 'Tabber YO controls keep aria-label but suppress native title hovers after live auto-state sync');
-    assert.ok(/transcriptMetaLoaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
+    assert.ok(/transcriptMetadataState\.loaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
     assert.ok(source.includes('function agentWindowPathEntries(agent)') && source.includes('function windowViewModel(session, windowIndex'), 'Tabber reads paths through the shared backend agent-window view model');
     assert.equal(/tabberTouchedRepoPathsForWindow|tabberRepoPathsForWindow|tabberFileMatchesWindow/.test(source), false, 'Tabber has no client-side per-window path resolver');

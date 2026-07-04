@@ -4,18 +4,27 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
+import threading
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
+from dataclasses import field
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from typing import Callable
 
+from . import common
+from .atomic_file import atomic_write_text
+from .atomic_file import file_lock
 from .common import AgentInfo
 from .common import SessionInfo
 from .common import git
@@ -52,12 +61,38 @@ SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
 # pass evicted the entries the next pass needed and reparsed every JSONL file from byte zero.
 _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET = 16
 _TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2 * _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET
+_TRANSCRIPT_SCAN_PREFIX_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _TRANSCRIPT_REVERSE_SCAN_BYTES = 64 * 1024
-_CODEX_TRANSCRIPT_SCAN_VERSION = 3
-_CLAUDE_TRANSCRIPT_SCAN_VERSION = 3
-_CODEX_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str, str, bool, bool], dict[str, Any]] = {}
-_CLAUDE_TRANSCRIPT_SCAN_CACHE: dict[tuple[int, int, int, str], dict[str, Any]] = {}
+_CODEX_TRANSCRIPT_SCAN_VERSION = 4
+_CLAUDE_TRANSCRIPT_SCAN_VERSION = 4
+_TRANSCRIPT_SCAN_STORE_VERSION = 1
+_TRANSCRIPT_SCAN_STORE_MAX_BYTES = 64 * 1024 * 1024
+_TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS = 60.0
+_TRANSCRIPT_SCAN_MESSAGE_ID_MAX = 4096
+_TRANSCRIPT_SCAN_PERSIST_MIN_BYTES = 64 * 1024
+_TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES = 256 * 1024
+_TRANSCRIPT_SCAN_PERSIST_INTERVAL_SECONDS = 30.0
+
+
+@dataclass
+class TranscriptScanRecord:
+    identity: tuple[Any, ...]
+    state: dict[str, Any]
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    persisted_offset: int = 0
+    persisted_at: float = 0.0
+
+
+_TRANSCRIPT_SCAN_CACHE: dict[tuple[Any, ...], TranscriptScanRecord] = {}
+_TRANSCRIPT_SCAN_CACHE_GUARD = threading.RLock()
+_TRANSCRIPT_SCAN_CACHE_STATE_DIR: Path | None = None
+_TRANSCRIPT_SCAN_STORE_NEXT_PRUNE = 0.0
+
+logger = logging.getLogger(__name__)
+
+SessionFilesPhaseRecorder = Callable[[str, float, dict[str, Any]], None]
+GitSnapshotProvider = Callable[[Path, str | None, str | None], dict[str, Any]]
 
 
 def classify_change(markers: set[str]) -> str:
@@ -115,31 +150,22 @@ def scan_claude_transcript_details(path: Path, cwd: str | None = None) -> dict[s
     # Cache the raw file once. candidate_session_cwds can ask about the same transcript from more
     # than one cwd; resolving paths only after parsing avoids repeating a growing JSONL scan per cwd.
     cache_key = claude_transcript_scan_cache_key(path)
-    state, current_size = incremental_transcript_scan_state(
+    return incremental_transcript_scan_details(
         path,
-        _CLAUDE_TRANSCRIPT_SCAN_CACHE,
         cache_key,
         new_claude_transcript_scan_state,
+        update=lambda state, line: update_claude_transcript_scan_state(state, line),
+        details=lambda state: claude_transcript_scan_state_details(state, cwd),
     )
-    if int(state.get("offset") or 0) >= current_size:
-        state["size"] = current_size
-        return claude_transcript_scan_state_details(state, cwd)
-    try:
-        offset = int(state.get("offset") or 0) if cache_key is not None else 0
-        consumed = scan_transcript_append(path, offset, lambda line: update_claude_transcript_scan_state(state, line), state)
-        state["offset"] = offset + consumed
-        state["size"] = current_size if cache_key is not None else offset + consumed
-    except OSError:
-        return claude_transcript_scan_state_details(state, cwd)
-    return claude_transcript_scan_state_details(state, cwd)
 
 
-def claude_transcript_scan_cache_key(path: Path) -> tuple[int, int, int, str] | None:
+def claude_transcript_scan_cache_key(path: Path) -> tuple[str, int, int, int, str] | None:
     try:
         stat = path.stat()
     except OSError:
         return None
     return (
+        "claude",
         _CLAUDE_TRANSCRIPT_SCAN_VERSION,
         int(stat.st_dev),
         int(stat.st_ino),
@@ -153,36 +179,22 @@ def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text
 
 def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True, include_usage: bool = True) -> dict[str, Any]:
     cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text, include_usage)
-    state, current_size = incremental_transcript_scan_state(
+    return incremental_transcript_scan_details(
         path,
-        _CODEX_TRANSCRIPT_SCAN_CACHE,
         cache_key,
         new_codex_transcript_scan_state,
+        update=lambda state, line: update_codex_transcript_scan_state(state, line, cwd, include_patch_text, include_usage),
+        details=codex_transcript_scan_state_details,
     )
-    if int(state.get("offset") or 0) >= current_size:
-        state["size"] = current_size
-        return codex_transcript_scan_state_details(state)
-    try:
-        offset = int(state.get("offset") or 0) if cache_key is not None else 0
-        consumed = scan_transcript_append(
-            path,
-            offset,
-            lambda line: update_codex_transcript_scan_state(state, line, cwd, include_patch_text, include_usage),
-            state,
-        )
-        state["offset"] = offset + consumed
-        state["size"] = current_size if cache_key is not None else offset + consumed
-    except OSError:
-        return codex_transcript_scan_state_details(state)
-    return codex_transcript_scan_state_details(state)
 
 
-def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> tuple[int, int, int, str, str, bool, bool] | None:
+def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> tuple[str, int, int, int, str, str, bool, bool] | None:
     try:
         stat = path.stat()
     except OSError:
         return None
     return (
+        "codex",
         _CODEX_TRANSCRIPT_SCAN_VERSION,
         int(stat.st_dev),
         int(stat.st_ino),
@@ -201,6 +213,7 @@ def new_codex_transcript_scan_state() -> dict[str, Any]:
         "last_token_total": None,
         "summed_last_generated_tokens": 0.0,
         "parsed_tail": b"",
+        "prefix_digest": "",
     }
 
 
@@ -212,33 +225,253 @@ def new_claude_transcript_scan_state() -> dict[str, Any]:
         "generated_tokens": 0.0,
         "usage_tokens_by_message_id": {},
         "parsed_tail": b"",
+        "prefix_digest": "",
     }
 
 
-def incremental_transcript_scan_state(path: Path, cache: dict[Any, dict[str, Any]], cache_key: Any, new_state: Any) -> tuple[dict[str, Any], int]:
+def transcript_scan_store_dir() -> Path:
+    return common.STATE_DIR / f"transcript-scan-cache-v{_TRANSCRIPT_SCAN_STORE_VERSION}"
+
+
+def transcript_scan_store_path(cache_key: tuple[Any, ...]) -> Path:
+    identity_text = json.dumps(list(cache_key), ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(identity_text.encode("utf-8")).hexdigest()
+    return transcript_scan_store_dir() / f"{digest}.json"
+
+
+def transcript_scan_prefix_digest(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            return hashlib.sha256(handle.readline(_TRANSCRIPT_SCAN_PREFIX_BYTES)).hexdigest()
+    except OSError:
+        return ""
+
+
+def serialized_transcript_marker_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(path): sorted({str(marker) for marker in markers if str(marker) in {"A", "M", "D"}})
+        for path, markers in value.items()
+        if isinstance(markers, (set, list, tuple))
+    }
+
+
+def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, Any]) -> dict[str, Any]:
+    provider = str(cache_key[0])
+    payload: dict[str, Any] = {
+        "offset": max(0, int(state.get("offset") or 0)),
+        "size": max(0, int(state.get("size") or 0)),
+        "prefix_digest": str(state.get("prefix_digest") or ""),
+        "parsed_tail_b64": base64.b64encode(state.get("parsed_tail") if isinstance(state.get("parsed_tail"), bytes) else b"").decode("ascii"),
+    }
+    if provider == "claude":
+        tokens_by_id = state.get("usage_tokens_by_message_id")
+        bounded_tokens = list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:] if isinstance(tokens_by_id, dict) else []
+        payload.update({
+            "raw_changes": serialized_transcript_marker_map(state.get("raw_changes")),
+            "generated_tokens": numeric_token_value(state.get("generated_tokens")),
+            "usage_tokens_by_message_id": {str(key): numeric_token_value(value) for key, value in bounded_tokens},
+        })
+    elif provider == "codex":
+        payload.update({
+            "changes": serialized_transcript_marker_map(state.get("changes")),
+            "last_token_total": numeric_token_value(state.get("last_token_total")) if state.get("last_token_total") is not None else None,
+            "summed_last_generated_tokens": numeric_token_value(state.get("summed_last_generated_tokens")),
+        })
+    return payload
+
+
+def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any, new_state: Callable[[], dict[str, Any]]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    state = new_state()
+    try:
+        state["offset"] = max(0, int(payload.get("offset") or 0))
+        state["size"] = max(0, int(payload.get("size") or 0))
+        state["prefix_digest"] = str(payload.get("prefix_digest") or "")
+        state["parsed_tail"] = base64.b64decode(str(payload.get("parsed_tail_b64") or ""), validate=True)
+    except (TypeError, ValueError):
+        return None
+    provider = str(cache_key[0])
+    if provider == "claude":
+        state["raw_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("raw_changes")).items()}
+        state["generated_tokens"] = numeric_token_value(payload.get("generated_tokens"))
+        tokens_by_id = payload.get("usage_tokens_by_message_id")
+        if isinstance(tokens_by_id, dict):
+            state["usage_tokens_by_message_id"] = {
+                str(key): numeric_token_value(value)
+                for key, value in list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]
+            }
+    elif provider == "codex":
+        state["changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("changes")).items()}
+        state["last_token_total"] = numeric_token_value(payload.get("last_token_total")) if payload.get("last_token_total") is not None else None
+        state["summed_last_generated_tokens"] = numeric_token_value(payload.get("summed_last_generated_tokens"))
+    return state
+
+
+def load_transcript_scan_state(cache_key: tuple[Any, ...], path: Path, new_state: Callable[[], dict[str, Any]]) -> dict[str, Any] | None:
+    cache_path = transcript_scan_store_path(cache_key)
+    if not cache_path.exists():
+        return None
+    try:
+        with file_lock(cache_path, dir_mode=0o700):
+            record = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            return None
+        if record.get("schema_version") != _TRANSCRIPT_SCAN_STORE_VERSION or record.get("identity") != list(cache_key):
+            return None
+        state = transcript_scan_state_from_payload(cache_key, record.get("state"), new_state)
+        if state is None or transcript_scan_state_needs_reset(path, path.stat().st_size, state):
+            return None
+        os.utime(cache_path, None)
+        return state
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("failed to load transcript scan cache %s: %s", cache_path.name, exc)
+        return None
+
+
+def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, max_bytes: int = _TRANSCRIPT_SCAN_STORE_MAX_BYTES) -> None:
+    store_dir = transcript_scan_store_dir()
+    try:
+        paths = sorted(store_dir.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True)
+    except OSError as exc:
+        logger.warning("failed to inspect transcript scan cache: %s", exc)
+        return
+    retained_bytes = 0
+    for index, path in enumerate(paths):
+        try:
+            size = path.stat().st_size
+            if index < max_entries and retained_bytes + size <= max_bytes:
+                retained_bytes += size
+                continue
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("failed to prune transcript scan cache %s: %s", path.name, exc)
+
+
+def persist_transcript_scan_state(cache_key: tuple[Any, ...], state: dict[str, Any]) -> bool:
+    global _TRANSCRIPT_SCAN_STORE_NEXT_PRUNE
+    cache_path = transcript_scan_store_path(cache_key)
+    if int(state.get("size") or 0) < _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES and not cache_path.exists():
+        return False
+    record = {
+        "schema_version": _TRANSCRIPT_SCAN_STORE_VERSION,
+        "identity": list(cache_key),
+        "state": transcript_scan_state_payload(cache_key, state),
+    }
+    try:
+        with file_lock(cache_path, dir_mode=0o700):
+            if cache_path.exists():
+                existing = json.loads(cache_path.read_text(encoding="utf-8"))
+                existing_state = existing.get("state") if isinstance(existing, dict) else None
+                if isinstance(existing, dict) and existing.get("identity") == list(cache_key) and isinstance(existing_state, dict) and int(existing_state.get("offset") or 0) > int(state.get("offset") or 0):
+                    return False
+            atomic_write_text(cache_path, json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True), mode=0o600)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("failed to persist transcript scan cache %s: %s", cache_path.name, exc)
+        return False
+    now = time.perf_counter()
+    if now >= _TRANSCRIPT_SCAN_STORE_NEXT_PRUNE:
+        _TRANSCRIPT_SCAN_STORE_NEXT_PRUNE = now + _TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS
+        prune_transcript_scan_store()
+    return True
+
+
+def maybe_persist_transcript_scan_record(record: TranscriptScanRecord, force: bool = False) -> None:
+    now = time.perf_counter()
+    offset = int(record.state.get("offset") or 0)
+    cache_exists = transcript_scan_store_path(record.identity).exists()
+    if not force:
+        if not cache_exists and int(record.state.get("size") or 0) < _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES:
+            return
+        if cache_exists and offset - record.persisted_offset < _TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES and now - record.persisted_at < _TRANSCRIPT_SCAN_PERSIST_INTERVAL_SECONDS:
+            return
+    if persist_transcript_scan_state(record.identity, record.state):
+        record.persisted_offset = offset
+        record.persisted_at = now
+
+
+def transcript_scan_memory_record(cache_key: tuple[Any, ...], path: Path, new_state: Callable[[], dict[str, Any]]) -> TranscriptScanRecord:
+    global _TRANSCRIPT_SCAN_CACHE_STATE_DIR
+    store_dir = transcript_scan_store_dir()
+    with _TRANSCRIPT_SCAN_CACHE_GUARD:
+        if _TRANSCRIPT_SCAN_CACHE_STATE_DIR != store_dir:
+            _TRANSCRIPT_SCAN_CACHE.clear()
+            _TRANSCRIPT_SCAN_CACHE_STATE_DIR = store_dir
+        record = _TRANSCRIPT_SCAN_CACHE.get(cache_key)
+        if record is not None:
+            return record
+        loaded_state = load_transcript_scan_state(cache_key, path, new_state)
+        state = loaded_state or new_state()
+        record = TranscriptScanRecord(
+            cache_key,
+            state,
+            persisted_offset=int(state.get("offset") or 0) if loaded_state is not None else 0,
+            persisted_at=time.perf_counter() if loaded_state is not None else 0.0,
+        )
+        if len(_TRANSCRIPT_SCAN_CACHE) >= _TRANSCRIPT_SCAN_CACHE_MAX:
+            oldest_key = next(iter(_TRANSCRIPT_SCAN_CACHE), None)
+            if oldest_key is not None:
+                _TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
+        _TRANSCRIPT_SCAN_CACHE[cache_key] = record
+        return record
+
+
+def incremental_transcript_scan_details(
+    path: Path,
+    cache_key: tuple[Any, ...] | None,
+    new_state: Callable[[], dict[str, Any]],
+    *,
+    update: Callable[[dict[str, Any], str], None],
+    details: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
     try:
         current_size = path.stat().st_size
     except OSError:
-        return new_state(), 0
+        return details(new_state())
     if cache_key is None:
-        return new_state(), current_size
-    state = cache.get(cache_key)
-    if state is not None and transcript_scan_state_needs_reset(path, current_size, state):
         state = new_state()
-        cache[cache_key] = state
-    elif state is None:
-        state = new_state()
-        if len(cache) >= _TRANSCRIPT_SCAN_CACHE_MAX:
-            oldest_key = next(iter(cache), None)
-            if oldest_key is not None:
-                cache.pop(oldest_key, None)
-        cache[cache_key] = state
-    return state, current_size
+        try:
+            scan_transcript_append(path, 0, lambda line: update(state, line), state)
+        except OSError:
+            pass
+        return details(state)
+    record = transcript_scan_memory_record(cache_key, path, new_state)
+    with record.lock:
+        try:
+            current_size = path.stat().st_size
+        except OSError:
+            return details(record.state)
+        reset = transcript_scan_state_needs_reset(path, current_size, record.state)
+        if reset:
+            record.state = new_state()
+        state = record.state
+        prefix_digest = transcript_scan_prefix_digest(path)
+        if not state.get("prefix_digest"):
+            state["prefix_digest"] = prefix_digest
+        offset = int(state.get("offset") or 0)
+        if offset >= current_size:
+            state["size"] = current_size
+            if reset:
+                maybe_persist_transcript_scan_record(record, force=True)
+            return details(state)
+        try:
+            consumed = scan_transcript_append(path, offset, lambda line: update(state, line), state)
+            state["offset"] = offset + consumed
+            state["size"] = current_size
+            maybe_persist_transcript_scan_record(record, force=reset)
+        except OSError:
+            return details(state)
+        return details(state)
 
 
 def transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict[str, Any]) -> bool:
     offset = int(state.get("offset") or 0)
     if current_size < offset:
+        return True
+    prefix_digest = str(state.get("prefix_digest") or "")
+    if prefix_digest and transcript_scan_prefix_digest(path) != prefix_digest:
         return True
     parsed_tail = state.get("parsed_tail")
     if offset <= 0 or not isinstance(parsed_tail, bytes) or not parsed_tail:
@@ -301,6 +534,8 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
         if generated_tokens > previous_tokens:
             state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens - previous_tokens
             tokens_by_message_id[message_id] = generated_tokens
+            while len(tokens_by_message_id) > _TRANSCRIPT_SCAN_MESSAGE_ID_MAX:
+                tokens_by_message_id.pop(next(iter(tokens_by_message_id)))
     elif generated_tokens:
         state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens
     raw_changes = state.get("raw_changes")
@@ -982,6 +1217,105 @@ def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None
     return {"behind": behind, "ahead": ahead}
 
 
+def git_snapshot_identity(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> tuple[Any, ...]:
+    """Return every worktree/ref input that can change a shared Git snapshot."""
+    canonical_repo = str(repo.expanduser().resolve(strict=False))
+    git_dir_result = git(["rev-parse", "--absolute-git-dir"], cwd=canonical_repo, timeout=5.0)
+    git_dir = git_dir_result.stdout.strip() if git_dir_result.returncode == 0 else ""
+    head_result = git(["rev-parse", "--verify", "HEAD"], cwd=canonical_repo, timeout=5.0)
+    head = head_result.stdout.strip() if head_result.returncode == 0 else ""
+    status_result = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=canonical_repo, timeout=10.0)
+    status_text = status_result.stdout if status_result.returncode == 0 else f"error:{status_result.returncode}:{status_result.stderr}"
+    worktree_signature = hashlib.sha256(status_text.encode("utf-8", errors="replace")).hexdigest()
+    index_signature = ""
+    index_result = git(["rev-parse", "--git-path", "index"], cwd=canonical_repo, timeout=5.0)
+    if index_result.returncode == 0 and index_result.stdout.strip():
+        index_path = Path(index_result.stdout.strip())
+        if not index_path.is_absolute():
+            index_path = repo / index_path
+        try:
+            index_signature = hashlib.sha256(index_path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+    ref_commits: list[tuple[str, str]] = []
+    for ref in (selected_from, selected_to):
+        if not ref or ref == "current":
+            ref_commits.append((ref, ref))
+            continue
+        result = git(["rev-parse", "--verify", ref], cwd=canonical_repo, timeout=5.0)
+        ref_commits.append((ref, result.stdout.strip() if result.returncode == 0 else ""))
+    default_ref = "" if refs_active else str(git_default_branch_ref(repo) or "")
+    default_commit = ""
+    if default_ref:
+        default_result = git(["rev-parse", "--verify", default_ref], cwd=canonical_repo, timeout=5.0)
+        default_commit = default_result.stdout.strip() if default_result.returncode == 0 else ""
+    refs_result = git(["for-each-ref", "--format=%(refname)%00%(objectname)"], cwd=canonical_repo, timeout=5.0)
+    refs_text = refs_result.stdout if refs_result.returncode == 0 else f"error:{refs_result.returncode}:{refs_result.stderr}"
+    refs_signature = hashlib.sha256(refs_text.encode("utf-8", errors="replace")).hexdigest()
+    return (
+        canonical_repo,
+        git_dir,
+        head,
+        index_signature,
+        worktree_signature,
+        selected_from,
+        selected_to,
+        tuple(ref_commits),
+        default_ref,
+        default_commit,
+        refs_signature,
+    )
+
+
+def build_git_snapshot(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
+    """Build repository-wide Git facts once; session attribution is merged later."""
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+    repo_error = ""
+    repo_error_message = message_descriptor("", "")
+    diff_base = "" if refs_active else git_diff_base(repo)
+    statuses, status_error = git_name_status(repo, diff_base or None, selected_from or None, selected_to or None)
+    if status_error and refs_active and diff_ref_resolution_error(status_error):
+        fallback_base = git_diff_base(repo)
+        statuses, status_error = git_name_status(repo, fallback_base)
+        numstat = git_numstat(repo, fallback_base) if not status_error else {}
+        selected_from, selected_to = "", ""
+        repo_error = "requested refs not found in this repo; showing default"
+        repo_error_message = message_descriptor("diff.warning.refsFallback", repo_error, {"repo": repo.name})
+    elif status_error:
+        issue = diff_ref_issue(status_error, selected_from, selected_to, repo.name)
+        repo_error = status_error
+        repo_error_message = issue
+        statuses = {}
+        numstat = {}
+    else:
+        numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
+    return {
+        "statuses": statuses,
+        "numstat": numstat,
+        "selected_from": selected_from,
+        "selected_to": selected_to,
+        "status_error": status_error,
+        "repo_error": repo_error,
+        "repo_error_message": repo_error_message,
+        "recent_refs": git_recent_refs(repo),
+        "ahead_behind": git_ahead_behind(repo, selected_from or None, selected_to or None),
+    }
+
+
+def record_session_files_phase(
+    recorder: SessionFilesPhaseRecorder | None,
+    phase: str,
+    started: float,
+    details: dict[str, Any] | None = None,
+) -> None:
+    if recorder is None:
+        return
+    recorder(phase, max(0.0, (time.perf_counter() - started) * 1000), dict(details or {}))
+
+
 def untracked_added_line_count(path: Path) -> int | None:
     try:
         if path.stat().st_size > 2 * 1024 * 1024:
@@ -1317,6 +1651,8 @@ def session_files_payload_for_info(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     agent_attribution: dict[str, list[str]] | None = None,
+    git_snapshot_provider: GitSnapshotProvider | None = None,
+    phase_recorder: SessionFilesPhaseRecorder | None = None,
 ) -> SessionFilesPayload:
     # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
     # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
@@ -1328,8 +1664,11 @@ def session_files_payload_for_info(
     # D2: per-agent transcript-discovery problems land here, separate from the blocking `errors` list, so a
     # single inactive agent's missing transcript does not read as a session-level Differ failure.
     warnings: list[str | dict[str, Any]] = []
+    phase_started = time.perf_counter()
     touched = touched_files_for_info(info, cutoff, warnings)
+    record_session_files_phase(phase_recorder, "transcript-attribution", phase_started, {"session": info.session, "paths": len(touched)})
 
+    phase_started = time.perf_counter()
     repos: dict[str, set[str]] = {}
     outside_repo_paths: set[str] = set()
     for path_text, metadata in touched.items():
@@ -1343,7 +1682,9 @@ def session_files_payload_for_info(
     for repo_text in candidate_repo_roots:
         repos.setdefault(repo_text, set())
     live_pane_repo_roots = set(session_live_pane_repo_roots(info))
+    record_session_files_phase(phase_recorder, "repository-discovery", phase_started, {"session": info.session, "repos": len(repos)})
 
+    phase_started = time.perf_counter()
     files: list[SessionFileEntry] = []
     repo_payloads: list[RepoPayload] = []
     refs_by_repo: dict[str, list[dict[str, Any]]] = {}
@@ -1354,29 +1695,29 @@ def session_files_payload_for_info(
         repo_from = str(repo_override.get("from") or "").strip() or from_ref
         repo_to = str(repo_override.get("to") or "").strip() or to_ref
         repo_refs_active = refs_requested(repo_from, repo_to)
-        sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
-        repo_error = ""
-        repo_error_message = message_descriptor("", "")
-        diff_base = "" if repo_refs_active else git_diff_base(repo)
-        statuses, status_error = git_name_status(repo, diff_base or None, sel_from or None, sel_to or None)
-        if status_error and repo_refs_active and diff_ref_resolution_error(status_error):
-            # The requested ref is unknown in THIS repo (e.g. a SHA that only exists in another repo) —
-            # fall back to this repo's own default base instead of erroring the whole payload.
-            fallback_base = git_diff_base(repo)
-            statuses, status_error = git_name_status(repo, fallback_base)
-            numstat = git_numstat(repo, fallback_base) if not status_error else {}
-            sel_from, sel_to = "", ""
-            repo_error = "requested refs not found in this repo; showing default"
-            repo_error_message = message_descriptor("diff.warning.refsFallback", repo_error, {"repo": repo.name})
-        elif status_error:
-            issue = diff_ref_issue(status_error, sel_from, sel_to, repo.name)
+        snapshot = (
+            git_snapshot_provider(repo, repo_from, repo_to)
+            if git_snapshot_provider is not None
+            else build_git_snapshot(repo, repo_from, repo_to)
+        )
+        statuses = {
+            str(path): str(status)
+            for path, status in snapshot.get("statuses", {}).items()
+        }
+        numstat = {
+            str(path): dict(counts)
+            for path, counts in snapshot.get("numstat", {}).items()
+            if isinstance(counts, dict)
+        }
+        sel_from = str(snapshot.get("selected_from") or "")
+        sel_to = str(snapshot.get("selected_to") or "")
+        status_error = str(snapshot.get("status_error") or "")
+        repo_error = str(snapshot.get("repo_error") or "")
+        raw_error_message = snapshot.get("repo_error_message")
+        repo_error_message = dict(raw_error_message) if isinstance(raw_error_message, dict) else message_descriptor("", "")
+        if status_error and not repo_error.startswith("requested refs not found"):
+            issue = repo_error_message if repo_error_message.get("fallback") else diff_ref_issue(status_error, sel_from, sel_to, repo.name)
             errors.append(message_descriptor("diff.error.repo", f"{repo.name}: {status_error}", {"repo": repo.name, "error": issue["fallback"]}))
-            repo_error = status_error
-            repo_error_message = issue
-            statuses = {}
-            numstat = {}
-        else:
-            numstat = git_numstat(repo, diff_base or None, sel_from or None, sel_to or None)
         touched_by_rel: dict[str, dict[str, Any]] = {}
         for touched_path, metadata in touched.items():
             rel_path = repo_relative_path(Path(touched_path), repo)
@@ -1428,7 +1769,7 @@ def session_files_payload_for_info(
         rendered_entries = differ_visible_entries(repo_entries)
         if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
             continue
-        refs_by_repo[str(repo)] = git_recent_refs(repo)
+        refs_by_repo[str(repo)] = copy.deepcopy(snapshot.get("recent_refs", []))
         repo_payload: RepoPayload = {
             "repo": str(repo),
             "count": len(rendered_entries),
@@ -1443,7 +1784,9 @@ def session_files_payload_for_info(
         }
         if repo_error_message.get("key") or repo_error_message.get("fallback"):
             repo_payload["error_message"] = repo_error_message
-        repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
+        ahead_behind = snapshot.get("ahead_behind")
+        if isinstance(ahead_behind, dict):
+            repo_payload.update({str(key): int(value) for key, value in ahead_behind.items() if isinstance(value, int)})
         repo_payloads.append(repo_payload)
 
     outside_entries: list[SessionFileEntry] = []
@@ -1479,6 +1822,12 @@ def session_files_payload_for_info(
         })
 
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
+    record_session_files_phase(
+        phase_recorder,
+        "session-merge-render",
+        phase_started,
+        {"session": info.session, "repos": len(repo_payloads), "files": len(files)},
+    )
     payload_from_ref = selected_from or "default"
     payload_to_ref = selected_to or "base"
     return {
@@ -1502,6 +1851,8 @@ def session_files_payload(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
     include_cross_session_attribution: bool = True,
+    git_snapshot_provider: GitSnapshotProvider | None = None,
+    phase_recorder: SessionFilesPhaseRecorder | None = None,
 ) -> tuple[SessionFilesPayload, HTTPStatus]:
     now = time.time()
     cutoff = session_files_cutoff(hours, now)
@@ -1511,7 +1862,17 @@ def session_files_payload(
         if info is None:
             diagnostic = f"unknown session: {session}"
             return {"session": session, **user_message_payload("status.sessionEnded", diagnostic, session=session)}, HTTPStatus.NOT_FOUND
-        payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
+        payload = session_files_payload_for_info(
+            info,
+            hours,
+            now=now,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            agent_attribution=attribution,
+            git_snapshot_provider=git_snapshot_provider,
+            phase_recorder=phase_recorder,
+        )
         return payload, HTTPStatus.OK
 
     files: list[SessionFileEntry] = []
@@ -1520,7 +1881,17 @@ def session_files_payload(
     errors: list[str | dict[str, Any]] = []
     warnings: list[str | dict[str, Any]] = []
     for info in infos.values():
-        payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
+        payload = session_files_payload_for_info(
+            info,
+            hours,
+            now=now,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            agent_attribution=attribution,
+            git_snapshot_provider=git_snapshot_provider,
+            phase_recorder=phase_recorder,
+        )
         files.extend(payload["files"])
         errors.extend(payload["errors"])
         warnings.extend(payload.get("warnings", []))

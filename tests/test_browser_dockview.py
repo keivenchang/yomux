@@ -2218,7 +2218,7 @@ def test_dockview_working_glyph_shows_static_symbol_and_static_green_ball_by_def
         const before = document.querySelector('.agent-window-agent-icon--working')?.closest('.tmux-window-button');
         const beforeDot = before?.querySelector('.agent-window-status-dot');
         setTimeout(() => {
-          updatePanelWindowStepButtons('1', transcriptMeta.sessions?.['1']);
+          updatePanelWindowStepButtons('1', transcriptMetadataState.payload.sessions?.['1']);
           requestAnimationFrame(() => {
             const after = document.querySelector('.agent-window-agent-icon--working')?.closest('.tmux-window-button');
             const afterDot = after?.querySelector('.agent-window-status-dot');
@@ -3034,25 +3034,7 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
           }
           return originalFetch(input, options);
         };
-        const waitFor = predicate => new Promise((resolve, reject) => {
-          let attempts = 0;
-          const tick = () => {
-            try {
-              const value = predicate();
-              if (value) { resolve(value); return; }
-            } catch (error) {
-              reject(error);
-              return;
-            }
-            attempts += 1;
-            if (attempts > 120) {
-              reject(new Error('timed out waiting for Differ row/opened tab'));
-              return;
-            }
-            requestAnimationFrame(tick);
-          };
-          tick();
-        });
+        const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
           setFileExplorerMode('diff', {force: true});
           renderFileExplorerChangesPanels({force: true});
@@ -3095,25 +3077,7 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         const path = arguments[0];
         const item = `filediff:${path}`;
         const done = arguments[arguments.length - 1];
-        const waitFor = predicate => new Promise((resolve, reject) => {
-          let attempts = 0;
-          const tick = () => {
-            try {
-              const value = predicate();
-              if (value) { resolve(value); return; }
-            } catch (error) {
-              reject(error);
-              return;
-            }
-            attempts += 1;
-            if (attempts > 120) {
-              reject(new Error('timed out waiting for Differ reopen'));
-              return;
-            }
-            requestAnimationFrame(tick);
-          };
-          tick();
-        });
+        const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
           setFileEditorViewMode(path, 'edit', item);
           renderOpenFilePath(path);
@@ -4576,13 +4540,7 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
         const done = arguments[arguments.length - 1];
         (async () => {
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 120; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview') || null;
           const widthOf = group => Math.round(group?.getBoundingClientRect?.().width || 0);
           const host = dockviewLayoutState.host;

@@ -25,7 +25,7 @@ class FakeTmuxResult:
 def make_app(sessions: list[str]) -> TmuxWebtermApp:
     app = object.__new__(TmuxWebtermApp)
     app.sessions = sessions
-    app.auto_workers = {}
+    app.auto_worker_records = {}
     app.auto_workers_lock = threading.RLock()
     app.share_tokens = {}
     app.share_tokens_lock = threading.RLock()

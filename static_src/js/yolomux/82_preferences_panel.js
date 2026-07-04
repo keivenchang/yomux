@@ -748,7 +748,7 @@ function createPreferencesPanel() {
 function focusPreferencesSearch(panel = null, options = {}) {
   // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
-  if (dragSession != null) return false;
+  if (dragState.item != null) return false;
   return focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options});
 }
 
@@ -778,7 +778,7 @@ function notePreferencesScrollActivity(now = Date.now()) {
 function renderPreferencesPanels(options = {}) {
   // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
-  if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (dragState.item != null) { pendingPreferencesRender = true; return; }
   scheduleDeferredSettingsMetadataRefresh();
   if (options.force !== true && preferencesScrollIsActive()) {
     pendingPreferencesRender = true;

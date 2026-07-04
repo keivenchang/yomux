@@ -17,7 +17,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
   // not get mistaken for a cheap same-shape layout update on drop.
-  if (dragSession != null) {
+  if (dragState.item != null) {
     requestLayoutRender({
       previousActive,
       options,
@@ -385,7 +385,7 @@ function renderPaneTabStripsMeasured() {
   }
   // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
-  if (dragSession != null) { pendingTabStripRender = true; return; }
+  if (dragState.item != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
@@ -546,7 +546,7 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
@@ -605,7 +605,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
@@ -693,7 +693,7 @@ function paneTabAriaLabel(item) {
   }
   const type = tabTypeForItem(item);
   if (type) return itemLabel(item);
-  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMeta.sessions?.[item], 140)}`.trim();
+  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMetadataState.payload.sessions?.[item], 140)}`.trim();
 }
 
 function beginPaneTabRename(tab, session) {
@@ -915,7 +915,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
 function tmuxPaneTabTokenHtml(session, options = {}) {
   const item = String(options.item || session || '').trim();
   if (!item) return '';
-  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMeta.sessions?.[item];
+  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMetadataState.payload.sessions?.[item];
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(item, info);
   const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
   const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
@@ -1014,7 +1014,7 @@ function clearPaneTabDropPreview(strip) {
 
 // #47: reset the per-drag tab-rect cache (called at drag start/end). See dragMeasureStrip.
 function resetDragTabRectCache() {
-  dragTabRectCache = null;
+  dragState.tabRectCache = null;
 }
 
 // During a live drag the tabs do not move (renders are deferred, #30), so measure each strip's rect +
@@ -1022,11 +1022,11 @@ function resetDragTabRectCache() {
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
   dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
-  if (dragSession != null) {
-    if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
-      dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+  if (dragState.item != null) {
+    if (!dragState.tabRectCache || dragState.tabRectCache.strip !== strip) {
+      dragState.tabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
     }
-    return dragTabRectCache;
+    return dragState.tabRectCache;
   }
   return {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
 }
@@ -1620,13 +1620,13 @@ function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
 }
 
 function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
   if (!nextInfo) return false;
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render === true) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -1653,7 +1653,7 @@ function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   };
 }
 
-function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMeta) {
+function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMetadataState.payload) {
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   const previousSessions = previousPayload?.sessions && typeof previousPayload.sessions === 'object' ? previousPayload.sessions : {};
   let nextSessions = null;
@@ -1746,7 +1746,7 @@ function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}
   setTimeout(() => {
     if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return;
     if (tmuxWindowActiveIndexOverride(session) !== indexKey) return;
-    if (tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]) === indexKey) {
+    if (tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]) === indexKey) {
       clearTmuxWindowActiveIndexOverride(session, {sequence});
     }
   }, tmuxWindowConfirmedOverrideHoldMs);
@@ -2107,11 +2107,11 @@ function updatePanelControlLabels(session, info) {
 }
 
 function searchHistoryResults() {
-  return Array.isArray(searchHistoryPayload?.results) ? searchHistoryPayload.results : [];
+  return Array.isArray(searchHistoryState.payload?.results) ? searchHistoryState.payload.results : [];
 }
 
 function runHistoryRows() {
-  return Array.isArray(runHistoryPayload?.runs) ? runHistoryPayload.runs : [];
+  return Array.isArray(runHistoryState.payload?.runs) ? runHistoryState.payload.runs : [];
 }
 
 function searchHistoryTimestampSeconds(value) {
@@ -2171,8 +2171,8 @@ function searchHistoryErrorText(payload) {
 }
 
 function searchHistoryPanelErrors() {
-  const payloadErrors = Array.isArray(runHistoryPayload?.errors) ? runHistoryPayload.errors : [];
-  return [searchHistoryError, runHistoryError, ...payloadErrors]
+  const payloadErrors = Array.isArray(runHistoryState.payload?.errors) ? runHistoryState.payload.errors : [];
+  return [searchHistoryState.error, runHistoryState.error, ...payloadErrors]
     .filter(Boolean)
     .map(searchHistoryErrorText)
     .filter(Boolean);
@@ -2207,8 +2207,8 @@ function searchHistoryResultHtml(result, index) {
 
 function searchHistoryResultsHtml() {
   const results = searchHistoryResults();
-  if (searchHistoryLoading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
-  if (!searchHistoryQuery.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
+  if (searchHistoryState.loading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (!searchHistoryState.query.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
   if (!results.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
   return `<div class="search-history-list">${results.map(searchHistoryResultHtml).join('')}</div>`;
 }
@@ -2229,13 +2229,13 @@ function runHistoryRowHtml(row) {
 
 function runHistoryRowsHtml() {
   const rows = runHistoryRows();
-  if (runHistoryLoading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (runHistoryState.loading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
   if (!rows.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyRuns'))}</div>`;
   return `<div class="search-history-list">${rows.map(runHistoryRowHtml).join('')}</div>`;
 }
 
 function searchHistoryPanelStatusText() {
-  if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
+  if (searchHistoryState.loading || runHistoryState.loading) return t('common.loading');
   const [error] = searchHistoryPanelErrors();
   if (error) return error;
   return t('searchHistory.detail');
@@ -2246,7 +2246,7 @@ function searchHistoryPanelHtml() {
   const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
   return `
     <form class="search-history-search" data-search-history-form>
-      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryQuery)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
+      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
       <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
       <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
     </form>
@@ -2274,49 +2274,74 @@ function renderSearchHistoryPanels() {
 }
 
 async function refreshRunHistoryData() {
-  runHistoryLoading = true;
-  runHistoryError = null;
+  const requestIsCurrent = runHistoryState.guard.begin();
+  runHistoryState.loading = true;
+  runHistoryState.error = null;
   renderSearchHistoryPanels();
-  try {
-    runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
-  } catch (error) {
-    runHistoryError = error?.payload && typeof error.payload === 'object'
-      ? error.payload
-      : {error: String(error?.message || error)};
-  } finally {
-    runHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return runHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
+      if (requestIsCurrent()) runHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        runHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (runHistoryState.request === request) {
+        runHistoryState.loading = false;
+        runHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return runHistoryState.payload;
+  })();
+  runHistoryState.request = request;
+  return request;
 }
 
-async function runSearchHistoryQuery(query = searchHistoryQuery) {
-  searchHistoryQuery = String(query || '').trim();
-  searchHistoryError = null;
-  if (!searchHistoryQuery) {
-    searchHistoryPayload = {query: '', results: []};
+async function runSearchHistoryQuery(query = searchHistoryState.query) {
+  const normalizedQuery = String(query || '').trim();
+  searchHistoryState.query = normalizedQuery;
+  searchHistoryState.error = null;
+  const requestIsCurrent = searchHistoryState.guard.begin();
+  if (!normalizedQuery) {
+    searchHistoryState.payload = {query: '', results: []};
+    searchHistoryState.loading = false;
+    searchHistoryState.request = null;
     renderSearchHistoryPanels();
-    return searchHistoryPayload;
+    return searchHistoryState.payload;
   }
-  searchHistoryLoading = true;
+  searchHistoryState.loading = true;
   renderSearchHistoryPanels();
-  try {
-    searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
-  } catch (error) {
-    searchHistoryError = error?.payload && typeof error.payload === 'object'
-      ? error.payload
-      : {error: String(error?.message || error)};
-  } finally {
-    searchHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return searchHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/search?q=${encodeURIComponent(normalizedQuery)}`, {cache: 'no-store'});
+      if (requestIsCurrent()) searchHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        searchHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (searchHistoryState.request === request) {
+        searchHistoryState.loading = false;
+        searchHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return searchHistoryState.payload;
+  })();
+  searchHistoryState.request = request;
+  return request;
 }
 
 async function loadSearchHistoryPanelData(options = {}) {
   renderSearchHistoryPanels();
   await refreshRunHistoryData();
-  const query = options.query == null ? searchHistoryQuery : String(options.query || '');
+  const query = options.query == null ? searchHistoryState.query : String(options.query || '');
   if (query.trim()) await runSearchHistoryQuery(query);
   else renderSearchHistoryPanels();
 }
@@ -2361,7 +2386,7 @@ function bindSearchHistoryPanel(panel) {
     const refresh = event.target.closest('[data-run-history-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryQuery});
+      loadSearchHistoryPanelData({query: searchHistoryState.query});
       return;
     }
     const result = event.target.closest('[data-search-result-index]');

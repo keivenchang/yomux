@@ -206,14 +206,13 @@ function previewZoomFitScale(viewport, content, options = {}) {
 }
 
 function previewZoomButton(action) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.dataset.previewZoomAction = action.id;
-  button.textContent = action.labelKey ? t(action.labelKey) : action.label;
   const title = action.titleKey ? t(action.titleKey) : action.title;
-  button.title = title;
-  button.setAttribute('aria-label', title);
-  return button;
+  return makeButton({
+    dataset: {previewZoomAction: action.id},
+    label: action.labelKey ? t(action.labelKey) : action.label,
+    title,
+    ariaLabel: title,
+  });
 }
 
 function previewZoomReadState(options = {}) {

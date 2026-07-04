@@ -2140,7 +2140,10 @@ function scheduleFileEditorSplitScrollSync(host, source) {
 const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
-  return Number(panel?._previewLayoutScrollUntil || 0) > nowMs() ? 'editor' : 'preview';
+  const layoutSyncActive = Number(panel?._previewLayoutScrollUntil || 0) > nowMs();
+  return layoutSyncActive && fileEditorPanelMode(panel) === 'split' && fileEditorSourceCanDrive(panel, 'editor')
+    ? 'editor'
+    : 'preview';
 }
 
 function scheduleFileEditorPreviewLayoutSync(panel) {

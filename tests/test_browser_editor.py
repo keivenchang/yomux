@@ -4,7 +4,10 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     css = app_css()
     page = tmp_path / "diff-active-line-fill.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 20px; background: #0f1115; color: #dfe6ef; }}
@@ -24,9 +27,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
             </div></div>
           </div>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         function bg(selector) {
@@ -78,7 +79,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -121,7 +122,10 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
         separators=(",", ":"),
     )
     page = tmp_path / "readme-diff-race.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -195,13 +199,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 return originalLoadCodeMirrorApi.apply(this, args);
               }};
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 120; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const waitFor = window.__yolomuxTestWaitFor;
               renderFileEditorPanel(panel, item);
               await waitFor(() => window.__resolveReadmeDiffFetch);
               await frame();
@@ -252,9 +250,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -274,7 +270,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -306,7 +302,10 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "clean-diff-button-race.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -369,13 +368,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 120; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const waitFor = window.__yolomuxTestWaitFor;
               const snapshot = () => {{
                 const button = panel.querySelector('.file-editor-diff-panel');
                 const refs = panel.querySelector('.file-editor-diff-ref-panel');
@@ -420,9 +413,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -455,7 +446,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
 
 def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_path):
     css = app_css()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -470,7 +461,10 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
         separators=(",", ":"),
     )
     page = tmp_path / "preview-toolbar.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -536,9 +530,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__previewToolbarReady != null")
     )
@@ -570,12 +562,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
 
 
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
-    page = tmp_path / "preview-direct-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         const mount = document.getElementById('grid');
@@ -758,12 +745,7 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
 
 
 def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
-    page = tmp_path / "preview-direct-mermaid-source.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -861,12 +843,7 @@ def _wcag_contrast(c1, c2):
 
 def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
     browser.set_window_size(1200, 900)
-    page = tmp_path / "preview-direct-mermaid-real-bundle.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     mermaid_uri = (REPO_ROOT / "static" / "vendor" / "mermaid.min.js").as_uri()
     mermaid_source = (REPO_ROOT / "docs" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
@@ -882,6 +859,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             (async () => {
               try {
                 const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const waitFor = window.__yolomuxTestWaitFor;
                 const waitImage = image => new Promise(resolve => {
                   if (!image) {
                     resolve(false);
@@ -1001,9 +979,10 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             await frame();
             // Wait for the zoom surface to reveal (measuring class cleared) so geometry/pixels are
             // sampled at the settled size, not a transient pre-settle size that is hidden anyway.
-            for (let i = 0; i < 50 && splitPreview.classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
-              await new Promise(resolve => setTimeout(resolve, 16));
-            }
+            await waitFor(
+              () => !splitPreview.classList.contains('file-editor-preview-zoom-measuring'),
+              {description: 'split Mermaid zoom measurement'}
+            );
             await frame();
             const splitMeasuring = splitPreview.classList.contains('file-editor-preview-zoom-measuring');
             const splitViewport = splitPreview.querySelector('.file-editor-preview-zoom-viewport');
@@ -1160,9 +1139,10 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                 const bp = panel.querySelector('.file-editor-preview-pane-panel');
                 renderEditorPreviewPane(bp, path, mermaidSource, {context: 'split'});
                 if (bp._previewAsync) await bp._previewAsync;
-                for (let i = 0; i < 60 && bp.querySelector('.file-editor-preview-zoom-shell') && bp.querySelector('.file-editor-preview-zoom-shell').classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
-                  await new Promise(resolve => setTimeout(resolve, 16));
-                }
+                await waitFor(() => {
+                  const shell = bp.querySelector('.file-editor-preview-zoom-shell');
+                  return !shell || !shell.classList.contains('file-editor-preview-zoom-measuring');
+                }, {description: 'bright Mermaid zoom measurement'});
                 const bImg = bp.querySelector('img.mermaid-preview-image');
                 await waitImage(bImg);
                 const bTxt = bImg && bImg.src ? await readBlobText(bImg.src) : '';
@@ -1296,12 +1276,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
 
 
 def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_path):
-    page = tmp_path / "preview-sniffed-binary.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1364,12 +1339,7 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
 
 
 def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_path):
-    page = tmp_path / "preview-registry-structured-table.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         const mount = document.getElementById('grid');
@@ -1520,12 +1490,7 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
 
 
 def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
-    page = tmp_path / "preview-markdown-media-mermaid.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1747,12 +1712,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
 
 
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
-    page = tmp_path / "preview-markdown-split-scroll-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=920, grid_height=620), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=920, grid_height=620)
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1926,12 +1886,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
 
 def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser, tmp_path):
     browser.set_window_size(1200, 1200)
-    page = tmp_path / "preview-markdown-visual-mermaid-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=1000, grid_height=980), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=1000, grid_height=980)
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2119,12 +2074,7 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
 
 
 def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
-    page = tmp_path / "preview-popout-media-mermaid.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2223,12 +2173,7 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
 
 
 def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
-    page = tmp_path / "preview-popout-zoom-controls.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2425,12 +2370,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
 
 
 def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):
-    page = tmp_path / "markdown-task-checkbox-split.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2472,13 +2412,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = async predicate => {
-              for (let attempt = 0; attempt < 160; attempt += 1) {
-                if (predicate()) return true;
-                await frame();
-              }
-              return false;
-            };
+            const waitFor = window.__yolomuxTestWaitFor;
             const ready = await waitFor(() => panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length === 2 && panel._cmView?.state?.doc?.toString?.().includes('first task'));
             const before = {
               ready,
@@ -2528,12 +2462,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
 
 
 def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser, tmp_path):
-    page = tmp_path / "preview-yellow-callout.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         document.body.classList.remove('theme-light', 'editor-theme-light');
@@ -2732,7 +2661,10 @@ python -V
 
 def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(browser, tmp_path):
     page = tmp_path / "preview-code-block-bg.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{app_css()}</style></head>
         <body class="theme-dark editor-theme-dark">
           <div class="file-editor-content">
@@ -2744,9 +2676,7 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
             </article>
           </div>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const preview = document.querySelector('#preview');
@@ -2787,17 +2717,12 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
 
 
 def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
-    page = tmp_path / "preview-popout-sync.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"appearance": {"preview_font_size": 16}},
-            sessions=["1"],
-        ),
-        encoding="utf-8",
-    )
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1",
+        settings={"appearance": {"preview_font_size": 16}},
+        sessions=["1"],
     )
     metrics = browser.execute_async_script(
         """
@@ -2805,15 +2730,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             (async () => {
               try {
                 const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-                const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-                const waitFor = async (predicate, timeoutMs = 1500) => {
-                  const deadline = performance.now() + timeoutMs;
-                  while (performance.now() < deadline) {
-                    if (predicate()) return true;
-                    await frame();
-                  }
-                  return predicate();
-                };
+                const waitFor = window.__yolomuxTestWaitFor;
+                const waitForScrollSyncReady = (...records) => waitFor(
+                  () => records.every(record => !fileEditorScrollSyncBlocked(record)),
+                  {timeoutMs: 500, description: 'editor scroll-sync readiness'}
+                );
                 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -2996,14 +2917,15 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupValue: popupValue(),
               editorValue: editorValue(),
             };
-            popupThemeButton().click();
-            await frame();
-            await frame();
-            const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
-            previewPane.scrollTop = Math.round(maxScrollTop(previewPane) * 0.38);
-            previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
-            await frame();
-            await frame();
+                popupThemeButton().click();
+                await frame();
+                await frame();
+                const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+                panel._previewLayoutScrollUntil = performance.now() + fileEditorPreviewLayoutScrollSyncMs;
+                previewPane.scrollTop = Math.round(maxScrollTop(previewPane) * 0.38);
+                previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+                await frame();
+                await frame();
             const afterEditorScroll = {
               previewTop: previewPane.scrollTop,
               popupTop: popupScroller().scrollTop,
@@ -3012,7 +2934,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(previewPane),
               popupCenterRatio: visibleCenterRatio(popupScroller()),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             previewPane.scrollTop = 0;
             previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3021,7 +2943,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: previewPane.scrollTop,
               popupTop: popupScroller().scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             previewPane.scrollTop = maxScrollTop(previewPane);
             previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3032,7 +2954,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupTop: popupScroller().scrollTop,
               popupMax: maxScrollTop(popupScroller()),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const popupBefore = popupScroller().scrollTop;
             popupScroller().scrollTop = Math.round(maxScrollTop(popupScroller()) * 0.61);
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
@@ -3049,7 +2971,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(previewPane),
               headerTop: snapshotGeometry().headerTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             popupScroller().scrollTop = 0;
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
@@ -3059,7 +2981,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupTop: popupScroller().scrollTop,
               previewTop: previewPane.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             popupScroller().scrollTop = maxScrollTop(popupScroller());
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
@@ -3110,7 +3032,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: editorScroller?.scrollTop || 0,
               editorMax: maxScrollTop(editorScroller),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const splitPath = '/home/test/repo/SPLIT_SCROLL.md';
             const splitTail = Array.from({length: 120}, (_, index) => `Split paragraph ${index + 1} smooth scroll text`).join('\\n\\n');
             const splitOriginal = `# Split Scroll\n\n${splitTail}\n`;
@@ -3155,7 +3077,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorCenterRatio: visibleCenterRatio(splitEditorScroller),
               previewCenterRatio: visibleCenterRatio(splitPreviewPane),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitEditorScroller.scrollTop = 0;
             splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3164,7 +3086,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: splitEditorScroller.scrollTop,
               previewTop: splitPreviewPane.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitEditorScroller.scrollTop = maxScrollTop(splitEditorScroller);
             splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3175,7 +3097,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: splitPreviewPane.scrollTop,
               previewMax: maxScrollTop(splitPreviewPane),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = Math.round(maxScrollTop(splitPreviewPane) * 0.63);
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3186,7 +3108,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(splitPreviewPane),
               editorCenterRatio: visibleCenterRatio(splitEditorScroller),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = 0;
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3195,7 +3117,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: splitPreviewPane.scrollTop,
               editorTop: splitEditorScroller.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = maxScrollTop(splitPreviewPane);
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3346,17 +3268,12 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
 
 
 def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_path):
-    page = tmp_path / "editor-preview-shared-light-syntax.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"appearance": {"preview_font_size": 16}},
-            sessions=["1"],
-        ),
-        encoding="utf-8",
-    )
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1",
+        settings={"appearance": {"preview_font_size": 16}},
+        sessions=["1"],
     )
     metrics = browser.execute_async_script(
         """
@@ -3587,7 +3504,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
 
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
     css = app_css()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3602,7 +3519,10 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "preview-vanilla.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -3666,9 +3586,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__previewVanillaReady != null")
     )
@@ -3690,7 +3608,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3706,7 +3624,10 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
         separators=(",", ":"),
     )
     page = tmp_path / "markdown-edit-color.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -3780,9 +3701,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -3809,7 +3728,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
 def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3825,7 +3744,10 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
         separators=(",", ":"),
     )
     page = tmp_path / "editor-search-toggle.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -3860,13 +3782,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 160; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const waitFor = window.__yolomuxTestWaitFor;
               await waitFor(() => panel._cmView && panel.querySelector('.file-editor-find-panel')?.hidden === false);
               const button = panel.querySelector('.file-editor-find-panel');
               const before = {{
@@ -3892,9 +3808,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -3915,7 +3829,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
 def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3931,7 +3845,10 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "long-markdown-editor-scroll.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -3966,13 +3883,7 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
               const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 180; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const waitFor = window.__yolomuxTestWaitFor;
               const ready = await waitFor(() => {{
                 const scroller = panel._cmView?.scrollDOM;
                 return scroller && scroller.scrollHeight > scroller.clientHeight * 3;
@@ -4003,9 +3914,7 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

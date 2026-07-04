@@ -67,7 +67,7 @@ async function openFileExplorerAt(path, options = {}) {
 }
 
 function resetFileExplorerAppliedSyncPlan() {
-  fileExplorerLastAppliedSyncPlanKey = '';
+  fileExplorerSyncState.appliedPlanKey = '';
 }
 
 async function saveFileExplorerRootMode(mode) {
@@ -81,10 +81,7 @@ async function saveFileExplorerRootMode(mode) {
 // second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
-const fileExplorerDirListingCache = new Map();
-const fileExplorerDirListingInflight = new Map();
-const fileExplorerPathInfoCache = new Map();
-const fileExplorerPathInfoInflight = new Map();
+const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
@@ -165,6 +162,80 @@ function fileExplorerFsCacheTtlMs() {
 
 function fileExplorerFsBatchKey(type, path) {
   return `${type}\x1f${normalizeDirectoryPath(path)}`;
+}
+
+function fileExplorerFsResourceRecord(type, path) {
+  const key = fileExplorerFsBatchKey(type, path);
+  let record = fileExplorerFsResourceRecords.get(key);
+  if (!record) {
+    record = {value: undefined, storedAt: 0, request: null, generation: 0};
+    setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
+  }
+  return {key, record};
+}
+
+function fileExplorerFsResourceCurrent(key, record, generation) {
+  return fileExplorerFsResourceRecords.get(key) === record && record.generation === generation;
+}
+
+function setFileExplorerFsResourceValue(type, path, value) {
+  const {record} = fileExplorerFsResourceRecord(type, path);
+  record.generation += 1;
+  record.request = null;
+  record.value = value;
+  record.storedAt = Date.now();
+  return value;
+}
+
+function fileExplorerFsResourceHasValue(type, path) {
+  const record = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey(type, path));
+  return record?.value !== undefined;
+}
+
+function invalidateFileExplorerFsResourceRecord(key, record) {
+  record.generation += 1;
+  record.value = undefined;
+  record.storedAt = 0;
+  record.request = null;
+  if (fileExplorerFsResourceRecords.get(key) === record) fileExplorerFsResourceRecords.delete(key);
+}
+
+function requestFileExplorerFsResource(type, path, options, makeRequest, lifecycle = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const canReuse = options.fresh !== true;
+  const {key, record} = fileExplorerFsResourceRecord(type, normalized);
+  const cacheTtlMs = fileExplorerFsCacheTtlMs();
+  if (canReuse && cacheTtlMs > 0 && record.value !== undefined && Date.now() - record.storedAt < cacheTtlMs) {
+    lifecycle.onReuse?.(record.value);
+    return Promise.resolve(record.value);
+  }
+  if (canReuse && record.request) return record.request;
+  if (lifecycle.skipRequest?.() === true) {
+    lifecycle.onSkip?.();
+    return Promise.resolve(lifecycle.skipValue);
+  }
+  record.generation += 1;
+  const generation = record.generation;
+  let request = null;
+  request = (async () => {
+    try {
+      const value = await makeRequest();
+      if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
+        record.value = value;
+        record.storedAt = Date.now();
+        lifecycle.onPublish?.(value);
+      }
+      return value;
+    } catch (error) {
+      if (fileExplorerFsResourceCurrent(key, record, generation)) lifecycle.onError?.(error);
+      if (Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue')) return lifecycle.errorValue;
+      throw error;
+    } finally {
+      if (fileExplorerFsResourceCurrent(key, record, generation) && record.request === request) record.request = null;
+    }
+  })();
+  record.request = request;
+  return request;
 }
 
 function fileExplorerFsBatchSingleUrl(type, path) {
@@ -254,35 +325,22 @@ async function flushFileExplorerFsBatch() {
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  const canReuse = options.fresh !== true;
-  const dirListingTtlMs = fileExplorerFsCacheTtlMs();
-  if (canReuse && dirListingTtlMs > 0) {
-    const cached = fileExplorerDirListingCache.get(root);
-    if (cached && Date.now() - cached.at < dirListingTtlMs) {
-      clearFileExplorerListError(root);
-      return cached.entries;
-    }
-  }
-  if (fileExplorerPushRefreshDepth > 0) {
-    clearFileExplorerListError(root);
-    return null;
-  }
-  if (suppressBackgroundFilesystemFetch(options)) {
-    clearFileExplorerListError(root);
-    return null;
-  }
-  return dedupeInflight(fileExplorerDirListingInflight, root, canReuse, () => (async () => {
-    try {
+  return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
-      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: canReuse});
-      const entries = payload.entries || [];
+      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: options.fresh !== true});
+      return payload.entries || [];
+    }, {
+      onReuse: () => clearFileExplorerListError(root),
+      skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
+      onSkip: () => clearFileExplorerListError(root),
+      skipValue: null,
+      onPublish: entries => {
       clearFileExplorerListError(root);
       cacheFileExplorerRepoInfoEntries(root, entries);
       markNewDirectoryEntries(root, entries);
       if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-      setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
-      return entries;
-    } catch (err) {
+      },
+      onError: err => {
       const status = Number(err?.status) || 0;
       const openFailed = t('preview.openFailed', {path: root});
       fileExplorerPathError = status
@@ -290,15 +348,18 @@ async function fetchDirectory(path, options = {}) {
         : `${openFailed}: ${err}`;
       setFileExplorerListError(root, err, status);
       console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
-      return null;
-    }
-  })());
+      },
+      errorValue: null,
+    });
 }
 
 function invalidateFileExplorerFsCaches() {
-  fileExplorerDirListingCache.clear();
-  fileExplorerPathInfoCache.clear();
-  fileExplorerDirectorySignatures.clear();
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    invalidateFileExplorerFsResourceRecord(key, record);
+  }
+  for (const [root, record] of Array.from(fileExplorerDirectoryRecords.entries())) {
+    updateFileExplorerDirectoryRecord(root, {signature: undefined}, record);
+  }
 }
 
 function invalidateFileExplorerRoots(roots = []) {
@@ -308,16 +369,11 @@ function invalidateFileExplorerRoots(roots = []) {
     .map(root => normalizeDirectoryPath(root));
   if (!normalizedRoots.length) return false;
   const shouldDrop = path => normalizedRoots.some(root => pathIsInsideDirectory(path, root));
-  for (const cache of [
-    fileExplorerDirListingCache,
-    fileExplorerPathInfoCache,
-    fileExplorerDirectorySignatures,
-    fileExplorerKnownEntryNames,
-    fileExplorerNewEntryUntil,
-  ]) {
-    for (const key of Array.from(cache.keys())) {
-      if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
-    }
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    if (shouldDrop(normalizeDirectoryPath(key.split('\x1f').at(-1)))) invalidateFileExplorerFsResourceRecord(key, record);
+  }
+  for (const cache of [fileExplorerDirectoryRecords, fileExplorerNewEntryUntil]) {
+    for (const key of Array.from(cache.keys())) if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
   }
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
@@ -334,7 +390,7 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     cacheFileExplorerRepoInfoEntries(path, entries);
     markNewDirectoryEntries(path, entries);
     recordDirectorySignature(path, entries);
-    setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
+    setFileExplorerFsResourceValue('list', path, entries);
   }
   return entriesByDir;
 }
@@ -440,7 +496,7 @@ async function refreshFileExplorerFromPush(payload = {}) {
         });
       }
       const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
-      if (openFileDirs.every(path => fileExplorerDirListingCache.has(path))) await refreshOpenFilesIfChanged();
+      if (openFileDirs.every(path => fileExplorerFsResourceHasValue('list', path))) await refreshOpenFilesIfChanged();
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
     }
@@ -470,8 +526,23 @@ function directoryEntriesSignature(entries) {
     .join('\x1e');
 }
 
+function fileExplorerDirectoryRecord(path) {
+  return fileExplorerDirectoryRecords.get(normalizeDirectoryPath(path)) || null;
+}
+
+function updateFileExplorerDirectoryRecord(path, patch = {}, existing = fileExplorerDirectoryRecord(path)) {
+  const root = normalizeDirectoryPath(path);
+  const next = {
+    signature: existing?.signature,
+    knownEntryNames: existing?.knownEntryNames || null,
+    ...patch,
+  };
+  setLimitedMapEntry(fileExplorerDirectoryRecords, root, next, fileExplorerMemoryCacheLimit);
+  return next;
+}
+
 function recordDirectorySignature(path, entries) {
-  setLimitedMapEntry(fileExplorerDirectorySignatures, normalizeDirectoryPath(path), directoryEntriesSignature(entries), fileExplorerMemoryCacheLimit);
+  updateFileExplorerDirectoryRecord(path, {signature: directoryEntriesSignature(entries)});
 }
 
 function pruneExpiredNewFileEntries(now = Date.now()) {
@@ -483,7 +554,8 @@ function pruneExpiredNewFileEntries(now = Date.now()) {
 function markNewDirectoryEntries(path, entries) {
   const root = normalizeDirectoryPath(path);
   const names = new Set((Array.isArray(entries) ? entries : []).map(entry => entry?.name).filter(Boolean));
-  const previous = fileExplorerKnownEntryNames.get(root);
+  const record = fileExplorerDirectoryRecord(root);
+  const previous = record?.knownEntryNames;
   const now = Date.now();
   pruneExpiredNewFileEntries(now);
   if (previous && fileExplorerNewEntryHighlightMs > 0) {
@@ -491,7 +563,7 @@ function markNewDirectoryEntries(path, entries) {
       if (!previous.has(name)) setLimitedMapEntry(fileExplorerNewEntryUntil, childPath(root, name), now + fileExplorerNewEntryHighlightMs, fileExplorerMemoryCacheLimit);
     }
   }
-  setLimitedMapEntry(fileExplorerKnownEntryNames, root, names, fileExplorerMemoryCacheLimit);
+  updateFileExplorerDirectoryRecord(root, {knownEntryNames: names}, record);
 }
 
 function fileExplorerEntryIsNew(path) {
@@ -662,18 +734,19 @@ function renderQuickAccessInto(container) {
   container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
     const expanded = normalizeDirectoryPath(expandQuickAccessPath(path));
     const active = !sync && expanded === currentRoot;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'file-explorer-quick-access-button';
-    button.textContent = displayQuickAccessPath(path);
-    button.title = t('finder.quickAccess.openPath', {path});
-    button.dataset.quickPath = path;
-    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      openFileExplorerQuickAccessPath(path);
+    const title = t('finder.quickAccess.openPath', {path});
+    const button = makeButton({
+      className: 'file-explorer-quick-access-button',
+      label: displayQuickAccessPath(path),
+      title,
+      dataset: {quickPath: path},
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openFileExplorerQuickAccessPath(path);
+      },
     });
+    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
     return button;
   }));
 }
@@ -731,7 +804,7 @@ function tmuxDirectoryForItem(item) {
 
 function tmuxGitRootForItem(item) {
   if (!isTmuxSession(item)) return '';
-  const root = transcriptMeta.sessions?.[item]?.project?.git?.root || '';
+  const root = transcriptMetadataState.payload.sessions?.[item]?.project?.git?.root || '';
   return root ? normalizeDirectoryPath(root) : '';
 }
 
@@ -770,7 +843,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesPayload?.session || '');
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -815,16 +888,30 @@ function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerE
     ));
 }
 
+function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) {
+  const key = String(targetKey || '');
+  if (!key) return null;
+  let record = fileExplorerSyncTargetRecords.get(key) || null;
+  if (!record && create) {
+    record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+  }
+  if (record && (touch || !fileExplorerSyncTargetRecords.has(key))) {
+    setLimitedMapEntry(fileExplorerSyncTargetRecords, key, record, fileExplorerMemoryCacheLimit);
+  }
+  return record;
+}
+
 function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSyncSession, root = fileExplorerVisibleSyncRoot) {
   if (fileExplorerRootMode !== 'sync') return;
   const key = fileExplorerSyncTargetKey(session, root);
   if (!key) return;
-  setLimitedMapEntry(fileExplorerExpandedBySyncTarget, key, fileExplorerExpandedPathsForRoot(root), fileExplorerMemoryCacheLimit);
+  const record = fileExplorerSyncTargetRecord(key, true, true);
+  record.expandedPaths = fileExplorerExpandedPathsForRoot(root);
 }
 
 function rememberedFileExplorerSyncExpandedPaths(session, root) {
   const key = fileExplorerSyncTargetKey(session, root);
-  const paths = key ? fileExplorerExpandedBySyncTarget.get(key) : null;
+  const paths = fileExplorerSyncTargetRecord(key)?.expandedPaths;
   return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
 }
 
@@ -833,7 +920,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesPayload) {
+function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -851,7 +938,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesPayload) {
+function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -934,7 +1021,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -988,12 +1075,12 @@ function fileExplorerSyncPlanKey(plan) {
 function fileExplorerSyncPlanAlreadyApplied(plan) {
   const key = fileExplorerSyncPlanKey(plan);
   return Boolean(key)
-    && key === fileExplorerLastAppliedSyncPlanKey
+    && key === fileExplorerSyncState.appliedPlanKey
     && normalizeDirectoryPath(plan.root) === normalizeDirectoryPath(currentFileExplorerRoot());
 }
 
 function markFileExplorerSyncPlanApplied(plan) {
-  fileExplorerLastAppliedSyncPlanKey = fileExplorerSyncPlanKey(plan);
+  fileExplorerSyncState.appliedPlanKey = fileExplorerSyncPlanKey(plan);
 }
 
 function fileExplorerSyncManualCollapseKey(plan) {
@@ -1002,15 +1089,19 @@ function fileExplorerSyncManualCollapseKey(plan) {
 
 function rememberFileExplorerSyncManualCollapseState(targetKey = fileExplorerSyncManualCollapseTargetKey) {
   if (!targetKey) return;
-  setLimitedMapEntry(fileExplorerSyncManualCollapsedByTarget, targetKey, Array.from(fileExplorerSyncManualCollapsedPaths), fileExplorerMemoryCacheLimit);
+  const record = fileExplorerSyncTargetRecord(targetKey, true, true);
+  record.manualCollapsedPaths = fileExplorerSyncManualCollapsedPaths;
 }
 
 function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
   const targetKey = fileExplorerSyncManualCollapseKey(plan);
   if (targetKey !== fileExplorerSyncManualCollapseTargetKey) {
+    let record = fileExplorerSyncTargetRecord(targetKey);
     rememberFileExplorerSyncManualCollapseState();
     fileExplorerSyncManualCollapseTargetKey = targetKey;
-    fileExplorerSyncManualCollapsedPaths = new Set(fileExplorerSyncManualCollapsedByTarget.get(targetKey) || []);
+    if (!record && targetKey) record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    if (record) setLimitedMapEntry(fileExplorerSyncTargetRecords, targetKey, record, fileExplorerMemoryCacheLimit);
+    fileExplorerSyncManualCollapsedPaths = record?.manualCollapsedPaths || new Set();
   }
   return targetKey;
 }
@@ -1111,7 +1202,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesPayload;
+  const payload = fileExplorerSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -1470,12 +1561,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const syncPlan = fileSyncPath ? fileExplorerSyncPlanForFile(fileSyncPath) : fileExplorerSyncPlan(syncItem);
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
-  const staleInFlightSync = Boolean(fileExplorerSyncPathInFlight && fileExplorerSyncPathInFlight !== syncSignature);
+  const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
     && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
-    && fileExplorerSyncPathInFlight !== syncSignature
+    && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
     const interactionGeneration = fileExplorerInteractionGeneration;
@@ -1504,8 +1595,8 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
 function cancelPendingFileExplorerActiveSync(options = {}) {
   fileExplorerInteractionGeneration += 1;
   if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
-  fileExplorerSyncGeneration += 1;
-  fileExplorerSyncPathInFlight = '';
+  fileExplorerSyncState.generation += 1;
+  fileExplorerSyncState.inFlightSignature = '';
   resetFileExplorerAppliedSyncPlan();
 }
 
@@ -1529,14 +1620,14 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
-  if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
+  if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     updateFileExplorerSessionHighlightRows(preferredItem);
     return false;
   }
-  fileExplorerSyncPathInFlight = signature;
+  fileExplorerSyncState.inFlightSignature = signature;
   try {
     let changed = false;
     const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
@@ -1568,9 +1659,9 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     }
     if (expandPaths.length) {
-      const generation = ++fileExplorerSyncGeneration;
+      const generation = ++fileExplorerSyncState.generation;
       for (const path of expandPaths) {
-        if (generation !== fileExplorerSyncGeneration) return changed;
+        if (generation !== fileExplorerSyncState.generation) return changed;
         changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
         if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
       }
@@ -1581,7 +1672,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     updateFileExplorerSessionHighlightRows(preferredItem);
     return changed;
   } finally {
-    if (fileExplorerSyncPathInFlight === signature) fileExplorerSyncPathInFlight = '';
+    if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
 }
 
@@ -1590,15 +1681,15 @@ async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
-  if (!path || fileExplorerSyncPathInFlight === path) return false;
+  if (!path || fileExplorerSyncState.inFlightSignature === path) return false;
   const root = currentFileExplorerRoot();
   if (!pathIsInsideDirectory(path, root) || path === root) return false;
-  fileExplorerSyncPathInFlight = path;
-  const generation = ++fileExplorerSyncGeneration;
+  fileExplorerSyncState.inFlightSignature = path;
+  const generation = ++fileExplorerSyncState.generation;
   try {
     return await expandFileExplorerTreesToPath(path, root, generation);
   } finally {
-    if (fileExplorerSyncPathInFlight === path) fileExplorerSyncPathInFlight = '';
+    if (fileExplorerSyncState.inFlightSignature === path) fileExplorerSyncState.inFlightSignature = '';
   }
 }
 
@@ -1747,12 +1838,12 @@ function scrollFileTreeRowIntoView(container, row) {
   return true;
 }
 
-async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncGeneration, options = {}) {
+async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncState.generation, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
   const rendered = await ensureFileTreeRootRendered(container, root);
   if (!rendered) return false;
-  if (generation !== fileExplorerSyncGeneration) return false;
+  if (generation !== fileExplorerSyncState.generation) return false;
   let scope = container;
   let parent = root;
   let row = null;
@@ -1771,7 +1862,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
         return false;
       }
       const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
-      if (generation !== fileExplorerSyncGeneration) return false;
+      if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
         scope = childScope;
@@ -1782,18 +1873,18 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
     parent = fullPath;
   }
   await nextAnimationFrame();
-  if (generation !== fileExplorerSyncGeneration) return false;
+  if (generation !== fileExplorerSyncState.generation) return false;
   if (options.scrollIntoView !== false) scrollFileTreeRowIntoView(container, row);
   updateFileExplorerCurrentFileHighlight();
   return Boolean(row);
 }
 
-async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration, options = {}) {
+async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncState.generation, options = {}) {
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
   setFileExplorerPathDisplay(root);
   for (const container of fileExplorerTreeContainers()) {
-    if (generation !== fileExplorerSyncGeneration) return false;
+    if (generation !== fileExplorerSyncState.generation) return false;
     expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
   }
   return expanded;
@@ -1804,9 +1895,9 @@ async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplore
     .filter(path => pathIsInsideDirectory(path, root) && path !== root)
     .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path))
     .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   for (const path of expandedPaths) {
-    if (generation !== fileExplorerSyncGeneration) return false;
+    if (generation !== fileExplorerSyncState.generation) return false;
     await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
   }
   return true;
@@ -1817,7 +1908,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -1831,7 +1922,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -1899,12 +1990,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
+  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
@@ -2551,9 +2642,7 @@ function bindFinderRowHandlers(row, state) {
   };
   row.ondragend = () => {
     row.__fileTreeDragging = false;
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
+    cancelDragOperationState();
   };
 }
 
@@ -2751,10 +2840,10 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   updateFileExplorerCurrentFileHighlight();
   if (!fileExplorerIsOpen() || !pathIsInsideDirectory(target, root)) return;
   if (!fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'))) return;
-  const generation = ++fileExplorerSyncGeneration;
+  const generation = ++fileExplorerSyncState.generation;
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
   schedule(() => {
-    if (generation !== fileExplorerSyncGeneration) return;
+    if (generation !== fileExplorerSyncState.generation) return;
     expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
       console.warn('Finder active file reveal failed', error);
     });
@@ -3579,16 +3668,18 @@ function tabberActivityPayloadIsRefreshPlaceholder(payload) {
 
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (!payload || typeof payload !== 'object' || !payload.activity || typeof payload.activity !== 'object') return false;
-  const generation = Number(requestGeneration) || 0;
-  if (generation > 0 && generation < tabberActivityAppliedRequestGeneration) return false;
+  // Generation zero denotes a direct/pushed snapshot rather than an HTTP completion. Give it a new
+  // generation so any request started before that snapshot cannot roll the cache back afterward.
+  const generation = Number(requestGeneration) || ++tabberActivityState.requestGeneration;
+  if (generation > 0 && generation < tabberActivityState.appliedGeneration) return false;
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
-  tabberActivityLoaded = true;
+  tabberActivityState.loaded = true;
   // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
-  if (!refreshPlaceholder && generation > tabberActivityAppliedRequestGeneration) {
-    tabberActivityAppliedRequestGeneration = generation;
+  if (!refreshPlaceholder && generation > tabberActivityState.appliedGeneration) {
+    tabberActivityState.appliedGeneration = generation;
   }
   return true;
 }
@@ -3596,9 +3687,9 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
 async function fetchTabberActivity(options = {}) {
   const visible = options.visible !== undefined ? Boolean(options.visible) : tabberActivityVisibleConsumer();
   if (!visible && options.allowHidden !== true) return false;
-  if (tabberActivityFetchPromise) return tabberActivityFetchPromise;
-  const requestGeneration = ++tabberActivityRequestGeneration;
-  tabberActivityFetchPromise = (async () => {
+  if (tabberActivityState.request) return tabberActivityState.request;
+  const requestGeneration = ++tabberActivityState.requestGeneration;
+  const request = (async () => {
     try {
       const params = new URLSearchParams();
       params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
@@ -3608,17 +3699,20 @@ async function fetchTabberActivity(options = {}) {
     } catch (_) {
       // Keep the last snapshot; the interval retries without a render-triggered request loop.
     } finally {
-      tabberActivityLoaded = true;
-      tabberActivityFetchPromise = null;
+      if (tabberActivityState.request === request) {
+        tabberActivityState.loaded = true;
+        tabberActivityState.request = null;
+      }
     }
     if (fileExplorerMode === 'tabber') refreshTabberPanels();
     return true;
   })();
-  return tabberActivityFetchPromise;
+  tabberActivityState.request = request;
+  return request;
 }
 
 function warmTabberDataOnLaunch() {
-  if (tabberLaunchWarmupStarted || !transcriptMetaLoaded || !tabberActivityVisibleConsumer()) return false;
+  if (tabberLaunchWarmupStarted || !transcriptMetadataState.loaded || !tabberActivityVisibleConsumer()) return false;
   tabberLaunchWarmupStarted = true;
   fetchTabberActivity();
   return true;
@@ -3733,15 +3827,15 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
 
 // Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
 function tabberOrderedSessions() {
-  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
-  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
+  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const ordered = [];
   for (const session of [...order, ...all]) {
     if (seen.has(session)) continue;
     seen.add(session);
     if (!isTmuxSession(session)) continue;
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     if (!Array.isArray(info?.panes) || !info.panes.length) continue;
     ordered.push(session);
   }
@@ -3756,7 +3850,7 @@ function tabberWindowIsAgent(name) {
 function tabberAgentSessions() {
   const sessions = [];
   for (const session of tabberOrderedSessions()) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     if (tmuxWindowRecords(info?.panes).some(record => tabberWindowIsAgent(record.name))) sessions.push(session);
   }
   return sessions;
@@ -3765,7 +3859,7 @@ function tabberAgentSessions() {
 function ensureTabberSessionFilesFetches() {
   // Agent-window paths now come from the cached /api/activity agent_windows payload.
   // The session-files fetchers remain for the modified-files UI and focused tests.
-  if (!tabberActivityLoaded && !tabberActivityFetchPromise) fetchTabberActivity();
+  if (!tabberActivityState.loaded && !tabberActivityState.request) fetchTabberActivity();
 }
 
 function tabberRepoEntriesForAgentWindow(agent, session, windowIndex) {
@@ -3802,7 +3896,7 @@ function buildTabberTree() {
   const visibleItems = new Set(activePaneItems());
   const focusedItem = visualActivePaneItem();
   tabberOrderedSessions().forEach(session => {
-    const info = transcriptMeta.sessions?.[session] || {};
+    const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
     const git = info?.project?.git;
@@ -3991,7 +4085,7 @@ function tabberWindowButtonHtml(data, label) {
 function tabberSessionChromeHtml(data) {
   const classes = ['tabber-session-tab', 'session-popover-host'];
   const session = String(data.session || '').trim();
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const agentKind = sessionAgentKind(session);
@@ -4057,7 +4151,7 @@ function tabberNativeDragImageForRow(row) {
   else preview.style.width = `${width}px`;
   for (const item of rows) preview.appendChild(cloneTabberDragPreviewRow(item));
   document.body.appendChild(preview);
-  nativeDragImagePreview = preview;
+  dragState.nativePreview = preview;
   return preview;
 }
 
@@ -4066,7 +4160,7 @@ function bindTabberSessionChrome(row, session) {
   if (!tab || tab.dataset.tabberChromeBound === 'true') return;
   tab.dataset.tabberChromeBound = 'true';
   tab.dataset.paneTab = session;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
   applySessionStateClasses(tab, state);
   bindPaneTabPopover(tab, session);
@@ -4286,7 +4380,7 @@ function activeTabberRowPath() {
   if (!item || isFileExplorerItem(item)) return '';
   if (!isTmuxSession(item)) return tabberTabPath(item);
   const session = item;
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const override = tmuxWindowDisplayActiveIndex(session);
   if (override !== undefined) {
     return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);

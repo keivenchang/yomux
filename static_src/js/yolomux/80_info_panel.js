@@ -6,7 +6,7 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
   infoSessionFileLookbackHours = writeStoredInfoLookbackHours(hours);
   if (infoSessionFileLookbackHours !== previous) {
-    activitySummaryPayload = {...activitySummaryPayload, session_file_hours: infoSessionFileLookbackHours};
+    activitySummaryState.payload = {...activitySummaryState.payload, session_file_hours: infoSessionFileLookbackHours};
     if (options.refresh !== false) refreshActivitySummary({force: true, silent: options.silent === true});
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   }
@@ -203,7 +203,7 @@ function bindYoagentPanel(panel) {
     const input = form.querySelector('[data-yoagent-chat-input]');
     const value = input?.value || '';
     if (input) input.value = '';
-    yoagentDraft = '';
+    yoagentChatState.draft = '';
     resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
   });
@@ -218,7 +218,7 @@ function bindYoagentPanel(panel) {
     if (retry && panel.contains(retry)) {
       event.preventDefault();
       const input = panel.querySelector('[data-yoagent-chat-input]');
-      sendYoagentChatMessage(input?.value || yoagentDraft);
+      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
       return;
     }
     const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
@@ -266,8 +266,8 @@ function bindYoagentPanel(panel) {
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) {
-      yoagentDraft = input.value || '';
-      if (yoagentHistoryCursor === null) yoagentHistoryDraft = '';
+      yoagentChatState.draft = input.value || '';
+      if (yoagentChatState.historyCursor === null) yoagentChatState.historyDraft = '';
     }
   });
   panel.addEventListener('keydown', event => {
@@ -291,7 +291,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('common.refresh'), t('common.refresh'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
     } else {
       const label = t('common.refresh');
       refresh.textContent = label;

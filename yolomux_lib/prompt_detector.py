@@ -548,6 +548,8 @@ _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)
 _STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
 _STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
 _STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
+_VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS = 512
+_VISIBLE_STATUS_COUNTER_CACHE_IDLE_SECONDS = 30.0
 _VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
 _BOX_DRAWING_LABELLED_LINE_RE = re.compile(r"^\s*[─━═]{3,}\s+\S.*?\s+[─━═]+\s*$")
@@ -986,29 +988,55 @@ def _status_spinner_advanced(previous: dict[str, object] | None, current: dict[s
     return previous_marker in _WORKING_SPINNER_GLYPHS and current_marker in _WORKING_SPINNER_GLYPHS and previous_marker != current_marker
 
 
+def _prune_visible_status_counter_cache(now: float) -> None:
+    for target, record in tuple(_VISIBLE_STATUS_COUNTER_CACHE.items()):
+        last_seen_at = float(record.get("last_counter_seen_at") or record.get("first_seen_at") or now)
+        if 0 <= now - last_seen_at > _VISIBLE_STATUS_COUNTER_CACHE_IDLE_SECONDS:
+            _VISIBLE_STATUS_COUNTER_CACHE.pop(target, None)
+    while len(_VISIBLE_STATUS_COUNTER_CACHE) > _VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS:
+        oldest_target = next(iter(_VISIBLE_STATUS_COUNTER_CACHE), None)
+        if oldest_target is None:
+            break
+        _VISIBLE_STATUS_COUNTER_CACHE.pop(oldest_target, None)
+
+
+def _forget_visible_status_counter(pane_target: str | None, now: float) -> None:
+    _prune_visible_status_counter_cache(now)
+    if pane_target:
+        _VISIBLE_STATUS_COUNTER_CACHE.pop(pane_target, None)
+
+
+def _remember_visible_status_counter(pane_target: str, record: dict[str, object], now: float) -> None:
+    _VISIBLE_STATUS_COUNTER_CACHE.pop(pane_target, None)
+    _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = record
+    _prune_visible_status_counter_cache(now)
+
+
 def _status_counter_screen_state(counter: dict[str, object], pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
     now = time.monotonic() if now is None else now
     advanced = False
     stale = False
     last_counter_seen_at = now
     if pane_target:
+        _prune_visible_status_counter_cache(now)
         previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
         previous_counter = previous.get("counter") if previous else None
         advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
         spinner_advanced = _status_spinner_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
         previous_liveness = _status_counter_liveness_snapshot(previous_counter if isinstance(previous_counter, dict) else None)
         current_liveness = _status_counter_liveness_snapshot(counter)
-        if previous and previous_liveness == current_liveness and not advanced and not spinner_advanced:
-            last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
+        liveness_changed = bool(previous and previous_liveness != current_liveness)
+        last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now) if previous else now
+        if advanced or spinner_advanced or liveness_changed:
+            last_advanced_at = now
+        elif previous:
             stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
-            last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
-        if not stale:
-            _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = {
-                "counter": dict(counter),
-                "first_seen_at": previous.get("first_seen_at") if previous else now,
-                "last_advanced_at": now if advanced or spinner_advanced or not previous else previous.get("last_advanced_at", now),
-                "last_counter_seen_at": now,
-            }
+        _remember_visible_status_counter(pane_target, {
+            "counter": dict(counter),
+            "first_seen_at": previous.get("first_seen_at") if previous else now,
+            "last_advanced_at": last_advanced_at,
+            "last_counter_seen_at": now,
+        }, now)
     else:
         spinner_advanced = False
 
@@ -1460,6 +1488,10 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
     visible_text = normalize_capture_text(visible_text)
+    observation_now = time.monotonic() if now is None else now
+    counter = visible_agent_status_counter(visible_text)
+    if counter is None:
+        _forget_visible_status_counter(pane_target, observation_now)
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
     if prompt_type is not None:
@@ -1507,9 +1539,8 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
             "evidence_lines": _matching_evidence_lines(visible_text, None, completed_followup) or [completed_followup],
             "prompt_hash": _hash_prompt_parts(completed_followup),
         }
-    counter = visible_agent_status_counter(visible_text)
     if counter is not None:
-        return _status_counter_screen_state(counter, pane_target=pane_target, now=now)
+        return _status_counter_screen_state(counter, pane_target=pane_target, now=observation_now)
     if visible_agent_working(visible_text):
         return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)

@@ -32,6 +32,7 @@ from ..activity_summary import yoagent_context_lines
 from ..activity_summary import yoagent_question_requests_session_list
 from ..activity_summary import yoagent_question_requests_work_next
 from ..common import SessionInfo
+from ..common import start_thread_with_rollback
 from ..common import truncate_text
 from ..locales import message_fields
 from ..locales import message_descriptor
@@ -758,7 +759,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             message_params={"id": job_id},
         )
         self.deps.publish_yoagent_jobs_changed("yoagent_job_confirmed", public)
-        self.client_watch_wake_event.set()
+        self.wake_client_event_watcher()
         return {"ok": True, "job": self.deps.public_yoagent_job(public)}, HTTPStatus.OK
 
 
@@ -1993,14 +1994,24 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
     def start_yoagent_action_result_watcher(self, preview: dict[str, Any], marker: dict[str, Any]) -> dict[str, Any]:
         watch_id = f"yar_{secrets.token_urlsafe(10)}"
-        self.deps.register_yoagent_action_wait(watch_id, preview, marker)
+        pending = self.deps.register_yoagent_action_wait(watch_id, preview, marker)
         worker = threading.Thread(
             target=self.run_yoagent_action_result_watcher,
             kwargs={"preview": copy.deepcopy(preview), "marker": copy.deepcopy(marker), "watch_id": watch_id},
             name=f"yoagent-result-{watch_id}",
             daemon=True,
         )
-        worker.start()
+
+        def rollback() -> None:
+            removed = False
+            with self.yoagent_action_lock:
+                if self.yoagent_action_waits.get(watch_id) is pending:
+                    self.yoagent_action_waits.pop(watch_id, None)
+                    removed = True
+            if removed:
+                self.publish_yoagent_conversation_changed("yoagent_wait_start_failed")
+
+        start_thread_with_rollback(worker, rollback)
         return {"id": watch_id, "started": True, "wait_seconds": YOAGENT_ACTION_RESULT_WAIT_SECONDS}
 
 
@@ -2250,18 +2261,66 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         return response, HTTPStatus.OK
 
 
+    def yoagent_startup_generation_is_current_locked(self, generation: int) -> bool:
+        record = self.yoagent_prewarm_record
+        return (
+            not record.reset_in_progress
+            and record.startup_generation == generation
+            and record.active_startup_generation == generation
+        )
+
+
+    def aborted_yoagent_startup_response(
+        self,
+        *,
+        stream_id: str,
+        requested_backend: str,
+        backend: str,
+        conversation: dict[str, Any],
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        self.publish_yoagent_stream_delta(
+            stream_id,
+            "",
+            backend=backend,
+            phase="stopped",
+            done=True,
+            aborted=True,
+            auxiliary_done=True,
+        )
+        return {
+            "ok": True,
+            "started": False,
+            "visible": False,
+            "aborted": True,
+            "backend": requested_backend,
+            "backend_used": backend,
+            "reason": "startup response invalidated by reset",
+            "stream_id": stream_id,
+            "conversation": conversation,
+        }, HTTPStatus.OK
+
+
     def reset_yoagent_chat(self) -> dict[str, Any]:
-        with self.yoagent_cli_lock:
-            self.yoagent_cli_sessions.clear()
-            yoagent_conversation.clear_cli_sessions()
-        self.deps.close_yoagent_codex_app_server()
-        with self.yoagent_action_lock:
-            self.yoagent_action_waits.clear()
-        yoagent_conversation.clear_messages()
         with self.yoagent_prewarm_lock:
-            self.yoagent_prewarm_status = {}
-            self.yoagent_startup_response_running = False
-        return {"ok": True, "conversation": self.yoagent_conversation_payload()}
+            record = self.yoagent_prewarm_record
+            record.startup_generation += 1
+            record.active_startup_generation = None
+            record.reset_in_progress = True
+        try:
+            with self.yoagent_cli_lock:
+                self.yoagent_cli_sessions.clear()
+                yoagent_conversation.clear_cli_sessions()
+            self.deps.close_yoagent_codex_app_server()
+            with self.yoagent_action_lock:
+                self.yoagent_action_waits.clear()
+            yoagent_conversation.clear_messages()
+            with self.yoagent_prewarm_lock:
+                self.yoagent_prewarm_record.prewarm_status = {}
+                conversation = self.yoagent_conversation_payload()
+        finally:
+            with self.yoagent_prewarm_lock:
+                self.yoagent_prewarm_record.reset_in_progress = False
+        return {"ok": True, "conversation": conversation}
 
 
     def start_yoagent_backend_prewarm(self, payload: dict[str, Any] | None = None, *, reason: str = "prewarm") -> tuple[dict[str, Any], HTTPStatus]:
@@ -2272,13 +2331,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         invocation = str(settings.get("invocation") or "cli").strip().lower()
         if backend != "codex" or invocation != "cli":
             return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "no persistent Codex backend available"}, HTTPStatus.OK
-        with self.yoagent_prewarm_lock:
-            if self.yoagent_prewarm_running:
-                return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "already running"}, HTTPStatus.ACCEPTED
-            self.yoagent_prewarm_running = True
-            self.yoagent_prewarm_status = {"backend": backend, "reason": reason, "started_at": time.time()}
 
-        def worker() -> None:
+        def run_prewarm() -> None:
             status: dict[str, Any] = {"backend": backend, "reason": reason}
             try:
                 thread_id, raw_fallback_reason, cli_status = self.deps.ensure_yoagent_codex_app_server(settings)
@@ -2291,10 +2345,28 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 status = {"backend": backend, "reason": reason, "warmed": False, "error": str(exc)}
             finally:
                 with self.yoagent_prewarm_lock:
-                    self.yoagent_prewarm_status = status
-                    self.yoagent_prewarm_running = False
+                    if self.yoagent_prewarm_record is record and record.prewarm_worker is worker:
+                        record.prewarm_status = status
+                        record.prewarm_running = False
+                        record.prewarm_worker = None
 
-        threading.Thread(target=worker, name="yoagent-prewarm", daemon=True).start()
+        worker = threading.Thread(target=run_prewarm, name="yoagent-prewarm", daemon=True)
+        with self.yoagent_prewarm_lock:
+            record = self.yoagent_prewarm_record
+            if record.prewarm_running:
+                return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "already running"}, HTTPStatus.ACCEPTED
+            record.prewarm_running = True
+            record.prewarm_status = {"backend": backend, "reason": reason, "started_at": time.time()}
+            record.prewarm_worker = worker
+
+        def rollback() -> None:
+            with self.yoagent_prewarm_lock:
+                if self.yoagent_prewarm_record is record and record.prewarm_worker is worker:
+                    record.prewarm_worker = None
+                    record.prewarm_running = False
+                    record.prewarm_status = {}
+
+        start_thread_with_rollback(worker, rollback)
         return {"ok": True, "started": True, "backend": requested_backend, "backend_used": backend}, HTTPStatus.ACCEPTED
 
 
@@ -2326,7 +2398,18 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "conversation": self.yoagent_conversation_payload(),
             }, HTTPStatus.OK
         with self.yoagent_prewarm_lock:
-            if self.yoagent_startup_response_running:
+            record = self.yoagent_prewarm_record
+            if record.reset_in_progress:
+                return {
+                    "ok": True,
+                    "started": False,
+                    "visible": False,
+                    "backend": requested_backend,
+                    "backend_used": backend,
+                    "reason": "conversation reset in progress",
+                    "conversation": self.yoagent_conversation_payload(),
+                }, HTTPStatus.ACCEPTED
+            if record.active_startup_generation is not None:
                 return {
                     "ok": True,
                     "started": False,
@@ -2336,7 +2419,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     "reason": "startup response already running",
                     "conversation": self.yoagent_conversation_payload(),
                 }, HTTPStatus.ACCEPTED
-            self.yoagent_startup_response_running = True
+            record.startup_generation += 1
+            startup_generation = record.startup_generation
+            record.active_startup_generation = startup_generation
         stream_id = f"startup-{uuid.uuid4().hex}"
         started = time.monotonic()
         self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
@@ -2375,17 +2460,27 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             if hidden_thinking_removed:
                 response["hidden_thinking_removed"] = True
             response["detail_rows"] = yoagent_response_detail_rows(response)
-            if answer_text:
-                stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(stream_id)
-                self.record_yoagent_message(
-                    "assistant",
-                    answer_text,
-                    detail_rows=response["detail_rows"],
-                    response_ms=yoagent_response_ms(response),
-                    **stream_fields,
+            with self.yoagent_prewarm_lock:
+                startup_current = self.yoagent_startup_generation_is_current_locked(startup_generation)
+                if startup_current and answer_text:
+                    stream_fields = self.deps.yoagent_stream_auxiliary_message_fields(stream_id)
+                    self.record_yoagent_message(
+                        "assistant",
+                        answer_text,
+                        detail_rows=response["detail_rows"],
+                        response_ms=yoagent_response_ms(response),
+                        **stream_fields,
+                    )
+                response["conversation"] = self.yoagent_conversation_payload()
+            if not startup_current:
+                return self.aborted_yoagent_startup_response(
+                    stream_id=stream_id,
+                    requested_backend=requested_backend,
+                    backend=backend,
+                    conversation=response["conversation"],
                 )
+            if answer_text:
                 self.publish_yoagent_conversation_changed("yoagent_startup")
-            response["conversation"] = self.yoagent_conversation_payload()
             if not model_answered:
                 self.publish_yoagent_stream_delta(
                     stream_id,
@@ -2397,6 +2492,16 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 )
             return response, HTTPStatus.OK
         except Exception as exc:
+            with self.yoagent_prewarm_lock:
+                startup_current = self.yoagent_startup_generation_is_current_locked(startup_generation)
+                conversation = self.yoagent_conversation_payload()
+            if not startup_current:
+                return self.aborted_yoagent_startup_response(
+                    stream_id=stream_id,
+                    requested_backend=requested_backend,
+                    backend=backend,
+                    conversation=conversation,
+                )
             self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="error", done=True)
             return {
                 "ok": False,
@@ -2406,7 +2511,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             }, HTTPStatus.INTERNAL_SERVER_ERROR
         finally:
             with self.yoagent_prewarm_lock:
-                self.yoagent_startup_response_running = False
+                record = self.yoagent_prewarm_record
+                if record.active_startup_generation == startup_generation:
+                    record.active_startup_generation = None
 
 
     def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:

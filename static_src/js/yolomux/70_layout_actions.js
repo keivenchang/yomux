@@ -784,7 +784,7 @@ function selectAdjacentPaneTab(direction, options = {}) {
 }
 
 function sessionAgentKind(session) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
   return kind === 'claude' || kind === 'codex' ? kind : '';
@@ -1309,7 +1309,7 @@ function paneInfoBarMetaHtml(session, info) {
 const repoSelectorControlSelector = '[data-repo-cycle], [data-repo-chip]';
 
 function refreshSessionRepoDisplay(session) {
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   renderSessionButtons();
   renderPaneTabStrips();
 }
@@ -1320,7 +1320,7 @@ function activateRepoSelectorControl(event, button, panelSession) {
   const cycleSession = button.dataset.repoCycle;
   if (cycleSession !== undefined) {
     const session = cycleSession || panelSession;
-    cycleSessionRepoDisplay(session, transcriptMeta.sessions?.[session], button.dataset.repoCycleDir || 1);
+    cycleSessionRepoDisplay(session, transcriptMetadataState.payload.sessions?.[session], button.dataset.repoCycleDir || 1);
     refreshSessionRepoDisplay(session);
     return;
   }
@@ -1345,7 +1345,7 @@ function repoChipMenuRowHtml(repo) {
 }
 
 function showRepoChipMenu(session, x, y) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const repos = sessionRepoSummaries(info);
   if (repos.length < 2) return;
   const menu = document.createElement('div');
@@ -1567,15 +1567,24 @@ function replaceSessionMetadata(oldSession, newSession) {
   ]) {
     rekeyMap(map, oldSession, newSession);
   }
-  if (transcriptMeta.sessions?.[oldSession]) {
-    transcriptMeta.sessions = {
-      ...(transcriptMeta.sessions || {}),
-      [newSession]: transcriptMeta.sessions[newSession] || transcriptMeta.sessions[oldSession],
+  const hasTranscriptSession = Boolean(transcriptMetadataState.payload.sessions?.[oldSession]);
+  const hasTranscriptOrderEntry = Array.isArray(transcriptMetadataState.payload.session_order)
+    && transcriptMetadataState.payload.session_order.includes(oldSession);
+  if (hasTranscriptSession || hasTranscriptOrderEntry) {
+    const nextSessions = {
+      ...(transcriptMetadataState.payload.sessions || {}),
     };
-    delete transcriptMeta.sessions[oldSession];
-  }
-  if (Array.isArray(transcriptMeta.session_order)) {
-    transcriptMeta.session_order = transcriptMeta.session_order.map(item => item === oldSession ? newSession : item);
+    if (hasTranscriptSession) {
+      nextSessions[newSession] = nextSessions[newSession] || nextSessions[oldSession];
+      delete nextSessions[oldSession];
+    }
+    setTranscriptMetadataPayload({
+      ...transcriptMetadataState.payload,
+      sessions: nextSessions,
+      session_order: Array.isArray(transcriptMetadataState.payload.session_order)
+        ? transcriptMetadataState.payload.session_order.map(item => item === oldSession ? newSession : item)
+        : transcriptMetadataState.payload.session_order,
+    });
   }
 }
 
@@ -1945,7 +1954,7 @@ function terminalAttentionQuestionChromeHintText(value) {
 }
 
 function terminalAttentionQuestionTexts(session) {
-  const state = sessionState(session, transcriptMeta.sessions?.[session]);
+  const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
   if (![STATE_KEY.needsInput, STATE_KEY.needsApproval].includes(String(state?.key || '')) || state?.attention === false) return [];
   const payload = autoApproveStates.get(session) || {};
   const candidates = [

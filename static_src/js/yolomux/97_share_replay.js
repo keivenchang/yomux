@@ -1637,19 +1637,9 @@ function sharePublish(type, payload = {}, options = {}) {
   for (const share of targets) {
     const token = share?.token || share;
     if (!token) continue;
-    const socket = ensureShareHostSocket(token);
-    if (!socket) continue;
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(serialized);
-      sent += 1;
-      continue;
-    }
-    const shareHostQueue = shareHostQueues.get(token) || [];
-    if (shareHostQueue.length < 32) {
-      shareHostQueue.push(serialized);
-      queued += 1;
-    }
-    shareHostQueues.set(token, shareHostQueue);
+    const delivery = sendOrQueueShareHostMessage(token, serialized);
+    if (delivery.sent) sent += 1;
+    if (delivery.queued) queued += 1;
   }
   return {sent: sent > 0, sentCount: sent, queued, bytes, message};
 }
@@ -2740,13 +2730,35 @@ function applyShareScrollDescriptorPosition(descriptor, top, left) {
   return true;
 }
 
-function applyShareScrollState(payload = {}) {
+function shareScrollTargetRecord(target, options = {}) {
+  const cleanTarget = String(target || '');
+  if (!cleanTarget) return null;
+  let record = shareScrollTargetRecords.get(cleanTarget);
+  if (!record && options.create !== false) {
+    record = {
+      top: 0,
+      left: 0,
+      payload: {target: cleanTarget, top: 0, left: 0},
+      snapshotGeneration: shareScrollSnapshotGeneration,
+      restoreGeneration: 0,
+      remainingFrames: 0,
+    };
+    shareScrollTargetRecords.set(cleanTarget, record);
+  }
+  return record || null;
+}
+
+function applyShareScrollState(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return;
   const target = String(payload.target || '');
   const top = Math.max(0, Math.round(Number(payload.top || 0)));
   const left = Math.max(0, Math.round(Number(payload.left || 0)));
   if (target) {
-    shareLastAppliedScrollByTarget.set(target, {top, left, payload: {...payload, target, top, left}});
+    const record = shareScrollTargetRecord(target);
+    record.top = top;
+    record.left = left;
+    record.payload = {...payload, target, top, left};
+    record.snapshotGeneration = Number(options.snapshotGeneration || shareScrollSnapshotGeneration);
   }
   if (String(payload.kind || '') === 'editor' || target.startsWith('editor:')) {
     shareRememberEditorViewState(payload, top, left);
@@ -2777,7 +2789,13 @@ function applyShareScrollState(payload = {}) {
 
 function applyShareScrollSnapshot(scroll = []) {
   if (!Array.isArray(scroll)) return;
-  for (const payload of scroll.slice(0, 100)) applyShareScrollState(payload);
+  const payloads = scroll.slice(0, 100).filter(payload => payload && typeof payload === 'object' && String(payload.target || ''));
+  const currentTargets = new Set(payloads.map(payload => String(payload.target)));
+  const snapshotGeneration = ++shareScrollSnapshotGeneration;
+  for (const target of shareScrollTargetRecords.keys()) {
+    if (!currentTargets.has(target)) shareScrollTargetRecords.delete(target);
+  }
+  for (const payload of payloads) applyShareScrollState(payload, {snapshotGeneration});
 }
 
 async function applyShareFileVersion(payload = {}) {
@@ -3715,8 +3733,7 @@ function publishShareGeometryDigest() {
 }
 
 function installShareGeometryDigestLoop() {
-  if (shareGeometryDigestTimer) clearInterval(shareGeometryDigestTimer);
-  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);
+  resetRuntimeInterval('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs);
 }
 
 function applyShareUiMessage(message) {

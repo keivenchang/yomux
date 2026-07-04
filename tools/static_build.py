@@ -55,7 +55,31 @@ STANDARD_MOTION_DURATION_TOKENS = {
     "0.7s": "--motion-activity-duration",
     "0.9s": "--motion-activity-duration",
 }
+STANDARD_SPACING_TOKENS = {
+    f"{value}px": f"--space-{value}"
+    for value in range(1, 13)
+}
 SHARED_CSS_DECLARATION_SETS = {
+    "preformatted text wrapping": frozenset({
+        ("white-space", "pre-wrap"),
+        ("overflow-wrap", "anywhere"),
+    }),
+    "Info-tree field wrapping": frozenset({
+        ("min-width", "0"),
+        ("max-width", "100%"),
+        ("overflow", "visible"),
+        ("text-overflow", "clip"),
+        ("white-space", "normal"),
+        ("overflow-wrap", "anywhere"),
+    }),
+    "tmux window token alignment": frozenset({
+        ("flex", "0 1 auto"),
+        ("max-width", "100%"),
+        ("margin-inline-start", "0"),
+        ("justify-content", "flex-start"),
+        ("overflow", "visible"),
+        ("vertical-align", "middle"),
+    }),
     "active-control paint": frozenset({
         ("color", "var(--active-control-text)"),
         ("background", "var(--active-control-bg)"),
@@ -86,7 +110,7 @@ SHARED_CSS_DECLARATION_SETS = {
     "agent identity-cluster layout": frozenset({
         ("display", "inline-flex"),
         ("align-items", "center"),
-        ("gap", "2px"),
+        ("gap", "var(--space-2)"),
         ("flex", "0 0 auto"),
         ("vertical-align", "middle"),
     }),
@@ -109,22 +133,115 @@ SHARED_CSS_DECLARATION_SETS = {
         ("background", "var(--danger-strong-hover)"),
         ("color", "var(--paint-white)"),
     }),
-    "three-row content scaffold": frozenset({
-        ("height", "100%"),
-        ("min-height", "0"),
-        ("background", "var(--bg)"),
+    "three-row grid scaffold": frozenset({
         ("display", "grid"),
-        ("grid-template-rows", "auto auto minmax(0, 1fr)"),
+        ("grid-template-rows", "var(--three-row-panel-layout)"),
+    }),
+    "close glyph stroke geometry": frozenset({
+        ("content", '""'),
+        ("position", "absolute"),
+        ("top", "50%"),
+        ("left", "50%"),
+        ("width", "var(--panel-close-glyph-width)"),
+        ("height", "var(--panel-close-glyph-height)"),
+        ("border-radius", "var(--radius-pill)"),
+        ("background", "currentColor"),
     }),
     "two-row debug-view layout": frozenset({
         ("display", "grid"),
         ("grid-template-rows", "auto minmax(0, 1fr)"),
-        ("gap", "8px"),
+        ("gap", "var(--space-8)"),
     }),
     "search-input focus ring": frozenset({
         ("outline", "0"),
         ("border-color", "var(--active-control-border)"),
         ("box-shadow", "var(--active-control-focus-shadow)"),
+    }),
+    "search-input shell": frozenset({
+        ("height", "28px"),
+        ("padding", "3px 8px"),
+        ("color", "var(--text)"),
+        ("background", "var(--panel)"),
+        ("border", "1px solid var(--line)"),
+        ("border-radius", "5px"),
+        ("font", "var(--ui-font-size-sm)/1.2 var(--ui-font)"),
+    }),
+    "preview-surface shell": frozenset({
+        ("z-index", "var(--z-file-editor-preview-layer)"),
+        ("overflow", "auto"),
+        ("padding", "12px 16px"),
+        ("background", "var(--editor-preview-bg)"),
+        ("color", "var(--text)"),
+        ("font-family", "var(--ui-font)"),
+        ("font-size", "var(--editor-preview-font-size)"),
+        ("line-height", "1.35"),
+    }),
+    "circular chat-action geometry": frozenset({
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("justify-content", "center"),
+        ("width", "30px"),
+        ("height", "30px"),
+        ("flex", "0 0 auto"),
+        ("padding", "0"),
+        ("border-radius", "50%"),
+        ("cursor", "pointer"),
+    }),
+    "file-panel title typography": frozenset({
+        ("color", "var(--text)"),
+        ("font-family", "var(--tab-font)"),
+        ("font-size", "var(--ui-font-size)"),
+        ("font-weight", "700"),
+        ("white-space", "nowrap"),
+    }),
+    "changes trailing totals layout": frozenset({
+        ("flex", "0 0 auto"),
+        ("display", "inline-flex"),
+        ("align-items", "baseline"),
+        ("gap", "var(--space-8)"),
+        ("margin-inline-start", "auto"),
+        ("white-space", "nowrap"),
+    }),
+    "keyboard reference row layout": frozenset({
+        ("display", "grid"),
+        ("gap", "var(--space-6)"),
+        ("align-items", "center"),
+        ("padding", "2px 0"),
+        ("border-bottom", "1px solid var(--paint-white-06)"),
+        ("font", "var(--ui-font-size-sm)/1.25 var(--ui-font)"),
+    }),
+    "document preview body layout": frozenset({
+        ("display", "flex"),
+        ("flex-direction", "column"),
+        ("padding", "0"),
+        ("background", "var(--document-preview-bg)"),
+    }),
+    "document preview image fit": frozenset({
+        ("display", "block"),
+        ("max-width", "100%"),
+        ("height", "auto"),
+        ("object-fit", "contain"),
+    }),
+    "editor square toolbar control layout": frozenset({
+        ("min-width", "20px"),
+        ("width", "20px"),
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("justify-content", "center"),
+        ("padding", "0"),
+        ("line-height", "1"),
+    }),
+    "tree expand-collapse fixed geometry": frozenset({
+        ("box-sizing", "border-box"),
+        ("width", "16px"),
+        ("min-width", "16px"),
+        ("max-width", "16px"),
+        ("inline-size", "16px"),
+        ("min-inline-size", "16px"),
+        ("max-inline-size", "16px"),
+        ("flex", "0 0 16px"),
+        ("padding", "0"),
+        ("font-size", "0"),
     }),
     "danger-status paint": frozenset({
         ("color", "var(--danger-text)"),
@@ -162,6 +279,10 @@ SHARED_CSS_DECLARATION_SETS = {
         ("color", "var(--lt-code-block-text)"),
         ("background", "var(--lt-code-block-bg)"),
         ("border-color", "var(--lt-code-block-border)"),
+    }),
+    "editor native selection paint": frozenset({
+        ("color", "inherit !important"),
+        ("background", "var(--editor-native-selection-bg) !important"),
     }),
     "vanilla nested-code reset": frozenset({
         ("color", "inherit !important"),
@@ -208,8 +329,71 @@ SHARED_CSS_DECLARATION_SETS = {
         ("min-width", "0"),
         ("display", "inline-flex"),
         ("align-items", "center"),
-        ("gap", "1px"),
+        ("gap", "var(--space-1)"),
         ("overflow", "visible"),
+    }),
+    "centered 6px flex row": frozenset({
+        ("display", "flex"),
+        ("align-items", "center"),
+        ("gap", "var(--space-6)"),
+    }),
+    "spaced 8px flex heading": frozenset({
+        ("display", "flex"),
+        ("align-items", "center"),
+        ("justify-content", "space-between"),
+        ("gap", "var(--space-8)"),
+        ("min-width", "0"),
+    }),
+    "centered 6px inline row": frozenset({
+        ("min-width", "0"),
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("gap", "var(--space-6)"),
+    }),
+    "centered 5px inline control": frozenset({
+        ("display", "inline-flex"),
+        ("align-items", "center"),
+        ("gap", "var(--space-5)"),
+    }),
+    "wrapping 6px action row": frozenset({
+        ("display", "flex"),
+        ("flex-wrap", "wrap"),
+        ("gap", "var(--space-6)"),
+    }),
+    "trailing flex zone": frozenset({
+        ("flex", "0 1 auto"),
+        ("margin-inline-start", "auto"),
+        ("justify-content", "flex-end"),
+    }),
+    "bordered control shell": frozenset({
+        ("border", "1px solid var(--line)"),
+        ("border-radius", "var(--radius-control)"),
+        ("color", "var(--text)"),
+    }),
+    "Finder toolbar control shell": frozenset({
+        ("height", "20px"),
+        ("border", "1px solid var(--line)"),
+        ("border-radius", "var(--radius-control)"),
+        ("color", "var(--muted)"),
+        ("background", "transparent"),
+        ("font", "700 var(--ui-font-size-2xs)/1 var(--mono-font)"),
+    }),
+    "secondary surface paint": frozenset({
+        ("border", "1px solid var(--line)"),
+        ("background", "var(--panel2)"),
+        ("color", "var(--text)"),
+    }),
+    "framed panel surface": frozenset({
+        ("background", "var(--panel)"),
+        ("border", "1px solid var(--line)"),
+        ("border-radius", "var(--radius-md)"),
+    }),
+    "centered editor icon pseudo-element": frozenset({
+        ("content", '""'),
+        ("position", "absolute"),
+        ("top", "50%"),
+        ("left", "50%"),
+        ("transform", "translate(-50%, -50%)"),
     }),
 }
 CODE_SYNTAX_COLOR_TOKENS = frozenset({
@@ -906,6 +1090,36 @@ def lint_raw_standard_font_sizes() -> list[str]:
     return errors
 
 
+def lint_raw_standard_spacing() -> list[str]:
+    """Standard component gaps, padding, and margins must reference the shared spacing scale."""
+    errors: list[str] = []
+    property_re = re.compile(
+        r"(?:^|;)\s*(gap|row-gap|column-gap|padding(?:-[a-z-]+)?|margin(?:-[a-z-]+)?)\s*:\s*([^;}]+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    literals = "|".join(re.escape(value) for value in sorted(STANDARD_SPACING_TOKENS, key=len, reverse=True))
+    literal_re = re.compile(rf"(?<![\w.])({literals})(?![\w-])", re.IGNORECASE)
+    invalid_negated_token_re = re.compile(r"(?<![\w-])-var\((--space-(?:[1-9]|1[0-2]))\)", re.IGNORECASE)
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for _context, _selector, body, rule_line in _iter_located_css_rules(css):
+            for declaration in property_re.finditer(body):
+                line_no = rule_line + body.count("\n", 0, declaration.start(1))
+                for token in dict.fromkeys(invalid_negated_token_re.findall(declaration.group(2))):
+                    errors.append(
+                        f"{part}:{line_no}: invalid negated spacing token -var({token}); use calc(-1 * var({token}))"
+                    )
+                for value in dict.fromkeys(match.lower() for match in literal_re.findall(declaration.group(2))):
+                    errors.append(f"{part}:{line_no}: raw standard spacing {value}; use var({STANDARD_SPACING_TOKENS[value]})")
+    return errors
+
+
 def _color_rgba(color: str) -> tuple[tuple[int, int, int], float] | None:
     """Return normalized integer RGB channels and alpha for a literal CSS color."""
     color = color.strip().lower()
@@ -1521,6 +1735,34 @@ def lint_duplicate_functions() -> list[str]:
     return errors
 
 
+def lint_direct_button_construction() -> list[str]:
+    """Runtime buttons must inherit the shared type/ARIA/dataset/event contract from makeButton()."""
+    errors: list[str] = []
+    owner_count = 0
+    function_re = re.compile(r"^function\s+(\w+)\s*\(")
+    construction_re = re.compile(r"document\.createElement\(\s*(['\"])button\1\s*\)")
+    for part in ASSETS.get("yolomux.js", []):
+        path = repo_path(part)
+        try:
+            lines = read_text(path).splitlines()
+        except FileNotFoundError:
+            continue
+        current_function = ""
+        for line_number, line in enumerate(lines, start=1):
+            match = function_re.match(line)
+            if match:
+                current_function = match.group(1)
+            if not construction_re.search(line):
+                continue
+            if part.endswith("10_core_utils.js") and current_function == "makeButton":
+                owner_count += 1
+                continue
+            errors.append(f"{part}:{line_number}: direct button construction bypasses makeButton()")
+    if owner_count != 1:
+        errors.append(f"shared makeButton() must own exactly one direct button construction; found {owner_count}")
+    return errors
+
+
 def lint_source_control_characters() -> list[str]:
     """Static source partials must remain normal UTF-8 text that grep, editors, and linters can inspect."""
     errors: list[str] = []
@@ -1608,14 +1850,26 @@ def lint_raw_literal_equals_token() -> list[str]:
 def lint_repeated_raw_component_literals() -> list[str]:
     """Equivalent repeated component color literals need one owner, regardless of CSS spelling."""
     occurrences: dict[tuple[int, int, int, float], list[str]] = defaultdict(list)
+    variable_occurrences: dict[tuple[str, float], list[str]] = defaultdict(list)
+    variable_color_re = re.compile(
+        r"rgba?\(\s*var\(\s*(--[\w-]+)\s*\)\s*/\s*([0-9]*\.?[0-9]+%?)\s*\)",
+        re.IGNORECASE,
+    )
     for part in ASSETS.get("yolomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
         try:
-            text = _css_without_var_functions(_css_without_comments(read_text(path)))
+            source = _css_without_comments(read_text(path))
         except FileNotFoundError:
             continue
+        for match in variable_color_re.finditer(source):
+            raw_alpha = match.group(2)
+            alpha = float(raw_alpha.rstrip("%")) / (100 if raw_alpha.endswith("%") else 1)
+            identity = (match.group(1).lower(), round(max(0.0, min(1.0, alpha)), 6))
+            line_no = 1 + source.count("\n", 0, match.start())
+            variable_occurrences[identity].append(f"{part}:{line_no}")
+        text = _css_without_var_functions(source)
         for match in CSS_COLOR_LITERAL_RE.finditer(text):
             identity = _color_identity(match.group(0))
             if identity is None:
@@ -1642,6 +1896,15 @@ def lint_repeated_raw_component_literals() -> list[str]:
         shown = ", ".join(locations[:4])
         suffix = "" if len(locations) <= 4 else f" (+{len(locations) - 4} more)"
         errors.append(f"raw component color {literal} repeats in {shown}{suffix}; move it to a CSS token or add a reviewed allowlist reason")
+    for (variable, alpha), locations in sorted(variable_occurrences.items()):
+        if len(locations) < 2:
+            continue
+        shown = ", ".join(locations[:4])
+        suffix = "" if len(locations) <= 4 else f" (+{len(locations) - 4} more)"
+        errors.append(
+            f"raw component color rgb(var({variable}) / {alpha:g}) repeats in {shown}{suffix}; "
+            "move it to a CSS token"
+        )
     return errors
 
 
@@ -1842,6 +2105,7 @@ def main(argv: list[str] | None = None) -> int:
             # --lint-light, so it was absent from --check / the CPS check list).
             lint_errors = (
                 lint_duplicate_functions()
+                + lint_direct_button_construction()
                 + lint_source_control_characters()
                 + lint_css_structure()
                 + lint_identical_theme_restatements()
@@ -1850,6 +2114,7 @@ def main(argv: list[str] | None = None) -> int:
                 + lint_raw_standard_border_radii()
                 + lint_raw_standard_motion_durations()
                 + lint_raw_standard_font_sizes()
+                + lint_raw_standard_spacing()
                 + lint_undefined_css_vars()
                 + lint_raw_literal_equals_token()
                 + lint_repeated_raw_component_literals()

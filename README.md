@@ -70,7 +70,7 @@ When a Tab is a tmux session, that session has its own internal hierarchy — tm
 Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md); this list is the daily-driver essentials.)
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
-- Press `?` for Keyboard Shortcuts and Legends, including the green play, yellow pause, and red stop status glyph meanings.
+- Press `?` for the responsive Keyboard Shortcuts and Legends dialog, including the green play, yellow pause, and red stop status glyph meanings.
 - Drag a tab between pane tab bars to move it, drop near a pane edge to split that pane, or drop on the outer root edge for a full-span pane. Pane splits are percentage-based and encode into the shareable page URL.
 - Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
 - Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane.
@@ -80,10 +80,11 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. CPU and memory show the top four process groups; one GPU can do the same when its driver exposes process counters, while multi-GPU and macOS show per-device totals. Use its scale and time-range controls to inspect recent or retained history; widening or refining the range keeps the current graph visible while missing history loads and offers Retry on failure. Client communication charts distinguish bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
 - The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 - File -> `YO!share...` creates short live magic URLs for the current YOLOmux layout. Defaults are short-lived, read-only, http links; write access requires https. The host can extend active shares and see connected users with duration, IP, and browser type. Replay details live in [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md).
-- Finder includes file browsing, editing, preview, search, and per-repository `Differ` views. Quick Search is `Mod+P`.
+- Finder includes file browsing, editing, preview, search, and per-repository `Differ` views. Filesystem permission failures are reported in Finder instead of terminating the server request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
 - Tabber lists open tabs and tmux sub-windows by recent activity, and the top-bar language picker changes the live UI language.
 - YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
-- Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications.
+- Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state.
+- The browser title, favicon badge, and topbar activity count report working Claude/Codex sub-windows, so two active agents inside one tmux session count as two everywhere.
 
 For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/specs/GUI.md).
 

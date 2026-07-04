@@ -151,8 +151,7 @@ if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.
 let activeShare = null;
 let activeShares = [];
 let shareCreateErrorPayload = null;
-let shareHostSockets = new Map();
-let shareHostQueues = new Map();
+const shareHostConnectionRecords = new Map();
 let shareMirrorEpoch = 1;
 let shareMirrorSequence = 0;
 let shareReplayMirrorEpoch = 1;
@@ -165,8 +164,8 @@ let sharePointerFramePending = false;
 let sharePointerLastEvent = null;
 let sharePointerLastPublishedAt = -Infinity;
 const shareScrollPublishTimers = new Map();
-const shareScrollRestoreFrameTimers = new Map();
-let shareGeometryDigestTimer = null;
+const shareScrollTargetRecords = new Map();
+let shareScrollSnapshotGeneration = 0;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
@@ -212,7 +211,6 @@ let shareReplayTopologyKeyframeTimer = null;
 let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
 const sharePopupLayerLastSeqBySender = new Map();
-const shareLastAppliedScrollByTarget = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -228,15 +226,7 @@ const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
 const refreshMeta = document.getElementById('refreshMeta');
-const tabMetaToggle = (() => {
-  const button = document.createElement('button');
-  button.id = 'tabMetaToggle';
-  button.className = 'tab-meta-toggle';
-  button.type = 'button';
-  button.textContent = '#';
-  button.setAttribute('aria-pressed', 'true');
-  return button;
-})();
+const tabMetaToggle = makeButton({id: 'tabMetaToggle', className: 'tab-meta-toggle', label: '#', pressed: true});
 const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
 const fileExplorer = document.getElementById('fileExplorer');
@@ -558,8 +548,7 @@ const openFiles = fileState;  // compatibility alias during the file-state migra
 const fileIdentityByPath = new Map();  // display path -> backend physical-file identity
 const openFilePathByIdentity = new Map();  // backend physical-file identity -> primary open display path
 const fileOpenPromisesByPath = new Map();  // display path -> in-flight text-editor open promise
-const fileExplorerDirectorySignatures = new Map();
-const fileExplorerKnownEntryNames = new Map();
+const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
@@ -574,9 +563,11 @@ const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
-let layoutUrlStateFromQuery = null;
-let layoutUrlStateApplied = false;
-let layoutUrlStateRefreshTimer = null;
+const layoutUrlState = {
+  pending: null,
+  applied: false,
+  refreshTimer: null,
+};
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = shareBootstrapFinderRoot() || null;
@@ -659,21 +650,24 @@ const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStora
 let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
-let tabberActivityRequestGeneration = 0;
-let tabberActivityAppliedRequestGeneration = 0;
-let tabberActivityLoaded = false;
-let tabberActivityFetchPromise = null;
+const tabberActivityState = {
+  requestGeneration: 0,
+  appliedGeneration: 0,
+  loaded: false,
+  request: null,
+};
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
-let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
-let fileExplorerSessionFilesPayloadSignature = '';
-let fileExplorerSessionFilesLoading = false;
-const fileExplorerSessionFilesGuard = makeGenerationGuard();
+const fileExplorerSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+};
 let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
-const fileExplorerExpandedBySyncTarget = new Map();
+const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
-const fileExplorerSyncManualCollapsedByTarget = new Map();
 let fileExplorerSyncManualCollapsedPaths = new Set();
 let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
@@ -695,24 +689,28 @@ let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: glob
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
 let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
-let commandPaletteNode = null;
+const commandPaletteState = {
+  node: null,
+  query: '',
+  index: 0,
+  items: [],
+};
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
 let pendingGlobalShortcutChordTimer = null;
 const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
-let commandPaletteQuery = '';
-let commandPaletteIndex = 0;
-let commandPaletteItemsCache = [];
 const commandPaletteRecentKeys = new Map();
 let commandPaletteRecentSequence = 0;
-let fileQuickOpenRoot = '';
-let fileQuickOpenCandidates = [];
-let fileQuickOpenLoading = false;
-let fileQuickOpenError = '';
-let fileQuickOpenRequestId = 0;
-let fileQuickOpenDebounce = null;
-let fileQuickOpenAbortController = null;
+const fileQuickOpenState = {
+  root: '',
+  candidates: [],
+  loading: false,
+  error: '',
+  requestId: 0,
+  debounce: null,
+  abortController: null,
+};
 let tabsMenuSearchText = '';
 // P0 menu-bar: how the Tabs ▾ navigator orders its list — 'default' (tmux/editors/other), 'attention'
 // (needs-* sessions first, the "Needs me" view), or 'name'. Persisted; set from View → Sort tab list.
@@ -798,11 +796,13 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let serverWatchRootsSignature = '';
-let serverWatchRootsInFlight = false;
-let serverWatchRootsSyncedAt = 0;
-let serverWatchRootsTimer = null;
-let serverWatchRootsPendingOptions = {};
+const serverWatchRootsState = {
+  signature: '',
+  inFlight: false,
+  syncedAt: 0,
+  timer: null,
+  pendingOptions: {},
+};
 let fileExplorerFilesystemWatchToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
 const fileExplorerFilesystemKeyframeMs = 60001;
@@ -1327,62 +1327,93 @@ let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
-let transcriptMeta = {};
-let transcriptMetaLoading = false;
-let transcriptMetaLoaded = false;
-let transcriptMetaLoadError = null;
-let transcriptMetaRefreshPromise = null;
-let infoPanelRenderPending = false;
-let infoPanelLastRenderSignature = '';
-let infoPanelLastRenderHtml = '';
-let clientEventsSource = null;
-let clientEventsConnected = false;
-const clientPushEventQueue = new Map();
-let clientPushEventFrame = 0;
-let reconnectResyncTimer = null;
+const transcriptMetadataState = {
+  payload: {},
+  loading: false,
+  loaded: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+function setTranscriptMetadataPayload(payload, options = {}) {
+  if (options.invalidateRequest !== false) transcriptMetadataState.guard.invalidate();
+  transcriptMetadataState.payload = payload && typeof payload === 'object' ? payload : {};
+  return transcriptMetadataState.payload;
+}
+const infoPanelRenderCache = {signature: '', html: ''};
+const clientEventTransportState = {
+  source: null,
+  connected: false,
+  queue: new Map(),
+  frame: 0,
+  resyncTimer: null,
+};
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
-let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
-let activitySummaryRefreshing = false;
-let activitySummaryLastRefreshTs = 0;
-const activitySummaryGuard = makeGenerationGuard();
-let backgroundOwnerStatusPayload = null;
-let backgroundOwnerStatusLoading = false;
-let backgroundOwnerStatusLoaded = false;
-let backgroundOwnerStatusError = '';
-let backgroundOwnerStatusRefreshPromise = null;
-let yoagentStartupActivitySummaryPayload = null;
-let yoagentMessages = [];
-let yoagentPendingWaits = [];
-let yoagentJobs = [];
-let yoagentJobsLoading = false;
-let yoagentConversationLoaded = false;
-let yoagentConversationLoading = false;
-let yoagentConversationPath = '';
-let yoagentConversationDisplayPath = '';
-let yoagentBusy = false;
-let yoagentPrewarming = false;
-let yoagentPrewarmStarted = false;
-let yoagentStartupLlmRequested = false;
-let yoagentStreamingMessages = new Map();
-let yoagentActiveChatRequest = null;
-let yoagentChatQueue = [];
-let yoagentChatQueueSerial = 0;
-let yoagentError = null;
-let yoagentDraft = '';
-let yoagentHistoryCursor = null;
-let yoagentHistoryDraft = '';
-let yoagentNotice = null;
+const activitySummaryState = {
+  payload: {sessions: {}, global: {lines: []}, session_order: []},
+  refreshing: false,
+  guard: makeGenerationGuard(),
+};
+const backgroundOwnerStatusState = {
+  payload: null,
+  loading: false,
+  error: '',
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentStartupState = {
+  activityPayload: null,
+  prewarming: false,
+  prewarmStarted: false,
+  llmRequested: false,
+  infoShown: false,
+  infoVisible: false,
+};
+const yoagentConversationState = {
+  messages: [],
+  pendingWaits: [],
+  loaded: false,
+  loading: false,
+  path: '',
+  displayPath: '',
+  streamingMessages: new Map(),
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentJobsState = {
+  items: [],
+  loading: false,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentChatState = {
+  busy: false,
+  activeRequest: null,
+  queue: [],
+  queueSerial: 0,
+  error: null,
+  draft: '',
+  historyCursor: null,
+  historyDraft: '',
+  notice: null,
+};
 let yoagentScrollbackLocked = false;
-let yoagentStartupInfoShown = false;
-let yoagentStartupInfoVisible = false;
-let searchHistoryQuery = '';
-let searchHistoryPayload = {query: '', results: []};
-let searchHistoryLoading = false;
-let searchHistoryError = null;
-let runHistoryPayload = {runs: []};
-let runHistoryLoading = false;
-let runHistoryError = null;
+const searchHistoryState = {
+  query: '',
+  payload: {query: '', results: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const runHistoryState = {
+  payload: {runs: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
 const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
@@ -1437,9 +1468,17 @@ let focusedPanelItem = null;
 let lastActivePaneItem = null;
 let lastActiveNonFileExplorerPaneItem = null;
 let lastFocusedTmuxSession = null;
-let dragSession = null;
-let dragSourceSlot = null;
-let dragPaneSlot = null;
+const dragState = {
+  item: null,
+  sourceSlot: null,
+  paneSlot: null,
+  filePayload: null,
+  customPreview: null,
+  customPreviewOffset: {x: 0, y: 0},
+  nativePreview: null,
+  transparentImage: null,
+  tabRectCache: null,
+};
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
@@ -1448,14 +1487,8 @@ let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
-let dragFilePayloadState = null;
-let customDragPreview = null;
-let customDragPreviewOffset = {x: 0, y: 0};
-let nativeDragImagePreview = null;
-let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
-let dragTabRectCache = null;
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
@@ -1488,6 +1521,8 @@ let authRedirectStarted = false;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
-let fileExplorerSyncPathInFlight = '';
-let fileExplorerLastAppliedSyncPlanKey = '';
-let fileExplorerSyncGeneration = 0;
+const fileExplorerSyncState = {
+  inFlightSignature: '',
+  appliedPlanKey: '',
+  generation: 0,
+};

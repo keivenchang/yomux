@@ -376,7 +376,34 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesSource.includes('openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('), 'changes panel routes ref-input focus/pointer through the shared picker-open helper');
     assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
     assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'Differ and editor ref pickers share a responsive two-thirds-browser maximum so full commit descriptions remain readable');
-    assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
+    assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*const \{node, input\} = diffRefPopoverState[\s\S]*positionDiffRefPopover\(input, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
+    const scrollListenersBeforePopover = api.documentListenersForTest('scroll').length;
+    const popoverNode = api.ensureDiffRefPopoverForTest();
+    assert.equal(api.ensureDiffRefPopoverForTest(), popoverNode, 'diff-ref popover reuses one DOM node');
+    assert.equal(api.documentListenersForTest('scroll').length, scrollListenersBeforePopover + 1, 'diff-ref popover installs global listeners once');
+    const popoverInput = new TestElement('diff-ref-test-input', 'input');
+    popoverInput.dataset.diffRefInput = '';
+    popoverInput.dataset.diffRefFrom = '';
+    api.setDiffRefPopoverStateForTest(popoverInput, collapsedHeadRefs, -1);
+    const arrowEvent = {key: 'ArrowDown', preventDefault() { this.defaultPrevented = true; }};
+    assert.equal(api.handleDiffRefPopoverKeydownForTest(arrowEvent, popoverInput), true, 'open popover owns arrow navigation');
+    assert.equal(api.diffRefPopoverStateForTest().activeIndex, 0, 'arrow navigation advances the record cursor');
+    api.hideDiffRefPopoverForTest();
+    assert.deepEqual(canonical(api.diffRefPopoverStateForTest()), {
+      activeIndex: -1,
+      hasNode: true,
+      hidden: true,
+      input: null,
+      itemCount: 0,
+      listenersInstalled: true,
+    }, 'hide clears input/items/cursor together while retaining the reusable node/listeners');
+    api.setDiffRefPopoverStateForTest(popoverInput, collapsedHeadRefs, 0);
+    popoverInput.isConnected = false;
+    for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
+    assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
+    for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
+      assert.equal(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
+    }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
       session: '1',
@@ -846,9 +873,9 @@ async function runShareThemeSuite() {
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-chip"'), 'CSS-2: repo count button uses the shared button reset');
     assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
     assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
-    assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
+    assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
-    assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
+    assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
     // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
     // and taking precedence over the global Mod+Delete tab-close.
     assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
@@ -873,7 +900,7 @@ async function runShareThemeSuite() {
     assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
     assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
-    assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*2px/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
+    assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*var\(--space-2\)/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
     assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
     assert.equal(changedFilesCss.includes('.changes-tree-folder'), false, 'Differ folders use the shared Finder tree renderer, not a stale changes-tree-folder CSS path');
     assert.equal(changedFilesSource.includes('function changeFileRowHtml('), false, 'Differ rows are not rendered through the legacy standalone row builder');
@@ -1517,7 +1544,7 @@ async function runShareThemeSuite() {
     assert.ok(/function applySessionFilesPayloadFromPush\(payload = \{\}, request = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear a stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
-    assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
+    assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesState.payload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
     assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
     assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');
     assert.ok(/refreshFileExplorerTrees\(\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload refreshes the modified-file overlay as well as the directory tree');
@@ -1836,7 +1863,8 @@ async function runShareThemeSuite() {
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*file-tree-expand-collapse-icon[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*file-tree-expand-collapse-icon/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders toolbar SVG icons');
     assert.equal(treeExpandCollapseButtons.includes('▦') || treeExpandCollapseButtons.includes('▤'), false, 'shared tree expand/collapse helper does not use square text glyphs');
     assert.ok(/\.file-tree-expand-collapse-all\s*\{[\s\S]*box-sizing:\s*border-box[\s\S]*width:\s*16px[\s\S]*max-width:\s*16px[\s\S]*flex:\s*0 0 16px[\s\S]*padding:\s*0/.test(preferencesCss), 'shared tree expand/collapse toolbar icon buttons stay narrow');
-    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-reload-cluster \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{[\s\S]*max-inline-size:\s*16px[\s\S]*height:\s*20px/.test(preferencesCss), 'Differ/Finder toolbar context cannot widen tree expand/collapse icon buttons');
+    assert.ok(/\.file-explorer-header-action\.file-explorer-date-toggle:not\(\.file-tree-expand-collapse-all\)\s*\{[\s\S]*min-width:\s*42px/.test(preferencesCss), 'ordinary Finder date buttons own their label width without widening shared expand/collapse controls');
+    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-reload-cluster \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{\s*height:\s*20px;\s*\}/.test(preferencesCss), 'Differ/Finder expand/collapse variants inherit fixed geometry and own only their contextual height');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
     assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
     assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
@@ -1902,13 +1930,13 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
     assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files header reads the shared pane bar background when focused/hovered');
     assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*isolation:\s*isolate/.test(preferencesCss), 'Finder Modified-files section isolates its sticky header/content layers');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 5px 5px/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
+    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 var\(--space-5\) var\(--space-5\)/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
     assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
     assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
     assert.ok(/\.diff-ref-suggestion-popover\.compact\s*\{[\s\S]*min-width:\s*min\(520px,\s*66\.667vw\)[\s\S]*max-height:\s*min\(230px,\s*34vh\)/.test(preferencesCss), 'compact Differ ref suggestions retain a readable minimum without exceeding the shared two-thirds-browser maximum');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
     assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*8ch\s*minmax\(0,\s*1fr\)\s*max-content\s*max-content/.test(preferencesCss), 'diff-ref popup reserves its flexible width for the subject while date and author size to content');
-    assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*-4px/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
+    assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*calc\(-1 \* var\(--space-4\)\)/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
     assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
     assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
     assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'compact Differ and noncompact editor pickers share the two-thirds-browser maximum');
@@ -1927,7 +1955,7 @@ async function runShareThemeSuite() {
     // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
     // cluster sits centered between the menubar and the right-side actions, not right-aligned.
     assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
-    assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*6px auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
+    assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*var\(--space-6\) auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
     assert.ok(/\.resizer-row::after\s*\{[^}]*inset-inline: -5px/.test(preferencesCss), '#34: the resizer has a wide invisible grab zone (~5px past the line) so it is easy to grab');
     assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
     // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
@@ -2006,8 +2034,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.layout-resizer:hover::before,[\s\S]*background:\s*transparent/.test(preferencesCss), 'resizer hover does not return to a solid fill');
     assert.ok(/\.resizer-row:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: row splitter hover is a solid straight yellow bar (no dashed gradient)');
     assert.ok(/\.resizer-column:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: column splitter hover is a solid straight yellow bar (no dashed gradient)');
-    assert.ok(preferencesCss.includes('--pc-control-fg: #1f2937'), 'light mode uses a dark foreground for pane action controls');
-    assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
+    assert.ok(preferencesCss.includes('--pc-control-fg: var(--pane-tab-text)'), 'light mode pane action controls inherit the shared dark tab foreground');
+    assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
     assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
@@ -2338,11 +2366,11 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
     assert.ok(/\.preferences-radio-swatches\.joined\s*\{[\s\S]*gap:\s*0/.test(preferencesCss), 'Preferences active-color swatches are connected into one segmented box');
     assert.ok(/\.keyboard-shortcuts-overlay\s*\{[\s\S]*align-items:\s*center[\s\S]*justify-items:\s*center[\s\S]*padding:\s*var\(--popover-edge-gap\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends dialog is centered in the modal overlay');
-    assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(1180px,\s*calc\(100vw - \(2 \* var\(--popover-edge-gap\)\)\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends uses a wide viewport-bounded panel');
-    assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*8px 10px[\s\S]*padding:\s*8px 10px 10px/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
-    assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*8px/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
+    assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(var\(--dialog-wide-inline-size\),\s*var\(--popover-max-inline-size\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends reuses the shared wide viewport-bounded dialog capacity');
+    assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*var\(--space-8\) var\(--space-10\)[\s\S]*padding:\s*var\(--space-8\) var\(--space-10\) var\(--space-10\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
+    assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*var\(--space-8\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
     assert.ok(/\.keyboard-shortcuts-section h3\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(preferencesCss), 'Keyboard shortcuts section headers follow the active theme color');
-    assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*2px 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
+    assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*var\(--space-2\) 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
     assert.ok(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'YO buttons use the shared square control radius, not a circular pill');
     assert.ok(/\.panel-session-label \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'Info Bar YO buttons use the same square control radius');
     assert.ok(/\.pane-tab-core > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius');
@@ -2503,7 +2531,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-editor-diff-codemirror \.cm-searchMatch-selected\s*\{[\s\S]*background:\s*var\(--diff-search-selected-bg\) !important[\s\S]*font-weight:\s*900/.test(editorSelectionCss), 'selected Differ search matches use a stronger non-green fill');
     assert.ok(editorSelectionSource.includes("}, {dark: scheme.dark});"), 'CodeMirror receives the active light/dark theme flag');
     assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
-    assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
+    assert.ok(/\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{[^}]*color:\s*inherit !important;[^}]*background:\s*var\(--editor-native-selection-bg\) !important;/.test(editorSelectionCss), 'CodeMirror native selection uses one standard cross-browser selector owner and semantic transparent paint');
+    assert.equal(editorSelectionCss.includes('.cm-content ::-moz-selection'), false, 'CodeMirror does not mix the legacy Mozilla pseudo-element into a Chrome-invalid selector list');
     assert.equal(/body\.editor-theme-light \.file-editor-codemirror \.cm-content,[\s\S]*?background:\s*var\(--editor-bg\) !important/.test(editorSelectionCss), false, 'light CodeMirror content stays transparent so the selection layer remains visible');
     for (const scheme of ['one-dark', 'dracula', 'monokai', 'popular-ide-dark-plus', 'nord']) {
       api.setFileEditorThemeMode(scheme);
@@ -2981,7 +3010,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareDebugProfileUploadPayload[\s\S]*shareRedactDiagnosticValue[\s\S]*async function shareUploadDebugProfile[\s\S]*shareDebugProfileUploadEnabled\(\)[\s\S]*apiFetchJson\('\/api\/share\/debug-profile'/.test(shareSource), 'YO!share debug/profiling uploads are opt-in, sent to the share debug endpoint, and client-redacted');
       assert.ok(/async function boot\(\)[\s\S]*shareBootstrap\?\.uiState[\s\S]*await applyShareUiState/.test(shareSource), 'share-view boot applies the server UI-state bootstrap after the initial panes render');
       assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingFileExplorer: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Finder');
-      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*transcriptMeta = \{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a stub only until scoped metadata loads');
+      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*setTranscriptMetadataPayload\(\{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a guarded stub only until scoped metadata loads');
       assert.ok(/function updateActiveSessionParam\(\)[\s\S]*if \(shareViewMode\) return/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot does not rewrite the share URL from local layout state');
       assert.ok(/function syncShareProtocolControls[\s\S]*!readOnly\.checked[\s\S]*https\.checked = true[\s\S]*http\.disabled = true/.test(shareSource), 'YO!share modal locks write mode to https');
       assert.ok(/let activeShares = \[\]/.test(shareSource), 'YO!share tracks active shares as a list for concurrent shares');
@@ -3041,12 +3070,34 @@ async function runShareThemeSuite() {
       assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
       assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
       assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
+      assert.ok(/const shareHostConnectionRecords = new Map\(\)/.test(shareSource), 'YO!share host socket and pending frames share one token-keyed connection record owner');
+      assert.equal(/shareHostSockets|shareHostQueues/.test(shareSource), false, 'parallel YO!share socket and queue maps are removed');
+      assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
+      assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareHostConnectionRecords\.entries\(\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*shareHostConnectionRecords\.delete\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
-      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*setInterval\(\(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status interval skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
+      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
       assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
       assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
-      assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*socket\.send\(serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication with one serialized message and sender ids');
+      assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*sendOrQueueShareHostMessage\(token, serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication through one serialized send-or-queue path');
+      const connectionApi = loadYolomux('', ['1'], 'https:');
+      connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
+      const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
+      assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
+      closedSocket.close();
+      assert.equal(connectionApi.shareHostConnectionCountForTest(), 1, 'socket close retains one reconnectable token record');
+      assert.equal(connectionApi.shareHostConnectionRecordForTest('closed-share').socket, null, 'socket close clears only the matching socket field');
+      assert.equal(connectionApi.shareHostQueueForTest('closed-share').length, 1, 'socket close preserves frames for an intended reconnect');
+      connectionApi.setActiveSharesForTest([]);
+      connectionApi.ensureShareHostSocketsForTest();
+      assert.equal(connectionApi.shareHostConnectionCountForTest(), 0, 'inactive-share reconciliation removes the socketless record and its queue');
+      connectionApi.setActiveSharesForTest([{token: 'retry-share'}]);
+      connectionApi.setShareHostSocketForTest('retry-share', {readyState: 3});
+      assert.equal(connectionApi.enqueueShareHostMessageForTest('retry-share', {type: 'queued-for-retry'}), true);
+      const retrySocket = connectionApi.ensureShareHostSocketForTest('retry-share');
+      retrySocket.onopen({target: retrySocket});
+      assert.deepStrictEqual(retrySocket.sent.map(JSON.parse), [{type: 'queued-for-retry'}], 'a replacement socket flushes the preserved queue once');
+      assert.deepStrictEqual([...connectionApi.shareHostQueueForTest('retry-share')], [], 'reconnect flush drains the record-owned queue');
       assert.ok(/function shareBuildUiMessage\(type, payload = \{\}, options = \{\}\)[\s\S]*shareNextMirrorFrameMetadata\(type, options\)/.test(shareSource), 'DOIT.72 P0.1: sharePublish stamps mirror metadata through one message builder');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*shareDropStaleMirrorFrame\(message\)[\s\S]*return/.test(shareSource), 'DOIT.72 P0.1: share viewers drop stale sequenced mirror frames before applying payloads');
       assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*viewport:\s*shareViewportSnapshot\(\)[\s\S]*appearance:\s*shareAppearanceSnapshot\(\)[\s\S]*terminalDims:\s*shareTerminalDimensionsSnapshot\(\)[\s\S]*chrome:[\s\S]*tabMetaVisible:[\s\S]*infoSubTab:[\s\S]*autoApprove:\s*shareAutoApproveStateSnapshot\(\)[\s\S]*info:\s*shareInfoStateSnapshot\(\{includeRows: !compact\}\)[\s\S]*finder:\s*shareFinderStateSnapshot\(\{compact\}\)[\s\S]*editor:\s*shareEditorStateSnapshot\(\{compact\}\)[\s\S]*preferences:\s*sharePreferencesStateSnapshot\(\{compact\}\)/.test(shareSource), 'YO!share snapshots chrome, YO!info, Finder/Differ/Tabber, editor, and Preferences state through shared compact/full helpers');
@@ -3114,18 +3165,19 @@ async function runShareThemeSuite() {
       assert.equal(shareSource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
       assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
       assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
-      assert.ok(/shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{/.test(shareSource), 'DOIT.67: share viewers remember the last host scroll frame and payload for local-scroll restoration');
-      assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareLastAppliedScrollByTarget\.get\(descriptor\.target\)[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
-      assert.equal(shareSource.includes('shareLastAppliedScrollPayloadByTarget'), false, 'share scroll restore state uses one target-keyed map');
-      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareLastAppliedScrollByTarget\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, payload\.top, payload\.left\)/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*shareScrollTargetRecord\(target\)[\s\S]*record\.payload = \{\.\.\.payload, target, top, left\}[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
+      assert.ok(/const shareScrollTargetRecords = new Map\(\)[\s\S]*function shareScrollTargetRecord\(target, options = \{\}\)/.test(shareSource), 'share viewers own scroll payload and restore lifecycle in one target-keyed record map');
+      assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareScrollTargetRecords\.get\(descriptor\.target\)[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
+      assert.equal(shareSource.includes('shareLastAppliedScrollByTarget'), false, 'retired scroll-state map is absent');
+      assert.equal(shareSource.includes('shareScrollRestoreFrameTimers'), false, 'retired scroll-restore timer map is absent');
+      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareScrollTargetRecords\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, payload\.top, payload\.left\)/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
       assert.ok(/function applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*scrollTop = top[\s\S]*scrollLeft = left[\s\S]*requestMeasure/.test(shareSource), 'host editor scroll uses one shared setter that refreshes virtualized CodeMirror rows');
-      assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*shareScrollRestoreFrameTimers\.set\(cleanTarget, state\)[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries across render frames');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
+      assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*record\.restoreGeneration = restoreGeneration[\s\S]*shareScrollTargetRecords\.get\(cleanTarget\) !== record[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries belong to the current target record generation');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
       assert.ok(/function shareScrollStateSnapshot\(\)[\s\S]*shareScrollPayloadForElement\(element\)/.test(shareSource), 'full UI-state snapshots reuse the shared scroll payload helper instead of inventing a second scroll format');
-      assert.ok(/function applyShareScrollSnapshot\(scroll = \[\]\)[\s\S]*applyShareScrollState\(payload\)/.test(shareSource), 'full UI-state scroll replays through the same host-authored scroll apply path');
-      assert.ok(/function restoreShareScrollTargetsByPrefix\(prefix\)[\s\S]*shareLastAppliedScrollByTarget\.keys\(\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'DOIT.69: editor scroll targets can replay as a group after editor rerender');
+      assert.ok(/function applyShareScrollSnapshot\(scroll = \[\]\)[\s\S]*snapshotGeneration = \+\+shareScrollSnapshotGeneration[\s\S]*shareScrollTargetRecords\.delete\(target\)[\s\S]*applyShareScrollState\(payload, \{snapshotGeneration\}\)/.test(shareSource), 'full UI-state scroll replaces absent targets and replays current targets through the shared apply path');
+      assert.ok(/function restoreShareScrollTargetsByPrefix\(prefix\)[\s\S]*shareScrollTargetRecords\.keys\(\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'DOIT.69: editor scroll targets can replay as a group after editor rerender');
       assert.ok(/function scheduleShareFileEditorScrollRestore\(item, path\)[\s\S]*editor:\$\{key\}:editor[\s\S]*editor:\$\{key\}:preview/.test(shareSource), 'file editor renders schedule host scroll replay for editor and preview scrollers');
       assert.ok(/function shareCanPublishScroll\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*return false[\s\S]*return shareCanPublishUi\(\)/.test(shareSource), 'DOIT.69: read-only share viewers cannot publish scroll frames');
       assert.ok(/function scheduleShareScrollPublishForElement\(element\)[\s\S]*!shareCanPublishScroll\(\)[\s\S]*restoreShareReadonlyScrollTarget\(element\)[\s\S]*if \(shareCanPublishScroll\(\)\) sharePublish\('scroll'/.test(shareSource), 'DOIT.69: scroll publish scheduling restores readonly local scroll and rechecks publish permission before sending');
@@ -3157,7 +3209,7 @@ async function runShareThemeSuite() {
       assert.equal(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*else await resyncShareViewerUiState\(\)/.test(shareSource), false, 'DOIT.72 P0.2: geometry drift repair no longer blindly runs the generic semantic resync for every mismatch');
       assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
       assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9/MV-3: the odd geometry digest cadence is owned by the shared timing partial');
-      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared timing owner');
+      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*resetRuntimeInterval\('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared scheduler and timing owner');
       const digestApi = loadYolomux('?debug=1&shareReplay=1', ['1'], 'https:');
       const digestFrames = [];
       digestApi.setActiveSharesForTest([{token: 'idle-share', viewers: 0}]);
@@ -3254,7 +3306,7 @@ async function runShareThemeSuite() {
       assert.ok(/\.app-overlay-root\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-share-presence\)[\s\S]*pointer-events:\s*none/.test(shareCss), 'DOIT.72 P4.3: app overlay root is fixed app-space chrome and does not resize the layout grid');
       assert.ok(/function createContextMenuController\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(menu\)/.test(shareSource), 'DOIT.72 P4.3: context menus mount under the replayed app overlay root');
       assert.ok(/function detachPaneTabPopover\(tab, popover\)[\s\S]*const host = appOverlayRootElement\(\)[\s\S]*host\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: detached tab popovers mount under the replayed app overlay root');
-      assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(diffRefPopover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
+      assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
       assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: repo hover popovers mount under the replayed app overlay root');
       assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: image preview popovers mount under the replayed app overlay root');
       assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(shareSource), 'DOIT.72 P4.3: rename dialogs mount under the replayed app overlay root');
@@ -3284,7 +3336,7 @@ async function runShareThemeSuite() {
       assert.ok(/visibility:\s*visible\s*!important/.test(popupChildRule) && /opacity:\s*1\s*!important/.test(popupChildRule), 'DOIT.67: mirrored popup children stay visible without host-only open ancestors');
       const popupModalRule = shareCss.match(/\.share-popup-mirror-item > \.modal\s*\{(?<body>[^}]*)\}/)?.groups?.body || '';
       assert.ok(/width:\s*100%\s*!important/.test(popupModalRule) && /height:\s*100%\s*!important/.test(popupModalRule) && /max-height:\s*none\s*!important/.test(popupModalRule), 'mirrored modal overlays fill the host-measured shell without using client viewport dimensions');
-      assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(960px,\s*calc\(100% - 28px\)\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width is relative to the host-measured modal shell');
+      assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(var\(--dialog-wide-inline-size\),\s*100%\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width uses the shared host/replay capacity token relative to the measured shell');
       assert.ok(/function shareTerminalBytesFromMessage\(session, message\)[\s\S]*message\.ch !== 'term'[\s\S]*atob\(message\.data\)/.test(shareSource), 'share-view terminal output is decoded from tagged terminal frames');
   	    assert.ok(/function scheduleShareTopologySnapshot\(reason = 'topology'\)[\s\S]*scheduleShareUiStatePublish\(\{reason: `topology:\$\{cleanReason\}`\}\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'DOIT.72 P0.3: topology changes route through one full UI-state snapshot scheduler and a replay keyframe scheduler');
   	    assert.ok(/shareTopologyKeyframePointerQuietMs:\s*500/.test(timingSource) && /const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs/.test(shareSource) && /function shareTopologyDomKeyframeDelayMs\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayHostLastKeyframeAt[\s\S]*sharePointerQuietDelayMs\(\)/.test(shareSource), 'topology replay keyframes wait for a pointer-quiet window and respect the host keyframe floor');
@@ -3319,8 +3371,8 @@ async function runShareThemeSuite() {
       assert.ok(/\.share-status-pill\.share-mode-read\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'read share status uses the green/good mode color');
       assert.ok(/\.share-status-pill\.share-mode-write\s*\{[\s\S]*var\(--bad\)/.test(shareCss), 'write share status uses the red/bad mode color');
       assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*--share-cursor-color/.test(shareCss), 'share cursor color is participant-specific');
-      assert.ok(/--share-stage-bg:\s*#000/.test(shareCss), 'M3: share view keeps one black stage token for letterbox/crop bands');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--share-stage-bg:\s*#000/.test(shareCss), 'M3: light mode explicitly keeps the share stage black');
+      assert.ok(/--share-stage-bg:\s*var\(--paint-black\)/.test(shareCss), 'M3: share view keeps one shared black stage token for letterbox/crop bands');
+      assert.equal(/body\.theme-light\s*\{[\s\S]*--share-stage-bg:/.test(shareCss), false, 'M3: light mode inherits the single black share-stage owner');
       assert.ok(/\.share-mirror-stage\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*hidden[\s\S]*background:\s*var\(--share-stage-bg\)/.test(shareCss), 'M3: share view has a fixed black clipping stage for letterbox/crop bands');
       assert.ok(/body\.share-view-mode \.share-mirror-stage \.app-root\s*\{[\s\S]*position:\s*absolute[\s\S]*transform:\s*translate3d\(var\(--share-mirror-tx/.test(shareCss), 'M3: share view transforms the app root inside the mirror stage');
       assert.ok(/\.share-viewer-banner\s*\{[\s\S]*position:\s*fixed[\s\S]*bottom:\s*8px/.test(shareCss), 'M3: share viewer banner is fixed outside the mirror root');
@@ -3845,7 +3897,7 @@ async function runShareThemeSuite() {
       assert.equal(textPointer.defaultPrevented, false, 'read-only share pointerdown inside scroll content still allows text selection defaults');
       scroller.scrollTop = 999;
       scroller.scrollLeft = 17;
-      roApi.setShareLastAppliedScrollForTest('editor:file:/tmp/a.md:editor', {top: 123, left: 4}, {
+      roApi.setShareScrollTargetRecordForTest('editor:file:/tmp/a.md:editor', {top: 123, left: 4}, {
         kind: 'editor',
         path: '/tmp/a.md',
         item: 'file:/tmp/a.md',
@@ -3861,7 +3913,7 @@ async function runShareThemeSuite() {
       hostScroll.target = scroller;
       roApi.blockShareReadonlyInteraction(hostScroll);
       assert.equal(hostScroll.immediateStopped, false, 'host-authored scroll at the mirrored position reaches virtualized widgets');
-      assert.deepStrictEqual({...roApi.shareLastAppliedScrollPayloadForTest('editor:file:/tmp/a.md:editor')}, {
+      assert.deepStrictEqual({...roApi.shareScrollTargetPayloadForTest('editor:file:/tmp/a.md:editor')}, {
         kind: 'editor',
         path: '/tmp/a.md',
         item: 'file:/tmp/a.md',
@@ -3881,6 +3933,51 @@ async function runShareThemeSuite() {
       assert.equal(roApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'pending Differ scroll schedules replay by target key after the pane appears');
       assert.equal(diffScroller.scrollTop, 345, 'pending Differ scroll replay restores the host scrollTop');
       assert.equal(diffScroller.scrollLeft, 6, 'pending Differ scroll replay restores the host horizontal scroll');
+      const queuedScrollFrames = [];
+      const snapshotApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
+        share: {view: true, id: 'share-scroll-snapshot', mode: 'ro', session: '1', sessions: ['1']},
+        requestAnimationFrame(callback) {
+          queuedScrollFrames.push(callback);
+          return queuedScrollFrames.length;
+        },
+      });
+      queuedScrollFrames.length = 0;
+      const snapshotDiffScroller = new TestElement('', 'div');
+      snapshotDiffScroller.classList.add('file-explorer-changes-panel');
+      snapshotApi.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-changes-panel' ? [snapshotDiffScroller] : []);
+      const drainScrollFrames = () => {
+        let guard = 32;
+        while (queuedScrollFrames.length && guard > 0) {
+          queuedScrollFrames.shift()();
+          guard -= 1;
+        }
+        assert.ok(guard > 0, 'scroll restore frames settle within their bounded retry count');
+      };
+      snapshotApi.applyShareScrollSnapshotForTest([
+        {target: 'preferences', kind: 'preferences', top: 11, left: 0},
+        {target: 'finder:diff', kind: 'finder', mode: 'diff', top: 222, left: 7},
+      ]);
+      drainScrollFrames();
+      assert.equal(snapshotApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'current snapshot target schedules a restore generation');
+      const retiredDiffRestore = queuedScrollFrames.shift();
+      assert.equal(typeof retiredDiffRestore, 'function', 'scheduled target owns a pending restore callback');
+      snapshotApi.applyShareScrollSnapshotForTest([
+        {target: 'preferences', kind: 'preferences', top: 19, left: 0},
+      ]);
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff'), null, 'authoritative full snapshot retires an absent target record');
+      snapshotDiffScroller.scrollTop = 0;
+      snapshotDiffScroller.scrollLeft = 0;
+      retiredDiffRestore();
+      assert.equal(snapshotDiffScroller.scrollTop, 0, 'retired target restore callback cannot resurrect its old scrollTop');
+      assert.equal(snapshotDiffScroller.scrollLeft, 0, 'retired target restore callback cannot resurrect its old scrollLeft');
+      snapshotApi.applyShareScrollStateForTest({target: 'finder:diff', kind: 'finder', mode: 'diff', top: 444, left: 9});
+      assert.equal(snapshotDiffScroller.scrollTop, 444, 'a later delta recreates the retired target with current scrollTop');
+      assert.equal(snapshotDiffScroller.scrollLeft, 9, 'a later delta recreates the retired target with current scrollLeft');
+      retiredDiffRestore();
+      assert.equal(snapshotDiffScroller.scrollTop, 444, 'an old generation cannot overwrite a recreated target');
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames > 0, true, 'recreated target owns its own bounded restore work');
+      drainScrollFrames();
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames, 0, 'current restore generation cleans up its frame count');
       const termCalls = [];
       roApi.registerTerminalForTest('1', {
         cols: 80,
@@ -4165,7 +4262,7 @@ async function runShareThemeSuite() {
     const modeSeparatorIndex = source.indexOf("dataset: {editorToolbarSeparator: 'mode'}");
     assert.ok(splitButtonIndex > 0 && popoutPreviewButtonIndex > splitButtonIndex && popoutPreviewButtonIndex < modeSeparatorIndex, 'Preview pop-out sits directly in the editor mode button group after Split view');
     assert.ok(source.includes('editor.autosave_delay_seconds'), 'editor autosave delay is a persisted preference');
-    assert.ok(source.includes('(commandPaletteIndex + 1) % commandPaletteItemsCache.length'), 'command palette arrow navigation wraps down');
+    assert.ok(source.includes('(commandPaletteState.index + 1) % commandPaletteState.items.length'), 'command palette arrow navigation wraps down');
     assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
     assert.equal(source.includes('function updateLinkedFilePreviewRings()'), false, 'old side-preview ring updater is removed');
     assert.equal(source.includes("previewPanel.classList.add('preview-linked')"), false, 'focused editors no longer mark paired side-preview panes');
@@ -4209,7 +4306,7 @@ async function runShareThemeSuite() {
     assert.equal(finderCandidatesBody.includes('focusedTerminal'), false, 'Finder candidates do not read passive focusedTerminal');
     assert.equal(finderCandidatesBody.includes('lastFocusedTmuxSession'), false, 'Finder candidates do not read passive lastFocusedTmuxSession');
     assert.ok(/function setFileExplorerManualRootMode\(\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*setFileExplorerRootMode\('fixed', \{sync: false, persist: true\}\)/.test(source), 'manual Finder scope buttons cancel pending Sync and leave Sync mode explicitly');
-    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncGeneration \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
+    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncState.generation \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
     assert.ok(source.includes('openFileExplorerManualRoot(expandQuickAccessPath(path));'), 'Finder quick-access opens are manual and disable Sync');
     assert.ok(source.includes('const opened = await openFileExplorerManualRoot(target);'), 'Finder typed path opens are manual and disable Sync');
     assert.ok(source.includes("if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);"), 'Finder root navigation by double-click is manual and disables Sync');
@@ -5542,7 +5639,7 @@ async function runShareThemeSuite() {
     assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
     assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
     assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\) !important[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'dark Finder ? status badge is faint against a dark background');
-    assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.06\) !important[\s\S]*?color:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background through the shared slate overlay token');
+    assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--paint-overlay-slate-06\) !important[\s\S]*?color:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background through the shared slate paint token');
     assert.equal(syncCss.includes('.changes-status-unknown'), false, 'Differ no longer has a separate unknown-status CSS path');
     const scrollContainer = {
       clientHeight: 100,

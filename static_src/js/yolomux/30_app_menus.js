@@ -174,12 +174,12 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  return tabMenuDetailText(item, transcriptMetadataState.payload.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -195,7 +195,7 @@ function commandPaletteTabDetail(item) {
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
   const pr = displayPullRequest(info);
@@ -536,7 +536,7 @@ function finderSearchAliases(item) {
 }
 
 function tabSearchFields(item) {
-  const info = transcriptMeta.sessions?.[item] || {};
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
@@ -1090,31 +1090,30 @@ function createAppMenu(menu) {
   const wrapper = document.createElement('div');
   wrapper.className = 'app-menu';
   wrapper.dataset.appMenu = menu.id;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'app-menu-button';
-  button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', openAppMenuId === menu.id ? 'true' : 'false');
-  button.setAttribute('role', 'menuitem');
-  button.innerHTML = `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
   popover.setAttribute('role', 'menu');
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
   fitAppMenuPopover(popover);
-  button.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (wrapper.classList.contains(CLS.open)) {
-      const openMs = Date.now() - openAppMenuOpenedAt;
-      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
-      else openAppMenu(wrapper, {focusFirst: false, pinned: true});
-      return;
-    }
-    openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  const button = makeButton({
+    className: 'app-menu-button',
+    role: 'menuitem',
+    html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
+    attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (wrapper.classList.contains(CLS.open)) {
+        const openMs = Date.now() - openAppMenuOpenedAt;
+        if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+        else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+        return;
+      }
+      openAppMenu(wrapper, {focusFirst: false, pinned: true});
+    },
+    events: {keydown: event => handleAppMenuButtonKeydown(event, wrapper)},
   });
-  button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
   if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
@@ -1281,24 +1280,22 @@ function bindAppMenuCommandMirrorActive(button, owner = button) {
 }
 
 function createAppMenuCommand(item, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
-  button.setAttribute('role', item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem');
-  if (item.checked !== undefined) {
-    button.dataset.checked = item.checked ? 'true' : 'false';
-    button.setAttribute('aria-checked', item.checked ? 'true' : 'false');
-  }
-  if (item.disabled) button.disabled = true;
   const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
-  if (ariaLabel) button.setAttribute('aria-label', ariaLabel);
   const richHtml = item.html ? stripTitleAttrs(item.html) : '';
   const iconHtml = item.iconHtml ? stripTitleAttrs(item.iconHtml) : '';
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
   const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
-  button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
+  const button = makeButton({
+    className: ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
+    role: item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
+    checked: item.checked,
+    disabled: item.disabled,
+    ariaLabel,
+    dataset: item.checked !== undefined ? {checked: item.checked ? 'true' : 'false'} : undefined,
+    html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
+  });
   if (!options.asSubmenu) {
     button.addEventListener('click', event => {
       event.preventDefault();

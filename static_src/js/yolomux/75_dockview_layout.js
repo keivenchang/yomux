@@ -1549,7 +1549,7 @@ function createDockviewHeaderActionsRenderer() {
     const html = dockviewHeaderActionsHtml(activeItem);
     element.hidden = !html;
     element.innerHTML = html;
-    updatePanelWindowStepButtons(activeItem, transcriptMeta.sessions?.[activeItem]);
+    updatePanelWindowStepButtons(activeItem, transcriptMetadataState.payload.sessions?.[activeItem]);
     const panel = document.getElementById(panelDomId(activeItem));
     if (panel) {
       updatePaneExpandButton(panel, activeItem);
@@ -1715,7 +1715,7 @@ function syncDockviewTabShell(tab, item, api = null) {
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
   tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
-  applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMeta.sessions?.[item]));
+  applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMetadataState.payload.sessions?.[item]));
   tab.setAttribute('aria-label', dockviewTabAriaLabel(item));
 }
 

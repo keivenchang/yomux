@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
 import types
 
@@ -1236,7 +1237,8 @@ def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
     ])
     second = first.replace("3h 45m", "3h 46m")
 
-    prompt_detector.agent_screen_state(first, pane_target="%codex-goal-stale", now=1000.0)
+    for observed_at in (1000.0, 1020.0, 1040.0, 1060.0):
+        prompt_detector.agent_screen_state(first, pane_target="%codex-goal-stale", now=observed_at)
     state = prompt_detector.agent_screen_state(second, pane_target="%codex-goal-stale", now=1080.0)
 
     assert state["key"] == "idle"
@@ -1248,12 +1250,47 @@ def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
 def test_agent_screen_state_stales_repeated_unchanged_visible_counter():
     visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
 
-    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1000.0)
+    for observed_at in (1000.0, 1020.0, 1040.0, 1060.0):
+        prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=observed_at)
     state = prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1080.0)
 
     assert state["key"] == "idle"
     assert state["activity_source"] == "visible-counter"
     assert state["negative_reason"] == "stale visible status counter"
+
+
+def test_visible_counter_history_clears_when_counter_disappears_before_target_reuse():
+    visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    pane_target = "%counter-reused"
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+
+    first = prompt_detector.agent_screen_state(visible_text, pane_target=pane_target, now=1000.0)
+    idle = prompt_detector.agent_screen_state("build finished\nkeivenc@host$ ", pane_target=pane_target, now=1001.0)
+    reused = prompt_detector.agent_screen_state(visible_text, pane_target=pane_target, now=1080.0)
+
+    assert first["key"] == "working"
+    assert idle["key"] == "idle"
+    assert reused["key"] == "working"
+    assert pane_target in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+
+
+def test_visible_counter_history_is_idle_pruned_and_bounded():
+    visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+    base_now = time.monotonic()
+
+    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-old", now=base_now)
+    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-fresh", now=base_now + 31.0)
+    assert "%counter-old" not in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+
+    for index in range(prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS + 1):
+        prompt_detector.agent_screen_state(visible_text, pane_target=f"%counter-bound-{index}", now=base_now + 31.0)
+
+    assert len(prompt_detector._VISIBLE_STATUS_COUNTER_CACHE) == prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS
+    assert "%counter-fresh" not in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    assert f"%counter-bound-{prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS}" in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
 
 
 def test_visible_counter_is_stale_when_real_output_follows_it():

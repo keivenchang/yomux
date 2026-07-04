@@ -14,6 +14,107 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
     assert browser_wait_timeout(5, worker="") == 5
 
 
+def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path):
+    page = tmp_path / "browser-wait-helper.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<main id="ready">ready</main>'),
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const immediate = await window.__yolomuxTestWaitFor(
+            () => document.getElementById('ready')?.textContent,
+            {description: 'immediate fixture value'}
+          );
+          let delayedValue = '';
+          setTimeout(() => { delayedValue = 'delayed-value'; }, 20);
+          const delayed = await window.__yolomuxTestWaitFor(
+            () => delayedValue,
+            {timeoutMs: 500, intervalMs: 5, description: 'delayed fixture value'}
+          );
+          let asyncAttempts = 0;
+          const asyncValue = await window.__yolomuxTestWaitFor(
+            async () => {
+              await Promise.resolve();
+              asyncAttempts += 1;
+              return asyncAttempts >= 2 ? {ready: true} : false;
+            },
+            {timeoutMs: 500, intervalMs: 5, description: 'async fixture value'}
+          );
+          let timeout = '';
+          try {
+            await window.__yolomuxTestWaitFor(
+              () => false,
+              {timeoutMs: 15, intervalMs: 4, description: 'missing fixture state'}
+            );
+          } catch (error) {
+            timeout = String(error?.message || error);
+          }
+          done({immediate, delayed, asyncValue, asyncAttempts, timeout});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["immediate"] == "ready", metrics
+    assert metrics["delayed"] == "delayed-value", metrics
+    assert metrics["asyncValue"] == {"ready": True}, metrics
+    assert metrics["asyncAttempts"] == 2, metrics
+    assert metrics["timeout"] == "Timed out after 15ms waiting for missing fixture state", metrics
+
+
+def test_live_runtime_bundle_readiness_has_one_ready_and_error_owner():
+    class FixtureBrowser:
+        def __init__(self, state):
+            self.state = state
+
+        def execute_script(self, _script):
+            return self.state
+
+    ready = {"sentinel": True, "grid": True, "appRoot": False, "lateFunction": True, "url": "file:///tmp/live-runtime-boot.html", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(FixtureBrowser(ready), timeout=0.01) == ready
+
+    replay_ready = {"sentinel": True, "grid": False, "appRoot": True, "lateFunction": True, "url": "file:///tmp/live-runtime-boot.html", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(FixtureBrowser(replay_ready), timeout=0.01) == replay_ready
+
+    redirected = {"sentinel": False, "grid": False, "appRoot": False, "lateFunction": False, "url": "file:///login", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(
+        FixtureBrowser(redirected),
+        timeout=0.01,
+        expected_url="file:///tmp/live-runtime-boot.html",
+        expected_redirect_paths=("/login",),
+    ) == redirected
+
+    unexpected_redirect = {**redirected, "url": "file:///broken"}
+    assert live_runtime_bundle_ready_state(unexpected_redirect, "/tmp/live-runtime-boot.html", ("/login",)) is False
+    chrome_error = {**redirected, "url": "chrome-error://chromewebdata/"}
+    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html") is False
+    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html", ("/login",)) == chrome_error
+
+    failed = {"sentinel": False, "grid": True, "appRoot": False, "lateFunction": False, "url": "file:///tmp/live-runtime-boot.html", "errors": [{"message": "bundle boom"}], "rejections": []}
+    with pytest.raises(AssertionError, match="bundle boom"):
+        wait_for_live_runtime_bundle(FixtureBrowser(failed), timeout=0.01)
+
+
+def test_live_runtime_raw_html_builder_has_no_external_callers():
+    external_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPO_ROOT / "tests").glob("test_browser_*.py"))
+    )
+    assert "live_runtime_boot_fixture" + "_html(" not in external_sources
+
+
+def test_static_browser_fixtures_have_one_write_and_navigation_owner():
+    source = (REPO_ROOT / "tests" / "browser_helpers" / "browser_layout.py").read_text(encoding="utf-8")
+
+    assert source.count("page.write_text(") == 2  # one static helper plus the distinct full-bundle loader
+    assert source.count("browser.get(page.as_uri())") == 1
+    assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
+
+
 def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(monkeypatch, tmp_path):
     session = f"yt-named-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     runtime = start_isolated_tmux_runtime(
@@ -71,12 +172,19 @@ def test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner():
     real_source = function_sources["test_real_agent_prompts_render_ask_attention_in_live_server"]
     assert "getattr(" not in real_source
     assert "except Exception:" not in real_source
+    assert "window.__yolomuxTestWaitFor" in real_source
+    assert "ui_deadline" not in real_source
+    assert "time.sleep(0.5)" not in real_source
 
 
 def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tmp_path):
     page = tmp_path / "branch-list-title-theme.html"
-    page.write_text(page_html('<div class="branch-list-title">Branches</div>'), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<div class="branch-list-title">Branches</div>'),
+    )
     colors = browser.execute_script(
         """
         const title = document.querySelector('.branch-list-title');
@@ -92,11 +200,15 @@ def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tm
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
     page = tmp_path / "tab-metadata-visibility.html"
     tab_body = '<span class="session-yolo-marker">YO</span><span class="session-button-name">1</span><span class="tab-symbol ci-indicator branch-indicator">MAIN</span><span class="session-button-detail">description</span>'
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <button id="regular-tab" class="pane-tab active">{tab_body}</button>
       <button id="compact-tab" class="tmux-pane-tab-token active">{tab_body}</button>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const regular = document.getElementById('regular-tab');
@@ -130,15 +242,19 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
 
 def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_controls(browser, tmp_path):
     page = tmp_path / "session-popover-agent-row-wrap.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div id="row" class="session-agent-row attention">
         <span id="controls" class="session-agent-kind"><span class="agent-window-activity"><span class="agent-window-status-dot">■</span><span class="agent-icon">✳</span></span></span>12:claude a deliberately long tmux window name that should wrap in the popover <span id="separator" class="session-agent-sep">—</span> needs input
       </div>
     """, extra_css="""
       body { margin: 0; padding: 16px; background: var(--bg); }
       #row { box-sizing: border-box; width: 210px; padding: 3px 5px; border-radius: 5px; background: var(--pane-inactive-tab-bg); }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const row = document.getElementById('row');
@@ -173,88 +289,130 @@ def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_control
     assert metrics["scrollWidth"] <= metrics["clientWidth"], metrics
 
 
-@pytest.mark.parametrize(
-    "tone,pulsing,expected_fill",
-    [
-        ("attention", True, "#dc2626"),
-        ("attention", False, "#dc2626"),
-        ("cooldown", True, "#ffd633"),
-        ("cooldown", False, "#ffd633"),
-    ],
-)
-def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path, tone, pulsing, expected_fill):
+def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path):
+    cases = [
+        {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
+        {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
+        {"tone": "cooldown", "pulsing": True, "expected_fill": "#ffd633", "window_index": 4},
+        {"tone": "cooldown", "pulsing": False, "expected_fill": "#ffd633", "window_index": 5},
+    ]
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     browser.execute_script(
         """
-        const tone = arguments[0];
-        const pulsing = arguments[1];
+        const cases = arguments[0];
         const now = Date.now() / 1000;
         agentStatusPulsePeriodMs = 1200;
         document.documentElement.style.setProperty('--pulse-duration', '1.2s');
         document.documentElement.style.setProperty('--status-pulse-step-count', '10');
         setAttentionAnimationClockDelay();
-        workflowTransitionGlowSeconds = pulsing ? 60 : 0;
-        const agent = tone === 'attention'
-          ? {kind: 'codex', state: 'approval', window_index: 2, window_label: '2:codex', attention_key: 'click-gray-red', attention_acknowledged: false, screen_text: 'Approval required', observed_ts: now}
-          : {kind: 'codex', state: 'idle', window_index: 2, window_label: '2:codex', working_stopped_ts: now - 1, idle_since: now - 1, cooldown_acknowledged: false, observed_ts: now};
-        applyAutoApprovePayload({sessions: {'1': {
-          target: '1', enabled: false, screen: {key: 'idle'},
-          agent_windows: [agent],
-        }}});
+        workflowTransitionGlowSeconds = 60;
+        const acknowledgementKeyFor = (item, tone) => JSON.stringify([
+          'agent-window',
+          '1',
+          String(item.window_index),
+          '',
+          'codex',
+          tone === 'attention' ? 'approval' : 'cooldown',
+          `click-gray-${item.window_index}`,
+        ]);
+        const agentFor = (item, tone = item.tone) => {
+          const acknowledgementKey = acknowledgementKeyFor(item, tone);
+          return tone === 'attention'
+            ? {kind: 'codex', state: 'approval', window_index: item.window_index, window_label: `${item.window_index}:codex`, attention_key: acknowledgementKey, attention_acknowledged: false, screen_text: 'Approval required', observed_ts: now}
+            : {kind: 'codex', state: 'idle', window_index: item.window_index, window_label: `${item.window_index}:codex`, working_stopped_ts: now - item.window_index, idle_since: now - item.window_index, cooldown_attention_key: acknowledgementKey, cooldown_acknowledged: false, observed_ts: now};
+        };
+        const payloadFor = agentWindows => ({
+          session_order: ['1'],
+          sessions: {'1': {target: '1', enabled: false, screen: {key: 'idle'}, agent_windows: agentWindows}},
+          rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+        });
+        const staticPreseed = cases.filter(item => !item.pulsing).map(item => agentFor(item, item.tone === 'attention' ? 'cooldown' : 'attention'));
+        applyAutoApprovePayload(payloadFor(staticPreseed));
         refreshAgentWindowActivityDisplays();
-        const findButton = () => [...document.querySelectorAll('[data-window-session="1"][data-window-index="2"]')].find(node => node.offsetParent !== null);
-        const read = label => {
-          const dot = findButton()?.querySelector('.agent-window-status-dot');
+        const payload = payloadFor(cases.map(item => agentFor(item)));
+        window.__fixtureAutoApprovePayload = payload;
+        applyAutoApprovePayload(payload);
+        refreshAgentWindowActivityDisplays();
+        const findButton = index => [...document.querySelectorAll(`[data-window-session="1"][data-window-index="${index}"]`)].find(node => node.offsetParent !== null);
+        const read = (index, label) => {
+          const dot = findButton(index)?.querySelector('.agent-window-status-dot');
           const style = dot ? getComputedStyle(dot) : null;
+          const stateRow = (autoApproveStates.get('1')?.agent_windows || []).find(row => Number(row?.window_index) === index);
+          const fixtureRow = (window.__fixtureAutoApprovePayload?.sessions?.['1']?.agent_windows || []).find(row => Number(row?.window_index) === index);
+          const key = String(stateRow?.attention_key || stateRow?.cooldown_attention_key || fixtureRow?.attention_key || fixtureRow?.cooldown_attention_key || '');
+          const record = attentionAcknowledgementRecord(key);
           const pseudo = name => {
             const pseudoStyle = dot ? getComputedStyle(dot, name) : null;
             return {content: pseudoStyle?.content || '', width: pseudoStyle?.width || '', height: pseudoStyle?.height || '', background: pseudoStyle?.backgroundColor || ''};
           };
-          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', before: pseudo('::before'), after: pseudo('::after')};
+          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', acknowledgement: {pending: record?.pending === true, recorded: record?.recordedAt !== null && record?.recordedAt !== undefined, state: stateRow?.attention_acknowledged === true || stateRow?.cooldown_acknowledged === true, fixture: fixtureRow?.attention_acknowledged === true || fixtureRow?.cooldown_acknowledged === true}, before: pseudo('::before'), after: pseudo('::after')};
         };
-        window.__subwindowGrayClickSamples = [read('before')];
+        window.__subwindowGrayClickSamples = Object.fromEntries(cases.map(item => [String(item.window_index), [read(item.window_index, 'before')]]));
+        window.__subwindowGrayClicked = new Set();
         document.addEventListener('pointerdown', event => {
-          const button = event.target?.closest?.('[data-window-session="1"][data-window-index="2"]');
-          if (!button) return;
-          setTimeout(() => window.__subwindowGrayClickSamples.push(read('immediate')), 0);
-          setTimeout(() => window.__subwindowGrayClickSamples.push(read('400ms')), 400);
-          setTimeout(() => window.__subwindowGrayClickSamples.push(read('900ms')), 900);
-          setTimeout(() => window.__subwindowGrayClickSamples.push(read('1400ms')), 1400);
-        }, {capture: true, once: true});
-        return window.__subwindowGrayClickSamples[0];
+          const button = event.target?.closest?.('[data-window-session="1"][data-window-index]');
+          const index = Number(button?.dataset?.windowIndex);
+            const samples = window.__subwindowGrayClickSamples[String(index)];
+            if (!samples || window.__subwindowGrayClicked.has(index)) return;
+                window.__subwindowGrayClicked.add(index);
+                const clickedAt = performance.now();
+                const captureSettled = () => {
+                  refreshAgentWindowActivityDisplays();
+                  const sample = read(index, 'settled');
+              if (!sample.gray || performance.now() - clickedAt >= 3000) samples.push(sample);
+              else setTimeout(captureSettled, 100);
+            };
+            setTimeout(() => samples.push(read(index, 'immediate')), 0);
+            setTimeout(() => samples.push(read(index, '400ms')), 400);
+            setTimeout(() => samples.push(read(index, '900ms')), 900);
+            setTimeout(captureSettled, 1400);
+        }, {capture: true});
+        return window.__subwindowGrayClickSamples;
         """,
-        tone,
-        pulsing,
+        cases,
     )
-    button = next(node for node in browser.find_elements("css selector", '[data-window-session="1"][data-window-index="2"]') if node.is_displayed())
-    fast_pointer_actions(browser).move_to_element(button).click().perform()
-    WebDriverWait(browser, 4).until(
-        lambda driver: driver.execute_script("return window.__subwindowGrayClickSamples?.length === 5")
+    for case in cases:
+        selector = f'[data-window-session="1"][data-window-index="{case["window_index"]}"]'
+        click_visible_selector(browser, selector)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return Object.values(window.__subwindowGrayClickSamples || {}).every(samples => samples.length === 5)")
     )
-    samples = browser.execute_script("return window.__subwindowGrayClickSamples")
-    assert samples[0]["gray"] is False and samples[0]["pulsing"] is pulsing and samples[0]["fill"] == expected_fill, samples
-    for sample in samples[1:4]:
-        assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", samples
-        assert sample["animationName"] == "agent-status-acknowledgement-fade", samples
-        assert sample["animationDuration"] == "1.2s", samples
-        assert -1.2 <= float(sample["animationDelay"].removesuffix("s")) <= 0, samples
-        assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), samples
-        assert float(sample["before"]["width"].removesuffix("px")) > 0, samples
-        assert float(sample["before"]["height"].removesuffix("px")) > 0, samples
-        assert sample["before"]["background"] == "rgb(154, 165, 177)", samples
-        if tone == "cooldown":
-            assert float(sample["after"]["width"].removesuffix("px")) > 0, samples
-            assert float(sample["after"]["height"].removesuffix("px")) > 0, samples
-            assert sample["after"]["background"] == "rgb(154, 165, 177)", samples
-    assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, samples
-    assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, samples
-    assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, samples
-    assert samples[4]["gray"] is False and samples[4]["fill"] == "", samples
+    samples_by_window = browser.execute_script("return window.__subwindowGrayClickSamples")
+    for case in cases:
+        samples = samples_by_window[str(case["window_index"])]
+        evidence = {"case": case, "samples": samples}
+        assert samples[0]["gray"] is False and samples[0]["pulsing"] is case["pulsing"] and samples[0]["fill"] == case["expected_fill"], evidence
+        for sample in samples[1:4]:
+            assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", evidence
+            assert sample["animationName"] == "agent-status-acknowledgement-fade", evidence
+            assert sample["animationDuration"] == "1.2s", evidence
+            assert -1.2 <= float(sample["animationDelay"].removesuffix("s")) <= 0, evidence
+            assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), evidence
+            assert float(sample["before"]["width"].removesuffix("px")) > 0, evidence
+            assert float(sample["before"]["height"].removesuffix("px")) > 0, evidence
+            assert sample["before"]["background"] == "rgb(154, 165, 177)", evidence
+            if case["tone"] == "cooldown":
+                assert float(sample["after"]["width"].removesuffix("px")) > 0, evidence
+                assert float(sample["after"]["height"].removesuffix("px")) > 0, evidence
+                assert sample["after"]["background"] == "rgb(154, 165, 177)", evidence
+        assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, evidence
+        assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, evidence
+        assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, evidence
+        assert samples[4]["gray"] is False and samples[4]["fill"] == "", {
+            "case": case,
+            "acknowledgement": samples[4]["acknowledgement"],
+            "gray": samples[4]["gray"],
+            "fill": samples[4]["fill"],
+        }
 
 
 def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(browser, tmp_path):
     page = tmp_path / "tab-reserves-invisible-status-ball.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="tab-prefix-fixture">
         <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
         <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
@@ -264,8 +422,8 @@ def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(br
       body { margin: 0; padding: 16px; background: #202633; }
       .tab-prefix-fixture { display: grid; justify-items: start; gap: 8px; }
       .pane-tab { width: 420px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -359,7 +517,11 @@ def _tabber_window_button_html(kind, label, glyph_html, active=False):
 
 def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
     page = tmp_path / "debug-agent-status-axis-guides.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-chart debug-chart-fixture" data-js-debug-chart="activity">
         <div class="js-debug-chart-head">
           <span class="js-debug-chart-title">Agent status</span>
@@ -389,8 +551,8 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
     """, extra_css="""
       body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
       .debug-chart-fixture { width: 560px; height: 260px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const svg = document.querySelector('.js-debug-line-chart');
@@ -426,7 +588,11 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
         for value in grid_values
     )
     page = tmp_path / "debug-agent-status-hidden-integer-guides.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="js-debug-graph-view">
         <div class="js-debug-y-axis">{labels_html}</div>
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
@@ -438,8 +604,8 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
       body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
       .js-debug-graph-view { width: 560px; }
       .js-debug-line-chart { width: 520px; height: 220px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const lines = [...document.querySelectorAll('[data-js-debug-grid-value]')];
@@ -472,7 +638,11 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
 
 def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_path):
     page = tmp_path / "debug-graph-series-colors.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-graph-view" id="debug-graph">
         <svg class="js-debug-line-chart" viewBox="0 0 20 20" role="img" preserveAspectRatio="none">
           <path class="js-debug-line js-debug-line--api" d="M0 1L20 1"></path>
@@ -501,8 +671,8 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       #debug-graph { width: 260px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const graph = document.getElementById('debug-graph');
@@ -591,7 +761,11 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
 
 def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tmp_path):
     page = tmp_path / "debug-graph-full-title.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-chart" style="width:420px">
         <div class="js-debug-chart-head">
           <div class="js-debug-chart-heading-row">
@@ -603,8 +777,8 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
         </div>
         <div class="js-debug-chart-body"><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div>
       </section>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"),
+    )
     metrics = browser.execute_script(
         """
         const title = document.getElementById('latency-title');
@@ -633,8 +807,7 @@ def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tm
 
 
 def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browser, tmp_path):
-    page = tmp_path / "debug-graph-header-geometry.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(browser, tmp_path, "debug-graph-header-geometry.html", page_html("""
       <div class="js-debug-graph-controls" style="width:720px">
         <div class="js-debug-range-slider-control" data-js-debug-range-control>
           <input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-end" class="js-debug-range-end-label">24h</span>
@@ -646,8 +819,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
         <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(123.4k, Σ displayed reqs)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
         <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 93.333%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
       </section>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
         const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width, height:value.height}; };
@@ -673,8 +845,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
 
 
 def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
-    page = tmp_path / "debug-graph-cpu-compact-row.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(browser, tmp_path, "debug-graph-cpu-compact-row.html", page_html("""
       <div class="js-debug-chart-grid" style="width:690px">
         <section id="cpu" class="js-debug-chart" data-js-debug-chart="cpu">
           <div class="js-debug-chart-head"><div class="js-debug-chart-heading-row"><span class="js-debug-chart-title">CPU</span></div><div class="js-debug-legend"><span>system avg CPU %</span><span>yolomux.py :8101 CPU %</span><span>yolomux.py :8102 CPU %</span><span>yolomux.py :8103 CPU %</span></div></div>
@@ -683,8 +854,7 @@ def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, t
         <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">System memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>125GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
         <section id="next-row" class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">GPU memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>48GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
       </div>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
         const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
@@ -697,16 +867,14 @@ def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, t
 
 
 def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap(browser, tmp_path):
-    page = tmp_path / "debug-graph-flow-layout.html"
     chart = """
       <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span style="--js-debug-axis-y:6.667%">100%</span><span style="--js-debug-axis-y:93.333%">0%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
     """
-    page.write_text(page_html(f"""
+    load_static_html_fixture(browser, tmp_path, "debug-graph-flow-layout.html", page_html(f"""
       <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:300px">
         <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}</div></div></div>
       </div>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
         const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, left:value.left, right:value.right}; };
@@ -725,16 +893,14 @@ def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap
 
 
 def test_debug_graph_cards_fill_a_tall_pane_without_exceeding_their_maximum_height(browser, tmp_path):
-    page = tmp_path / "debug-graph-tall-card-layout.html"
     chart = """
       <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>100%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
     """
-    page.write_text(page_html(f"""
+    load_static_html_fixture(browser, tmp_path, "debug-graph-tall-card-layout.html", page_html(f"""
       <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:1040px">
         <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}{chart.format(title='Client latency')}{chart.format(title='Agent status')}</div></div></div>
       </div>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
         const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
@@ -756,14 +922,12 @@ def test_debug_graph_cards_fill_a_tall_pane_without_exceeding_their_maximum_heig
 
 
 def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(browser, tmp_path):
-    page = tmp_path / "repo-chip-grid-columns.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(browser, tmp_path, "repo-chip-grid-columns.html", page_html("""
       <div class="terminal-context-menu repo-chip-menu" style="width:760px">
         <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8001</span><span class="repo-chip-branch meta-branch">yolomux.dev8001</span><span class="repo-chip-status"><span class="meta-muted">51 dirty</span><span class="meta-muted">6 ahead</span></span></button>
         <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8002</span><span class="repo-chip-branch meta-branch">yolomux.dev8002</span><span class="repo-chip-status"><span class="meta-muted">9 ahead</span></span></button>
       </div>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
         const column = selector => [...document.querySelectorAll(selector)].map(node => {
@@ -800,7 +964,11 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
         </div>
       </div>
     """
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="js-debug-graph-view">
         <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
           <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
@@ -824,8 +992,8 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       .js-debug-graph-view { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; height: 380px; }
       .js-debug-graph { height: 340px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const rect = selector => {
@@ -979,13 +1147,7 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
           };
           stopJsDebugStatsPolling();
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 240; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
 
           // Keep all stateful pane families mounted while the global Help overlay and YO!stats
           // relocalize. This catches locale refreshes that accidentally clear Finder, CodeMirror,
@@ -1433,7 +1595,7 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
             return typeof pollJsDebugStatsSample === 'function'
               && typeof renderDebugPanels === 'function'
               && document.querySelector('[data-js-debug-graph]') !== null
-              && jsDebugStatsPollInFlight === false;
+              && jsDebugStatsPollState.inFlight === false;
             """
         )
     )
@@ -1443,10 +1605,10 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
         (async () => {
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
-          jsDebugStatsFirstSampleReceived = true;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
-          jsDebugStatsPollPendingForceGraphRefresh = false;
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
           jsDebugStatsServerSequence = 1;
           const nowSeconds = Math.floor(Date.now() / 1000);
           recordJsDebugStatsSample({history: {sequence: 1, records: [{
@@ -1500,12 +1662,13 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
             const refocusedAt = performance.now();
             Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
             document.dispatchEvent(new Event('visibilitychange'));
-            const deadline = performance.now() + 2000;
-            while (performance.now() < deadline) {
-              const currentRenderedAt = Number(document.querySelector('[data-js-debug-graph]')?.dataset.jsDebugGraphRenderedAt);
-              if (!jsDebugStatsPollInFlight && requests >= 1 && currentRenderedAt > renderedBefore) break;
-              await new Promise(resolve => setTimeout(resolve, 10));
-            }
+            await window.__yolomuxTestWaitFor(() => {
+              const currentGraph = document.querySelector('[data-js-debug-graph]');
+              const currentRenderedAt = Number(currentGraph?.dataset.jsDebugGraphRenderedAt);
+              const currentPointCount = Array.from(currentGraph?.querySelectorAll('[data-js-debug-series="systemCpu"]') || [])
+                .flatMap(line => String(line.getAttribute('points') || '').trim().split(/\\s+/).filter(Boolean)).length;
+              return !jsDebugStatsPollState.inFlight && requests >= 1 && currentRenderedAt > renderedBefore && currentPointCount >= 2;
+            }, {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats visibility-refocus redraw'});
             const refreshedGraph = document.querySelector('[data-js-debug-graph]');
             const renderedAfter = Number(refreshedGraph.dataset.jsDebugGraphRenderedAt);
             const points = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'))
@@ -1547,7 +1710,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
         """
         stopJsDebugStatsPolling();
         clearJsDebugGraphData();
-        jsDebugStatsFirstSampleReceived = true;
+        jsDebugStatsPollState.firstSampleReceived = true;
         setDebugGraphRange(60 * 60);
         const nowSeconds = Math.floor(Date.now() / 10000) * 10;
         recordJsDebugStatsSample({history: {sequence: 2, records: [
@@ -1654,7 +1817,7 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
         """
         stopJsDebugStatsPolling();
         clearJsDebugGraphData();
-        jsDebugStatsFirstSampleReceived = true;
+        jsDebugStatsPollState.firstSampleReceived = true;
         const nowSeconds = Math.floor(Date.now() / 60000) * 60;
         recordJsDebugStatsSample({history: {sequence: 4, records: [{
           start: nowSeconds - 60,
@@ -1708,7 +1871,11 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
     page = tmp_path / "debug-graph-bad-connection-overlay.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-graph-view" id="debug-graph">
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
           <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60" vector-effect="non-scaling-stroke"></line>
@@ -1720,8 +1887,8 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       #debug-graph { width: 600px; height: 160px; }
       .js-debug-line-chart { height: 120px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const svg = document.querySelector('.js-debug-line-chart');
@@ -2124,7 +2291,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const labelRect = label?.getBoundingClientRect();
         const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
         const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
-        const labelBeforeSliderGap = labelRect && sliderAfterZoomRect ? sliderAfterZoomRect.left - labelRect.right : NaN;
+        const sliderBeforeLabelGap = labelRect && sliderAfterZoomRect ? labelRect.left - sliderAfterZoomRect.right : NaN;
         reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
         const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
 
@@ -2152,7 +2319,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
           resetRightGap,
-          labelBeforeSliderGap,
+          sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
         };
         """
@@ -2185,7 +2352,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 118 <= metrics["zoomSeconds"] <= 122, metrics
     assert metrics["resetText"] == "Reset", metrics
     assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
-    assert metrics["labelBeforeSliderGap"] >= 4, metrics
+    assert metrics["sliderBeforeLabelGap"] >= 4, metrics
     assert metrics["resetZoomed"] is False, metrics
 
     slider = WebDriverWait(browser, 5).until(lambda driver: driver.find_element("css selector", "[data-js-debug-range-slider]"))
@@ -2231,9 +2398,10 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
           resetJsDebugHistoryReadiness();
-          jsDebugStatsFirstSampleReceived = false;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
           const nowSeconds = Math.floor(Date.now() / 1000);
           jsDebugGraphRangeSeconds = 8 * 60 * 60;
           jsDebugStatsAgentTokenResolutionSeconds = 120;
@@ -2284,10 +2452,10 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
           };
           try {
             setDebugGraphRange(2 * 60 * 60);
-            const deadline = performance.now() + 3000;
-            while ((!requests.length || jsDebugStatsPollInFlight) && performance.now() < deadline) {
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 1 && !jsDebugStatsPollState.inFlight,
+              {timeoutMs: 3000, intervalMs: 20, description: 'short-range token history refetch'},
+            );
             renderDebugPanels({force: true});
             const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
             const url = new URL(requests[0] || location.href);
@@ -2331,9 +2499,10 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
           resetJsDebugHistoryReadiness();
-          jsDebugStatsFirstSampleReceived = true;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
           const nowSeconds = Math.floor(Date.now() / 1000);
           const twoHoursAgo = nowSeconds - (2 * 60 * 60);
           jsDebugGraphRangeSeconds = 2 * 60 * 60;
@@ -2345,12 +2514,10 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
           });
           const originalFetch = window.fetch;
           const requests = [];
-          const waitForRequests = async expectedCount => {
-            const deadline = performance.now() + 3000;
-            while ((requests.length < expectedCount || jsDebugStatsPollInFlight) && performance.now() < deadline) {
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
-          };
+          const waitForRequests = expectedCount => window.__yolomuxTestWaitFor(
+            () => requests.length >= expectedCount && !jsDebugStatsPollState.inFlight,
+            {timeoutMs: 3000, intervalMs: 20, description: `compact-token history request ${expectedCount}`},
+          );
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
@@ -2444,9 +2611,10 @@ def test_debug_graph_server_restart_refetches_complete_history_without_waiting_f
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
           resetJsDebugHistoryReadiness();
-          jsDebugStatsFirstSampleReceived = true;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
           jsDebugStatsServerSequence = 0;
           jsDebugStatsServerPid = null;
           jsDebugStatsServerStartedAt = null;
@@ -2503,10 +2671,10 @@ def test_debug_graph_server_restart_refetches_complete_history_without_waiting_f
           try {
             await pollJsDebugStatsSample();
             await pollJsDebugStatsSample();
-            const deadline = performance.now() + 3000;
-            while ((requests.length < 3 || jsDebugStatsPollInFlight) && performance.now() < deadline) {
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 3 && !jsDebugStatsPollState.inFlight,
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats server-restart history refetch'},
+            );
             renderDebugPanels({force: true});
             const xValues = [...document.querySelectorAll('[data-js-debug-series="systemCpu"]')]
               .flatMap(line => String(line.getAttribute('points') || '')
@@ -2552,9 +2720,9 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
         (async () => {
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
-          jsDebugStatsFirstSampleReceived = false;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
           jsDebugStatsServerSequence = 0;
           resetJsDebugHistoryReadiness();
           jsDebugGraphRangeSeconds = 15 * 60;
@@ -2631,11 +2799,10 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
             };
             releaseIncremental();
             await narrowPoll;
-            const deadline = performance.now() + 3000;
-            while ((requests.length < 3 || jsDebugStatsPollInFlight) && performance.now() < deadline) {
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
-            await new Promise(resolve => setTimeout(resolve, 650));
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 3 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
+              {timeoutMs: 3000, intervalMs: 20, description: 'wider YO!stats history readiness'}
+            );
             const wideUrl = new URL(requests[2]);
             const lines = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'));
             const xValues = lines.flatMap(line => String(line.getAttribute('points') || '')
@@ -2675,7 +2842,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert metrics["requestCount"] == 3, metrics
     assert metrics["since"] == "0", metrics
     assert metrics["historyEnd"] == metrics["expectedHistoryEnd"], metrics
-    assert metrics["historyResolution"] == 5, metrics
+    assert metrics["historyResolution"] == 1, metrics
     assert metrics["historyMaxPoints"] == 6000, metrics
     assert 1790 <= metrics["rangeSeconds"] <= 1810, metrics
     assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
@@ -2784,10 +2951,10 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
               retry: Boolean(errorGraph?.querySelector('[data-js-debug-history-retry]')),
             };
             retryJsDebugHistory();
-            const deadline = performance.now() + 3000;
-            while ((requestCount < 2 || jsDebugStatsPollInFlight || jsDebugHistoryReadiness.phase !== 'ready') && performance.now() < deadline) {
-              await new Promise(resolve => setTimeout(resolve, 20));
-            }
+            await window.__yolomuxTestWaitFor(
+              () => requestCount >= 2 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats history retry readiness'}
+            );
             const readyGraph = document.querySelector('[data-js-debug-graph]');
             return {
               retainedChartCount,
@@ -2849,9 +3016,9 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
         (async () => {
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
-          jsDebugStatsFirstSampleReceived = false;
-          jsDebugStatsPollInFlight = false;
-          jsDebugStatsPollPending = false;
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
           jsDebugStatsServerSequence = 0;
           resetJsDebugHistoryReadiness();
           jsDebugGraphRangeSeconds = 15 * 60;
@@ -2983,7 +3150,11 @@ def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
 
 def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
     page = tmp_path / "working-agent-visible-pulse.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="agent-pulse-fixture">
         <button id="dock-tab" class="pane-tab active">
           <span class="pane-tab-core">
@@ -3034,8 +3205,8 @@ def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windo
         padding: 4px 8px;
         background: #2c3340;
       }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     reduced = browser.execute_script("return matchMedia('(prefers-reduced-motion: reduce)').matches")
     targets = {
         "dock-tab Claude": "#dock-claude",
@@ -3085,7 +3256,11 @@ def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windo
 
 def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, tmp_path):
     page = tmp_path / "working-agent-glow-pixels.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="glow-pixel-fixture">
         <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
@@ -3105,8 +3280,8 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
       #tabber-glow-row .file-tree-name,
       #tabber-glow-row .tabber-window-token,
       #tabber-glow-row .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const dot = document.getElementById('tabber-glow-dot');
@@ -3144,7 +3319,11 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
 
 def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path):
     page = tmp_path / "mixed-parent-status-ball.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="mixed-status-fixture">
         <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-green" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-working">●</span></span></span>
         <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-yellow" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-cooldown">●</span></span></span>
@@ -3153,8 +3332,8 @@ def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path)
       body { margin: 0; padding: 64px; background: #111820; }
       .mixed-status-fixture { display: flex; gap: 24px; }
       .session-agent-activity-marker { --agent-status-ball-size: 28px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -3176,7 +3355,11 @@ def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path)
 
 def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, tmp_path):
     page = tmp_path / "pane-tab-cooldown-vibrant-yellow.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="status-ball-vibrancy-fixture">
         <button id="tab" class="pane-tab active">
           <span class="pane-tab-core">
@@ -3195,8 +3378,8 @@ def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, 
       .status-ball-vibrancy-fixture { display: flex; align-items: center; gap: 32px; }
       #tab { min-width: 160px; min-height: 34px; }
       #reference-dot { font-size: 14px; line-height: 1; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const dot = document.getElementById('tab-dot');
@@ -3234,7 +3417,11 @@ def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, 
 
 def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser, tmp_path):
     page = tmp_path / "pane-tab-attention-opacity.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <button class="pane-tab active">
         <span class="pane-tab-core">
           <span class="session-agent-activity-marker">
@@ -3245,8 +3432,8 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
           <span class="session-button-prefix">needs input</span>
         </span>
       </button>
-    """, extra_css="body { margin: 0; padding: 64px; background: var(--bg); }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="body { margin: 0; padding: 64px; background: var(--bg); }"),
+    )
     metrics = browser.execute_script(
         """
         const dot = document.getElementById('attention-dot');
@@ -3276,7 +3463,11 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
 
 def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
     page = tmp_path / "subwindow-status-solid-shapes.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="subwindow-glyph-fixture">
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="bar-button" class="tab tmux-window-button active">
@@ -3341,8 +3532,8 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
       .file-tree-row.tabber-row { padding: 6px 10px; background: var(--panel2); }
       .tmux-window-button.active { background: var(--active-control-bg); }
       .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         document.documentElement.classList.add('status-pulse-disabled');
@@ -3484,7 +3675,11 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
 
 def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
     page = tmp_path / "agent-status-split-surfaces.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="agent-status-split-fixture">
         <button id="dock-tab" class="pane-tab active">
           <span class="pane-tab-core">
@@ -3525,8 +3720,8 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
       .file-tree-row.tabber-row { width: 520px; padding: 4px 8px; background: #2c3340; }
       .pane-info-bar { display: flex; width: 520px; padding: 4px; background: #202633; }
       .tmux-window-button { width: max-content; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         document.getElementById('tabber-window-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -3641,7 +3836,11 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
 
 def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(browser, tmp_path):
     page = tmp_path / "tabber-parent-child-status-ball-parity.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="tabber-ball-parity-fixture">
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 16px;">
           <span class="file-tree-name">
@@ -3668,8 +3867,8 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
       .tabber-session-tab,
       .tabber-window-token,
       .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -3733,7 +3932,11 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
 
 def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(browser, tmp_path):
     page = tmp_path / "attention-dot-pulse.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
@@ -3743,8 +3946,8 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
     """, extra_css="""
       :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
       body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const ids = ['working-dot', 'window-dot', 'popover-dot', 'tabber-dot', 'cooldown-dot', 'attention-label'];
@@ -4020,7 +4223,11 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
 
 def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
     page = tmp_path / "agent-status-split.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div id="base" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.42s">
         <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
@@ -4055,8 +4262,8 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
       </div>
     """, extra_css="""
       body { background: #111; color: #ddd; font: 16px sans-serif; padding: 24px; display: grid; gap: 16px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         document.getElementById('info-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -4139,11 +4346,15 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
         </div>
       </article>
     """.replace("__LONG_TEXT__", long_text)
-    page.write_text(page_html(body, extra_css="""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(body, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       .panel { height: auto; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const rect = id => {
@@ -4236,7 +4447,11 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
 
 def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
     page = tmp_path / "pane-control-shared-paint.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <article class="panel active-pane" style="height:auto;">
         <div class="pane-info-bar panel-detail-row">
           <button id="status-control" type="button" class="tab tmux-status-toggle">·</button>
@@ -4248,10 +4463,15 @@ def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
             <button id="pane-close" type="button" class="tab pane-close"></button>
           </div>
           <button id="detail-close" type="button" class="panel-detail-close"></button>
+          <button id="tab-close" type="button" class="pane-tab-close"></button>
         </div>
       </article>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+      <article id="preferences-grid" class="preferences-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="debug-grid" class="js-debug-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="panel-grid" class="panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="editor-grid" class="panel file-editor-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+    """),
+    )
 
     def paint(control_id):
         return browser.execute_script(
@@ -4280,29 +4500,43 @@ def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
         hover_paints.append(paint(control_id))
     assert hover_paints[0] == hover_paints[1] == hover_paints[2] == focus_paints[0]
 
-    glyphs = browser.execute_script(
-        """
-        const read = id => {
-          const element = document.getElementById(id);
-          const style = getComputedStyle(element, '::before');
-          return {
-            base: {position: style.position, width: style.width, height: style.height, radius: style.borderRadius},
-            centerX: parseFloat(style.left) / element.clientWidth,
-            centerY: parseFloat(style.top) / element.clientHeight,
-          };
-        };
-        return {detail: read('detail-close'), pane: read('pane-close')};
-        """
-    )
-    assert glyphs["detail"]["base"] == glyphs["pane"]["base"]
-    for glyph in glyphs.values():
-        assert abs(glyph["centerX"] - 0.5) <= 0.01
-        assert abs(glyph["centerY"] - 0.5) <= 0.01
+    for theme in ("dark", "light"):
+        browser.execute_script("document.body.classList.toggle('theme-light', arguments[0] === 'light')", theme)
+        metrics = browser.execute_script(
+            """
+            const readGlyph = id => {
+              const element = document.getElementById(id);
+              const style = getComputedStyle(element, '::before');
+              return {
+                base: {position: style.position, width: style.width, height: style.height, radius: style.borderRadius},
+                centerX: parseFloat(style.left) / element.clientWidth,
+                centerY: parseFloat(style.top) / element.clientHeight,
+              };
+            };
+            const gridIds = ['preferences-grid', 'debug-grid', 'panel-grid', 'editor-grid'];
+            return {
+              glyphs: ['detail-close', 'pane-close', 'tab-close'].map(readGlyph),
+              grids: gridIds.map(id => getComputedStyle(document.getElementById(id)).gridTemplateRows),
+            };
+            """
+        )
+        glyphs = metrics["glyphs"]
+        assert glyphs[0]["base"] == glyphs[1]["base"] == glyphs[2]["base"]
+        assert glyphs[0]["base"]["width"] == "8px"
+        assert abs(float(glyphs[0]["base"]["height"].removesuffix("px")) - 1.4) <= 0.02
+        for glyph in glyphs:
+            assert abs(glyph["centerX"] - 0.5) <= 0.01
+            assert abs(glyph["centerY"] - 0.5) <= 0.01
+        assert metrics["grids"][0] == metrics["grids"][1] == metrics["grids"][2] == metrics["grids"][3]
 
 
 def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
     page = tmp_path / "persistent-active-control-paint.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <button id="tab-meta" class="active"></button>
       <div class="topbar-language-menu open"><button id="language" class="topbar-language"></button></div>
       <button id="menu-icon" class="app-menu-ui-icon active"></button>
@@ -4328,9 +4562,14 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
         <button id="diff-pressed" class="file-editor-diff-panel" aria-pressed="true"></button>
         <button id="toolbar-hover" class="file-editor-gutter-panel"></button>
         <div class="file-editor-preview-find-panel" style="position:static;"><button id="preview-find-hover"></button></div>
+        <span id="icon-blame" class="file-editor-icon file-editor-icon-blame"></span>
+        <span id="icon-diff" class="file-editor-icon file-editor-icon-diff"></span>
+        <span id="icon-eye" class="file-editor-icon file-editor-icon-eye"></span>
+        <span id="icon-split" class="file-editor-icon file-editor-icon-split"></span>
+        <span id="icon-theme" class="file-editor-icon file-editor-icon-theme"></span>
       </article>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const ids = ['tab-meta', 'language', 'menu-icon', 'notify', 'session-state', 'preferences-search', 'tmux-window', 'rename', 'info-preset', 'finder-toggle', 'preview-zoom', 'search-toggle'];
@@ -4339,6 +4578,21 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
         const readPaint = element => {
           const style = getComputedStyle(element);
           return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const readIcon = (id, pseudo) => {
+          const element = document.getElementById(id);
+          const style = getComputedStyle(element, pseudo);
+          const transform = new DOMMatrixReadOnly(style.transform);
+          const outerWidth = parseFloat(style.width) + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+          const outerHeight = parseFloat(style.height) + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+          return {
+            content: style.content,
+            position: style.position,
+            centerX: parseFloat(style.left) / element.clientWidth,
+            centerY: parseFloat(style.top) / element.clientHeight,
+            translatedHalfWidth: transform.e + (outerWidth / 2),
+            translatedHalfHeight: transform.f + (outerHeight / 2),
+          };
         };
         const readTheme = light => {
           document.body.classList.toggle('theme-light', light);
@@ -4363,6 +4617,16 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
               return [id, readPaint(document.getElementById(resolvedId))];
             })),
             paneControls: Object.fromEntries(paneIds.map(id => [id, readPaint(document.getElementById(id))])),
+            icons: {
+              blameBefore: readIcon('icon-blame', '::before'),
+              blameAfter: readIcon('icon-blame', '::after'),
+              diffBefore: readIcon('icon-diff', '::before'),
+              eyeBefore: readIcon('icon-eye', '::before'),
+              eyeAfter: readIcon('icon-eye', '::after'),
+              splitBefore: readIcon('icon-split', '::before'),
+              splitAfter: readIcon('icon-split', '::after'),
+              themeBefore: readIcon('icon-theme', '::before'),
+            },
           };
         };
         return {dark: readTheme(false), light: readTheme(true)};
@@ -4374,6 +4638,13 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
             assert paint == expected, {"theme": theme, "control": control, "paint": paint, "expected": expected}
         for control, paint in metrics[theme]["paneControls"].items():
             assert paint == metrics[theme]["paneExpected"], {"theme": theme, "control": control, "paint": paint, "expected": metrics[theme]["paneExpected"]}
+        for icon, geometry in metrics[theme]["icons"].items():
+            assert geometry["content"] == '""', {"theme": theme, "icon": icon, "geometry": geometry}
+            assert geometry["position"] == "absolute", {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["centerX"] - 0.5) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["centerY"] - 0.5) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["translatedHalfWidth"]) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["translatedHalfHeight"]) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
 
     for theme, light in (("dark", False), ("light", True)):
         browser.execute_script(
@@ -4406,7 +4677,11 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
 
 def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(browser, tmp_path):
     page = tmp_path / "shared-css-state-layout-owners.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <button id="hover-away" type="button">away</button>
       <button id="server-reload" type="button" class="server-update-banner-reload">Reload</button>
       <article class="panel" style="position:static;height:auto;width:320px;">
@@ -4420,9 +4695,10 @@ def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(br
       <section id="debug-scroll" class="js-debug-scroll" style="height:90px;"><i></i><i></i></section>
       <section id="debug-events" class="js-debug-events-view" style="height:90px;"><i></i><i></i></section>
       <label class="info-tree-search-control"><input id="info-search" value="info"></label>
+      <input id="preferences-search" class="preferences-search" value="preferences">
       <input id="history-search" class="search-history-input" value="history">
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
 
     metrics = browser.execute_script(
         """
@@ -4517,7 +4793,7 @@ def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(br
         assert hover["actual"] == hover["expected"], {"theme": theme, **hover}
 
         focus_paints = []
-        for control_id in ("info-search", "history-search"):
+        for control_id in ("info-search", "preferences-search", "history-search"):
             browser.execute_script("document.getElementById(arguments[0]).focus()", control_id)
             focus_paints.append(
                 browser.execute_script(
@@ -4534,7 +4810,11 @@ def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(br
 
 def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tmp_path):
     page = tmp_path / "shared-ellipsis-disabled-state.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <span id="share-banner" class="share-viewer-banner-text"></span>
       <span id="menu-setting" class="app-menu-setting-label"></span>
       <span id="status-label" class="status-indicator--label"></span>
@@ -4569,8 +4849,8 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
       <span id="session-agent-cluster" class="agent-window-activity agent-window-activity--subwindow"><span class="agent-icon"><svg id="subwindow-agent-svg"></svg></span></span>
       <span id="changes-agent-cluster" class="changes-file-agent"><span class="agent-icon"><svg id="changes-agent-svg"></svg></span></span>
       <span id="file-agent-cluster" class="file-tree-agent"></span>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const ellipsisIds = ['share-banner', 'menu-setting', 'status-label', 'diff-description', 'preferences-title', 'client-perf', 'chart-summary', 'x-axis', 'tmux-window-text', 'search-title', 'search-meta', 'recent-paths', 'transcript-value', 'compact-label', 'job-meta', 'job-text', 'info-label-line', 'info-label', 'editor-title', 'tabber-window-text', 'share-heading', 'share-url', 'share-user', 'terminal-drop-label'];
@@ -4626,7 +4906,11 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
 
 def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners(browser, tmp_path):
     page = tmp_path / "danger-status-light-panel-paint.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <span id="approval" class="session-state-badge session-state-needs-approval"></span>
       <span id="input" class="session-state-badge session-state-needs-input"></span>
       <span id="failing" class="ci-indicator pr-status-failing"></span>
@@ -4635,6 +4919,16 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
       <section id="changes-toolbar" class="changes-toolbar"></section>
       <section id="changes-repo" class="changes-repo-group"></section>
       <section id="comparison" class="changes-comparison-head"></section>
+      <section id="debug-stat" class="js-debug-stat"></section>
+      <section id="preferences-section" class="preferences-section"></section>
+      <section id="search-result" class="search-history-result"></section>
+      <section id="mermaid-preview" class="mermaid-preview"></section>
+      <section id="zoom-viewport" class="file-editor-preview-zoom-viewport"></section>
+      <button id="default-button">default</button>
+      <button id="share-control" class="share-view-fit-toggle">fit</button>
+      <label class="info-tree-search-control"><input id="info-search-control"></label>
+      <section id="terminal-surface" class="terminal-drop-suggestions"></section>
+      <section id="preview-surface" class="file-editor-preview-fallback"></section>
       <button id="standalone-refresh" class="changes-refresh">refresh</button>
       <section id="file-explorer" class="file-explorer"></section>
       <section id="file-tree-col" class="file-explorer-tree-col"></section>
@@ -4650,13 +4944,45 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
         <section id="embedded-comparison" class="changes-comparison-head"></section>
         <button id="embedded-refresh" class="changes-refresh">refresh</button>
       </section>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const paint = id => {
           const style = getComputedStyle(document.getElementById(id));
           return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const frame = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {background: style.backgroundColor, border: style.borderTop, radius: style.borderRadius};
+        };
+        const controlShell = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, border: style.borderTop, radius: style.borderRadius};
+        };
+        const secondarySurface = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTop};
+        };
+        const sharedOwnerPaint = () => {
+          const controlProbe = document.createElement('div');
+          controlProbe.style.cssText = 'color:var(--text);border:1px solid var(--line);border-radius:var(--radius-control)';
+          document.body.appendChild(controlProbe);
+          controlProbe.id = 'control-shell-probe';
+          const expectedControl = controlShell('control-shell-probe');
+          controlProbe.remove();
+          const surfaceProbe = document.createElement('div');
+          surfaceProbe.style.cssText = 'color:var(--text);background:var(--panel2);border:1px solid var(--line)';
+          document.body.appendChild(surfaceProbe);
+          surfaceProbe.id = 'secondary-surface-probe';
+          const expectedSurface = secondarySurface('secondary-surface-probe');
+          surfaceProbe.remove();
+          return {
+            controls: Object.fromEntries(['share-control', 'info-search-control'].map(id => [id, controlShell(id)])),
+            expectedControl,
+            surfaces: Object.fromEntries(['default-button', 'terminal-surface', 'preview-surface'].map(id => [id, secondarySurface(id)])),
+            expectedSurface,
+          };
         };
         const probePaint = cssText => {
           const probe = document.createElement('div');
@@ -4672,6 +4998,15 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
         document.body.classList.remove('editor-theme-light');
         const darkStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
         const expectedDangerDark = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const darkSharedOwners = sharedOwnerPaint();
+        const frameIds = ['debug-stat', 'preferences-section', 'search-result', 'mermaid-preview', 'zoom-viewport'];
+        const darkFrames = Object.fromEntries(frameIds.map(id => [id, frame(id)]));
+        const darkFrameProbe = document.createElement('div');
+        darkFrameProbe.style.cssText = 'background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-md)';
+        document.body.appendChild(darkFrameProbe);
+        darkFrameProbe.id = 'dark-frame-probe';
+        const expectedDarkFrame = frame('dark-frame-probe');
+        darkFrameProbe.remove();
         const darkOwnedPaint = {
           finder: ['finder-pane', 'finder-tree'].map(paint),
           yoagent: ['yoagent-chat', 'yoagent-message', 'yoagent-assistant', 'yoagent-result', 'yoagent-user'].map(paint),
@@ -4681,6 +5016,14 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
         document.body.classList.add('editor-theme-light');
         const lightStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
         const expectedDangerLight = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const lightSharedOwners = sharedOwnerPaint();
+        const lightFrames = Object.fromEntries(frameIds.map(id => [id, frame(id)]));
+        const lightFrameProbe = document.createElement('div');
+        lightFrameProbe.style.cssText = 'background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-md)';
+        document.body.appendChild(lightFrameProbe);
+        lightFrameProbe.id = 'light-frame-probe';
+        const expectedLightFrame = frame('light-frame-probe');
+        lightFrameProbe.remove();
         const surfaceIds = ['changes-toolbar', 'changes-repo', 'comparison', 'file-explorer', 'file-tree-col'];
         const lightSurfaces = Object.fromEntries(surfaceIds.map(id => [id, paint(id)]));
         const expectedSurface = probePaint('color:var(--text);background:var(--panel);border:1px solid var(--line)');
@@ -4711,8 +5054,14 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
         };
         return {
           darkStatuses,
+          darkSharedOwners,
+          darkFrames,
+          expectedDarkFrame,
           darkOwnedPaint,
           lightStatuses,
+          lightSharedOwners,
+          lightFrames,
+          expectedLightFrame,
           expectedDangerDark,
           expectedDangerLight,
           lightSurfaces,
@@ -4726,6 +5075,15 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
     )
     for status, paint in metrics["darkStatuses"].items():
         assert paint == metrics["expectedDangerDark"], {"theme": "dark", "status": status, "paint": paint}
+    for theme in ("dark", "light"):
+        owners = metrics[f"{theme}SharedOwners"]
+        for control, shell in owners["controls"].items():
+            assert shell == owners["expectedControl"], {"theme": theme, "control": control, "shell": shell, "expected": owners["expectedControl"]}
+        for surface, paint in owners["surfaces"].items():
+            assert paint == owners["expectedSurface"], {"theme": theme, "surface": surface, "paint": paint, "expected": owners["expectedSurface"]}
+    for theme in ("dark", "light"):
+        for surface, frame in metrics[f"{theme}Frames"].items():
+            assert frame == metrics[f"expected{theme.title()}Frame"], {"theme": theme, "surface": surface, "frame": frame}
     for status in ("approval", "input"):
         assert metrics["lightStatuses"][status] == metrics["expectedDangerLight"], {"theme": "light", "status": status, "paint": metrics["lightStatuses"][status]}
     assert metrics["lightStatuses"]["failing"] == metrics["lightStatuses"]["changes"]
@@ -4750,14 +5108,18 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
 
 def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser, tmp_path):
     page = tmp_path / "inactive-marker-vanilla-code-paint.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <span id="session-marker" class="session-yolo-marker inactive"></span>
       <button class="pane-tab active"><span id="pane-marker" class="session-yolo-marker inactive"></span></button>
       <div class="file-editor-preview-pane vanilla-preview-body"><code id="pane-code"></code><pre id="pane-pre"></pre></div>
       <div class="file-editor-preview-pane-panel vanilla-preview-body"><code id="popout-code"></code><pre id="popout-pre"></pre></div>
       <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><code id="editor-code"></code><pre id="editor-pre"></pre></div></div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const paint = id => {
@@ -4797,9 +5159,13 @@ def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser
         assert paint == metrics["vanilla"]["expected"], {"surface": surface, "paint": paint, "expected": metrics["vanilla"]["expected"]}
 
 
-def test_code_surfaces_headers_and_tab_text_share_computed_owners(browser, tmp_path):
+def test_code_surfaces_and_audited_css_families_share_computed_owners(browser, tmp_path):
     page = tmp_path / "code-header-tab-text-owners.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="file-editor-content">
         <div class="markdown-body">
           <code id="markdown-inline">inline</code>
@@ -4812,12 +5178,23 @@ def test_code_surfaces_headers_and_tab_text_share_computed_owners(browser, tmp_p
       <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><pre><code id="editor-nested-code"><span id="editor-nested-child">editor</span></code></pre></div></div>
       <div id="action-code-block" class="yoagent-action-text">action</div>
       <div class="yoagent-chat"><div class="markdown-body"><pre id="chat-code-block">chat</pre></div></div>
+      <div id="preview-overlay" class="file-editor-preview-pane" style="position:static;"></div>
+      <div id="preview-panel" class="file-editor-preview-pane-panel"></div>
+      <button id="chat-send" class="yoagent-chat-send"></button>
+      <button id="chat-stop" class="yoagent-chat-stop"></button>
+      <div id="explorer-title" class="file-explorer-title">Finder</div>
+      <div id="explorer-panel-title" class="file-explorer-panel-title">Differ</div>
+      <div id="editor-title" class="file-editor-title">Editor</div>
+      <span id="summary-totals" class="changes-summary-totals"></span>
+      <span id="repo-totals" class="changes-repo-totals"></span>
+      <div id="shortcut-row" class="keyboard-shortcut-row"></div>
+      <div id="legend-row" class="keyboard-legend-row"></div>
       <div id="finder-head" class="file-explorer-head">Finder</div>
       <div class="file-explorer-changes-panel"><div id="changes-head" class="file-explorer-changes-head">Modified files</div></div>
       <button class="pane-tab file-editor-item"><span id="file-tab-text" class="session-button-dir">file.py</span></button>
       <button class="pane-tab"><span id="detail-tab-text" class="session-button-dir tab-inline-detail">detail</span></button>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const codePaint = id => {
@@ -4852,7 +5229,23 @@ def test_code_surfaces_headers_and_tab_text_share_computed_owners(browser, tmp_p
           const style = getComputedStyle(document.getElementById(id));
           return {grow: style.flexGrow, shrink: style.flexShrink, basis: style.flexBasis, minWidth: style.minWidth, maxWidth: style.maxWidth};
         };
-        return {themes, nested, codeBlocks, flex: {file: flex('file-tab-text'), detail: flex('detail-tab-text')}};
+        const family = (ids, properties) => Object.fromEntries(ids.map(id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return [id, Object.fromEntries(properties.map(property => [property, style[property]]))];
+        }));
+        return {
+          themes,
+          nested,
+          codeBlocks,
+          flex: {file: flex('file-tab-text'), detail: flex('detail-tab-text')},
+          sharedFamilies: {
+            preview: family(['preview-overlay', 'preview-panel'], ['zIndex', 'overflow', 'padding', 'backgroundColor', 'color', 'fontFamily', 'fontSize', 'lineHeight']),
+            chat: family(['chat-send', 'chat-stop'], ['display', 'alignItems', 'justifyContent', 'width', 'height', 'flexGrow', 'flexShrink', 'flexBasis', 'padding', 'borderRadius', 'cursor']),
+            title: family(['explorer-title', 'explorer-panel-title', 'editor-title'], ['color', 'fontFamily', 'fontSize', 'fontWeight', 'whiteSpace']),
+            totals: family(['summary-totals', 'repo-totals'], ['display', 'alignItems', 'gap', 'flexGrow', 'flexShrink', 'flexBasis', 'whiteSpace']),
+            keyboard: family(['shortcut-row', 'legend-row'], ['display', 'gap', 'alignItems', 'padding', 'borderBottom', 'fontFamily', 'fontSize', 'lineHeight']),
+          },
+        };
         """
     )
     for theme, state in metrics["themes"].items():
@@ -4866,6 +5259,9 @@ def test_code_surfaces_headers_and_tab_text_share_computed_owners(browser, tmp_p
     assert nested_values[0]["background"] == "rgba(0, 0, 0, 0)"
     assert nested_values[0]["border"] == "rgba(0, 0, 0, 0)"
     assert metrics["flex"]["file"] == metrics["flex"]["detail"] == {"grow": "1", "shrink": "1", "basis": "auto", "minWidth": "0px", "maxWidth": "none"}
+    for family, members in metrics["sharedFamilies"].items():
+        values = list(members.values())
+        assert all(value == values[0] for value in values), {"family": family, "members": members}
 
 
 def test_syntax_token_colors_share_one_owner_across_renderers(browser, tmp_path):
@@ -4886,14 +5282,15 @@ def test_syntax_token_colors_share_one_owner_across_renderers(browser, tmp_path)
     markdown = "".join(f'<span id="markdown-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
     codemirror = "".join(f'<span id="codemirror-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
     page = tmp_path / "shared-syntax-token-colors.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             f'<div class="markdown-body"><pre><code>{hljs}{markdown}<span id="markdown-control" class="code-control">control</span></code></pre></div>'
             f'<div class="cm-content">{codemirror}<span id="codemirror-control" class="code-control">control</span></div>'
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const tokens = arguments[0];
@@ -4919,7 +5316,11 @@ def test_syntax_token_colors_share_one_owner_across_renderers(browser, tmp_path)
 
 def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser, tmp_path):
     page = tmp_path / "shared-link-drag-action-owners.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <button id="checked-menu" class="app-menu-command" data-checked="true">checked</button>
       <div id="changes-panel" class="file-explorer-changes-panel"><div id="changes-toolbar" class="changes-toolbar"><button id="changes-focus">focus</button><button id="changes-refresh" class="changes-refresh">refresh</button></div></div>
       <div class="file-editor-preview-pane vanilla-preview-body" style="position:static;"><h2 id="pane-heading">Pane heading</h2><strong id="pane-strong">Pane strong</strong></div>
@@ -4931,14 +5332,17 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
       <div class="summary-context"><a id="summary-link" href="#">summary</a><a id="summary-merged" class="pr-status-merged" href="#">merged</a></div>
       <button id="info-link" class="info-tree-group-label-action">info</button>
       <div id="terminal-drag" class="terminal path-drag-over" style="position:static;width:40px;height:20px;"></div><div id="panel-drag" class="panel path-drag-over" style="position:static;width:40px;height:20px;"></div>
-      <select id="sort-action" class="file-explorer-sort-select"><option>A-Z</option></select>
-      <button id="hidden-action" class="file-explorer-hidden-toggle">hidden</button>
-      <button id="header-action" class="file-explorer-header-action">header</button>
+      <div class="file-explorer-panel" style="position:static;display:block;">
+        <select id="sort-action" class="file-explorer-sort-select"><option>A-Z</option></select>
+        <button id="hidden-action" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">hidden</button>
+        <button id="header-action" class="file-explorer-header-action">header</button>
+        <button id="quick-action" class="file-explorer-quick-access-button">quick</button>
+      </div>
       <button id="compact-action" class="yoagent-compact-action">compact</button>
       <button id="confirm-action" class="yoagent-job-confirm">confirm</button>
       <button id="cancel-action" class="yoagent-job-cancel">cancel</button>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const paint = id => {
@@ -4978,6 +5382,26 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
           return value;
         };
         const themes = {dark: themed(false), light: themed(true)};
+        const finderShell = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {
+            height: style.height,
+            border: style.borderTop,
+            radius: style.borderRadius,
+            color: style.color,
+            background: style.backgroundColor,
+            family: style.fontFamily,
+            size: style.fontSize,
+            weight: style.fontWeight,
+          };
+        };
+        const finderShellIds = ['sort-action', 'hidden-action', 'header-action', 'quick-action'];
+        const finderShells = {};
+        for (const [theme, light] of [['dark', false], ['light', true]]) {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          finderShells[theme] = finderShellIds.map(finderShell);
+        }
         const focus = id => {
           const node = document.getElementById(id);
           node.focus({focusVisible: true});
@@ -4989,6 +5413,7 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
           branchRest: linkPaint('branch-link'),
           infoLink: focus('info-link'),
           drag: [outline('terminal-drag'), outline('panel-drag')],
+          finderShells,
           finderActions: ['sort-action', 'hidden-action', 'header-action', 'changes-refresh'].map(focus),
           yoagentActions: ['compact-action', 'confirm-action', 'cancel-action'].map(focus),
         };
@@ -5007,6 +5432,8 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
         assert values["focusedMergedLinks"][0]["color"] != values["focusedGenericLinks"][0]["color"], {theme: values}
     assert metrics["branchRest"]["color"] != metrics["themes"]["light"]["genericLinks"][0]["color"]
     assert metrics["drag"][0] == metrics["drag"][1]
+    for theme, shells in metrics["finderShells"].items():
+        assert all(shell == shells[0] for shell in shells), {theme: shells}
     assert all(value["focusVisible"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
     assert all(value["color"] == metrics["finderActions"][0]["color"] and value["border"] == metrics["finderActions"][0]["border"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
     assert all(value["focusVisible"] for value in metrics["yoagentActions"]), metrics["yoagentActions"]
@@ -5031,7 +5458,11 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
 
 def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(browser, tmp_path):
     page = tmp_path / "tab-interaction-shared-paint.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <article class="panel active-pane" style="position:static;height:auto;width:760px;">
         <button id="regular" type="button" class="pane-tab"><span class="session-button-name">regular</span></button>
         <button id="compact" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action"><span class="session-button-name">compact</span></button>
@@ -5044,8 +5475,8 @@ def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(brows
       </div>
       <article class="panel" style="position:static;height:auto;width:760px;"><button id="plain-inactive" type="button" class="pane-tab">plain</button></article>
       <article class="panel typing-ready-pane" style="position:static;height:auto;width:760px;"><button id="typing-inactive" type="button" class="pane-tab">typing</button></article>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
 
     def paint(control_id):
         return browser.execute_script(
@@ -5134,7 +5565,7 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
           panes: [],
           project: {git: {...repos[0]}, repos},
         };
-        transcriptMeta.sessions['1'] = info;
+        transcriptMetadataState.payload.sessions['1'] = info;
         cycleSessionRepoDisplay('1', info, 1);
         updatePanelHeader('1', info);
         return document.querySelector('[data-repo-chip="1"]')?.textContent.trim() || '';
@@ -5145,20 +5576,58 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
     assert browser.execute_script(
         "setFocusedPanelItem('__prefs__', {userInitiated: true}); return document.getElementById('panel-1').classList.contains('focused-pane');"
     ) is False
-    browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]').click()
+    previous = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]')
+    fast_pointer_actions(browser).move_to_element(previous).click().perform()
     assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "1/4"
     assert browser.execute_script("return document.getElementById('panel-1').classList.contains('focused-pane')") is True
 
-    browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]').click()
+    next_button = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]')
+    fast_pointer_actions(browser).move_to_element(next_button).click().perform()
     assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "2/4"
 
-    browser.find_element("css selector", '[data-repo-chip="1"]').click()
+    chip = browser.find_element("css selector", '[data-repo-chip="1"]')
+    fast_pointer_actions(browser).move_to_element(chip).click().perform()
     rows = WebDriverWait(browser, 5).until(
         lambda driver: driver.find_elements("css selector", ".repo-chip-menu [data-repo-chip-open]")
     )
     assert len(rows) == 4
-    browser.find_element("css selector", '[data-repo-chip-open="/home/test/repo-3"]').click()
+    assert browser.execute_script(
+        """
+        const menu = document.querySelector('.repo-chip-menu');
+        if (!menu) return false;
+        const rect = menu.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return rect.width > 0 && rect.height > 0 && menu.contains(hit);
+        """
+    ) is True
+    repo_three = browser.find_element("css selector", '[data-repo-chip-open="/home/test/repo-3"]')
+    fast_pointer_actions(browser).move_to_element(repo_three).click().perform()
     assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "3/4"
+
+
+def test_standalone_svg_blocked_tags_share_dom_and_string_policy(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    results = browser.execute_script(
+        """
+        const tags = ['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta'];
+        const outputs = tags.map(tag => {
+          const tagName = tag === 'foreignobject' ? 'foreignObject' : tag;
+          const source = `<svg><a href="#local">ok</a><${tagName}>blocked-${tag}</${tagName}></svg>`;
+          return {tag, dom: sanitizeStandaloneSvg(source), string: sanitizeStandaloneSvgString(source)};
+        });
+        const foreignObject = sanitizeStandaloneSvg('<svg><foreignObject x="0" y="0" width="100" height="20"><div>safe label</div></foreignObject></svg>');
+        return {outputs, foreignObject};
+        """
+    )
+    for output in results["outputs"]:
+        tag = "foreignObject" if output["tag"] == "foreignobject" else output["tag"]
+        blocked_tag = re.compile(rf"<\s*{re.escape(tag)}\b", re.IGNORECASE)
+        assert blocked_tag.search(output["dom"]) is None, output
+        assert blocked_tag.search(output["string"]) is None, output
+        assert 'href="#local"' in output["dom"], output
+        assert 'href="#local"' in output["string"], output
+    assert re.search(r"<foreignObject\b", results["foreignObject"], re.IGNORECASE) is None
+    assert "safe label" in results["foreignObject"]
 
 
 def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmux(browser, tmp_path):
@@ -5238,7 +5707,10 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
 
 def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_path):
     page = tmp_path / "shared-activity-cadence.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             f"""
             <button id="info-refresh" class="info-refresh loading">Refresh</button>
@@ -5249,9 +5721,7 @@ def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_p
             <div class="yoagent-message assistant streaming"><span id="agent-thinking" class="yoagent-message-role">Agent</span></div>
             """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const animation = (selector, pseudo) => {
@@ -5278,7 +5748,10 @@ def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_p
 
 def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_path):
     page = tmp_path / "responsive-ui-type-scale.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
             <div id="axis" class="js-debug-y-axis">10</div>
@@ -5289,9 +5762,7 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
             <div class="drop-action-result"><pre id="drop-result">12</pre></div>
             """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const read = () => ({
@@ -5323,6 +5794,83 @@ def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_p
         "popoutIcon": "15px",
         "dropResult": "17px",
     }, metrics
+
+
+def test_event_rows_follow_pane_width_with_scaled_localized_metadata(browser, tmp_path):
+    page = tmp_path / "responsive-event-rows.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <div id="event-host" style="height: 220px;">
+              <div id="event-list" class="event-list">
+                <div id="event-row" class="event-item">
+                  <span id="event-time" class="event-time">2026年07月03日 12时34分56秒</span>
+                  <span id="event-type" class="event-type">后台工作区同步完成事件</span>
+                  <span id="event-message" class="event-message">A deliberately long translated event message must retain readable width and wrap inside the selected pane.</span>
+                </div>
+              </div>
+            </div>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        const host = document.getElementById('event-host');
+        const list = document.getElementById('event-list');
+        const row = document.getElementById('event-row');
+        const time = document.getElementById('event-time');
+        const type = document.getElementById('event-type');
+        const message = document.getElementById('event-message');
+        const measure = (width, light) => {
+          host.style.width = `${width}px`;
+          document.body.classList.toggle('theme-light', light);
+          void list.offsetWidth;
+          const rowRect = row.getBoundingClientRect();
+          const timeRect = time.getBoundingClientRect();
+          const typeRect = type.getBoundingClientRect();
+          const messageRect = message.getBoundingClientRect();
+          const style = getComputedStyle(list);
+          return {
+            containerType: style.containerType,
+            containerName: style.containerName,
+            listClientWidth: list.clientWidth,
+            listScrollWidth: list.scrollWidth,
+            rowClientWidth: row.clientWidth,
+            rowScrollWidth: row.scrollWidth,
+            rowTop: rowRect.top,
+            timeTop: timeRect.top,
+            typeTop: typeRect.top,
+            metadataBottom: Math.max(timeRect.bottom, typeRect.bottom),
+            messageTop: messageRect.top,
+            messageWidth: messageRect.width,
+            background: style.backgroundColor,
+          };
+        };
+        return {
+          wideDark: measure(900, false),
+          narrowDark: measure(340, false),
+          wideLight: measure(900, true),
+          narrowLight: measure(340, true),
+        };
+        """
+    )
+    for theme in ("Dark", "Light"):
+        wide = metrics[f"wide{theme}"]
+        narrow = metrics[f"narrow{theme}"]
+        assert wide["containerType"] == "inline-size", metrics
+        assert wide["containerName"] == "event-list", metrics
+        assert abs(wide["messageTop"] - wide["timeTop"]) <= 1, metrics
+        assert wide["messageWidth"] >= 200, metrics
+        assert narrow["messageTop"] >= narrow["metadataBottom"] + 4, metrics
+        assert narrow["messageWidth"] >= narrow["rowClientWidth"] * 0.85, metrics
+        for layout in (wide, narrow):
+            assert layout["listScrollWidth"] <= layout["listClientWidth"] + 1, metrics
+            assert layout["rowScrollWidth"] <= layout["rowClientWidth"] + 1, metrics
+    assert metrics["wideDark"]["background"] != metrics["wideLight"]["background"], metrics
 
 
 def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path):
@@ -5499,7 +6047,11 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
 
 def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, tmp_path):
     page = tmp_path / "topbar-status-actions.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div id="token-topbar" class="topbar"></div>
       <button id="owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
       <button id="activity" class="topbar-activity topbar-status-surface">1 running</button>
@@ -5509,8 +6061,8 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
       <button id="normal-action" class="preferences-inline-action">normal</button>
       <div class="preferences-setting-advisory"><button id="advisory-action" class="preferences-inline-action">advisory</button></div>
       <div id="neutral" style="width:20px;height:20px"></div>
-    """, extra_css="#token-topbar { transition: none; }"), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css="#token-topbar { transition: none; }"),
+    )
 
     def read(element_id):
         return browser.execute_script(
@@ -5808,18 +6360,17 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         assert prompted_payloads["claude"]["screen"]["key"] == "approval", prompted_payloads["claude"]
         assert prompted_payloads["claude"]["prompt"]["agent"] == "claude", prompted_payloads["claude"]
 
-        ui_deadline = time.time() + 15
-        prompted_ui = {}
-        while time.time() < ui_deadline:
-            prompted_ui = browser.execute_async_script(
-                """
-                const sessions = arguments[0];
-                const done = arguments[arguments.length - 1];
-                Promise.resolve(refreshAutoStatuses()).then(() => {
+        prompted_ui = browser.execute_async_script(
+            """
+            const sessions = arguments[0];
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const prompted = await window.__yolomuxTestWaitFor(async () => {
+                  await refreshAutoStatuses();
                   refreshActivePanelHeaders();
                   updateTopbarActivityStatus();
                   const counts = globalActivityCounts();
-                  done({
+                  const snapshot = {
                     ok: counts.ask === sessions.length,
                     counts,
                     topbar: document.getElementById('topbarActivity')?.textContent || '',
@@ -5843,14 +6394,14 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                     }),
                     errors: window.__bootErrors || [],
                     rejections: window.__bootRejections || [],
-                  });
-                }).catch(error => done({ok: false, error: String(error && error.stack || error)}));
-                """,
-                list(sessions.values()),
-            )
-            if prompted_ui.get("ok") is True:
-                break
-            time.sleep(0.5)
+                  };
+                  return snapshot.ok ? snapshot : false;
+              }, {timeoutMs: 15000, intervalMs: 500, description: 'real agent prompt attention UI'});
+              done(prompted);
+            })().catch(error => done({ok: false, error: String(error && error.stack || error)}));
+            """,
+            list(sessions.values()),
+        )
         assert prompted_ui.get("ok") is True, prompted_ui
         browser.execute_script(
             """
@@ -6218,7 +6769,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               };
               const sendPromise = sendYoagentChatMessage('summarize activity');
               await raf();
-              const active = yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null;
+              const active = yoagentChatState.activeRequest ? {id: yoagentChatState.activeRequest.id, streamId: yoagentChatState.activeRequest.streamId} : null;
               const immediate = collect();
               const input = document.querySelector('[data-yoagent-chat-input]');
               const form = document.querySelector('[data-yoagent-chat-form]');
@@ -6303,8 +6854,8 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               await sendPromise;
               await raf();
               measured.afterCancel = {
-                activeRequest: yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null,
-                busy: yoagentBusy === true,
+                activeRequest: yoagentChatState.activeRequest ? {id: yoagentChatState.activeRequest.id, streamId: yoagentChatState.activeRequest.streamId} : null,
+                busy: yoagentChatState.busy === true,
                 inputDisabled: document.querySelector('[data-yoagent-chat-input]')?.disabled === true,
                 stoppedText: document.querySelector('.yoagent-message.stopped')?.textContent || '',
                 cancelCallCount: fetchCalls.filter(call => /^\\/api\\/yoagent\\/chat\\/.+\\/cancel$/.test(call.path)).length,
@@ -6378,7 +6929,10 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
 def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"yoagent-auxiliary-{theme_class}.html"
-        page.write_text(
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
             page_html(
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
@@ -6395,9 +6949,7 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
                 """,
                 extra_css="body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); } .yoagent-chat { width: 420px; }",
             ),
-            encoding="utf-8",
         )
-        browser.get(page.as_uri())
         metrics = browser.execute_script(
             """
             const body = document.querySelector('.yoagent-message-body');
@@ -6422,7 +6974,10 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
 
 def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp_path):
     page = tmp_path / "light-agent-status-chart.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
             <script>document.body.className = 'theme-light';</script>
@@ -6441,9 +6996,7 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
             """,
             extra_css="body { margin: 0; background: #fff; }",
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const style = id => getComputedStyle(document.getElementById(id));
@@ -6469,7 +7022,10 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
 def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"subwindow-metadata-{theme_class}.html"
-        page.write_text(
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
             page_html(
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
@@ -6478,9 +7034,7 @@ def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser
                 """,
                 extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
             ),
-            encoding="utf-8",
         )
-        browser.get(page.as_uri())
         metrics = browser.execute_script(
             """
             const color = id => getComputedStyle(document.getElementById(id)).color;
@@ -6666,11 +7220,15 @@ def test_rename_marks_index_building_and_refresh_done_requeries_open_search(brow
         fileExplorerIndexedDirs = new Set(['/repo']);
         fileExplorerIndexStatus.set('/repo', 'ready');
         renameFileTreePath('/repo/migration-tools', {name: 'migration-tools', kind: 'dir'}, 'home-manifest').then(async renamed => {
-          await new Promise(resolve => setTimeout(resolve, 0));
-          commandPaletteNode = document.createElement('div');
-          commandPaletteNode.hidden = false;
+          const waitFor = window.__yolomuxTestWaitFor;
+          await waitFor(
+            () => fileExplorerIndexStatus.get('/repo') === 'building',
+            {description: 'renamed root index building'}
+          );
+          commandPaletteState.node = document.createElement('div');
+          commandPaletteState.node.hidden = false;
           commandPaletteMode = 'files';
-          commandPaletteQuery = 'home-manifest';
+          commandPaletteState.query = 'home-manifest';
           refreshFileQuickOpenCandidates = async query => { retries.push(query); };
           handleClientPushEventNow('background_refresh_done', {role: 'search-index', root: '/repo'});
           await Promise.resolve();
@@ -6693,7 +7251,10 @@ def test_rename_marks_index_building_and_refresh_done_requeries_open_search(brow
 
 def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
     page = tmp_path / "yoinfo-badges-and-trailing-metadata.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             f"""
             <script>document.body.className = 'theme-dark';</script>
@@ -6706,9 +7267,7 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
             """,
             extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const rightInset = (containerId, itemId) => {
@@ -6752,7 +7311,10 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
 
 def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):
     page = tmp_path / "yoinfo-path-trailing-metadata.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
             <script>document.body.className = 'theme-dark';</script>
@@ -6775,9 +7337,7 @@ def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tm
             """,
             extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const rect = id => document.getElementById(id).getBoundingClientRect();
@@ -6823,7 +7383,7 @@ def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
-        transcriptMeta = {sessions: {
+        transcriptMetadataState.payload = {sessions: {
           '8003': {
             project: {
               git: {branch: 'feature/shared-tab-detail'},
@@ -6919,7 +7479,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
     ):
         browser.set_window_size(window_width, 720)
         page = tmp_path / f"tabber-session-row-{label}.html"
-        page.write_text(
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
             page_html(
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
@@ -6963,15 +7526,14 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                   </div>
                 </section>
+                <span id="info-window-token" class="info-tree-ai-value tmux-window-bar"><span class="tab tmux-window-button">0:bash</span></span>
                 """,
                 extra_css=f"""
                   body {{ margin: 0; padding: 16px; background: var(--bg); color: var(--text); }}
                   .fixture-tabber-panel {{ width: {pane_width}px; border: 1px solid var(--border); }}
                 """,
             ),
-            encoding="utf-8",
         )
-        browser.get(page.as_uri())
         metrics = browser.execute_script(
             """
             const rectFor = element => {
@@ -7047,6 +7609,19 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
             const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
             const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
+            const tabberWindowToken = activeWindowRow?.querySelector('.tabber-window-token');
+            const infoWindowToken = document.getElementById('info-window-token');
+            const tokenAlignment = node => {
+              const style = node ? getComputedStyle(node) : null;
+              return style ? {
+                flex: style.flex,
+                maxWidth: style.maxWidth,
+                marginInlineStart: style.marginInlineStart,
+                justifyContent: style.justifyContent,
+                overflow: style.overflow,
+                verticalAlign: style.verticalAlign,
+              } : null;
+            };
             const activeWindowText = activeWindowRow?.querySelector('.tmux-window-name-text');
             const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
             const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
@@ -7054,6 +7629,8 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               active: rowMetrics(activeRow),
               inactive: rowMetrics(inactiveRow),
               activeWindow: rectFor(activeWindowRow),
+              tabberWindowAlignment: tokenAlignment(tabberWindowToken),
+              infoWindowAlignment: tokenAlignment(infoWindowToken),
               activeWindowTextColor: activeWindowText ? getComputedStyle(activeWindowText).color : '',
               expectedText: resolvedColor(document.body, 'var(--text)'),
               expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
@@ -7095,6 +7672,14 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             assert metrics["inactive"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
         assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
+        assert metrics["tabberWindowAlignment"] == metrics["infoWindowAlignment"] == {
+            "flex": "0 1 auto",
+            "maxWidth": "100%",
+            "marginInlineStart": "0px",
+            "justifyContent": "flex-start",
+            "overflow": "visible",
+            "verticalAlign": "middle",
+        }, (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
         assert metrics["active"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
         assert metrics["active"]["tabBottomRadius"] == "0px", (label, metrics)
@@ -7120,7 +7705,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
 
 def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
     page = tmp_path / "tabber-session-popover-surface.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
             <script>document.body.className = 'theme-dark';</script>
@@ -7151,9 +7739,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
               .fixture-tabber-panel { width: 420px; }
             """,
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -7463,7 +8049,11 @@ def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(brows
 
 def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser, tmp_path):
     page = tmp_path / "terminal-file-reference-underlines.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section id="dark-terminal" class="terminal" data-terminal-theme="dark">
         <div class="xterm">
           <div class="xterm-rows">
@@ -7497,8 +8087,8 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
       #dark-terminal { background: #111827; color: #d1d5db; }
       #light-terminal { background: #ffffff; color: #111827; }
       .xterm-rows { position: absolute; inset: 8px 12px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const line = id => {
@@ -7692,22 +8282,16 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
             sessions: {'1': {target: '1', enabled: false, last_action: 'off', screen: {key: 'working'}}},
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           };
-          clientEventsConnected = false;
+          clientEventTransportState.connected = false;
           source.emit('ready');
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 90; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => document.querySelector('[data-yolo-session="1"]')?.classList.contains('working'));
           const markerAfter = document.querySelector('[data-yolo-session="1"]');
           return {
             beforeWorking,
             ready,
-            connected: clientEventsConnected,
+            connected: clientEventTransportState.connected,
             className: markerAfter?.className || '',
             autoApproveFetches: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
             errors: window.__bootErrors,
@@ -8266,7 +8850,11 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):
     page = tmp_path / "info-preferences-scrollbars.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <article id="info-panel" class="panel fixture-panel"><div class="info-list fixture-scroll"><div class="fixture-tall"></div></div></article>
       <article id="preferences-panel" class="panel fixture-panel"><div class="preferences-scroll fixture-scroll"><div class="fixture-tall"></div></div></article>
       <div id="neutral" style="width:20px;height:20px"></div>
@@ -8274,8 +8862,8 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
       .fixture-panel { display: block; width: 240px; height: 120px; }
       .fixture-scroll { height: 100%; overflow: auto; }
       .fixture-tall { height: 900px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const info = document.querySelector('.info-list');
@@ -8339,7 +8927,11 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
 
 def test_info_toolbar_height_stays_stable_during_metadata_refresh(browser, tmp_path):
     page = tmp_path / "info-toolbar-refresh-height.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <article id="panel" class="panel info-panel info-tree-panel" style="height: 360px;">
         <div class="panel-head"></div>
         <div id="actions" class="info-actions-bar info-tree-actions-bar">
@@ -8368,8 +8960,8 @@ def test_info_toolbar_height_stays_stable_during_metadata_refresh(browser, tmp_p
         </div>
         <div id="body" class="info-pane"></div>
       </article>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const panel = document.getElementById('panel');
@@ -8422,7 +9014,11 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
         """
         for index in range(24)
     )
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <div class="info-tree-panel" style="width: 680px; height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div id="info-tree-actions" class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane info-tree-pane-scrolled">
@@ -8455,8 +9051,8 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -8648,7 +9244,11 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
 
 def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
     page = tmp_path / "info-tree-shared-record-outline.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="info-tree" style="width: 760px">
         <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="path" data-info-depth="0" open>
           <summary>
@@ -8671,8 +9271,8 @@ def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
           </div>
         </details>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const first = document.getElementById('first-record');
@@ -8709,7 +9309,11 @@ def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
 
 def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
     page = tmp_path / "info-tree-top-visible.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane">
@@ -8732,8 +9336,8 @@ def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -8761,7 +9365,11 @@ def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
 
 def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
     page = tmp_path / "info-tree-top-mask.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane info-tree-pane-scrolled">
@@ -8803,8 +9411,8 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -9196,13 +9804,7 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
           if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: window.__bootErrors || [], bootRejections: window.__bootRejections || []};
           const panel = panelNodes.get(item);
@@ -9362,13 +9964,7 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -9411,12 +10007,10 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           activatePaneTab('left', item, {userInitiated: true});
           const fileReady = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
           if (!fileReady) return {error: 'file tab did not reactivate', savedTop, capturedTop, capturedSnapshot};
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 140));
-          await frame();
-          const restoredPanel = panelNodes.get(item);
-          const restoredScroller = restoredPanel._cmView.scrollDOM;
+          const restoredScroller = await waitFor(() => {
+            const scroller = panelNodes.get(item)?._cmView?.scrollDOM;
+            return scroller && Math.abs(scroller.scrollTop - savedTop) < 32 ? scroller : null;
+          }, {description: 'file editor scroll restoration'});
           return {
             savedTop,
             capturedTop,
@@ -9469,13 +10063,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 260; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -9557,21 +10145,12 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
-          const ready = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 140));
-          await frame();
-          const panel = panelNodes.get(item);
-          const scroller = panel?._cmView?.scrollDOM;
+          const waitFor = window.__yolomuxTestWaitFor;
+          const ready = await waitFor(() => Boolean(activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM));
+          const scroller = await waitFor(() => {
+            const candidate = panelNodes.get(item)?._cmView?.scrollDOM;
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'Dockview file editor scroll restoration'});
           return {
             ready,
             active: activeItemForSide('left'),
@@ -9582,6 +10161,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["ready"] is True, restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs, **restored}
@@ -9604,13 +10184,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
           next.left = paneStateWithTabs([prefsItemId, infoItemId], prefsItemId);
           applyLayoutSlots(next, {focusSession: prefsItemId, forceFull: true});
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 240; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
             return dockviewLayoutActive()
@@ -9683,15 +10257,12 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          for (let attempt = 0; attempt < 80; attempt += 1) {
-            if (activeItemForSide('left') === item && panelNodes.get(item)?.querySelector('.preferences-scroll')) break;
-            await frame();
-          }
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 120));
-          const scroller = panelNodes.get(item)?.querySelector('.preferences-scroll');
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            if (activeItemForSide('left') !== item) return null;
+            const candidate = panelNodes.get(item)?.querySelector('.preferences-scroll');
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'Preferences scroll restoration'});
           return {
             active: activeItemForSide('left'),
             restoredTop: scroller?.scrollTop || 0,
@@ -9701,6 +10272,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
@@ -9719,9 +10291,9 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         (async () => {
           autoFocusEnabled = false;
           infoPanelSubTab = 'info';
-          transcriptMetaLoaded = true;
-          transcriptMetaLoading = false;
-          transcriptMetaLoadError = '';
+          transcriptMetadataState.loaded = true;
+          transcriptMetadataState.loading = false;
+          transcriptMetadataState.error = '';
           const branches = Array.from({length: 180}, (_value, index) => ({
             name: `feature/long-info-row-${index + 1}`,
             subject: `Long YO!info tree row ${index + 1} that makes the relationship tree scroll.`,
@@ -9730,7 +10302,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             current: index === 0,
             linear_ids: [`YOLO-${index + 1}`],
           }));
-          transcriptMeta = {
+          transcriptMetadataState.payload = {
             session_order: ['1'],
             sessions: {
               '1': {
@@ -9752,13 +10324,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
           next.left = paneStateWithTabs([infoItemId, prefsItemId], infoItemId);
           applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
           const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 260; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = document.getElementById('info-content');
             return dockviewLayoutActive()
@@ -9834,15 +10400,12 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          for (let attempt = 0; attempt < 100; attempt += 1) {
-            if (activeItemForSide('left') === item && document.getElementById('info-content')) break;
-            await frame();
-          }
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 120));
-          const scroller = document.getElementById('info-content');
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            if (activeItemForSide('left') !== item) return null;
+            const candidate = document.getElementById('info-content');
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'YO!info scroll restoration'});
           return {
             active: activeItemForSide('left'),
             restoredTop: scroller?.scrollTop || 0,
@@ -9852,6 +10415,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
@@ -9895,8 +10459,8 @@ def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path
             </div>
           </div>`;
         node.innerHTML = html;
-        infoPanelLastRenderSignature = infoPanelRenderSignature();
-        infoPanelLastRenderHtml = html;
+        infoPanelRenderCache.signature = infoPanelRenderSignature();
+        infoPanelRenderCache.html = html;
         window.__infoTrustedClicks = [];
         document.addEventListener('click', event => {
           if (event.target?.matches?.('#linear-link, #pr-link')) {
@@ -10571,6 +11135,8 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
         const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
         const date = cluster.querySelector('.file-explorer-date-toggle');
+        const expand = cluster.querySelector('[data-file-tree-expand-collapse-all="expand"]');
+        const collapseAll = cluster.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
         const refresh = cluster.querySelector('.changes-refresh');
         const close = primaryRow.querySelector('.file-explorer-panel-close');
         const toolbarRect = toolbar.getBoundingClientRect();
@@ -10590,6 +11156,8 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const modeButtonStyles = modeButtons.map(button => getComputedStyle(button));
         const clusterRect = cluster.getBoundingClientRect();
         const dateRect = date.getBoundingClientRect();
+        const expandRect = expand.getBoundingClientRect();
+        const collapseAllRect = collapseAll.getBoundingClientRect();
         const refreshRect = refresh.getBoundingClientRect();
         const closeRect = close.getBoundingClientRect();
         const textProbe = document.createElement('span');
@@ -10606,6 +11174,11 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           return color;
         };
         const tabFont = getComputedStyle(document.documentElement).getPropertyValue('--tab-font').trim();
+        const hadLightTheme = document.body.classList.contains('theme-light');
+        document.body.classList.add('theme-light');
+        const lightExpandRect = expand.getBoundingClientRect();
+        const lightCollapseAllRect = collapseAll.getBoundingClientRect();
+        if (!hadLightTheme) document.body.classList.remove('theme-light');
         return {
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
           secondRowIsPath: primaryRow.nextElementSibling === pathRow,
@@ -10666,6 +11239,16 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           clusterRight: clusterRect.right,
           clusterLeft: clusterRect.left,
           dateRight: dateRect.right,
+          expandLeft: expandRect.left,
+          expandRight: expandRect.right,
+          expandWidth: expandRect.width,
+          expandHeight: expandRect.height,
+          collapseAllLeft: collapseAllRect.left,
+          collapseAllRight: collapseAllRect.right,
+          collapseAllWidth: collapseAllRect.width,
+          collapseAllHeight: collapseAllRect.height,
+          lightExpandWidth: lightExpandRect.width,
+          lightCollapseAllWidth: lightCollapseAllRect.width,
           refreshLeft: refreshRect.left,
           refreshRight: refreshRect.right,
           closeLeft: closeRect.left,
@@ -10717,7 +11300,12 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["pathColor"] == metrics["textColor"]
     assert metrics["pathRowTop"] >= metrics["primaryRowBottom"]
     assert metrics["actionsRowTop"] >= metrics["pathRowBottom"]
-    assert metrics["dateRight"] <= metrics["refreshLeft"]
+    assert metrics["dateRight"] <= metrics["expandLeft"]
+    assert metrics["expandRight"] <= metrics["collapseAllLeft"]
+    assert metrics["collapseAllRight"] <= metrics["refreshLeft"]
+    assert metrics["expandWidth"] == metrics["collapseAllWidth"] == 16
+    assert metrics["expandHeight"] == metrics["collapseAllHeight"] == 20
+    assert metrics["lightExpandWidth"] == metrics["lightCollapseAllWidth"] == 16
     assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
     assert metrics["clusterLeft"] > metrics["pathLeft"]
 
@@ -11817,8 +12405,12 @@ def _contrast_ratio(rgb_a, rgb_b):
 
 def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     page = tmp_path / "light-surfaces.html"
-    page.write_text(light_mode_surfaces_fixture_html("theme-light"), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-light"),
+    )
     style = browser.execute_script(
         """
         const out = {};
@@ -11867,8 +12459,12 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
 
 def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(browser, tmp_path):
     page = tmp_path / "preferences-advisory.html"
-    page.write_text(light_mode_surfaces_fixture_html("theme-dark"), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-dark"),
+    )
     dark = browser.execute_script(
         """
         const read = id => {
@@ -11883,8 +12479,12 @@ def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(br
         };
         """
     )
-    page.write_text(light_mode_surfaces_fixture_html("theme-light"), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-light"),
+    )
     light = browser.execute_script(
         """
         const read = id => {
@@ -11910,14 +12510,15 @@ def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(br
 
 def test_light_editor_image_backdrop_is_light(browser, tmp_path):
     page = tmp_path / "light-editor-image.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         light_mode_surfaces_fixture_html("editor-theme-light").replace(
             LIGHT_MODE_SURFACES,
             '<div class="file-editor-image-panel" id="imgp"><img class="file-editor-image" id="img" src="#"></div>',
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     style = browser.execute_script(
         "return {panel: getComputedStyle(document.getElementById('imgp')).backgroundColor,"
         " img: getComputedStyle(document.getElementById('img')).backgroundColor};"
@@ -11971,8 +12572,12 @@ def codemirror_search_panel_fixture_html():
 
 def load_codemirror_search_panel_fixture(browser, tmp_path):
     page = tmp_path / "cm-search-panel.html"
-    page.write_text(codemirror_search_panel_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        codemirror_search_panel_fixture_html(),
+    )
 
 
 def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser, tmp_path):
@@ -12039,6 +12644,137 @@ def test_codemirror_search_panel_uses_localized_phrases_and_generated_labels(bro
     }
 
 
+def test_preformatted_text_surfaces_share_wrapping_in_dark_and_light_modes(browser, tmp_path):
+    page = tmp_path / "shared-preformatted-wrapping.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <pre id="snapshot" class="tmux-snapshot">alpha/beta</pre>
+            <div id="transcript" class="transcript-text">alpha/beta</div>
+            <div id="agent" class="yoagent-message-body">alpha/beta</div>
+            <div id="details-preview" class="yoagent-details-preview">alpha/beta</div>
+            <div class="yoagent-message-details"><pre id="details">alpha/beta</pre></div>
+            <div class="modal"><pre id="modal-pre">alpha/beta</pre></div>
+            <div class="drop-action-result"><pre id="drop-result">alpha/beta</pre></div>
+            <div class="file-editor-conflict-compare"><pre id="conflict">alpha/beta</pre></div>
+            """
+        ),
+    )
+    for theme in ("theme-dark", "theme-light"):
+        metrics = browser.execute_script(
+            """
+            document.body.className = arguments[0];
+            return Object.fromEntries([
+              'snapshot', 'transcript', 'agent', 'details-preview',
+              'details', 'modal-pre', 'drop-result', 'conflict',
+            ].map(id => {
+              const style = getComputedStyle(document.getElementById(id));
+              return [id, {whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap}];
+            }));
+            """,
+            theme,
+        )
+        assert all(value == {"whiteSpace": "pre-wrap", "overflowWrap": "anywhere"} for value in metrics.values()), (theme, metrics)
+
+
+def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tmp_path):
+    page = tmp_path / "responsive-transient-capacities.html"
+    long_text = "0123456789abcdef" * 16
+    page.write_text(
+        page_html(
+            f"""
+            <div class="app-menu-area"><button id="search" class="topbar-search"><span class="topbar-search-label">{long_text}</span></button></div>
+            <pre id="drag" class="drag-timing-overlay">{long_text}</pre>
+            <div id="repo" class="file-tree-repo-popover" style="inset-inline-start:var(--popover-edge-gap);inset-block-start:90px"><div class="file-tree-repo-popover-title">{long_text}</div><div class="file-tree-repo-popover-path">/{long_text}</div></div>
+            <div id="drop" class="terminal-drop-suggestions" style="inset-inline-start:var(--popover-edge-gap);inset-block-start:190px"><div class="terminal-drop-suggestions-head">{long_text}</div></div>
+            """
+        ),
+        encoding="utf-8",
+    )
+    def geometry(width):
+        browser.set_window_size(width, 720)
+        browser.get(page.as_uri())
+        return browser.execute_script(
+            """
+            return {
+              viewport: innerWidth,
+              surfaces: Object.fromEntries(['search', 'drag', 'repo', 'drop'].map(id => {
+                const rect = document.getElementById(id).getBoundingClientRect();
+                return [id, {left: rect.left, right: rect.right, width: rect.width}];
+              })),
+            };
+            """
+        )
+
+    narrow = geometry(360)
+    for name, rect in narrow["surfaces"].items():
+        assert rect["left"] >= -1, (name, narrow)
+        assert rect["right"] <= narrow["viewport"] + 1, (name, narrow)
+        assert rect["width"] <= narrow["viewport"] + 1, (name, narrow)
+
+    wide = geometry(1400)
+    legacy_caps = {"search": 320, "drag": 460, "repo": 360, "drop": 380}
+    for name, old_cap in legacy_caps.items():
+        assert wide["surfaces"][name]["width"] > old_cap, (name, wide)
+
+
+def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser, tmp_path):
+    page = tmp_path / "dialog-capacity-ownership.html"
+    page.write_text(
+        page_html(
+            """
+            <div id="host-about" class="modal app-modal-overlay open about-open"><div id="host-about-dialog" class="modal-dialog"></div></div>
+            <div id="host-share" class="modal app-modal-overlay open share-open"><div id="host-share-dialog" class="modal-dialog"></div></div>
+            <div id="replay" class="share-popup-mirror-item" style="inset:0;width:100%;height:100%">
+              <div class="modal app-modal-overlay open about-open"><div id="replay-about-dialog" class="modal-dialog"></div></div>
+              <div class="modal app-modal-overlay open share-open"><div id="replay-share-dialog" class="modal-dialog"></div></div>
+            </div>
+            <div class="command-palette app-modal-overlay"><div id="command-dialog" class="command-palette-dialog"></div></div>
+            <div class="keyboard-shortcuts-overlay app-modal-overlay"><div id="keyboard-dialog" class="keyboard-shortcuts-dialog"></div></div>
+            <div class="file-editor-dialog-backdrop app-modal-overlay"><div id="editor-dialog" class="file-editor-dialog"></div></div>
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    def geometry(width, theme):
+        browser.set_window_size(width, 720)
+        browser.get(page.as_uri())
+        return browser.execute_script(
+            """
+            document.body.className = arguments[0];
+            const width = id => document.getElementById(id).getBoundingClientRect().width;
+            return {
+              viewport: innerWidth,
+              hostAbout: width('host-about-dialog'),
+              replayAbout: width('replay-about-dialog'),
+              hostShare: width('host-share-dialog'),
+              replayShare: width('replay-share-dialog'),
+              command: width('command-dialog'),
+              keyboard: width('keyboard-dialog'),
+              editor: width('editor-dialog'),
+            };
+            """,
+            theme,
+        )
+
+    for theme in ("theme-dark", "theme-light"):
+        narrow = geometry(360, theme)
+        wide = geometry(1400, theme)
+        for metrics in (narrow, wide):
+            assert abs(metrics["hostAbout"] - metrics["replayAbout"]) <= 1, (theme, metrics)
+            assert abs(metrics["hostShare"] - metrics["replayShare"]) <= 1, (theme, metrics)
+            assert all(0 < metrics[key] <= metrics["viewport"] for key in ("hostAbout", "hostShare", "command", "keyboard", "editor")), (theme, metrics)
+        assert abs(wide["command"] - wide["editor"]) <= 1, (theme, wide)
+        assert wide["keyboard"] >= wide["command"], (theme, wide)
+        assert wide["keyboard"] > narrow["keyboard"], (theme, narrow, wide)
+        assert wide["hostAbout"] > narrow["hostAbout"], (theme, narrow, wide)
+        assert wide["hostShare"] > narrow["hostShare"], (theme, narrow, wide)
+
+
 def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp_path):
     # image 20260603-028: focusing/hovering a needs-attention (red) pane on a --dangerously-yolo server
     # made it `typing-ready-pane yolo-ready-pane needs-input-pane`; the yolo-ready green --panel-ring-color
@@ -12052,9 +12788,13 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     ]
     panels = "".join(f'<div class="panel {c}" id="p{i}" style="width:160px;height:60px"></div>' for i, c in enumerate(combos))
     page = tmp_path / "needs-ring.html"
-    page.write_text(f"<!doctype html><html><head><meta charset=utf-8><style>{css}</style></head>"
-                    f'<body class="theme-dark">{panels}</body></html>', encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"<!doctype html><html><head><meta charset=utf-8><style>{css}</style></head>"
+                    f'<body class="theme-dark">{panels}</body></html>',
+    )
     rings = browser.execute_script(
         """
         const out = {};

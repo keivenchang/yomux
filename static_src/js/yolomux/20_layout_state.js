@@ -742,8 +742,8 @@ function applyLayoutUrlStateSeed(state) {
   applyLayoutUrlFinderSeed(state.finder || {});
   applyLayoutUrlEditorSeed(state.editor || {});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
-  layoutUrlStateFromQuery = state;
-  layoutUrlStateApplied = false;
+  layoutUrlState.pending = state;
+  layoutUrlState.applied = false;
   return true;
 }
 
@@ -790,10 +790,10 @@ function layoutUrlStateParamValue() {
 }
 
 function applyPendingLayoutUrlState() {
-  if (layoutUrlStateApplied) return false;
-  const state = layoutUrlStateFromQuery;
+  if (layoutUrlState.applied) return false;
+  const state = layoutUrlState.pending;
   if (!state || typeof state !== 'object') {
-    layoutUrlStateApplied = true;
+    layoutUrlState.applied = true;
     return false;
   }
   applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
@@ -802,23 +802,25 @@ function applyPendingLayoutUrlState() {
     requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
     setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
   }
-  layoutUrlStateApplied = true;
+  layoutUrlState.applied = true;
   return true;
 }
 
 function schedulePendingLayoutUrlStateApply() {
-  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  if (!layoutUrlState.pending || layoutUrlState.applied) return;
   requestAnimationFrame(applyPendingLayoutUrlState);
   setTimeout(applyPendingLayoutUrlState, 0);
 }
 
 function scheduleLayoutUrlStateRefresh() {
   if (shareViewMode) return;
-  if (layoutUrlStateRefreshTimer) return;
-  layoutUrlStateRefreshTimer = setTimeout(() => {
-    layoutUrlStateRefreshTimer = null;
+  if (layoutUrlState.refreshTimer) return;
+  const timer = setTimeout(() => {
+    if (layoutUrlState.refreshTimer !== timer) return;
+    layoutUrlState.refreshTimer = null;
     updateActiveSessionParam();
   }, 250);
+  layoutUrlState.refreshTimer = timer;
 }
 
 function refreshLayoutUrlStateSoon() {
@@ -1441,10 +1443,12 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
+  const record = attentionAcknowledgementRecord(value);
   // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
   // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
-  if (payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) return false;
-  const record = attentionAcknowledgementRecord(value);
+  // The one exception is this exact acknowledgement while its request is still pending: after the
+  // gray fade retires, the preceding snapshot is stale and must not flash red/yellow again.
+  if ((payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) && record?.pending !== true) return false;
   if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -1615,7 +1619,7 @@ function terminalDisconnected(session) {
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }
 
-function sessionState(session, info = transcriptMeta.sessions?.[session]) {
+function sessionState(session, info = transcriptMetadataState.payload.sessions?.[session]) {
   if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
@@ -1751,7 +1755,7 @@ function autoApproveScreenIsWorking(payload) {
     : String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
-function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMetadataState.payload.sessions?.[session]) {
   return typeof sessionAgentWindowHasWorkingSignal === 'function'
     ? sessionAgentWindowHasWorkingSignal(session, info, payload)
     : false;
@@ -1767,8 +1771,8 @@ function yoloWorkingSessions() {
   return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
-function runningAgentCount() {
-  return yoloWorkingSessions().length;
+function runningAgentCount(counts = globalActivityCounts()) {
+  return Math.max(0, Number(counts?.running || 0));
 }
 
 function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
@@ -1776,7 +1780,7 @@ function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.g
   const key = String(payload?.screen?.key || '');
   if (key && key !== STATE_KEY.idle) return true;
   if (autoApproveEnabledForSession(payload)) return true;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
 }
 
@@ -2120,7 +2124,7 @@ function browserFaviconLink() {
 }
 
 function updateBrowserFavicon(options = {}) {
-  const count = browserFaviconBadgeCount();
+  const count = browserFaviconBadgeCount(options.counts);
   // Include the accent in the dedupe signature so a theme/active-color change re-renders
   // on the next refresh tick even when the badge count is unchanged.
   const accent = browserFaviconAccentColors();
@@ -2136,8 +2140,9 @@ function updateBrowserFavicon(options = {}) {
 }
 
 function updateDocumentTitle() {
-  updateBrowserFavicon();
-  const count = runningAgentCount();
+  const counts = globalActivityCounts();
+  updateBrowserFavicon({counts});
+  const count = runningAgentCount(counts);
   if (count > 0) {
     documentTitleIdleSinceMs = null;
     document.title = t('document.title.running', {count});
@@ -2218,8 +2223,8 @@ function globalActivityCounts() {
 
 function globalActivityCountSessions() {
   if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
-  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
-  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
+  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const sessions = [];
   for (const value of [...order, ...all]) {
@@ -2243,7 +2248,7 @@ function globalActivityCountsFromAgentWindows() {
   let blocked = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
-    const info = transcriptMeta.sessions?.[session] || {};
+    const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const autoPayload = autoApproveStates.get(session) || {};
     const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
     for (const agent of rows) {
@@ -2287,14 +2292,13 @@ function topbarActivityCountBallHtml(count, tone, extraClass = '') {
 }
 
 function createTopbarActivityStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarActivity';
-  button.className = 'topbar-activity topbar-status-surface';
-  button.title = t('topbar.activity.title');
-  button.setAttribute('aria-label', t('topbar.activity.aria'));
-  button.onclick = () => openTabberActivityOverview();
-  return button;
+  return makeButton({
+    id: 'topbarActivity',
+    className: 'topbar-activity topbar-status-surface',
+    title: t('topbar.activity.title'),
+    ariaLabel: t('topbar.activity.aria'),
+    onClick: () => openTabberActivityOverview(),
+  });
 }
 
 function updateTopbarActivityStatus() {
@@ -2330,7 +2334,7 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   return lines.filter(Boolean).join('\n');
 }
 
-function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusState.payload) {
   if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
   return [
     {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
@@ -2339,12 +2343,12 @@ function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
   ];
 }
 
-function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusState.payload) {
   const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
   return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
 }
 
-function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusState.payload, nowSeconds = Date.now() / 1000) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
   const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
@@ -2382,7 +2386,7 @@ function showBackgroundOwnerContextMenu(event) {
     appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
   } else {
     appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
-      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
       const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
       if (backgroundOwnerCurrentOwnerLive(payload)) {
         const label = backgroundServerLabel(owner, t('common.unknown'));
@@ -2397,29 +2401,28 @@ function showBackgroundOwnerContextMenu(event) {
 
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
-  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+  if (backgroundOwnerStatusState.loading && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
   }
-  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+  if (backgroundOwnerStatusState.error && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload));
 }
 
 function createTopbarOwnerStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarOwnerStatus';
-  button.className = 'topbar-owner-status topbar-status-surface';
-  button.title = t('backgroundOwner.refresh');
-  button.setAttribute('aria-label', t('backgroundOwner.aria'));
-  button.onclick = () => {
-    if (typeof refreshBackgroundOwnerStatus === 'function') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-    }
-  };
-  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
-  return button;
+  return makeButton({
+    id: 'topbarOwnerStatus',
+    className: 'topbar-owner-status topbar-status-surface',
+    title: t('backgroundOwner.refresh'),
+    ariaLabel: t('backgroundOwner.aria'),
+    onClick: () => {
+      if (typeof refreshBackgroundOwnerStatus === 'function') {
+        refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+      }
+    },
+    events: {contextmenu: showBackgroundOwnerContextMenu},
+  });
 }
 
 function updateTopbarOwnerStatus() {
@@ -2430,12 +2433,12 @@ function updateTopbarOwnerStatus() {
   node.hidden = !html;
   node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload);
   if (summaries.length) {
     const [indexSummary, statsSummary, sessionSummary] = summaries;
     node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
-  } else if (backgroundOwnerStatusError) {
-    node.title = userMessageText(backgroundOwnerStatusError, t('common.requestFailed'));
+  } else if (backgroundOwnerStatusState.error) {
+    node.title = userMessageText(backgroundOwnerStatusState.error, t('common.requestFailed'));
   } else {
     node.title = t('backgroundOwner.refresh');
   }
@@ -2992,12 +2995,19 @@ function commandPaletteAllTabItems() {
   return Array.from(new Set([...activePaneItems(), ...backgroundTabItems(), ...inactiveTabItems()]));
 }
 
-const commandPaletteMissingFileTabPaths = new Set();
 const commandPaletteFileTabValidationInflight = new Set();
 
 function commandPaletteFilePathKnownMissing(path) {
   const normalized = normalizeDirectoryPath(path || '');
-  return Boolean(normalized && (openFileIsMissing(normalized) || commandPaletteMissingFileTabPaths.has(normalized)));
+  const state = normalized ? fileStateFor(normalized) : null;
+  return Boolean(state?.externalMissing === true && state?.dirty !== true);
+}
+
+function commandPaletteFilePathValidationDue(path, now = Date.now()) {
+  const state = fileStateFor(path);
+  if (state?.externalMissing !== true) return true;
+  const checkedAt = Math.max(0, Number(state.externalMissingCheckedAt) || 0);
+  return now - checkedAt >= commandPaletteMissingPathRetryMs;
 }
 
 function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems()) {
@@ -3005,17 +3015,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
   for (const item of items) {
     const path = fileItemPath(item);
     const normalized = normalizeDirectoryPath(path || '');
-    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || openFileIsMissing(normalized)) continue;
+    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
     fetchFilePathInfo(normalized, {user: true})
-      .then(info => {
-        if (info?.kind) commandPaletteMissingFileTabPaths.delete(normalized);
+      .then(async info => {
+        if (info?.kind === 'file') {
+          await recoverOpenFileAfterMissing(normalized, info);
+        } else if (info?.kind) {
+          markOpenFileMissing(normalized);
+        }
       })
       .catch(error => {
         if (Number(error?.status) === 404) {
-          commandPaletteMissingFileTabPaths.add(normalized);
           markOpenFileMissing(normalized);
-          if (commandPaletteNode && !commandPaletteNode.hidden) renderCommandPaletteResults();
+          if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
       })
       .finally(() => {
@@ -3241,7 +3254,7 @@ function fileQuickOpenDoitNeedle(query = commandPaletteSearchQuery()) {
 }
 
 function fileQuickOpenRepoFamilyBase() {
-  return normalizeDirectoryPath(fileQuickOpenRoot || repoRoot || '');
+  return normalizeDirectoryPath(fileQuickOpenState.root || repoRoot || '');
 }
 
 function fileQuickOpenRepoFamilyPrefix() {
@@ -3297,17 +3310,17 @@ function fileQuickOpenRootForSearch() {
   return repoRoot || homePath || '/';
 }
 
-function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
+function fileQuickOpenRootsForSearch(root = fileQuickOpenState.root || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
   return fileExplorerIndexedSearchRoots(root, fileQuickOpenExtraRootsForSearchQuery(query));
 }
 
-function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
+function fileQuickOpenScopeLabel(root = fileQuickOpenState.root || fileQuickOpenRootForSearch()) {
   const roots = fileQuickOpenRootsForSearch(root);
   if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
   return tPlural('palette.scope.indexedRoot', roots.length - 1, {path: compactHomePath(roots[0])});
 }
 
-function fileQuickOpenQueryParts(query = commandPaletteQuery) {
+function fileQuickOpenQueryParts(query = commandPaletteState.query) {
   const raw = String(query || '').trim();
   const match = raw.match(/^(.*?)(?::(\d+))?$/);
   return {
@@ -3318,11 +3331,11 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
-function fileQuickOpenSearchText(query = commandPaletteQuery) {
+function fileQuickOpenSearchText(query = commandPaletteState.query) {
   return fileQuickOpenQueryParts(query).query.replace(/[:.]+$/g, '').trim();
 }
 
-function fileQuickOpenPathQuery(query = commandPaletteQuery) {
+function fileQuickOpenPathQuery(query = commandPaletteState.query) {
   const text = fileQuickOpenQueryParts(query).query;
   if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
   if (text === '~') return {active: true, directory: '~', filter: ''};
@@ -3341,12 +3354,12 @@ function joinDirectoryPath(directory, name) {
 
 function descendFileQuickOpenDirectory(path) {
   const directory = normalizeDirectoryPath(path);
-  commandPaletteQuery = `${directory}${directory.endsWith('/') ? '' : '/'}`;
-  commandPaletteIndex = 0;
-  const input = commandPaletteNode?.querySelector?.('.command-palette-input');
-  if (input) input.value = commandPaletteQuery;
+  commandPaletteState.query = `${directory}${directory.endsWith('/') ? '' : '/'}`;
+  commandPaletteState.index = 0;
+  const input = commandPaletteState.node?.querySelector?.('.command-palette-input');
+  if (input) input.value = commandPaletteState.query;
   renderCommandPaletteResults();
-  refreshFileQuickOpenCandidates(commandPaletteQuery);
+  refreshFileQuickOpenCandidates(commandPaletteState.query);
 }
 
 function revealOpenFileLineSoon(path, line) {
@@ -3457,7 +3470,7 @@ function fileQuickOpenOpenFolderItem() {
   let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
-    const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    const match = fileQuickOpenState.candidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
     if (match?.path) target = match.path;
   }
   if (!target) return null;
@@ -3507,7 +3520,7 @@ function fileQuickOpenItems() {
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
-  for (const file of fileQuickOpenCandidates) {
+  for (const file of fileQuickOpenState.candidates) {
     const path = file.path || '';
     if (!path) continue;
     if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
@@ -3515,7 +3528,7 @@ function fileQuickOpenItems() {
     // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
-    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
+    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenState.root || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
@@ -3530,8 +3543,8 @@ function fileQuickOpenItems() {
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
-  if (fileQuickOpenError) {
-    const errorText = userMessageText(fileQuickOpenError, t('common.searchFailed'));
+  if (fileQuickOpenState.error) {
+    const errorText = userMessageText(fileQuickOpenState.error, t('common.searchFailed'));
     items.push({
       group: t('palette.group.files'),
       label: t('common.searchFailed'),
@@ -3541,11 +3554,11 @@ function fileQuickOpenItems() {
       run: null,
     });
   }
-  if (fileQuickOpenLoading) {
+  if (fileQuickOpenState.loading) {
     items.push({
       group: t('palette.group.files'),
       label: t('palette.searchingFiles'),
-      detail: compactHomePath(fileQuickOpenRoot),
+      detail: compactHomePath(fileQuickOpenState.root),
       loading: true,
       searchFields: ['searching'],
       disabled: true,
@@ -3565,7 +3578,7 @@ function commandPaletteMergedItems() {
   return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
 
-function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteQuery) {
+function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteState.query) {
   // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
   // candidate universe and differ only in searchRankWeights.domainPrior.
   const parts = fileQuickOpenQueryParts(rawQuery);
@@ -3583,7 +3596,7 @@ function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = comm
 }
 
 function commandPaletteItems() {
-  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteQuery);
+  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteState.query);
 }
 
 function commandPaletteRankItems(items, query, options = {}) {
@@ -3788,7 +3801,7 @@ function commandPaletteEffectiveMode() {
   return commandPaletteMode === 'files' && !fileQuickOpenQueryParts().commandMode ? 'files' : 'command';
 }
 
-function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPaletteMode) {
+function commandPaletteSearchQuery(query = commandPaletteState.query, mode = commandPaletteMode) {
   if (mode !== 'files') return String(query || '').trim();
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
@@ -3800,7 +3813,7 @@ function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPa
 
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
-  const q = commandPaletteQuery.trim();
+  const q = commandPaletteState.query.trim();
   if (q.startsWith('>')) return t('palette.placeholderCommand');
   if (q.startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.placeholderWithFiles');
@@ -3812,13 +3825,13 @@ function commandPaletteLabel() {
 }
 
 function commandPaletteEmptyText() {
-  if (fileQuickOpenLoading) return t('search.searching');
-  if (commandPaletteQuery.trim().startsWith('@')) return t('palette.symbolUnavailable');
+  if (fileQuickOpenState.loading) return t('search.searching');
+  if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
+  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -3826,12 +3839,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
 }
 
 function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
-    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
+    <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
       <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
@@ -3844,7 +3857,7 @@ function commandPaletteItemLabelHtml(item, query) {
 }
 
 function ensureCommandPalette() {
-  if (commandPaletteNode) return commandPaletteNode;
+  if (commandPaletteState.node) return commandPaletteState.node;
   const node = document.createElement('div');
   node.className = 'app-modal-overlay command-palette';
   node.hidden = true;
@@ -3859,8 +3872,8 @@ function ensureCommandPalette() {
   });
   const input = node.querySelector('.command-palette-input');
   input.addEventListener('input', () => {
-    commandPaletteQuery = input.value || '';
-    commandPaletteIndex = 0;
+    commandPaletteState.query = input.value || '';
+    commandPaletteState.index = 0;
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -3871,11 +3884,11 @@ function ensureCommandPalette() {
       closeCommandPalette();
     } else if (event.key === 'ArrowDown') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex + 1) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index + 1) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex - 1 + commandPaletteItemsCache.length) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index - 1 + commandPaletteState.items.length) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'Enter') {
       event.preventDefault();
@@ -3894,11 +3907,11 @@ function ensureCommandPalette() {
     }
     const row = event.target.closest('[data-command-index]');
     if (!row || !node.contains(row)) return;
-    commandPaletteIndex = Number(row.dataset.commandIndex || 0);
+    commandPaletteState.index = Number(row.dataset.commandIndex || 0);
     invokeCommandPaletteSelection();
   });
   appOverlayRootElement().appendChild(node);
-  commandPaletteNode = node;
+  commandPaletteState.node = node;
   return node;
 }
 
@@ -3913,7 +3926,7 @@ function renderCommandPaletteResults() {
   if (input) {
     input.placeholder = commandPalettePlaceholder();
     input.setAttribute('aria-label', commandPaletteLabel());
-    input.setAttribute('aria-busy', fileQuickOpenLoading ? 'true' : 'false');
+    input.setAttribute('aria-busy', fileQuickOpenState.loading ? 'true' : 'false');
   }
   if (status) {
     const text = commandPaletteStatusText();
@@ -3922,31 +3935,32 @@ function renderCommandPaletteResults() {
     status.setAttribute('aria-label', text);
     status.innerHTML = html;
   }
-  commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
-  commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
-  if (!commandPaletteItemsCache.length) {
+  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+  commandPaletteState.index = Math.min(commandPaletteState.index, Math.max(0, commandPaletteState.items.length - 1));
+  if (!commandPaletteState.items.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
-  results.innerHTML = commandPaletteResultsHtml(commandPaletteItemsCache, query);
+  results.innerHTML = commandPaletteResultsHtml(commandPaletteState.items, query);
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
 function openCommandPalette(options = {}) {
   const node = ensureCommandPalette();
   closeAppMenus();
+  abortFileQuickOpenSearch();
   commandPaletteMode = options.mode === 'files' ? 'files' : 'command';
-  commandPaletteQuery = '';
-  commandPaletteIndex = 0;
+  commandPaletteState.query = '';
+  commandPaletteState.index = 0;
   node.hidden = false;
   node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
-  fileQuickOpenRoot = fileQuickOpenRootForSearch();
-  fileQuickOpenCandidates = [];
-  fileQuickOpenLoading = false;
-  fileQuickOpenError = '';
+  fileQuickOpenState.root = fileQuickOpenRootForSearch();
+  fileQuickOpenState.candidates = [];
+  fileQuickOpenState.loading = false;
+  fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
   if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
@@ -3959,11 +3973,12 @@ function openFileQuickOpen() {
 }
 
 function closeCommandPalette() {
-  if (!commandPaletteNode) return;
-  commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove(CLS.open);
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
-  fileQuickOpenDebounce = null;
+  if (!commandPaletteState.node) return;
+  commandPaletteState.node.hidden = true;
+  commandPaletteState.node.classList.remove(CLS.open);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
+  fileQuickOpenState.debounce = null;
+  abortFileQuickOpenSearch();
 }
 
 function focusCommandPaletteTarget(item) {
@@ -3975,7 +3990,7 @@ function focusCommandPaletteTarget(item) {
 }
 
 async function invokeCommandPaletteSelection(event = null) {
-  const item = commandPaletteItemsCache[commandPaletteIndex];
+  const item = commandPaletteState.items[commandPaletteState.index];
   if (!item || item.disabled) return;
   rememberCommandPaletteItem(item);
   closeCommandPalette();
@@ -3985,22 +4000,23 @@ async function invokeCommandPaletteSelection(event = null) {
 }
 
 function scheduleFileQuickOpenSearch(options = {}) {
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
   const run = () => {
-    const q = commandPaletteQuery.trim();
-    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
+    fileQuickOpenState.debounce = null;
+    const q = commandPaletteState.query.trim();
+    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteState.query);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
+  else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {
-  if (fileQuickOpenAbortController) {
-    try { fileQuickOpenAbortController.abort(); } catch (_) {}
+  if (fileQuickOpenState.abortController) {
+    try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
-  fileQuickOpenAbortController = null;
-  fileQuickOpenRequestId += 1;
-  fileQuickOpenLoading = false;
+  fileQuickOpenState.abortController = null;
+  fileQuickOpenState.requestId += 1;
+  fileQuickOpenState.loading = false;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -4022,22 +4038,22 @@ function dedupeFileSearchResults(files) {
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
-  const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
+  const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
   abortFileQuickOpenSearch();
-  const requestId = ++fileQuickOpenRequestId;
-  fileQuickOpenAbortController = typeof AbortController === 'function' ? new AbortController() : null;
-  const fetchOptions = fileQuickOpenAbortController ? {signal: fileQuickOpenAbortController.signal} : {};
-  fileQuickOpenLoading = true;
+  const requestId = ++fileQuickOpenState.requestId;
+  fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
+  fileQuickOpenState.loading = true;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
-      if (requestId !== fileQuickOpenRequestId) return;
-      fileQuickOpenRoot = payload.path || pathQuery.directory || root;
+      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`, fetchOptions);
+      if (requestId !== fileQuickOpenState.requestId) return;
+      fileQuickOpenState.root = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
-      fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
+      fileQuickOpenState.candidates = (Array.isArray(payload.entries) ? payload.entries : [])
         .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
         .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
         .map(entry => ({
@@ -4060,34 +4076,34 @@ async function refreshFileQuickOpenCandidates(query = '') {
           return {ok: false, root: searchRoot, error};
         }
       }));
-      if (requestId !== fileQuickOpenRequestId) return;
+      if (requestId !== fileQuickOpenState.requestId) return;
       const successful = results.filter(result => result.ok);
       if (!successful.length) {
         const firstError = results.find(result => result.error)?.error;
         if (firstError) throw firstError;
         const fallback = t('common.searchFailed');
-        fileQuickOpenError = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
+        fileQuickOpenState.error = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
         return;
       }
-      fileQuickOpenRoot = root;
-      fileQuickOpenCandidates = dedupeFileSearchResults(
+      fileQuickOpenState.root = root;
+      fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
     }
-    fileQuickOpenError = '';
+    fileQuickOpenState.error = '';
   } catch (error) {
-    if (requestId !== fileQuickOpenRequestId) return;
+    if (requestId !== fileQuickOpenState.requestId) return;
     if (error?.name === 'AbortError') return;
-    fileQuickOpenCandidates = [];
-    fileQuickOpenError = userMessageSnapshot(error, {
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},
       fallback: t('common.searchFailed'),
     });
   } finally {
-    if (requestId === fileQuickOpenRequestId) {
-      fileQuickOpenAbortController = null;
-      fileQuickOpenLoading = false;
+    if (requestId === fileQuickOpenState.requestId) {
+      fileQuickOpenState.abortController = null;
+      fileQuickOpenState.loading = false;
       renderCommandPaletteResults();
     }
   }
@@ -4342,35 +4358,31 @@ function startupHelperWrappedIndex(index, count) {
   return ((Math.floor(Number(index)) % count) + count) % count;
 }
 
-function startupHelperAction(label, onClick, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if (options.className) button.className = options.className;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick?.();
-  });
-  return button;
-}
-
 function startupHelperNavigationGroup(index, total, showRelativeTip) {
   const group = document.createElement('span');
   group.className = 'startup-helper-nav';
   group.setAttribute('role', 'group');
   group.setAttribute('aria-label', t('startupHelper.navigation'));
   group.append(
-    startupHelperAction('<', () => showRelativeTip(-1), {
+    makeButton({
+      label: '<',
       className: 'startup-helper-nav-button',
       title: t('startupHelper.action.previous'),
       ariaLabel: t('startupHelper.action.previous'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(-1);
+      },
     }),
-    startupHelperAction('>', () => showRelativeTip(1), {
+    makeButton({
+      label: '>',
       className: 'startup-helper-nav-button',
       title: t('startupHelper.action.next'),
       ariaLabel: t('startupHelper.action.next'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(1);
+      },
     }),
   );
   return group;
@@ -4408,12 +4420,16 @@ function showStartupHelperTip(options = {}) {
     showStartupHelperTip({manual: true});
   };
   const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
-  const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
-    startupHelpersEnabled = false;
-    closeStartupHelperToast(node);
-    saveSettingsPatch(settingPatch('general.startup_tips', false))
-      .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
+  const offAction = makeButton({
+    label: t('startupHelper.action.offForever'),
+    onClick: event => {
+      event.stopPropagation();
+      startupHelpersEnabled = false;
+      closeStartupHelperToast(node);
+      saveSettingsPatch(settingPatch('general.startup_tips', false))
+        .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+        .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
+    },
   });
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
@@ -4455,7 +4471,7 @@ function compactNotificationTitle(scope, message, options = {}) {
 
 function sessionNotificationScope(session) {
   const label = sessionLabel(session);
-  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  const desc = sessionTabDescription(session, transcriptMetadataState.payload.sessions?.[session]);
   return desc ? `${label} ${desc}` : label;
 }
 
@@ -4472,7 +4488,7 @@ function attentionToastAgent(session, state) {
   if (agentWindowIsAttentionState(agent?.state)) {
     return {agent, item: state?.attentionAgentItem || null};
   }
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const summary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session))
     : null;
@@ -4511,7 +4527,7 @@ function agentToastTargetLine(session, agent, options = {}) {
       line.classList.add('toast-line--attention');
       const marker = document.createElement('span');
       marker.className = 'attention-toast-controls';
-      const info = transcriptMeta.sessions?.[session];
+      const info = transcriptMetadataState.payload.sessions?.[session];
       const auto = autoApproveStates.get(session)?.enabled === true;
       const status = options.state || sessionState(session, info);
       const tabHtml = tmuxPaneTabTokenHtml(session, {
@@ -4633,7 +4649,7 @@ function sendTestNotification(options = {}) {
 
 function notifyCurrentAttentionStates() {
   for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     if (shouldNotifyState(state)) maybeNotifyState(session, state, {force: true});
   }
 }
@@ -4648,7 +4664,7 @@ function stateSignature(state) {
 
 function trackSessionStateChanges() {
   for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     const record = sessionStatusRecord(session, true);
     const previous = record?.state || null;
     const signature = stateSignature(state);
@@ -4686,7 +4702,7 @@ function maybeNotifyState(session, state, options = {}) {
   const lastSent = sessionNotificationLastSentAt(session, key);
   if (options.force !== true && now - lastSent < 60_000) return;
   recordSessionNotificationSent(session, key, now);
-  const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
+  const body = `${state.reason} · ${projectDirName(session, transcriptMetadataState.payload.sessions?.[session])}`;
   if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {
     state: state.key,
@@ -4864,7 +4880,7 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
   const pendingMap = record?.workingAgentTransitionNotificationPending;
   if (!toneMap || !pendingMap) return 0;
   const rows = typeof sessionAgentWindowStatusPayloads === 'function'
-    ? sessionAgentWindowStatusPayloads(session, transcriptMeta.sessions?.[session], payload)
+    ? sessionAgentWindowStatusPayloads(session, transcriptMetadataState.payload.sessions?.[session], payload)
     : typeof agentWindowPayloadRows === 'function'
       ? agentWindowPayloadRows(payload.agent_windows)
       : [];
@@ -5144,7 +5160,7 @@ function performLayoutRender(request = {}) {
 
 function requestLayoutRender(request = {}) {
   const renderRequest = layoutRenderRequest(request);
-  if (dragSession != null) {
+  if (dragState.item != null) {
     pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
     return;
   }
