@@ -3164,6 +3164,7 @@ def test_session_files_memory_cache_is_bounded():
 
 def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
+    subscriber_id = None
     try:
         monkeypatch.setattr(
             app_module,
@@ -3177,10 +3178,14 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
         record.next_auto_poll_at = 101.0
         record.next_attention_ack_poll_at = 100.6
         record.next_watched_pr_poll_at = 200.0
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
+        subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
         record.next_signature_poll_at = 0.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
     finally:
+        if subscriber_id is not None:
+            webapp.client_events.unsubscribe(subscriber_id)
         webapp.control_server.stop()
 
 
@@ -3585,6 +3590,7 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
 
 def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
     old_polled = threading.Event()
     new_polled = threading.Event()
     release_old = threading.Event()
@@ -3644,6 +3650,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         assert poll_threads == [old_worker, replacement_worker]
     finally:
         release_old.set()
+        webapp.client_events.unsubscribe(subscriber_id)
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()
 

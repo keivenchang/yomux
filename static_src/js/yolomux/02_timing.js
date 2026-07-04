@@ -11,6 +11,7 @@ const uiDelayMs = Object.freeze({
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   commandPaletteMissingPathRetry: 1001,
+  clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
 });
@@ -29,6 +30,7 @@ const yolomuxTiming = Object.freeze({
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
+  clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
   yolomuxFontReadyTimeoutMs: 2500,
@@ -53,6 +55,7 @@ const {
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,
+  clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
   yolomuxFontReadyTimeoutMs,

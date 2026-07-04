@@ -2227,7 +2227,7 @@ function backgroundFileEditorWatchFiles() {
   return Array.from(new Set(paneItems()
     .filter(isFileEditorItem)
     .map(item => fileItemPath(item))
-    .filter(path => path && path.startsWith('/') && !visible.has(path))))
+    .filter(path => path && path.startsWith('/') && !visible.has(path) && fileStateFor(path)?.dirty === true)))
     .sort();
 }
 
@@ -2263,6 +2263,16 @@ function transcriptContextWatchRequests() {
 }
 
 function clientServerWatchState() {
+  if (document.visibilityState === 'hidden') {
+    return {
+      roots: [],
+      files: [],
+      background_files: [],
+      context_items: [],
+      activity_summary: {visible: false},
+      session_files: [],
+    };
+  }
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
@@ -2284,7 +2294,7 @@ function clientServerWatchState() {
 }
 
 function syncServerWatchRootsNow(options = {}) {
-  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsState.inFlight) return;
+  if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true) || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
   const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;

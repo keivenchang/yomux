@@ -1345,6 +1345,10 @@ const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
   connected: false,
+  enabled: false,
+  demand: null,
+  demandSignature: '',
+  demandTimer: null,
   queue: new Map(),
   frame: 0,
   resyncTimer: null,
@@ -1540,6 +1544,7 @@ const uiDelayMs = Object.freeze({
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   commandPaletteMissingPathRetry: 1001,
+  clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
 });
@@ -1558,6 +1563,7 @@ const yolomuxTiming = Object.freeze({
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
+  clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
   yolomuxFontReadyTimeoutMs: 2500,
@@ -1582,6 +1588,7 @@ const {
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,
+  clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
   yolomuxFontReadyTimeoutMs,
@@ -3779,6 +3786,7 @@ function updatePanelInactiveOverlays() {
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
   if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
   else if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
 }
 
 function esc(value) {
@@ -8372,6 +8380,7 @@ async function setNotificationDelivery(channel, enabled) {
   storageSet(notificationDeliveryStorageKey, JSON.stringify(notificationDelivery));
   renderNotifyToggle();
   refreshNotificationDeliveryMenuChecks();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   if (notificationDeliveryEnabled(channel)) sendTestNotification({[channel]: true});
 }
 
@@ -15723,6 +15732,14 @@ function markFileIndexRootsRefreshing(roots = []) {
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already
 // 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
+  const finderVisible = document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(fileExplorerItemId)
+    && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+  const fileSearchVisible = document.visibilityState !== 'hidden'
+    && commandPaletteState.node
+    && !commandPaletteState.node.hidden
+    && commandPaletteEffectiveMode() === 'files';
+  if (!finderVisible && !fileSearchVisible) return;
   for (const root of fileExplorerIndexedDirs) {
     refreshFileIndexStatus(root);
   }
@@ -20355,7 +20372,7 @@ function backgroundFileEditorWatchFiles() {
   return Array.from(new Set(paneItems()
     .filter(isFileEditorItem)
     .map(item => fileItemPath(item))
-    .filter(path => path && path.startsWith('/') && !visible.has(path))))
+    .filter(path => path && path.startsWith('/') && !visible.has(path) && fileStateFor(path)?.dirty === true)))
     .sort();
 }
 
@@ -20391,6 +20408,16 @@ function transcriptContextWatchRequests() {
 }
 
 function clientServerWatchState() {
+  if (document.visibilityState === 'hidden') {
+    return {
+      roots: [],
+      files: [],
+      background_files: [],
+      context_items: [],
+      activity_summary: {visible: false},
+      session_files: [],
+    };
+  }
   const state = {
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
@@ -20412,7 +20439,7 @@ function clientServerWatchState() {
 }
 
 function syncServerWatchRootsNow(options = {}) {
-  if (readOnlyMode || !clientPushCanSupplyData() || serverWatchRootsState.inFlight) return;
+  if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true) || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
   const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;
@@ -23463,6 +23490,7 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('auto-approve', () => {
+    if (document.visibilityState === 'hidden') return null;
     if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
@@ -54158,10 +54186,16 @@ function startShareStatusRefresh() {
     }
     if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
-    } else if (!readOnlyMode && Date.now() - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs) {
+    } else if (shareHostStatusBackupPollDue()) {
       refreshActiveShare({silent: true});
     }
   }, 1000);
+}
+
+function shareHostStatusBackupPollDue(nowMs = Date.now()) {
+  return !readOnlyMode
+    && shareHasActiveShare()
+    && nowMs - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs;
 }
 
 const shareReadonlyPreventDefaultEvents = new Set(['beforeinput', 'change', 'drop', 'dragstart', 'input', 'paste', 'submit']);
@@ -59287,6 +59321,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
+  if (document.visibilityState === 'hidden') return null;
   const startedAt = performance.now();
   try {
     await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
@@ -59326,10 +59361,16 @@ function resyncVisibleTerminalRemoteSizes(reason = '') {
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
       scheduleReconnectResync('visible');
       resyncVisibleTerminalRemoteSizes('visible');
+      updateLatency();
       if (fileExplorerMode === 'tabber' && typeof fetchTabberActivity === 'function') fetchTabberActivity();
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+      return;
     }
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({deactivate: true, immediate: true});
+    if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   });
   window.addEventListener('online', () => {
     scheduleReconnectResync('online');
@@ -59808,34 +59849,97 @@ function handleClientPushEventNow(type, payload = {}) {
   }
 }
 
-function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventTransportState.source) return;
+function clientEventDemandDescriptor() {
+  const visible = document.visibilityState !== 'hidden';
+  const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
+  const channels = new Set();
+  const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
+  if (visible) {
+    channels.add('core');
+    channels.add('status');
+    const finderActive = activeItems.includes(fileExplorerItemId);
+    const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
+    if (finderActive && fileExplorerMode === 'tabber') channels.add('activity');
+    if ((finderActive && fileExplorerMode !== 'tabber') || fileEditorActive) channels.add('files');
+    if (activeItems.includes(infoItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+    }
+    if (activeItems.includes(yoagentItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+      channels.add('yoagent');
+    }
+    if (activeItems.some(item => isTmuxSession(item) && typeof transcriptPreviewPaneIsActive === 'function' && transcriptPreviewPaneIsActive(item))) {
+      channels.add('transcripts');
+    }
+  } else if (notificationAttention) {
+    channels.add('attention');
+  }
+  return {
+    visibility: visible ? 'visible' : 'hidden',
+    active_panes: activeItems.slice().sort(),
+    active_subtabs: {
+      finder: finderActiveMode(),
+      yoagent: activeItems.includes(yoagentItemId),
+    },
+    channels: Array.from(channels).sort(),
+    notification_attention: notificationAttention,
+  };
+}
+
+function finderActiveMode() {
+  return itemIsActivePaneTab(fileExplorerItemId) ? normalizeFileExplorerMode(fileExplorerMode) : '';
+}
+
+function clientEventDemandSignature(descriptor) {
+  return JSON.stringify(descriptor);
+}
+
+function closeClientEventStream() {
+  const source = clientEventTransportState.source;
+  clientEventTransportState.source = null;
+  clientEventTransportState.connected = false;
+  source?.close?.();
+}
+
+function openClientEventStream(descriptor) {
+  if (typeof EventSource === 'undefined' || !descriptor.channels.length) return null;
+  const params = new URLSearchParams({
+    channels: descriptor.channels.join(','),
+    client_id: String(shareClientId || ''),
+  });
   let source;
   try {
-    source = new EventSource('/api/client-events');
+    source = new EventSource(`/api/client-events?${params.toString()}`);
   } catch (_error) {
-    return;
+    return null;
   }
   clientEventTransportState.source = source;
+  const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   });
   source.addEventListener('ping', event => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
   for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
+      if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
@@ -59843,6 +59947,37 @@ function installClientEventStream() {
       handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
     });
   }
+  return source;
+}
+
+function applyClientEventDemand() {
+  clientEventTransportState.demandTimer = null;
+  if (!clientEventTransportState.enabled) return false;
+  const descriptor = clientEventDemandDescriptor();
+  const signature = clientEventDemandSignature(descriptor);
+  if (signature === clientEventTransportState.demandSignature && clientEventTransportState.source) return false;
+  clientEventTransportState.demand = descriptor;
+  clientEventTransportState.demandSignature = signature;
+  closeClientEventStream();
+  if (!descriptor.channels.length) {
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+    return true;
+  }
+  openClientEventStream(descriptor);
+  return true;
+}
+
+function syncClientEventDemand(options = {}) {
+  if (!clientEventTransportState.enabled) return false;
+  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (options.immediate === true) return applyClientEventDemand();
+  clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  return true;
+}
+
+function installClientEventStream() {
+  clientEventTransportState.enabled = true;
+  return syncClientEventDemand({immediate: true});
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring

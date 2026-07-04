@@ -1917,6 +1917,7 @@ function updatePanelInactiveOverlays() {
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
   if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
   else if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
 }
 
 function esc(value) {

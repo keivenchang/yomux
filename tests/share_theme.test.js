@@ -1636,13 +1636,21 @@ async function runShareThemeSuite() {
     watchSlots.left = watchApi.paneStateWithTabs([backgroundItem, visibleItem], visibleItem);
     watchSlots.right = watchApi.paneStateWithTabs(['1'], '1');
     watchApi.setLayoutSlotsForTest(watchSlots);
+    watchApi.setOpenFileStateForTest(visiblePath, {dirty: false});
+    watchApi.setOpenFileStateForTest(backgroundPath, {dirty: false});
     assert.deepStrictEqual([...watchApi.visibleFileEditorWatchFilesForTest()], [visiblePath], 'active visible editor files use the fast watch list');
-    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [backgroundPath], 'background editor tabs use the slower watch list');
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'clean background editor tabs do not retain a watch');
+    watchApi.setOpenFileStateForTest(backgroundPath, {dirty: true});
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [backgroundPath], 'dirty background editor tabs retain the slower conflict watch');
     assert.deepStrictEqual([...watchApi.clientServerWatchStateForTest().files], [visiblePath], 'watch payload sends active editor files under files');
     assert.deepStrictEqual([...watchApi.clientServerWatchStateForTest().background_files], [backgroundPath], 'watch payload sends background editor files separately');
     watchApi.activatePaneTab('left', backgroundItem, {userInitiated: true});
     assert.deepStrictEqual([...watchApi.visibleFileEditorWatchFilesForTest()], [backgroundPath], 'activating a background editor promotes it to the fast watch list');
-    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [visiblePath], 'the previously visible editor moves to the slower watch list');
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'the previously visible clean editor does not move to the slower watch list');
+    watchApi.setDocumentVisibilityForTest('hidden');
+    assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest()), {
+      roots: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
+    }, 'hidden documents unregister every pane watch and producer request');
 
     const transcriptWatchApi = loadYolomux('', ['1', '2']);
     const transcriptWatchSlots = transcriptWatchApi.emptyLayoutSlots();

@@ -248,6 +248,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.clientEventTransportStateForTest().queued, 0, 'hidden delivery flushes immediately');
     assert.equal(api.clientEventTransportStateForTest().frame, 0, 'hidden delivery clears the frame field');
 
+    api.setDocumentVisibilityForTest('visible');
     api.installClientEventStreamForTest();
     const source = api.clientEventTransportStateForTest().source;
     source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});

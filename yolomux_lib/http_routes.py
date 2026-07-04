@@ -374,8 +374,12 @@ def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
 
 
 def get_client_events(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
-    request.stream_client_events()
+    del route
+    qs = parse_qs(parsed.query)
+    request.stream_client_events(
+        channels=str(query_one(qs, "channels", "") or ""),
+        client_id=str(query_one(qs, "client_id", "") or ""),
+    )
 
 
 def get_home(request: Any, parsed: Any, route: Route) -> None:

@@ -63,6 +63,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Launch, Worktrees, And Vitals
 
+- [ ] [L] Evaluate hidden-document terminal WebSocket suspension as an isolated feature. Use a bounded grace period and prove no lost input, duplicate socket, resize-authority drift, scrollback loss, missed attention transition, or incomplete current-snapshot recovery before enabling it; demand-aware HTTP/SSE gating intentionally leaves terminal sockets connected until this proof exists.
 - [ ] [L] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, optional session name, and optional worktree-backed launch.
 - [ ] [M] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.

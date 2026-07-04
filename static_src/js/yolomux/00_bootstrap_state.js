@@ -1344,6 +1344,10 @@ const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
   connected: false,
+  enabled: false,
+  demand: null,
+  demandSignature: '',
+  demandTimer: null,
   queue: new Map(),
   frame: 0,
   resyncTimer: null,

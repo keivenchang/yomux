@@ -8274,7 +8274,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
         const done = arguments[arguments.length - 1];
         (async () => {
           const markerBefore = document.querySelector('[data-yolo-session="1"]');
-          const source = (window.__eventSources || []).find(item => item.url === '/api/client-events');
+          const source = (window.__eventSources || []).find(item => item.url.startsWith('/api/client-events?channels='));
           if (!markerBefore || !source) return {error: 'missing marker or client-events source'};
           const beforeWorking = markerBefore.classList.contains('working');
           window.__fixtureAutoApprovePayload = {

@@ -4936,6 +4936,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
+  if (document.visibilityState === 'hidden') return null;
   const startedAt = performance.now();
   try {
     await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
@@ -4975,10 +4976,16 @@ function resyncVisibleTerminalRemoteSizes(reason = '') {
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
       scheduleReconnectResync('visible');
       resyncVisibleTerminalRemoteSizes('visible');
+      updateLatency();
       if (fileExplorerMode === 'tabber' && typeof fetchTabberActivity === 'function') fetchTabberActivity();
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+      return;
     }
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({deactivate: true, immediate: true});
+    if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   });
   window.addEventListener('online', () => {
     scheduleReconnectResync('online');
@@ -5457,34 +5464,97 @@ function handleClientPushEventNow(type, payload = {}) {
   }
 }
 
-function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventTransportState.source) return;
+function clientEventDemandDescriptor() {
+  const visible = document.visibilityState !== 'hidden';
+  const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
+  const channels = new Set();
+  const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
+  if (visible) {
+    channels.add('core');
+    channels.add('status');
+    const finderActive = activeItems.includes(fileExplorerItemId);
+    const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
+    if (finderActive && fileExplorerMode === 'tabber') channels.add('activity');
+    if ((finderActive && fileExplorerMode !== 'tabber') || fileEditorActive) channels.add('files');
+    if (activeItems.includes(infoItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+    }
+    if (activeItems.includes(yoagentItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+      channels.add('yoagent');
+    }
+    if (activeItems.some(item => isTmuxSession(item) && typeof transcriptPreviewPaneIsActive === 'function' && transcriptPreviewPaneIsActive(item))) {
+      channels.add('transcripts');
+    }
+  } else if (notificationAttention) {
+    channels.add('attention');
+  }
+  return {
+    visibility: visible ? 'visible' : 'hidden',
+    active_panes: activeItems.slice().sort(),
+    active_subtabs: {
+      finder: finderActiveMode(),
+      yoagent: activeItems.includes(yoagentItemId),
+    },
+    channels: Array.from(channels).sort(),
+    notification_attention: notificationAttention,
+  };
+}
+
+function finderActiveMode() {
+  return itemIsActivePaneTab(fileExplorerItemId) ? normalizeFileExplorerMode(fileExplorerMode) : '';
+}
+
+function clientEventDemandSignature(descriptor) {
+  return JSON.stringify(descriptor);
+}
+
+function closeClientEventStream() {
+  const source = clientEventTransportState.source;
+  clientEventTransportState.source = null;
+  clientEventTransportState.connected = false;
+  source?.close?.();
+}
+
+function openClientEventStream(descriptor) {
+  if (typeof EventSource === 'undefined' || !descriptor.channels.length) return null;
+  const params = new URLSearchParams({
+    channels: descriptor.channels.join(','),
+    client_id: String(shareClientId || ''),
+  });
   let source;
   try {
-    source = new EventSource('/api/client-events');
+    source = new EventSource(`/api/client-events?${params.toString()}`);
   } catch (_error) {
-    return;
+    return null;
   }
   clientEventTransportState.source = source;
+  const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   });
   source.addEventListener('ping', event => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
+    if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
   for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
     source.addEventListener(type, event => {
+      if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
@@ -5492,6 +5562,37 @@ function installClientEventStream() {
       handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
     });
   }
+  return source;
+}
+
+function applyClientEventDemand() {
+  clientEventTransportState.demandTimer = null;
+  if (!clientEventTransportState.enabled) return false;
+  const descriptor = clientEventDemandDescriptor();
+  const signature = clientEventDemandSignature(descriptor);
+  if (signature === clientEventTransportState.demandSignature && clientEventTransportState.source) return false;
+  clientEventTransportState.demand = descriptor;
+  clientEventTransportState.demandSignature = signature;
+  closeClientEventStream();
+  if (!descriptor.channels.length) {
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+    return true;
+  }
+  openClientEventStream(descriptor);
+  return true;
+}
+
+function syncClientEventDemand(options = {}) {
+  if (!clientEventTransportState.enabled) return false;
+  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (options.immediate === true) return applyClientEventDemand();
+  clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  return true;
+}
+
+function installClientEventStream() {
+  clientEventTransportState.enabled = true;
+  return syncClientEventDemand({immediate: true});
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring

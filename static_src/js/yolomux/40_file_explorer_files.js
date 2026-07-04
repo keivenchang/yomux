@@ -3381,6 +3381,14 @@ function markFileIndexRootsRefreshing(roots = []) {
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already
 // 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
+  const finderVisible = document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(fileExplorerItemId)
+    && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+  const fileSearchVisible = document.visibilityState !== 'hidden'
+    && commandPaletteState.node
+    && !commandPaletteState.node.hidden
+    && commandPaletteEffectiveMode() === 'files';
+  if (!finderVisible && !fileSearchVisible) return;
   for (const root of fileExplorerIndexedDirs) {
     refreshFileIndexStatus(root);
   }

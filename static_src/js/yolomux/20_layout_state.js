@@ -2729,6 +2729,7 @@ async function setNotificationDelivery(channel, enabled) {
   storageSet(notificationDeliveryStorageKey, JSON.stringify(notificationDelivery));
   renderNotifyToggle();
   refreshNotificationDeliveryMenuChecks();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   if (notificationDeliveryEnabled(channel)) sendTestNotification({[channel]: true});
 }
 

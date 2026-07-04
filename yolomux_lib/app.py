@@ -5682,16 +5682,19 @@ class TmuxWebtermApp:
 
     def client_event_watch_sleep_seconds(self, now: float, record: ClientEventWatcherRecord | None = None) -> float:
         current = record or self.client_event_watcher_record
-        next_due = min(
-            current.next_signature_poll_at,
-            current.next_file_poll_at,
-            current.next_background_file_poll_at,
-            current.next_auto_poll_at,
-            current.next_attention_ack_poll_at,
-            current.next_tmux_signal_poll_at,
-            current.next_watched_pr_poll_at,
-            current.next_yoagent_job_poll_at,
-        )
+        channels = self.client_events.aggregate_channels()
+        deadlines: list[float] = []
+        if not channels.isdisjoint({"files", "transcripts", "activity"}):
+            deadlines.extend((current.next_signature_poll_at, current.next_file_poll_at, current.next_background_file_poll_at))
+        if not channels.isdisjoint({"status", "attention"}):
+            deadlines.extend((current.next_auto_poll_at, current.next_attention_ack_poll_at, current.next_tmux_signal_poll_at))
+        if not channels.isdisjoint({"core", "attention"}):
+            deadlines.append(current.next_watched_pr_poll_at)
+        if not channels.isdisjoint({"yoagent", "attention"}):
+            deadlines.append(current.next_yoagent_job_poll_at)
+        if not deadlines:
+            return 60.0
+        next_due = min(deadlines)
         if next_due <= 0:
             return self.server_event_poll_seconds()
         return max(0.01, min(60.0, next_due - now))
@@ -6639,28 +6642,31 @@ class TmuxWebtermApp:
             while not current.stop_event.is_set():
                 try:
                     now = time.monotonic()
-                    if now >= current.next_file_poll_at:
+                    file_demand = self.client_events.has_demand("files", "transcripts", "activity")
+                    status_demand = self.client_events.has_demand("status", "attention")
+                    notification_demand = self.client_events.has_demand("attention")
+                    if file_demand and now >= current.next_file_poll_at:
                         self.poll_client_file_events_once()
                         current.next_file_poll_at = now + self.server_event_poll_seconds()
-                    if now >= current.next_background_file_poll_at:
+                    if file_demand and now >= current.next_background_file_poll_at:
                         self.poll_client_background_file_events_once()
                         current.next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
-                    if now >= current.next_signature_poll_at:
+                    if file_demand and now >= current.next_signature_poll_at:
                         current.next_signature_poll_at = now + self.server_directory_event_poll_seconds()
                         self.start_client_directory_poll(current)
-                    if now >= current.next_auto_poll_at:
+                    if status_demand and now >= current.next_auto_poll_at:
                         self.poll_auto_approve_client_event_once()
                         current.next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
-                    if now >= current.next_attention_ack_poll_at:
+                    if status_demand and now >= current.next_attention_ack_poll_at:
                         self.poll_attention_acks_client_event_once()
                         current.next_attention_ack_poll_at = now + self.server_attention_ack_event_poll_seconds()
-                    if now >= current.next_tmux_signal_poll_at:
+                    if status_demand and now >= current.next_tmux_signal_poll_at:
                         self.poll_tmux_signals_client_event_once()
                         current.next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
-                    if now >= current.next_watched_pr_poll_at:
+                    if (self.client_events.has_demand("core") or notification_demand) and now >= current.next_watched_pr_poll_at:
                         self.poll_watched_prs_client_event_once()
                         current.next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
-                    if now >= current.next_yoagent_job_poll_at:
+                    if (self.client_events.has_demand("yoagent") or notification_demand) and now >= current.next_yoagent_job_poll_at:
                         self.poll_yoagent_jobs_once()
                         current.next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
                 except (OSError, RuntimeError, ValueError) as exc:
@@ -9084,6 +9090,7 @@ class TmuxWebtermApp:
             "top_endpoints": self.runtime_top_endpoints(status),
             "top_background_work": self.runtime_top_background_work(status),
             "top_event_types": self.runtime_top_event_types(),
+            "client_events": self.client_events.snapshot(),
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }

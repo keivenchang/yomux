@@ -844,11 +844,11 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"jobs": []})]
 
-    handler, calls, writes = route_handler("/api/client-events", app)
-    handler.stream_client_events = lambda: writes.append(("client-events", handler.path))
+    handler, calls, writes = route_handler("/api/client-events?channels=files,status&client_id=client-a", app)
+    handler.stream_client_events = lambda **kwargs: writes.append(("client-events", handler.path, kwargs))
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("client-events", "/api/client-events")]
+    assert writes == [("client-events", "/api/client-events?channels=files,status&client_id=client-a", {"channels": "files,status", "client_id": "client-a"})]
 
     handler, calls, writes = route_handler("/api/summary-stream", app)
     handler.stream_codex_summary = lambda parsed: writes.append(("summary-stream", parsed.path))

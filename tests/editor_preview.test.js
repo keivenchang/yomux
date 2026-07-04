@@ -7844,7 +7844,8 @@ async function runEditorPreviewSuite() {
     assert.ok(topbarOwnerHtml.includes('topbar-owner-status-shared') && topbarOwnerHtml.includes('IDX|STATS|SESS') && topbarOwnerHtml.includes('follower'), 'topbar owner chip shows shared background follower status');
     assert.ok(api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload)).includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
+    assert.ok(source.includes("new EventSource(`/api/client-events?${params.toString()}`)"), 'client subscribes to the demand-filtered server event stream');
+    assert.ok(source.includes('function clientEventDemandDescriptor()') && source.includes("channels.add('files')") && source.includes("channels.add('yoagent')"), 'one browser demand descriptor owns pane-specific channels');
     assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
     assert.equal(source.includes('function clientPushSuppressesPolling()'), false, 'expensive client polling gate is removed');
     assert.equal(source.includes('refreshTranscriptsFromRuntime'), false, 'metadata fallback poll wrapper is removed');
@@ -7854,19 +7855,19 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');
     assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched directory roots from Finder/session-file state');
     assert.ok(/function visibleFileEditorWatchFiles\(\)[\s\S]*?activePaneItems\(\)/.test(source), 'client reports active visible editor files separately from directory roots');
-    assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)/.test(source), 'client reports background editor files separately from active visible editor files');
+    assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)[\s\S]*?fileStateFor\(path\)\?\.dirty === true/.test(source), 'client reports only dirty background editor files separately from active visible editor files');
     assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
     assert.ok(/function transcriptPreviewPaneIsActive\(session\)[\s\S]*pane\?\.classList\?\.contains\(CLS\.active\)[\s\S]*preview\?\.isConnected/.test(source), 'transcript context previews only subscribe when their transcript pane is active');
     assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
     assert.ok(source.includes("['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
     assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,360}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
+    assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
+    assert.ok(/addEventListener\('ready',[\s\S]{0,700}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
-    assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll only runs while client-events is disconnected');
+    assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (document.visibilityState === 'hidden') return null;\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll runs only on visible pages while client-events is disconnected');
     assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
     assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
     assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,180}applyBackgroundOwnerStatusPayload\(payload\)/.test(source), 'background_owner_changed applies direct owner status');
@@ -7911,6 +7912,48 @@ async function runEditorPreviewSuite() {
     assert.ok(/function backgroundOwnerOwnsAllRoles\(payload = backgroundOwnerStatusState\.payload\)[\s\S]*summaries\.every\(item => item\.ownsRole === true \|\| item\.ownsIndex === true\)/.test(source), 'topbar owner takeover detects already-leader state from the shared summaries');
     assert.ok(/function showBackgroundOwnerContextMenu\(event\)[\s\S]*appendContextMenuButton\(menu, t\('backgroundOwner\.takeOver'\)/.test(source) && /async function claimBackgroundOwnerLeader\(\)[\s\S]*apiFetchJson\('\/api\/background\/claim', \{method: 'POST'\}\)/.test(source), 'right-clicking the owner chip offers a shared-menu Take over as leader action wired to the claim API');
     assert.ok(/function backgroundOwnerCurrentOwnerLive\(payload = backgroundOwnerStatusState\.payload[\s\S]*last_heartbeat[\s\S]*<= 10/.test(source) && /window\.confirm\(message\)/.test(source), 'live owner takeover prompts before asking the current leader to step down');
+  });
+
+  test('client-event demand follows visibility, pane, and notification state', () => {
+    const api = loadYolomux();
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('slot1');
+    slots.slot1 = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('files');
+    api.setDocumentVisibilityForTest('visible');
+    api.setNotificationDeliveryForTest({inApp: true, system: false});
+    api.installClientEventStreamForTest();
+    let state = api.clientEventTransportStateForTest();
+    assert.deepEqual(state.demand.channels, ['core', 'files', 'status']);
+    assert.ok(state.source.url.includes('channels=core%2Cfiles%2Cstatus'), 'visible Finder subscribes only to core, file, and status channels');
+
+    api.setDocumentVisibilityForTest('hidden');
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.equal(state.source, null, 'hidden page with system notifications off closes client-events SSE');
+    assert.deepEqual(state.demand.channels, []);
+
+    api.setNotificationDeliveryForTest({inApp: true, system: true});
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.deepEqual(state.demand.channels, ['attention']);
+    assert.ok(state.source.url.includes('channels=attention'), 'hidden page retains only the attention channel for system notifications');
+
+    slots.slot1 = api.paneStateWithTabs([api.yoagentItemId], api.yoagentItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setDocumentVisibilityForTest('visible');
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.deepEqual(state.demand.channels, ['activity', 'core', 'files', 'status', 'transcripts', 'yoagent']);
+  });
+
+  test('share host backup polling requires an active share', () => {
+    const api = loadYolomux();
+    api.setActiveSharesForTest([]);
+    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a host without shares never performs the recurring backup request');
+    api.setActiveSharesForTest([{active: true, token: 'active-token'}]);
+    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'an active share retains expiry and viewer-status backup polling');
   });
 
   await testAsync('background owner context menu claims follower leadership', async () => {

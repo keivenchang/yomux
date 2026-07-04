@@ -935,6 +935,9 @@ globalThis.__layoutTestApi = {
   visibleFileEditorWatchFilesForTest: visibleFileEditorWatchFiles,
   backgroundFileEditorWatchFilesForTest: backgroundFileEditorWatchFiles,
   clientServerWatchStateForTest: clientServerWatchState,
+  clientEventDemandDescriptorForTest: clientEventDemandDescriptor,
+  syncClientEventDemandForTest: syncClientEventDemand,
+  applyClientEventDemandForTest: applyClientEventDemand,
   clientPushCanSupplyDataForTest: clientPushCanSupplyData,
   readOnlyModeForTest() { return readOnlyMode; },
   setClientEventsSourceForTest(value = {}) { clientEventTransportState.source = value; },
@@ -942,6 +945,9 @@ globalThis.__layoutTestApi = {
     return {
       source: clientEventTransportState.source,
       connected: clientEventTransportState.connected,
+      enabled: clientEventTransportState.enabled,
+      demand: clientEventTransportState.demand,
+      demandSignature: clientEventTransportState.demandSignature,
       queued: clientEventTransportState.queue.size,
       frame: clientEventTransportState.frame,
       resyncTimer: clientEventTransportState.resyncTimer,
@@ -1245,6 +1251,7 @@ globalThis.__layoutTestApi = {
   setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   setDocumentVisibilityForTest(value) { Object.defineProperty(document, 'visibilityState', {value: String(value || 'visible'), configurable: true}); },
+  setNotificationDeliveryForTest(value = {}) { notificationDelivery = {inApp: value.inApp === true, system: value.system === true}; },
   queueClientPushEventForTest: queueClientPushEvent,
   flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
   scheduleReconnectResyncForTest: scheduleReconnectResync,
@@ -2063,6 +2070,7 @@ globalThis.__layoutTestApi = {
   shareCreatePayloadFromFormForTest: shareCreatePayloadFromForm,
   shareBuildUiMessageForTest: shareBuildUiMessage,
   setActiveSharesForTest(shares) { setActiveShares(shares || []); },
+  shareHostStatusBackupPollDueForTest: shareHostStatusBackupPollDue,
   setShareHostSocketForTest(token, socket) {
     const record = shareHostConnectionRecord(token, {create: true});
     if (record) record.socket = socket;

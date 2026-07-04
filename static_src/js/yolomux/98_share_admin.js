@@ -577,10 +577,16 @@ function startShareStatusRefresh() {
     }
     if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
-    } else if (!readOnlyMode && Date.now() - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs) {
+    } else if (shareHostStatusBackupPollDue()) {
       refreshActiveShare({silent: true});
     }
   }, 1000);
+}
+
+function shareHostStatusBackupPollDue(nowMs = Date.now()) {
+  return !readOnlyMode
+    && shareHasActiveShare()
+    && nowMs - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs;
 }
 
 const shareReadonlyPreventDefaultEvents = new Set(['beforeinput', 'change', 'drop', 'dragstart', 'input', 'paste', 'submit']);

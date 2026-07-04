@@ -1796,7 +1796,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except OSError:
             return
 
-    def stream_client_events(self) -> None:
+    def stream_client_events(self, channels: str = "", client_id: str = "") -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1804,9 +1804,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe()
+        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe(
+            channels=channels or None,
+            client_id=client_id,
+        )
         if hasattr(self.server.app, "start_client_event_watcher"):
             self.server.app.start_client_event_watcher()
+        if hasattr(self.server.app, "wake_client_event_watcher"):
+            self.server.app.wake_client_event_watcher()
         try:
             self.write_sse_json("ready", {"time": time.time()})
             while True:
@@ -1820,6 +1825,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "wake_client_event_watcher"):
+                self.server.app.wake_client_event_watcher()
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
                 self.server.app.stop_client_event_watcher_if_idle()
 
