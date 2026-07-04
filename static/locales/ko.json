@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": " 평균 {average}ms 최대 {max}ms",
   "debug.graph.control.bucketSize": "그래프 버킷 크기",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "해상도: {resolution}",
   "debug.graph.control.timeRange": "그래프 시간 범위",
   "debug.graph.control.zoom": "줌",
   "debug.graph.history.error": "{range} 기록을 불러오지 못했습니다: {error}",

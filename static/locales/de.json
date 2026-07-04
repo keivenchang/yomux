@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": " Durchschnitt {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Diagramm-Bucket-Größe",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "Auflösung: {resolution}",
   "debug.graph.control.timeRange": "Zeitbereich des Diagramms",
   "debug.graph.control.zoom": "Zoomen",
   "debug.graph.history.error": "Verlauf für {range} konnte nicht geladen werden: {error}",

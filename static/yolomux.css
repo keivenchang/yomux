@@ -3424,39 +3424,21 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-graph-controls {
   display: grid;
-  grid-template-columns: max-content minmax(34px, 1fr) minmax(88px, 2fr);
+  grid-template-columns: minmax(88px, 2fr) minmax(34px, 1fr) max-content;
   align-items: center;
   gap: 6px;
   justify-self: stretch;
   min-width: 0;
 }
-.js-debug-graph-control-group {
-  display: inline-flex;
-  align-items: center;
+.js-debug-resolution-label {
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--panel2);
-}
-.js-debug-scale-button {
-  min-width: 0;
-  height: 24px;
-  padding: 0 5px;
-  border: 0;
-  border-inline-end: 1px solid var(--line);
+  justify-self: end;
+  white-space: nowrap;
   color: var(--muted);
-  background: transparent;
-  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
-}
-.js-debug-scale-button:last-child {
-  border-inline-end: 0;
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .js-debug-subtab:not(.active):hover,
-.js-debug-subtab:not(.active):focus-visible,
-.js-debug-scale-button:not(.active):hover,
-.js-debug-scale-button:not(.active):focus-visible {
+.js-debug-subtab:not(.active):focus-visible {
   color: var(--text);
   background: var(--pane-inactive-tab-bg-hover);
 }
@@ -3537,7 +3519,6 @@ body.theme-light .js-debug-graph-view {
   cursor: pointer;
 }
 .js-debug-subtab.active,
-.js-debug-scale-button.active,
 .js-debug-zoom-reset {
   color: var(--active-control-text);
   background: var(--active-control-bg);

@@ -923,7 +923,6 @@ globalThis.__layoutTestApi = {
   recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
   bindDebugPanelForTest: bindDebugPanel,
   setDebugSubTabForTest: setDebugSubTab,
-  setDebugGraphScaleForTest: setDebugGraphScale,
   setDebugGraphRangeForTest: setDebugGraphRange,
   setDebugGraphChartVisibleForTest: setDebugGraphChartVisible,
   clearDebugGraphZoomForTest: clearDebugGraphZoom,

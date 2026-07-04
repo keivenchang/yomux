@@ -205,6 +205,7 @@
   "debug.graph.clientWorkTiming": " متوسط {average}ms ماكس {max}ms",
   "debug.graph.control.bucketSize": "حجم دلو الرسم البياني",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "الدقة: {resolution}",
   "debug.graph.control.timeRange": "النطاق الزمني للرسم البياني",
   "debug.graph.control.zoom": "تكبير",
   "debug.graph.history.error": "تعذر تحميل السجل لمدة {range}: {error}",

@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "图表采样间隔",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "分辨率：{resolution}",
   "debug.graph.control.timeRange": "图表时间范围",
   "debug.graph.control.zoom": "缩放",
   "debug.graph.history.error": "无法加载 {range} 的历史数据：{error}",

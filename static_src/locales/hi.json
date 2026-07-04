@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "ग्राहक कार्य | एनिमेशन {animations} | लंबे कार्य {tasks}{timing}",
   "debug.graph.clientWorkTiming": " औसत {average}ms अधिकतम {max}ms",
   "debug.graph.control.bucketSize": "बाल्टी का आकार ग्राफ़ करें",
+  "debug.graph.control.resolution": "रिज़ॉल्यूशन: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "रीसेट करें",
   "debug.graph.control.timeRange": "ग्राफ़ समय सीमा",

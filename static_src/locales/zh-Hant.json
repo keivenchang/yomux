@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "用戶端工作 | 動畫 {animations} | 長任務 {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "圖表取樣間隔",
+  "debug.graph.control.resolution": "解析度：{resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "重設",
   "debug.graph.control.timeRange": "圖表時間範圍",

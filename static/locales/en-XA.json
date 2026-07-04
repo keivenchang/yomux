@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": "⟦ áṽǧ {average}ɱš ɱáẋ {max}ɱš······⟧",
   "debug.graph.control.bucketSize": "⟦Ǧřáƥĥ ƀúçķéť šížé·······⟧",
   "debug.graph.control.charts": "⟦Çĥářťš··⟧",
+  "debug.graph.control.resolution": "⟦Řéšółúťíóñ: {resolution}·····⟧",
   "debug.graph.control.timeRange": "⟦Ǧřáƥĥ ťíɱé řáñǧé······⟧",
   "debug.graph.control.zoom": "⟦Žóóɱ··⟧",
   "debug.graph.history.error": "⟦Çóúłđ ñóť łóáđ ĥíšťóřý ƒóř {range}: {error}············⟧",

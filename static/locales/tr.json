@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": " ort. {average} ms, maks. {max} ms",
   "debug.graph.control.bucketSize": "Grafik kovası boyutu",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "Çözünürlük: {resolution}",
   "debug.graph.control.timeRange": "Grafik zaman aralığı",
   "debug.graph.control.zoom": "Yakınlaştır",
   "debug.graph.history.error": "{range} geçmişi yüklenemedi: {error}",

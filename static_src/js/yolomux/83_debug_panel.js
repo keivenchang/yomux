@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // JavaScript debug panel rendering and controls split from 80_panes_preferences.js.
 
-const jsDebugGraphDefaultScaleSeconds = 5;
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
 const jsDebugGraphGeometry = (() => {
   const width = 600;
@@ -29,7 +28,7 @@ const jsDebugHistoryReadiness = {
   targetEndSeconds: 0,
   requestedStartSeconds: 0,
   requestedEndSeconds: 0,
-  requestedResolutionSeconds: jsDebugGraphDefaultScaleSeconds,
+  requestedResolutionSeconds: 1,
   loadedStartSeconds: 0,
   loadedEndSeconds: 0,
   resolutionSeconds: 0,
@@ -42,7 +41,6 @@ const jsDebugHistoryReadiness = {
   overlayTimer: null,
 };
 let jsDebugSubTab = 'graph';
-let jsDebugGraphScaleSeconds = jsDebugGraphDefaultScaleSeconds;
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugStatsPollTimer = null;
 let jsDebugStatsPollInFlight = false;
@@ -68,7 +66,6 @@ let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
-const jsDebugGraphScaleOptions = Object.freeze([1, 5, 10, 30]);
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
   {seconds: 5 * 60, label: '5m'},
@@ -229,11 +226,6 @@ function normalizedJsDebugSubTab(value) {
   return value === 'events' ? 'events' : 'graph';
 }
 
-function normalizedJsDebugGraphScale(value) {
-  const seconds = Number(value);
-  return jsDebugGraphScaleOptions.includes(seconds) ? seconds : jsDebugGraphDefaultScaleSeconds;
-}
-
 function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
   const seconds = Number(value);
   const options = debugGraphAvailableRangeOptions(nowMs);
@@ -257,7 +249,6 @@ function loadJsDebugStatsUiPreferences() {
   }
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
   jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
-  jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(saved.scaleSeconds);
   jsDebugGraphRangeSeconds = jsDebugGraphRangeOptions.some(option => option.seconds === Number(saved.rangeSeconds))
     ? Number(saved.rangeSeconds)
     : jsDebugGraphDefaultRangeSeconds;
@@ -274,7 +265,6 @@ function saveJsDebugStatsUiPreferences() {
   try {
     window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
       subTab: jsDebugSubTab,
-      scaleSeconds: jsDebugGraphScaleSeconds,
       rangeSeconds: jsDebugGraphRangeSeconds,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
@@ -403,7 +393,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
-function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = jsDebugGraphScaleSeconds, retry = false} = {}) {
+function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = 1, retry = false} = {}) {
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
@@ -413,7 +403,7 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
     requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
     requestedEndSeconds: Math.max(0, Math.floor(Number(requestedEndSeconds) || 0)),
-    requestedResolutionSeconds: Math.max(1, Math.floor(Number(requestedResolutionSeconds) || jsDebugGraphDefaultScaleSeconds)),
+    requestedResolutionSeconds: Math.max(1, Math.floor(Number(requestedResolutionSeconds) || 1)),
     attemptCount: retry ? Math.max(1, Number(state.attemptCount) + 1) : 1,
     error: '',
     generation,
@@ -444,7 +434,7 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
     nextOlderEnd: Number(raw.next_older_end),
   };
   if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
-  if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = jsDebugGraphScaleSeconds;
+  if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = 1;
   if (!Number.isFinite(coverage.sourceResolutionSeconds) || coverage.sourceResolutionSeconds <= 0) coverage.sourceResolutionSeconds = 0;
   return coverage;
 }
@@ -535,7 +525,9 @@ function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolution
 }
 
 function jsDebugRequestedHistoryResolutionSeconds() {
-  return debugGraphZoomDomainValid() ? 1 : Math.max(1, Math.floor(jsDebugGraphScaleSeconds));
+  // The server chooses the coarsest retained source tier for the domain. Asking
+  // for the finest resolution lets a later zoom recover finer retained history.
+  return 1;
 }
 
 function jsDebugHistoryCoverageResolutionSeconds(startSeconds, requestedResolutionSeconds, nowMs = Date.now()) {
@@ -565,7 +557,7 @@ function resetJsDebugHistoryReadiness() {
     targetEndSeconds: 0,
     requestedStartSeconds: 0,
     requestedEndSeconds: 0,
-    requestedResolutionSeconds: jsDebugGraphScaleSeconds,
+    requestedResolutionSeconds: 1,
     loadedStartSeconds: 0,
     loadedEndSeconds: 0,
     resolutionSeconds: 0,
@@ -1643,17 +1635,17 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
   return jsDebugGraphRangeOptions;
 }
 
-function debugGraphDisplayResolutionMs(domain, requestedScaleSeconds = jsDebugGraphScaleSeconds) {
-  const requestedSeconds = Number(requestedScaleSeconds);
-  const requestedMs = (jsDebugGraphScaleOptions.includes(requestedSeconds)
-    ? normalizedJsDebugGraphScale(requestedSeconds)
-    : Math.max(1, requestedSeconds || jsDebugGraphDefaultScaleSeconds)) * 1000;
-  let sourceMs = 0;
-  for (const bucket of [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]) {
-    if (!debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) continue;
-    sourceMs = Math.max(sourceMs, Number(bucket.durationMs) || 0);
-  }
-  return Math.max(requestedMs, sourceMs);
+function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
+  // The selected domain owns the normal chart resolution. A recent 1m/15m
+  // view is always one-second resolution even if a stale/coarse source record
+  // happens to be present; only fixed-resolution charts such as Agent status
+  // can request a coarser minimum.
+  const domainStartMs = Number(domain?.startMs);
+  const retainedMs = Number.isFinite(domainStartMs)
+    ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
+    : jsDebugGraphRawBucketMs;
+  const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
+  return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs);
 }
 
 function debugGraphSourceBuckets(domain) {
@@ -1662,10 +1654,10 @@ function debugGraphSourceBuckets(domain) {
     .sort((left, right) => left.startMs - right.startMs);
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGraphScaleSeconds, rangeSeconds = jsDebugGraphRangeSeconds) {
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
-  const scaleMs = debugGraphDisplayResolutionMs(domain, scaleSeconds);
+  const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
   const buckets = new Map();
   for (const bucket of jsDebugGraphRollupBuckets.values()) {
     if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
@@ -1679,7 +1671,7 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGrap
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
   const resolutionSeconds = debugGraphAgentTokenResolution(nowMs);
   if (!resolutionSeconds || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds || !jsDebugGraphAgentTokenBuckets.size) {
-    return debugGraphDisplayBuckets(nowMs, jsDebugGraphAgentTokenBucketSeconds, jsDebugGraphRangeSeconds);
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: jsDebugGraphAgentTokenBucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
   }
   const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
   return [...jsDebugGraphAgentTokenBuckets.values()]
@@ -2265,13 +2257,10 @@ function debugGraphSeriesData(buckets) {
   });
 }
 
-function debugGraphScaleControlsHtml() {
-  return `<div class="js-debug-graph-control-group" role="toolbar" aria-label="${esc(t('debug.graph.control.bucketSize'))}">
-    ${jsDebugGraphScaleOptions.map(seconds => {
-      const active = seconds === jsDebugGraphScaleSeconds;
-      return `<button type="button" class="js-debug-scale-button${active ? ' active' : ''}" data-js-debug-scale="${seconds}" aria-pressed="${active ? 'true' : 'false'}">${seconds}s</button>`;
-    }).join('')}
-  </div>`;
+function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
+  const domain = debugGraphDomain(nowMs);
+  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
+  return `<span class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}</span>`;
 }
 
 function debugGraphRangeControlsHtml(nowMs = Date.now()) {
@@ -2302,9 +2291,9 @@ function debugGraphControlsHtml(nowMs = Date.now()) {
   const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
   const rangeLabel = debugGraphZoomDomainValid() ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-graph-controls">
-    ${debugGraphScaleControlsHtml()}
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${debugGraphRangeControlsHtml(nowMs)}
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
+    ${debugGraphResolutionLabelHtml(nowMs)}
     ${debugGraphHiddenChartsHtml()}
   </div>`;
 }
@@ -2854,7 +2843,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   if (group?.key === 'agentTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
-    return debugGraphDisplayBuckets(nowMs, bucketSeconds, jsDebugGraphRangeSeconds);
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
   }
   return defaultBuckets;
 }
@@ -2998,7 +2987,8 @@ function debugGraphHtml() {
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
-  const buckets = debugGraphDisplayBuckets(nowMs, jsDebugGraphScaleSeconds, jsDebugGraphRangeSeconds);
+  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
+  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
   return {
     rawBuckets: jsDebugGraphRawBuckets.size,
@@ -3012,7 +3002,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventBuckets.size,
-    scaleSeconds: jsDebugGraphScaleSeconds,
+    resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
     rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
     zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
@@ -3492,16 +3482,6 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   return true;
 }
 
-function setDebugGraphScale(value) {
-  loadJsDebugStatsUiPreferences();
-  jsDebugGraphScaleSeconds = normalizedJsDebugGraphScale(value);
-  saveJsDebugStatsUiPreferences();
-  if (requestJsDebugHistoryForCurrentDomain()) return;
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force: true});
-  }
-}
-
 function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
@@ -3770,12 +3750,6 @@ function handleDebugGraphControlEvent(event, panel) {
   if (range && panel.contains(range)) {
     event.preventDefault();
     setDebugGraphRange(range.dataset.jsDebugRange);
-    return true;
-  }
-  const scale = event.target.closest('[data-js-debug-scale]');
-  if (scale && panel.contains(scale)) {
-    event.preventDefault();
-    setDebugGraphScale(scale.dataset.jsDebugScale);
     return true;
   }
   return false;

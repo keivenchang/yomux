@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "Müşteri çalışmaları | animasyonlar {animations} | uzun görevler {tasks}{timing}",
   "debug.graph.clientWorkTiming": " ort. {average} ms, maks. {max} ms",
   "debug.graph.control.bucketSize": "Grafik kovası boyutu",
+  "debug.graph.control.resolution": "Çözünürlük: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Sıfırlama",
   "debug.graph.control.timeRange": "Grafik zaman aralığı",

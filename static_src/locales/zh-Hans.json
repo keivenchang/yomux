@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "客户端工作 | 动画 {animations} | 长任务 {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "图表采样间隔",
+  "debug.graph.control.resolution": "分辨率：{resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "重置",
   "debug.graph.control.timeRange": "图表时间范围",

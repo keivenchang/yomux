@@ -40,7 +40,6 @@ function runYostatsPerformanceSuite() {
     appendTier(now - (2 * 60 * 60 * 1000), 360, 10);
     appendTier(now - (60 * 60 * 1000), 3600, 1);
     assert.equal(records.length, 5280, 'fixture has the 1320x60s + 360x10s + 3600x1s mixed-resolution stress shape');
-    api.setDebugGraphScaleForTest(1);
     api.setDebugGraphRangeForTest(24 * 60 * 60, {render: false});
     api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
     const started = performance.now();

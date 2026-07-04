@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "Klantwerk | animaties {animations} | Lange taken {tasks}{timing}",
   "debug.graph.clientWorkTiming": " gem. {average} ms, max. {max} ms",
   "debug.graph.control.bucketSize": "Grootte van de graafbak",
+  "debug.graph.control.resolution": "Resolutie: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Opnieuw instellen",
   "debug.graph.control.timeRange": "Grafiektijdbereik",

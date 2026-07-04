@@ -128,6 +128,7 @@
   "debug.graph.clientWork": "Lavoro con i clienti | Animazioni {animations} | compiti lunghi {tasks}{timing}",
   "debug.graph.clientWorkTiming": " media {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Dimensione del contenitore del grafico",
+  "debug.graph.control.resolution": "Risoluzione: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Reimposta",
   "debug.graph.control.timeRange": "Intervallo temporale del grafico",

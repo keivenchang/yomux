@@ -3069,9 +3069,8 @@ async function runEditorPreviewSuite() {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
       assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
     }
-    for (const scale of ['1', '5', '10', '30']) {
-      assert.ok(html.includes(`data-js-debug-scale="${scale}"`), `YO!stats graph renders the ${scale}s aggregate button`);
-    }
+    assert.match(html, /data-js-debug-resolution(?:-seconds="1")?/, 'YO!stats graph shows its automatic displayed resolution');
+    assert.equal(html.includes('data-js-debug-scale='), false, 'YO!stats does not expose manual aggregation controls');
     for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
       assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph exposes the ${range}s range slider tick`);
     }
@@ -3107,8 +3106,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-bar--workingAgents') && debugPaneCss.includes('.js-debug-bar--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, line/bar graph styling, and legends');
     assert.ok(debugPaneCss.includes('.js-debug-range-slider') && debugPaneCss.includes('.js-debug-hover-line') && debugPaneCss.includes('.js-debug-selection-rect'), 'YO!stats ships compact range slider plus hover and selection overlays');
-    assert.ok(/\.js-debug-subtab\.active,\s*\.js-debug-scale-button\.active,\s*\.js-debug-zoom-reset\s*\{[\s\S]*color:\s*var\(--active-control-text\)[\s\S]*background:\s*var\(--active-control-bg\)/.test(debugPaneCss), 'YO!stats selected and static accent controls share one paint owner');
-    assert.ok(/\.js-debug-subtab:not\(\.active\):hover,[\s\S]*\.js-debug-scale-button:not\(\.active\):focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)/.test(debugPaneCss), 'YO!stats inactive subtabs and scale controls share pointer and keyboard paint');
+    assert.ok(/\.js-debug-subtab\.active,\s*\.js-debug-zoom-reset\s*\{[\s\S]*color:\s*var\(--active-control-text\)[\s\S]*background:\s*var\(--active-control-bg\)/.test(debugPaneCss), 'YO!stats selected and static accent controls share one paint owner');
+    assert.equal(debugPaneCss.includes('.js-debug-scale-button'), false, 'YO!stats has no selectable aggregation-control styling');
     assert.ok(/class="js-debug-hidden-chart control-active-hover"/.test(debugPaneSource) && /class="js-debug-chart-close control-active-hover"/.test(debugPaneSource), 'YO!stats chart restore and close controls reuse the global accent hover/focus parent');
     assert.equal(debugPaneCss.includes('.js-debug-range-button'), false, 'YO!stats has no dead range-button CSS after migrating to the slider');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
@@ -3221,7 +3220,7 @@ async function runEditorPreviewSuite() {
     assert.ok(summary.middleBuckets > 0 && summary.middleBuckets <= 3, 'ninety-minute-old per-second samples compress into ten-second buckets');
     assert.equal(summary.oldBuckets, 1, 'three-hour-old samples compress into one sixty-second bucket');
     assert.deepStrictEqual([...summary.tierBucketCounts].slice(2), [1, 1, 1, 1], 'older samples use the 1m, 2m, 5m, and 10m tiers');
-    assert.equal(summary.scaleSeconds, 5, 'YO!stats graph defaults to five-second aggregate buckets');
+    assert.equal(summary.resolutionSeconds, 1, 'YO!stats defaults to the one-second retained resolution for the recent 15-minute domain');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
@@ -3269,7 +3268,7 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
-    assert.equal(summary.scaleSeconds, 5, 'changing range does not override the selected aggregate bucket size');
+    assert.equal(summary.resolutionSeconds, 10, 'a two-hour range automatically uses its ten-second retained resolution');
     assert.equal(summary.displayBuckets, 0, 'changing range does not resurrect history discarded after a server restart');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 18,
@@ -3318,10 +3317,9 @@ async function runEditorPreviewSuite() {
     });
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.rawBuckets > 0, 'recent server timing samples stay in one-second buckets');
-    api.setDebugGraphScaleForTest(10);
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.scaleSeconds, 10, 'selected two-hour graph range keeps the chosen aggregate interval');
+    assert.equal(summary.resolutionSeconds, 10, 'the selected two-hour graph reports its automatic aggregate interval');
     const html = api.debugPanelHtmlForTest();
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
@@ -3368,7 +3366,6 @@ async function runEditorPreviewSuite() {
         latency_count: 1,
       }],
     });
-    api.setDebugGraphScaleForTest(10);
     api.setDebugGraphRangeForTest(86400);
     const html = api.debugPanelHtmlForTest();
     const match = html.match(/data-js-debug-series="api"[^>]*points="([^"]+)"/);
@@ -3384,7 +3381,6 @@ async function runEditorPreviewSuite() {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
-    api.setDebugGraphScaleForTest(5);
     api.setDebugGraphRangeForTest(4 * 60 * 60);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 63,
@@ -3408,6 +3404,26 @@ async function runEditorPreviewSuite() {
     const summary = api.debugGraphBucketSummaryForTest(now);
     assert.deepStrictEqual([...summary.displayBucketSeconds], [60], 'a four-hour domain aggregates 1s and 10s source buckets to the coarsest intersecting 60s source interval');
     assert.equal(summary.displayBuckets, 3, 'uniform aggregation retains one displayed bucket per distinct minute instead of mixing persistence-tier resolutions');
+  });
+
+  test('YO!stats selects displayed resolution from the range and drag-zoom domain', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 1,
+      records: [{start: Math.floor((now - 30_000) / 1000 / 10) * 10, duration: 10, sequence: 1, api_count: 1}],
+    });
+    api.setDebugGraphRangeForTest(60, {render: false});
+    let summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 1, 'a one-minute graph always selects one-second resolution even when a stale coarse source record is present');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="1"'), 'the read-only control reports one second for the one-minute graph');
+    api.setDebugGraphRangeForTest(8 * 60 * 60, {render: false});
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 120, 'an eight-hour range reports the two-minute retained resolution before history finishes loading');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="120"'), 'the read-only control reports the selected eight-hour resolution');
+    api.setDebugGraphRangeForTest(16 * 60 * 60, {render: false});
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 600, 'a sixteen-hour range reports the ten-minute retained resolution');
   });
 
   test('YO!stats uses server-aggregated token points for wide time ranges', () => {
@@ -3605,10 +3621,13 @@ async function runEditorPreviewSuite() {
         'debug.graph.chart.agentStatus',
         'debug.graph.chart.agentTokens',
         'debug.graph.series.systemCpu',
-        'debug.graph.control.bucketSize',
+        'debug.graph.control.resolution',
         'debug.graph.control.timeRange',
       ]) {
-        assert.ok(html.includes(escaped(catalog[key])), `${locale} YO!stats renders ${key}`);
+        const rendered = key === 'debug.graph.control.resolution'
+          ? catalog[key].replace('{resolution}', '1s')
+          : catalog[key];
+        assert.ok(html.includes(escaped(rendered)), `${locale} YO!stats renders ${key}`);
       }
       assert.equal(/Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|All agents total|sum of tokens from displayed|Graph bucket size|Graph time range/.test(html), false, `${locale} YO!stats leaks no graph-label English`);
     }
@@ -3644,7 +3663,6 @@ async function runEditorPreviewSuite() {
         bandwidth_bytes: 140 * 1024 * 10,
       }],
     });
-    api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
 
     assert.ok(/data-js-debug-axis-max="count"[^>]*>4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
@@ -3677,7 +3695,6 @@ async function runEditorPreviewSuite() {
         };
       }),
     });
-    api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
 
     for (const series of ['api', 'sse', 'latency', 'bandwidth', 'cpu', 'systemCpu']) {
@@ -3721,7 +3738,6 @@ async function runEditorPreviewSuite() {
         },
       }],
     });
-    api.setDebugGraphScaleForTest(1);
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
     assert.equal(clientSeries.length, 4, 'the Client charts have one aggregate series per metric');
     assert.ok(clientSeries.every(series => series.clientId === 'all-clients' && series.clientLinePattern === 'solid'), 'every Client series uses the same retained-client population and solid-line contract');
@@ -4007,7 +4023,6 @@ async function runEditorPreviewSuite() {
         agent_activity_samples: 1,
       }],
     });
-    api.setDebugGraphScaleForTest(10);
     const html = api.debugPanelHtmlForTest();
     const latencyMatch = html.match(/data-js-debug-series="latency"[^>]*points="([^"]+)"/);
     const activeMatch = html.match(/data-js-debug-bar-series="workingAgents"[^>]*x="([^"]+)"/);
@@ -4017,7 +4032,7 @@ async function runEditorPreviewSuite() {
     assert.ok(Math.abs(activeX - latencyX) <= 0.2, 'server activity bar hairline centering stays aligned with the matching latency timestamp');
   });
 
-  test('YO!stats graph controls apply on pointer down before refresh can replace buttons', () => {
+  test('YO!stats graph range controls apply on pointer down before refresh can replace controls', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -4031,18 +4046,15 @@ async function runEditorPreviewSuite() {
       }],
     });
     const panel = new TestElement('debug-panel');
-    const scale = new TestElement('graph-scale', 'button');
     const range = new TestElement('graph-range', 'button');
     const slider = new TestElement('graph-range-slider', 'input');
     const chartClose = new TestElement('graph-chart-close', 'button');
     const chartRestore = new TestElement('graph-chart-restore', 'button');
-    scale.dataset.jsDebugScale = '10';
     range.dataset.jsDebugRange = '7200';
     slider.dataset.jsDebugRangeSlider = '';
     chartClose.dataset.jsDebugChartClose = 'cpu';
     chartRestore.dataset.jsDebugChartRestore = 'cpu';
     slider.value = '7';
-    panel.appendChild(scale);
     panel.appendChild(range);
     panel.appendChild(slider);
     panel.appendChild(chartClose);
@@ -4053,15 +4065,13 @@ async function runEditorPreviewSuite() {
     const change = panel.listeners.get('change')[0];
     let prevented = 0;
 
-    pointerdown({target: scale, preventDefault() { prevented += 1; }});
-    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'single pointerdown applies the graph aggregate bucket size immediately');
     pointerdown({target: range, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
-    assert.equal(api.debugGraphBucketSummaryForTest().scaleSeconds, 10, 'range pointerdown does not overwrite the selected aggregate bucket size');
-    assert.equal(prevented, 2, 'graph controls claim pointerdown before a refresh can remove the clicked button');
+    assert.equal(api.debugGraphBucketSummaryForTest().resolutionSeconds, 10, 'the range immediately chooses its ten-second retained resolution');
+    assert.equal(prevented, 1, 'graph controls claim pointerdown before a refresh can remove the clicked button');
     pointerdown({type: 'pointerdown', target: slider, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'range slider pointerdown leaves native dragging to the browser');
-    assert.equal(prevented, 2, 'range slider pointerdown is not claimed before native input can fire');
+    assert.equal(prevented, 1, 'range slider pointerdown is not claimed before native input can fire');
     slider.value = '7.4';
     input({type: 'input', target: slider, preventDefault() {}});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider input updates state without claiming native dragging');
@@ -4070,7 +4080,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider change commits the matching range stop after dragging');
     assert.equal(slider.value, '7', 'range slider change snaps the thumb to the nearest preset stop');
     pointerdown({target: chartClose, preventDefault() { prevented += 1; }});
-    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), false, 'one X click hides the selected graph without changing range or scale');
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), false, 'one X click hides the selected graph without changing its range');
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-chart-restore="cpu"'), 'a closed graph moves to the compact restore strip at the top');
     pointerdown({target: chartRestore, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'the top restore chip reopens the graph');
@@ -4080,7 +4090,6 @@ async function runEditorPreviewSuite() {
     const preferencesKey = 'yolomux.stats.ui_preferences.v1';
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     api.setDebugSubTabForTest('events');
-    api.setDebugGraphScaleForTest(30);
     api.setDebugGraphRangeForTest(4 * 60 * 60);
     api.setDebugGraphChartVisibleForTest('gpuMemory', false);
     const saved = api.storageValueForTest(preferencesKey);
@@ -4092,7 +4101,7 @@ async function runEditorPreviewSuite() {
     const html = reloaded.debugPanelHtmlForTest();
     const summary = reloaded.debugGraphBucketSummaryForTest();
     assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'the selected YO!stats sub-tab survives reload');
-    assert.equal(summary.scaleSeconds, 30, 'the graph aggregation scale survives reload');
+    assert.equal(summary.resolutionSeconds, 60, 'the graph automatically restores the four-hour retained resolution without a saved scale preference');
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
     assert.ok(html.includes('data-js-debug-chart-restore="gpuMemory"'), 'the top restore strip retains a closed chart after reload');
@@ -4111,7 +4120,8 @@ async function runEditorPreviewSuite() {
         api_count: 1,
       }],
     });
-    api.setDebugGraphRangeForTest(300);
+    api.setDebugGraphRangeForTest(8 * 60 * 60);
+    assert.equal(api.debugGraphBucketSummaryForTest(now).resolutionSeconds, 120, 'the unzoomed eight-hour domain uses its retained two-minute resolution');
     const panel = new TestElement('debug-panel');
     const graph = new TestElement('graph');
     graph.dataset.jsDebugGraph = '';
@@ -4156,6 +4166,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(prevented === 1 && summary.zoomed, 'drag-select claims the pointer and creates a graph zoom domain');
     assert.ok(summary.zoomRangeSeconds > 140 && summary.zoomRangeSeconds < 160, `zoom range follows selected chart ratio, got ${summary.zoomRangeSeconds}`);
+    assert.equal(summary.resolutionSeconds, 1, 'a drag-zoom into the recent five-minute domain automatically returns to one-second resolution');
 
     const reset = new TestElement('graph-reset', 'button');
     reset.dataset.jsDebugZoomReset = '';
@@ -4197,7 +4208,7 @@ async function runEditorPreviewSuite() {
     assert.equal(sampleUrl.searchParams.get('since'), '0', 'YO!stats sample keeps incremental since state');
     assert.ok(sampleUrl.searchParams.has('history_start'), `YO!stats initial sample requests a bounded visible-history range: ${sampleRequest.url}`);
     assert.equal(sampleUrl.searchParams.get('history_end'), '0', 'YO!stats initial sample keeps the live-history end sentinel');
-    assert.equal(sampleUrl.searchParams.get('history_resolution'), '5', 'YO!stats initial sample requests the current graph resolution');
+    assert.equal(sampleUrl.searchParams.get('history_resolution'), '1', 'YO!stats always asks the server for the finest retained history; the server chooses the displayed tier');
     assert.equal(sampleUrl.searchParams.get('history_max_points'), '6000', 'YO!stats bounds the server response size');
     assert.ok(sampleUrl.searchParams.get('client_id'), 'YO!stats sample includes the per-tab client id');
 	    assert.equal(sampleUrl.searchParams.get('token_consumer'), '1', 'visible YO!stats polling opts into slower server token scans');
@@ -4474,7 +4485,7 @@ async function runEditorPreviewSuite() {
     assert.ok(Number(wideUrl.searchParams.get('history_start')) < Number(narrowUrl.searchParams.get('history_start')), 'the follow-up poll requests the newly exposed older half');
     assert.equal(wideUrl.searchParams.get('history_end'), narrowUrl.searchParams.get('history_start'), 'the wider request stops at the already loaded left edge');
     assert.equal(wideUrl.searchParams.get('since'), '0', 'the wider request resets the incremental sequence so older retained records are returned');
-    assert.equal(wideUrl.searchParams.get('history_resolution'), '5', 'the wider request keeps the active graph resolution');
+    assert.equal(wideUrl.searchParams.get('history_resolution'), '1', 'the wider request asks the server for the finest retained history');
     assert.equal(wideUrl.searchParams.get('history_max_points'), '6000', 'the wider request keeps the server response bound');
     assert.equal(api.jsDebugStatsPollingStateForTest().historyStartSeconds, Number(wideUrl.searchParams.get('history_start')), 'loaded-history coverage advances only after the wider response succeeds');
     assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 2, 'the widened graph contains both the old and recent records without visiting 1h first');
@@ -4748,7 +4759,6 @@ async function runEditorPreviewSuite() {
     const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
     const peerBucketStart = bucketStart(25_000);
     const peerMidpointX = (((peerBucketStart * 1000) + 2500 - (now - 60_000)) / 60_000) * 600;
-    api.setDebugGraphScaleForTest(5);
     api.setDebugGraphRangeForTest(60);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 202,

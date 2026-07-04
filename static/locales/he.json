@@ -187,6 +187,7 @@
   "debug.graph.clientWorkTiming": " ממוצע {average}ms מקסימום {max}ms",
   "debug.graph.control.bucketSize": "גודל דלי גרף",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "רזולוציה: {resolution}",
   "debug.graph.control.timeRange": "טווח זמן גרף",
   "debug.graph.control.zoom": "זום",
   "debug.graph.history.error": "לא ניתן לטעון היסטוריה עבור {range}: {error}",

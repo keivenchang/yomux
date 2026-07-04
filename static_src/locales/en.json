@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "Client work | animations {animations} | long tasks {tasks}{timing}",
   "debug.graph.clientWorkTiming": " avg {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Graph bucket size",
+  "debug.graph.control.resolution": "Resolution: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Reset",
   "debug.graph.control.timeRange": "Graph time range",

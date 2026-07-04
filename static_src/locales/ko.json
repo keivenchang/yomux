@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "클라이언트 작업 | 애니메이션 {animations} | 긴 작업 {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 평균 {average}ms 최대 {max}ms",
   "debug.graph.control.bucketSize": "그래프 버킷 크기",
+  "debug.graph.control.resolution": "해상도: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "재설정",
   "debug.graph.control.timeRange": "그래프 시간 범위",

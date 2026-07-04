@@ -636,11 +636,11 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     page = tmp_path / "debug-graph-header-geometry.html"
     page.write_text(page_html("""
       <div class="js-debug-graph-controls" style="width:720px">
-        <div id="scale-group" class="js-debug-graph-control-group"><button>1s</button><button>5s</button></div>
-        <span id="range-start" class="js-debug-range-label">15m</span>
         <div class="js-debug-range-slider-control" data-js-debug-range-control>
           <input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-end" class="js-debug-range-end-label">24h</span>
         </div>
+        <span id="range-start" class="js-debug-range-label">15m</span>
+        <span id="resolution" class="js-debug-resolution-label">Resolution: 1s</span>
       </div>
       <section id="chart" class="js-debug-chart" style="width:420px">
         <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(123.4k, Σ displayed reqs)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
@@ -653,7 +653,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
         const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width, height:value.height}; };
         const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot'); const svg = rect('svg');
         const chart = rect('chart'); const range = document.querySelector('[data-js-debug-range-control]').getBoundingClientRect();
-        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, scale: rect('scale-group'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
+        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, resolution: rect('resolution'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
         """
     )
     assert metrics["close"]["right"] <= metrics["heading"]["right"] + 0.5, metrics
@@ -664,10 +664,11 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     assert abs(((metrics["axisMax"]["top"] + metrics["axisMax"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 8 / 120))) <= 0.75, metrics
     assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 112 / 120))) <= 0.75, metrics
     assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5 and metrics["axisZero"]["bottom"] <= metrics["yAxis"]["bottom"] + 0.5, metrics
-    assert metrics["rangeStart"]["left"] >= metrics["scale"]["right"] + 4, metrics
-    assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["scale"]["right"] + metrics["rangeSlider"]["left"]) / 2)) <= 1.5, metrics
+    assert metrics["rangeStart"]["left"] >= metrics["range"]["right"] + 4, metrics
+    assert metrics["resolution"]["left"] >= metrics["rangeStart"]["right"] + 4, metrics
+    assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["range"]["right"] + metrics["resolution"]["left"]) / 2)) <= 1.5, metrics
     assert metrics["rangeEnd"]["right"] <= metrics["range"]["right"] + 0.5, metrics
-    assert metrics["rangeSlider"]["left"] >= metrics["rangeStart"]["right"] + 4, metrics
+    assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
     assert metrics["rangeSlider"]["right"] <= metrics["rangeEnd"]["left"] - 4, metrics
 
 
@@ -802,18 +803,18 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     page.write_text(page_html(f"""
       <section class="js-debug-graph-view">
         <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {client_perf}
           {chart_shell}
         </div>
         <div id="graph-without-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {chart_shell}
         </div>
         <div id="graph-empty-with-client-work" class="js-debug-graph js-debug-graph--empty" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-scale-button">5s</button></div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           <div class="js-debug-graph-meta">waiting for server stats</div>
           {client_perf}
           <div class="js-debug-graph-empty">No data</div>
@@ -1761,7 +1762,6 @@ def test_debug_graph_disconnected_client_traffic_contributes_to_all_client_serie
         const now = Date.now();
         const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
         const peerBucketStart = bucketStart(25_000);
-        setDebugGraphScale(5);
         setDebugGraphRange(60, {render: false});
         debugGraphApplyServerHistory({
           sequence: 202,
@@ -1843,7 +1843,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
           return {color: style.color, background: style.backgroundColor};
         };
         const activeSubtabPaint = paint(panel?.querySelector('.js-debug-subtab.active'));
-        const activeScalePaint = paint(panel?.querySelector('.js-debug-scale-button.active'));
+        const resolutionLabel = panel?.querySelector('[data-js-debug-resolution]')?.textContent.trim();
         const cpuClose = panel?.querySelector('[data-js-debug-chart-close="cpu"]');
         cpuClose?.focus({focusVisible: true});
         const closeFocusPaint = paint(cpuClose);
@@ -1857,15 +1857,14 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
         restore?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
         const restored = Boolean(panel?.querySelector('[data-js-debug-chart="cpu"]'));
         panel?.querySelector('[data-js-debug-subtab="events"]')?.click();
-        panel?.querySelector('[data-js-debug-scale="30"]')?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
-        setDebugGraphRange(14400, {render: false});
+        setDebugGraphRange(14400);
         panel?.querySelector('[data-js-debug-chart-close="gpuMemory"]')?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
         return {
           closed,
           restoreVisible: Boolean(restore),
           restored,
           activeSubtabPaint,
-          activeScalePaint,
+          resolutionLabel,
           closeFocusPaint,
           restoreFocusPaint,
           closeUsesSharedParent,
@@ -1877,14 +1876,13 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
     assert metrics["closed"] is True, metrics
     assert metrics["restoreVisible"] is True, metrics
     assert metrics["restored"] is True, metrics
-    assert metrics["activeSubtabPaint"] == metrics["activeScalePaint"], metrics
+    assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["closeFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["restoreFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["closeUsesSharedParent"] is True, metrics
     assert metrics["restoreUsesSharedParent"] is True, metrics
     assert metrics["saved"] == {
         "subTab": "events",
-        "scaleSeconds": 30,
         "rangeSeconds": 14400,
         "hiddenCharts": ["gpuMemory", "gpuUtil", "memory"],
         "visibleCharts": ["cpu"],
@@ -1897,7 +1895,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
             const panel = document.querySelector('.js-debug-panel');
             return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
               && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
-              && document.querySelector('[data-js-debug-scale="30"]')?.getAttribute('aria-pressed') === 'true'
+              && document.querySelector('[data-js-debug-resolution]')?.textContent.trim() === 'Resolution: 60s'
               && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
               && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
             """
@@ -1947,7 +1945,6 @@ def test_debug_graph_24_hour_range_change_avoids_multi_second_browser_task(brows
         appendTier(now - (24 * 60 * 60 * 1000), 1320, 60);
         appendTier(now - (2 * 60 * 60 * 1000), 360, 10);
         appendTier(now - (60 * 60 * 1000), 3600, 1);
-        setDebugGraphScale(1);
         setDebugGraphRange(15 * 60, {render: false});
         debugGraphApplyServerHistory({sequence: records.length, records});
         setJsDebugHistoryReadiness('ready', {

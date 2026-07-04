@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "Kundenarbeit | Animationen {animations} | lange Aufgaben {tasks}{timing}",
   "debug.graph.clientWorkTiming": " Durchschnitt {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Diagramm-Bucket-Größe",
+  "debug.graph.control.resolution": "Auflösung: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Zurücksetzen",
   "debug.graph.control.timeRange": "Zeitbereich des Diagramms",

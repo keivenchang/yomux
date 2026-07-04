@@ -133,6 +133,7 @@
   "debug.graph.clientWork": "Praca z klientem | Animacje {animations} | Długie zadania {tasks}{timing}",
   "debug.graph.clientWorkTiming": " średnia {average} ms max {max}ms",
   "debug.graph.control.bucketSize": "Rozmiar kubełka grafów",
+  "debug.graph.control.resolution": "Rozdzielczość: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "Resetuj",
   "debug.graph.control.timeRange": "Zakres czasu wykresu",

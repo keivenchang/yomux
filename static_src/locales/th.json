@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "งานลูกค้า | ภาพเคลื่อนไหว {animations} | งานยาว {tasks}{timing}",
   "debug.graph.clientWorkTiming": " เฉลี่ย {average}ms สูงสุด {max}ms",
   "debug.graph.control.bucketSize": "ขนาดถังกราฟ",
+  "debug.graph.control.resolution": "ความละเอียด: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "รีเซ็ต",
   "debug.graph.control.timeRange": "ช่วงเวลากราฟ ซูม",

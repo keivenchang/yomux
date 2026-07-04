@@ -143,6 +143,7 @@
   "debug.graph.clientWork": "عمل العميل | الرسوم المتحركة {animations} | المهام الطويلة {tasks}{timing}",
   "debug.graph.clientWorkTiming": " متوسط {average}ms ماكس {max}ms",
   "debug.graph.control.bucketSize": "حجم دلو الرسم البياني",
+  "debug.graph.control.resolution": "الدقة: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "إعادة تعيين",
   "debug.graph.control.timeRange": "النطاق الزمني للرسم البياني",

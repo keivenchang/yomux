@@ -181,6 +181,7 @@
   "debug.graph.clientWorkTiming": " औसत {average}ms अधिकतम {max}ms",
   "debug.graph.control.bucketSize": "बाल्टी का आकार ग्राफ़ करें",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.resolution": "रिज़ॉल्यूशन: {resolution}",
   "debug.graph.control.timeRange": "ग्राफ़ समय सीमा",
   "debug.graph.control.zoom": "ज़ूम करें",
   "debug.graph.history.error": "{range} का इतिहास लोड नहीं हो सका: {error}",

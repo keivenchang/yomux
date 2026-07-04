@@ -123,6 +123,7 @@
   "debug.graph.clientWork": "クライアントワーク |アニメーション {animations} |長いタスク {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "グラフバケットサイズ",
+  "debug.graph.control.resolution": "解像度: {resolution}",
   "debug.graph.control.charts": "Charts",
   "common.reset": "リセット",
   "debug.graph.control.timeRange": "グラフの時間範囲",
