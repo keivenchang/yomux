@@ -2039,7 +2039,6 @@ class TmuxWebtermApp:
         window_start = requested_start or available_start
         window_end = requested_end or available_end
         requested_resolution = max(0, int(resolution_seconds or 0))
-        effective_resolution = requested_resolution
         point_budget = max(0, int(max_points or 0))
 
         scoped_sources = [
@@ -2048,6 +2047,11 @@ class TmuxWebtermApp:
             if (not requested_start or int(source.get("start") or 0) + int(source.get("duration") or 0) > requested_start)
             and (not requested_end or int(source.get("start") or 0) < requested_end)
         ]
+        # Retention has already compacted the oldest part of a wide view. Encode every
+        # record at that view's coarsest retained duration so the response does not send
+        # newer fine buckets merely for the browser to aggregate them again.
+        retained_resolution = max((int(source.get("duration") or 0) for source in scoped_sources), default=0)
+        effective_resolution = max(requested_resolution, retained_resolution)
 
         def grouped_sources(resolution: int) -> dict[tuple[int, int], dict[str, Any]]:
             grouped: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2111,6 +2115,7 @@ class TmuxWebtermApp:
             "has_more_older": bool(available_start and covered_start and available_start < covered_start),
             "next_older_end": covered_start if available_start and covered_start and available_start < covered_start else 0,
             "resolution_seconds": effective_resolution,
+            "source_resolution_seconds": retained_resolution,
             "max_points": point_budget,
             "source_records": len(scoped_sources),
             "returned_records": len(records),

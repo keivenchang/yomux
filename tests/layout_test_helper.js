@@ -907,6 +907,7 @@ globalThis.__layoutTestApi = {
   setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
   applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
   jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,
+  jsDebugHistoryCoverageResolutionSecondsForTest: jsDebugHistoryCoverageResolutionSeconds,
   jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,

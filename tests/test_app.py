@@ -277,7 +277,7 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
     assert sum(record["api_count"] for record in payload["history"]["records"]) == 100
     assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
     assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
-    assert {record["duration"] for record in payload["history"]["records"]} == {10, 60, 120, 300, 600}
+    assert {record["duration"] for record in payload["history"]["records"]} == {600}
     assert incremental["history"]["records"] == []
 
 
@@ -415,7 +415,7 @@ def test_stats_client_history_combines_v2_v3_v4_without_overlap_or_corrupt_rows(
     assert migrated["migrated_versions"] == [2, 3]
     assert migrated["rev"] == 101
     assert sum(record["api_count"] for record in history["records"]) == 9
-    assert {record["duration"] for record in history["records"]} == {10, 60, 600}
+    assert {record["duration"] for record in history["records"]} == {600}
     assert all("client-corrupt" not in record["clients"] for record in history["records"])
     old_processes = next(record["servers"] for record in history["records"] if record["duration"] == 600)
     assert set(old_processes) == {"port:8003"}
@@ -577,7 +577,8 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
         "complete": True,
         "has_more_older": False,
         "next_older_end": 0,
-        "resolution_seconds": 0,
+        "resolution_seconds": 1,
+        "source_resolution_seconds": 1,
         "max_points": 0,
         "source_records": 15,
         "returned_records": 15,
@@ -710,7 +711,7 @@ def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_
     assert sum(item["tokens"] for record in token_records for item in record["agent_token_rates"]) == 240
 
 
-def test_stats_history_display_encoder_preserves_full_mixed_duration_input_until_budget_requires_coarsening():
+def test_stats_history_display_encoder_sends_wide_mixed_duration_input_at_the_coarsest_retained_resolution():
     webapp = app_module.TmuxWebtermApp([])
     end = 1_036_800
     start = end - (24 * 60 * 60)
@@ -768,10 +769,10 @@ def test_stats_history_display_encoder_preserves_full_mixed_duration_input_until
     finally:
         webapp.control_server.stop()
 
-    assert len(preserved["records"]) == 5280
-    assert preserved["coverage"]["resolution_seconds"] == 1
-    assert preserved["coverage"]["returned_records"] == 5280
-    assert {duration: sum(record["duration"] == duration for record in preserved["records"]) for duration in (1, 10, 60)} == {1: 3600, 10: 360, 60: 1320}
+    assert len(preserved["records"]) == 1440
+    assert preserved["coverage"]["resolution_seconds"] == 60
+    assert preserved["coverage"]["returned_records"] == 1440
+    assert {record["duration"] for record in preserved["records"]} == {60}
     records = coarsened["records"]
     assert len(records) <= 500
     assert coarsened["coverage"]["resolution_seconds"] > 60

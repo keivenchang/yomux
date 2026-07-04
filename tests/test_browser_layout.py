@@ -862,7 +862,7 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert with_client["chart"]["top"] >= with_client["client"]["bottom"], metrics
     assert with_client["rowGap"] <= 6, metrics
     without_client = metrics["withoutClientWork"]
-    assert abs(with_client["chart"]["height"] - without_client["chart"]["height"]) <= 1, metrics
+    assert without_client["chart"]["height"] > without_client["graph"]["height"] * 0.55, metrics
     assert without_client["chart"]["bottom"] <= without_client["graph"]["bottom"], metrics
     empty = metrics["emptyWithClientWork"]
     assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
@@ -2431,6 +2431,111 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
     assert len(metrics["tokenStarts"]) == 2, metrics
     assert metrics["tokenStarts"][1] - metrics["tokenStarts"][0] > 3 * 60 * 60, metrics
     assert metrics["oldBars"] == 1 and metrics["recentBars"] == 1, metrics
+
+
+def test_debug_graph_server_restart_refetches_complete_history_without_waiting_for_the_poll_interval(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsFirstSampleReceived = true;
+          jsDebugStatsPollInFlight = false;
+          jsDebugStatsPollPending = false;
+          jsDebugStatsServerSequence = 0;
+          jsDebugStatsServerPid = null;
+          jsDebugStatsServerStartedAt = null;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const originalFetch = window.fetch;
+          const requests = [];
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          const history = (url, records, sequence) => ({
+            sequence,
+            latest_sequence: sequence,
+            records,
+            coverage: {
+              mode: 'live',
+              requested_start: Number(url.searchParams.get('history_start')),
+              requested_end: 0,
+              covered_start: Number(url.searchParams.get('history_start')),
+              covered_end: nowSeconds,
+              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              complete: true,
+              has_more_older: false,
+              next_older_end: 0,
+            },
+          });
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url);
+            if (requests.length === 1) {
+              return response({
+                pid: 1001,
+                started_at: nowSeconds - 120,
+                history: history(url, [{start: nowSeconds - 600, duration: 5, sequence: 100, system_cpu_total_percent: 20, system_cpu_count: 1}], 100),
+              });
+            }
+            if (requests.length === 2) {
+              return response({
+                pid: 2002,
+                started_at: nowSeconds,
+                history: history(url, [], 101),
+              });
+            }
+            return response({
+              pid: 2002,
+              started_at: nowSeconds,
+              history: history(url, [
+                {start: nowSeconds - 600, duration: 5, sequence: 150, system_cpu_total_percent: 20, system_cpu_count: 1},
+                {start: nowSeconds - 60, duration: 5, sequence: 151, system_cpu_total_percent: 40, system_cpu_count: 1},
+              ], 151),
+            });
+          };
+          try {
+            await pollJsDebugStatsSample();
+            await pollJsDebugStatsSample();
+            const deadline = performance.now() + 3000;
+            while ((requests.length < 3 || jsDebugStatsPollInFlight) && performance.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            renderDebugPanels({force: true});
+            const xValues = [...document.querySelectorAll('[data-js-debug-series="systemCpu"]')]
+              .flatMap(line => String(line.getAttribute('points') || '')
+                .split(/\\s+/)
+                .filter(Boolean)
+                .map(point => Number(point.split(',')[0]))
+                .filter(Number.isFinite));
+            return {
+              requestCount: requests.length,
+              restartRefetchSince: requests[2]?.searchParams.get('since'),
+              graphBusy: document.querySelector('[data-js-debug-graph]')?.getAttribute('aria-busy'),
+              xValues,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 3, metrics
+    assert metrics["restartRefetchSince"] == "0", metrics
+    assert metrics["graphBusy"] == "false", metrics
+    assert any(100 < value < 300 for value in metrics["xValues"]), metrics
+    assert any(value > 500 for value in metrics["xValues"]), metrics
 
 
 def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):

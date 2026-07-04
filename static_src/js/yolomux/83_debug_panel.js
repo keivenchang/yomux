@@ -438,12 +438,14 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
     coveredStart: Number(raw.covered_start),
     coveredEnd: Number(raw.covered_end),
     resolutionSeconds: Number(raw.resolution_seconds),
+    sourceResolutionSeconds: Number(raw.source_resolution_seconds),
     complete: raw.complete === true,
     hasMoreOlder: raw.has_more_older === true,
     nextOlderEnd: Number(raw.next_older_end),
   };
   if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
   if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = jsDebugGraphScaleSeconds;
+  if (!Number.isFinite(coverage.sourceResolutionSeconds) || coverage.sourceResolutionSeconds <= 0) coverage.sourceResolutionSeconds = 0;
   return coverage;
 }
 
@@ -451,18 +453,20 @@ function mergeJsDebugHistoryCoverageIntervals(intervals) {
   const grouped = new Map();
   for (const interval of intervals || []) {
     const resolution = Number(interval?.resolutionSeconds);
+    const sourceResolution = Number(interval?.sourceResolutionSeconds) || 0;
     const start = Number(interval?.startSeconds);
     const end = Number(interval?.endSeconds);
     if (!Number.isFinite(resolution) || resolution <= 0 || !Number.isFinite(start) || end <= start) continue;
-    if (!grouped.has(resolution)) grouped.set(resolution, []);
-    grouped.get(resolution).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution});
+    const key = `${resolution}:${sourceResolution}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution, sourceResolutionSeconds: sourceResolution});
   }
   const output = [];
   for (const [resolution, items] of grouped.entries()) {
     items.sort((left, right) => left.startSeconds - right.startSeconds || right.endSeconds - left.endSeconds);
     for (const item of items) {
       const previous = output.at(-1);
-      if (previous?.resolutionSeconds === resolution && item.startSeconds <= previous.endSeconds) {
+      if (previous?.resolutionSeconds === resolution && previous.sourceResolutionSeconds === sourceResolution && item.startSeconds <= previous.endSeconds) {
         previous.endSeconds = Math.max(previous.endSeconds, item.endSeconds);
       } else {
         output.push({...item});
@@ -491,7 +495,7 @@ function applyJsDebugHistoryCoverage(coverage) {
   if (satisfiedEnd > satisfiedStart) {
     state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
       ...state.coverageIntervals,
-      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds},
+      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
     ]);
   }
   if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd)) {
@@ -502,14 +506,16 @@ function applyJsDebugHistoryCoverage(coverage) {
 
 function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
   const intervals = jsDebugHistoryReadiness.coverageIntervals
-    .filter(interval => Number(interval.resolutionSeconds) <= maxResolutionSeconds)
+    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
   for (const interval of intervals) {
     const intervalStart = Number(interval.startSeconds);
     const intervalEnd = Number(interval.endSeconds);
+    const sourceResolution = Math.max(0, Number(interval.sourceResolutionSeconds) || 0);
     if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
     if (intervalStart > cursor) return false;
+    if (Number(interval.resolutionSeconds) > Math.max(maxResolutionSeconds, sourceResolution)) return false;
     cursor = Math.max(cursor, intervalEnd);
     if (cursor >= endSeconds) return true;
   }
@@ -530,6 +536,11 @@ function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolution
 
 function jsDebugRequestedHistoryResolutionSeconds() {
   return debugGraphZoomDomainValid() ? 1 : Math.max(1, Math.floor(jsDebugGraphScaleSeconds));
+}
+
+function jsDebugHistoryCoverageResolutionSeconds(startSeconds, requestedResolutionSeconds, nowMs = Date.now()) {
+  const retainedResolutionSeconds = debugGraphBucketDurationForTime(Math.max(0, Number(startSeconds) || 0) * 1000, nowMs) / 1000;
+  return Math.max(1, Number(requestedResolutionSeconds) || 0, retainedResolutionSeconds);
 }
 
 function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resolutionSeconds) {
@@ -1310,8 +1321,16 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
   }
   debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: advanceHistoryCursor, replaceCoverage});
   // The restart response was requested with the previous process's sequence. Refetch from zero so
-  // stale high-water marks cannot hide the replacement process's durable history.
-  if (serverChanged) jsDebugStatsServerSequence = 0;
+  // stale high-water marks cannot hide the replacement process's durable history. Drop the
+  // partial old-cursor response and queue the zero-cursor fetch now instead of showing an empty
+  // graph until the normal 30-second poll.
+  if (serverChanged) {
+    clearJsDebugGraphData();
+    resetJsDebugHistoryReadiness();
+    jsDebugStatsServerSequence = 0;
+    jsDebugStatsPollPending = true;
+    jsDebugStatsPollPendingForceGraphRefresh = true;
+  }
   if (payload.history && typeof payload.history === 'object') {
     if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
     return;
@@ -1624,13 +1643,29 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
   return jsDebugGraphRangeOptions;
 }
 
+function debugGraphDisplayResolutionMs(domain, requestedScaleSeconds = jsDebugGraphScaleSeconds) {
+  const requestedSeconds = Number(requestedScaleSeconds);
+  const requestedMs = (jsDebugGraphScaleOptions.includes(requestedSeconds)
+    ? normalizedJsDebugGraphScale(requestedSeconds)
+    : Math.max(1, requestedSeconds || jsDebugGraphDefaultScaleSeconds)) * 1000;
+  let sourceMs = 0;
+  for (const bucket of [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]) {
+    if (!debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) continue;
+    sourceMs = Math.max(sourceMs, Number(bucket.durationMs) || 0);
+  }
+  return Math.max(requestedMs, sourceMs);
+}
+
+function debugGraphSourceBuckets(domain) {
+  return [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]
+    .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
+    .sort((left, right) => left.startMs - right.startMs);
+}
+
 function debugGraphDisplayBuckets(nowMs = Date.now(), scaleSeconds = jsDebugGraphScaleSeconds, rangeSeconds = jsDebugGraphRangeSeconds) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
-  const requestedScaleSeconds = Number(scaleSeconds);
-  const scaleMs = (jsDebugGraphScaleOptions.includes(requestedScaleSeconds)
-    ? normalizedJsDebugGraphScale(requestedScaleSeconds)
-    : Math.max(1, requestedScaleSeconds || jsDebugGraphDefaultScaleSeconds)) * 1000;
+  const scaleMs = debugGraphDisplayResolutionMs(domain, scaleSeconds);
   const buckets = new Map();
   for (const bucket of jsDebugGraphRollupBuckets.values()) {
     if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
@@ -2861,7 +2896,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets) {
   const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
@@ -2902,10 +2937,10 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = []) {
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain)).join('') : ''}
           ${debugGraphGridLinesHtml(group, axisMax)}
-          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(buckets, domain, debugGraphCommunicationSeriesItems(groupSeries)) : ''}
+          ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCommunicationSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(buckets, domain) : ''}
+          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
@@ -2924,10 +2959,11 @@ function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
 
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
+  const overlayBuckets = debugGraphSourceBuckets(domain);
   const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets);
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -2970,6 +3006,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     middleBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
     oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
     tierBucketCounts: jsDebugGraphTiers.map(tier => [...jsDebugGraphRawBuckets.values(), ...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === tier.bucketMs).length),
+    displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
     agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
     agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
@@ -3084,21 +3121,22 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
     const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
     const historyResolution = jsDebugRequestedHistoryResolutionSeconds();
-    const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, historyResolution);
+    const coverageResolution = jsDebugHistoryCoverageResolutionSeconds(targetStart, historyResolution);
+    const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
       const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
         && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
         && Number(state.targetStartSeconds) === Number(targetStart)
         && Number(state.targetEndSeconds) === Number(targetEnd)
-        && Number(state.requestedResolutionSeconds) === Number(historyResolution);
+        && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
       if (!currentRequestMatches) {
-        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, historyResolution);
+        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
         beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
           targetStartSeconds: targetStart,
           targetEndSeconds: targetEnd,
           requestedEndSeconds: requestWindow.endSeconds,
-          requestedResolutionSeconds: historyResolution,
+          requestedResolutionSeconds: coverageResolution,
           retry: state.phase === 'error',
         });
       }
@@ -3432,20 +3470,21 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
   const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
   const requestedResolutionSeconds = jsDebugRequestedHistoryResolutionSeconds();
-  if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds)) return false;
+  const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
+  if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
     && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
-    && Number(state.requestedResolutionSeconds) === Number(requestedResolutionSeconds);
+    && Number(state.requestedResolutionSeconds) === Number(coverageResolutionSeconds);
   if (!currentRequestMatches || retry) {
-    const requestWindow = jsDebugHistoryRequestWindow(requestedStartSeconds, requestedDomainEndSeconds, requestedResolutionSeconds);
+    const requestWindow = jsDebugHistoryRequestWindow(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds);
     beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
       targetStartSeconds: requestedStartSeconds,
       targetEndSeconds: requestedDomainEndSeconds,
       requestedEndSeconds: requestWindow.endSeconds,
-      requestedResolutionSeconds,
+      requestedResolutionSeconds: coverageResolutionSeconds,
       retry,
     });
   }

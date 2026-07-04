@@ -3380,6 +3380,36 @@ async function runEditorPreviewSuite() {
     assert.equal(html.includes('10s buckets | 24h'), false, 'graph omits the redundant bottom scale footer');
   });
 
+  test('YO!stats renders one aggregation interval across mixed persistence tiers', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphScaleForTest(5);
+    api.setDebugGraphRangeForTest(4 * 60 * 60);
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 63,
+      records: [{
+        start: Math.floor((now - (3 * 60 * 60 * 1000)) / 1000 / 60) * 60,
+        duration: 60,
+        sequence: 61,
+        bandwidth_bytes: 600,
+      }, {
+        start: Math.floor((now - (60 * 60 * 1000)) / 1000 / 10) * 10,
+        duration: 10,
+        sequence: 62,
+        bandwidth_bytes: 100,
+      }, {
+        start: Math.floor((now - (5 * 60 * 1000)) / 1000),
+        duration: 1,
+        sequence: 63,
+        bandwidth_bytes: 10,
+      }],
+    });
+    const summary = api.debugGraphBucketSummaryForTest(now);
+    assert.deepStrictEqual([...summary.displayBucketSeconds], [60], 'a four-hour domain aggregates 1s and 10s source buckets to the coarsest intersecting 60s source interval');
+    assert.equal(summary.displayBuckets, 3, 'uniform aggregation retains one displayed bucket per distinct minute instead of mixing persistence-tier resolutions');
+  });
+
   test('YO!stats uses server-aggregated token points for wide time ranges', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
@@ -4240,6 +4270,27 @@ async function runEditorPreviewSuite() {
       {startSeconds: 500, endSeconds: 600},
       'a disjoint fine zoom aligns its bounded replacement to the retained five-second bucket edges',
     );
+  });
+
+  test('YO!stats accepts the server-selected retained resolution for a wide range', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSeconds = 2_000_000;
+    assert.equal(api.jsDebugHistoryCoverageResolutionSecondsForTest(nowSeconds - (4 * 60 * 60), 1, nowSeconds * 1000), 60, 'a four-hour domain accepts the persisted one-minute representation');
+    assert.equal(api.jsDebugHistoryCoverageResolutionSecondsForTest(nowSeconds - (5 * 60), 1, nowSeconds * 1000), 1, 'a recent domain still requires one-second records');
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {targetStartSeconds: 100, targetEndSeconds: 200});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: 100, requestedEnd: 0, coveredStart: 100, coveredEnd: 200,
+      resolutionSeconds: 120, sourceResolutionSeconds: 120, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 200, 60), false, 'a server-reported two-minute retention boundary prevents a redundant refetch');
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {targetStartSeconds: 100, targetEndSeconds: 200});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: 100, requestedEnd: 0, coveredStart: 100, coveredEnd: 200,
+      resolutionSeconds: 120, sourceResolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 200, 60), true, 'a user-selected coarse response does not block a later finer request');
   });
 
   test('YO!stats finer replacement preserves coarse bucket portions outside unaligned coverage', () => {
