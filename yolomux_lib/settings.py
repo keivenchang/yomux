@@ -182,6 +182,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "notify_working_done": False,
         "throttle_seconds": 60,
     },
+    "chat": {
+        "retention_days": 7,
+    },
     # PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
     # a full https://github.com/owner/repo/pull/N URL (normalized when polled).
     "github": {
@@ -347,6 +350,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("performance", "auto_approve_interval_seconds"): (0.1, 10),
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
+    ("chat", "retention_days"): (1, 365),
     ("terminal_editor", "scrollback"): (1000, 50000),
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
@@ -507,6 +511,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("notifications", "notify_working_attention"): "true/false. Default true. Notify when a working Claude or Codex stops and needs your attention.",
     ("notifications", "notify_working_done"): "true/false. Default false. Notify when a working Claude or Codex finishes without needing attention.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
+    ("chat", "retention_days"): "Days, 1-365. Searchable YO!chat messages are retained for this many days. Default 7; reducing the value prunes newly expired rows immediately.",
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
@@ -595,6 +600,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("notifications", "notify_working_done"): "Notifications",
     ("notifications", "toast_duration_ms"): "Notifications",
     ("notifications", "throttle_seconds"): "Notifications",
+    ("chat", "retention_days"): "YO!chat",
     ("file_explorer", "root_mode"): "Finder",
     ("file_explorer", "image_open_mode"): "Finder",
     ("file_explorer", "image_preview_max_px"): "Finder",
@@ -655,6 +661,7 @@ SETTING_GUI_SECTION_LOCALE_KEYS = {
     "Terminal and Editor": "pref.section.terminal_editor",
     "Uploads/Downloads": "pref.section.uploads",
     "YO!agent": "brand.tab.agent",
+    "YO!chat": "brand.tab.chat",
     "YO!share": "brand.share",
     "YOLO": "brand.yolo",
 }
@@ -1046,6 +1053,8 @@ def setting_units(section: str, key: str, default: Any) -> str:
         return "milliseconds"
     if key.endswith("_seconds") or key.endswith("_interval_seconds") or (section, key) == ("share", "ttl_seconds"):
         return "seconds"
+    if key.endswith("_days"):
+        return "days"
     if key.endswith("_font_size") or key in {"tab_width", "pane_spacing", "image_preview_max_px"}:
         return "pixels"
     if key.endswith("_opacity"):

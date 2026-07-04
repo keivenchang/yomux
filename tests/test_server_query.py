@@ -57,13 +57,90 @@ def test_get_agent_auth_honors_force_query():
     assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
 
 
+def test_chat_send_route_uses_authenticated_username_and_allows_readonly():
+    writes = []
+    calls = []
+    app = SimpleNamespace(
+        chat_send=lambda username, payload, locale, sender_ip="": calls.append((username, sender_ip, payload, locale)) or {
+            "message": {"id": 1, "username": username, "body": payload["body"]},
+            "revision": 1,
+            "created": True,
+        }
+    )
+    payload = {
+        "browser_instance_id": "browser-a", "client_message_uuid": "message-a", "body": "<b>exact text</b>",
+        "username": "mallory", "created_at_utc": 0, "is_question": True,
+    }
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        client_address=("10.1.2.3", 12345),
+        auth_identity=lambda: SimpleNamespace(username="readonly-user", role="readonly"), request_locale_pref=lambda: "en",
+        read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+    route = route_by_path("POST", "/api/chat/send")
+
+    http_routes.post_chat_send(request, SimpleNamespace(query=""), route)
+
+    assert route.role == "readonly" and route.share_access == http_routes.SHARE_ACCESS_NONE
+    assert calls == [("readonly-user", "10.1.2.3", payload, "en")]
+    assert writes[0][0] == HTTPStatus.CREATED
+    assert writes[0][1]["message"] == {"id": 1, "username": "readonly-user", "body": "<b>exact text</b>"}
+
+
+def test_chat_bootstrap_includes_server_observed_client_ip():
+    writes = []
+    calls = []
+    app = SimpleNamespace(
+        chat_bootstrap=lambda username, reader_id, browser_instance_id: calls.append((username, reader_id, browser_instance_id)) or {
+            "revision": 0, "messages": [], "typing": [],
+        }
+    )
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app),
+        client_address=("10.1.123.12", 54321),
+        share_token_text=lambda: "",
+        auth_identity=lambda: SimpleNamespace(username="alice", role="readonly"),
+        write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+
+    http_routes.get_chat_bootstrap(
+        request,
+        SimpleNamespace(query="reader_id=reader-a&browser_instance_id=browser-a"),
+        route_by_path("GET", "/api/chat/bootstrap"),
+    )
+
+    assert calls == [("alice", "reader-a", "browser-a")]
+    assert writes == [(HTTPStatus.OK, {"revision": 0, "messages": [], "typing": [], "client_ip": "10.1.123.12"})]
+
+
+def test_chat_yoagent_route_uses_authenticated_identity_and_stored_source():
+    writes = []
+    calls = []
+    payload = {"browser_instance_id": "browser-a", "message_id": 17, "message": "spoofed query"}
+    app = SimpleNamespace(
+        chat_yoagent=lambda username, role, body, locale: calls.append((username, role, body, locale)) or {
+            "message": {"id": 18, "username": "YO!agent", "body": "answer"}, "revision": 18, "created": True,
+        }
+    )
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        auth_identity=lambda: SimpleNamespace(username="guest", role="readonly"), request_locale_pref=lambda: "en",
+        read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+
+    http_routes.post_chat_yoagent(request, SimpleNamespace(query=""), route_by_path("POST", "/api/chat/yoagent"))
+
+    assert calls == [("guest", "readonly", payload, "en")]
+    assert writes[0][0] == HTTPStatus.CREATED
+
+
 def test_get_home_records_html_page_compute_time(monkeypatch):
     writes = []
     html_calls = []
     clock = iter([100.0, 100.037])
 
-    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language=""):
-        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language))
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language="", auth_username=""):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language, auth_username))
         return "<html>boot</html>"
 
     monkeypatch.setattr(http_routes, "html_page", fake_html_page)
@@ -73,14 +150,14 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
         share_sessions=lambda: [],
         share_record=lambda: None,
         share_bootstrap_payload=lambda record: {"record": record},
-        auth_identity=lambda: SimpleNamespace(role="admin"),
+        auth_identity=lambda: SimpleNamespace(role="admin", username="alice"),
         write_html=lambda body: writes.append(body),
     )
 
     http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
 
     assert writes == ["<html>boot</html>"]
-    assert html_calls == [(["5"], "admin", True, True, None, "")]
+    assert html_calls == [(["5"], "admin", True, True, None, "", "alice")]
     assert request._http_response_compute_ms == pytest.approx(37.0)
     assert request._http_response_performance_details == {
         "html_page": True,
@@ -690,7 +767,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert 'dispatch_http_route(self, "POST")' in post_body
     assert "if parsed.path" not in get_body
     assert "if parsed.path" not in post_body
-    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "filesystem", "tmux"}
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "chat", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
@@ -992,6 +1069,9 @@ def test_share_token_post_auth_uses_registry_roles_for_readonly_and_mutating_rou
         "/api/yoagent/chat",
         "/api/yoagent/intent",
         "/api/yoagent/jobs",
+        "/api/chat/send",
+        "/api/chat/typing",
+        "/api/chat/read",
         "/api/fs/write",
         "/api/fs/delete",
         "/api/fs/rename",

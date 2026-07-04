@@ -47,6 +47,7 @@ STATIC_CONTENT_TYPES = {
     "setup-auth.js": "application/javascript; charset=utf-8",
     "preauth-locale.js": "application/javascript; charset=utf-8",
     "codemirror.js": "application/javascript; charset=utf-8",
+    "emoji-data.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
     "xterm-addon-unicode11.js": "application/javascript; charset=utf-8",
@@ -233,6 +234,7 @@ def html_page(
     dangerously_yolo: bool = False,
     share: dict | None = None,
     accept_language: str = "",
+    auth_username: str = "",
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
@@ -248,6 +250,7 @@ def html_page(
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": bootstrap_agent_auth_status(),
         "accessRole": access_role,
+        "authUsername": auth_username if not share else "",
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,

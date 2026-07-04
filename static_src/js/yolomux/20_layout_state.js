@@ -1315,6 +1315,14 @@ function registerImageViewerLayoutItem(path) {
   return imageViewerItemFor(path);
 }
 
+function registerDynamicVirtualLayoutItem(item) {
+  const text = String(item || '');
+  if (!tabTypeForItem(text)?.prefix) return null;
+  dynamicVirtualLayoutItems.add(text);
+  layoutItems = computeLayoutItems();
+  return text;
+}
+
 function resolveLayoutItem(value) {
   const text = String(value || '');
   if (text === 'changes' || text === '__changes__') {
@@ -1324,6 +1332,7 @@ function resolveLayoutItem(value) {
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
+  if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -4122,16 +4131,30 @@ function shouldNotifyState(state) {
 }
 
 function sendBrowserNotification(title, options = {}) {
-  const icon = options.icon === undefined
+  const targetItem = String(options.targetItem || options.session || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) return null;
+  const {onClick, session, targetItem: _targetItem, url, ...notificationOptions} = options;
+  const icon = notificationOptions.icon === undefined
     ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
     : '';
-  const notification = new Notification(title, icon ? {icon, ...options} : options);
+  const notification = new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions);
+  if (targetItem) {
+    if (!browserNotificationsByTarget.has(targetItem)) browserNotificationsByTarget.set(targetItem, new Set());
+    browserNotificationsByTarget.get(targetItem).add(notification);
+    notification.onclose = () => {
+      const notifications = browserNotificationsByTarget.get(targetItem);
+      notifications?.delete(notification);
+      if (!notifications?.size) browserNotificationsByTarget.delete(targetItem);
+    };
+  }
   notification.onclick = () => {
     window.focus();
-    if (options.session) selectSession(options.session, {userInitiated: true});
+    notification.close?.();
+    if (typeof onClick === 'function') onClick();
+    else if (session) selectSession(session, {userInitiated: true});
     // a watched-PR notification opens the PR (no session to focus); safe blank-target open.
-    else if (options.url) {
-      try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    else if (url) {
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {}
     }
   };
   return notification;
@@ -4279,12 +4302,18 @@ function resumeToastRemoval(id, node, reason) {
 }
 
 function showToast(title, lines, options = {}) {
+  const targetItem = String(options.targetItem || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) {
+    dismissNotificationsForTarget(targetItem);
+    return null;
+  }
   const container = options.container || attentionAlerts;
   if (!container) return null;
   const id = ++attentionAlertSequence;
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  if (targetItem) node.dataset.toastTargetItem = targetItem;
   const bodyNode = ensureToastShell(node, {
     title,
     closeLabel: options.closeLabel,
@@ -4461,6 +4490,12 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
+function notificationTargetIsFocused(item) {
+  const target = String(item || '').trim();
+  if (!target || document.visibilityState !== 'visible' || document.hasFocus?.() !== true) return false;
+  return itemIsActivePaneTab(target) && (focusedPanelItem === target || focusedTerminal === target);
+}
+
 function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
@@ -4594,7 +4629,11 @@ function showAttentionAlert(session, state) {
     attentionToastLine(session, state),
     {
       container: displayToastContainer(session),
-      onClick: () => { void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent); },
+      targetItem: session,
+      onClick: () => {
+        dismissSessionToasts(session);
+        void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent);
+      },
     },
   );
   if (node) {
@@ -4603,13 +4642,24 @@ function showAttentionAlert(session, state) {
   }
 }
 
-function dismissSessionToasts(session, options = {}) {
+function dismissNotificationsForTarget(item, options = {}) {
+  const target = String(item || '').trim();
+  if (!target) return;
   const kind = String(options.kind || '');
   for (const [id, record] of toastRecords.entries()) {
     const node = record.node;
-    if (node.dataset.toastSession !== session) continue;
+    if (node.dataset.toastTargetItem !== target && node.dataset.toastSession !== target) continue;
     if (!kind || node.dataset.toastKind === kind) removeAttentionAlert(id);
   }
+  const notifications = browserNotificationsByTarget.get(target);
+  if (notifications) {
+    for (const notification of [...notifications]) notification.close?.();
+    browserNotificationsByTarget.delete(target);
+  }
+}
+
+function dismissSessionToasts(session, options = {}) {
+  dismissNotificationsForTarget(session, options);
 }
 
 function dismissAttentionAlertsForSession(session) {
@@ -4617,11 +4667,7 @@ function dismissAttentionAlertsForSession(session) {
 }
 
 function attentionAlreadyVisible(session) {
-  if (document.visibilityState !== 'visible') return false;
-  if (!activeSessions.includes(session)) return false;
-  const panel = document.getElementById(panelDomId(session));
-  if (!panel || !panel.isConnected) return false;
-  return focusedPanelItem === session || focusedTerminal === session || activeSessions.length === 1;
+  return notificationTargetIsFocused(session);
 }
 
 function removeAttentionAlert(id) {
@@ -4811,6 +4857,12 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
     : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
+  if (notificationTargetIsFocused(session)) {
+    recordSessionNotificationSent(session, key, now);
+    dismissNotificationsForTarget(session);
+    postEvent(session, 'agent_window_transition_notification_suppressed_visible', '', {agent: target.kind, tone});
+    return false;
+  }
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
   const lastSent = sessionNotificationLastSentAt(session, key);
   if (now - lastSent < throttleMs) return false;
@@ -4820,10 +4872,18 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   const title = t(`notify.working.${descriptor.copyKey}.title`);
   const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
   if (notificationDeliveryEnabled('inApp')) {
-    showToast(title, agentToastTargetLine(session, target, {reason: body}), {
+    const node = showToast(title, agentToastTargetLine(session, target, {reason: body}), {
       container: displayToastContainer(session),
-      onClick: () => { void focusAgentToastTarget(session, target); },
+      targetItem: session,
+      onClick: () => {
+        dismissSessionToasts(session);
+        void focusAgentToastTarget(session, target);
+      },
     });
+    if (node) {
+      node.dataset.toastSession = session;
+      node.dataset.toastKind = 'working-agent-transition';
+    }
   }
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;

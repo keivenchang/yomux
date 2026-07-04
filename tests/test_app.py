@@ -1571,6 +1571,10 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert payload["top_event_types"][0] == {"type": "background_refresh_done", "count": 2}
     assert payload["largest_active_transcripts"][0]["path"] == str(large)
     assert payload["largest_active_transcripts"][0]["bytes"] == len("large transcript payload")
+    assert payload["chat"]["subscribers"] == 0
+    assert set(payload["chat"]["events"]) == {"chat_messages_changed", "chat_typing_changed"}
+    assert set(payload["chat"]["store"]) >= {"database_bytes", "message_rows", "typing_leases", "prune_runs"}
+    assert "body" not in payload["chat"] and "query" not in payload["chat"] and "browser" not in payload["chat"]
 
 
 def test_background_refresh_control_uses_nested_payload(monkeypatch):
@@ -3470,6 +3474,117 @@ def test_save_settings_active_color_syncs_existing_tmux_theme(monkeypatch):
     assert webapp.tmux_theme_color == "blue"
     assert events[0][0] == "settings_changed"
     assert webapp.client_event_watcher_record.wake_event.is_set()
+
+
+def test_save_settings_retention_reduction_prunes_chat_immediately(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    calls = []
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"chat": {"retention_days": 30}}})
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda patch: {"settings": {"chat": {"retention_days": 7}, "appearance": {}}, "mtime_ns": 123},
+    )
+    monkeypatch.setattr(webapp.chat_store, "prune_if_due", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(webapp, "sync_tmux_theme_from_settings", lambda *args, **kwargs: None)
+    try:
+        webapp.save_settings({"chat": {"retention_days": 7}})
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == [{"retention_days": 7, "previous_retention_days": 30}]
+
+
+def test_two_webapps_reconcile_chat_from_shared_database_and_fanout_once(monkeypatch, tmp_path):
+    class FakeControlServer:
+        def __init__(self, _handler):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(app_module.common, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "YolomuxControlServer", FakeControlServer)
+    app1 = app_module.TmuxWebtermApp([])
+    app2 = app_module.TmuxWebtermApp([])
+    subscriber_id, subscriber_queue = app2.client_events.subscribe("chat", "browser-b")
+
+    def fanout(event_type, payload=None, **_kwargs):
+        app2.handle_background_client_event({"event_type": event_type, "payload": payload or {}})
+        return {"type": event_type, "payload": payload or {}}
+
+    monkeypatch.setattr(app1, "publish_background_client_event", fanout)
+    try:
+        sent = app1.chat_send(
+            "alice",
+            {"browser_instance_id": "browser-a", "client_message_uuid": "message-a", "body": "cross-process 😀"},
+            "en",
+        )
+        event = subscriber_queue.get_nowait()
+        assert event["type"] == "chat_messages_changed"
+        assert subscriber_queue.empty()
+        delta = app2.chat_delta("bob", after="")
+        assert [message["body"] for message in delta["messages"]] == ["cross-process 😀"]
+        assert delta["revision"] == sent["revision"]
+
+        app1.chat_typing("alice", "browser-a", True)
+        assert subscriber_queue.get_nowait()["type"] == "chat_typing_changed"
+        bootstrap = app2.chat_bootstrap("bob", "reader-b", "browser-b")
+        assert [lease["username"] for lease in bootstrap["typing"]] == ["alice"]
+    finally:
+        app2.client_events.unsubscribe(subscriber_id)
+        app1.control_server.stop()
+        app2.control_server.stop()
+
+
+def test_chat_yoagent_delegates_to_existing_controller_and_publishes_reply(monkeypatch):
+    source = SimpleNamespace(id=17)
+    calls = []
+    service = SimpleNamespace(
+        yoagent_source=lambda **kwargs: calls.append(("source", kwargs)) or (source, "what should I work on?"),
+        record_yoagent_reply=lambda **kwargs: calls.append(("record", kwargs)) or ({
+            "message": {"id": 18, "username": "YO!agent", "body": kwargs["answer"]}, "revision": 18,
+        }, True),
+    )
+    def fake_yoagent(payload, access_role):
+        calls.append(("yoagent", payload, access_role))
+        time.sleep(0.03)
+        return {"answer": "Work on the failing test."}, HTTPStatus.OK
+
+    monkeypatch.setattr(app_module, "CHAT_TYPING_LEASE_SECONDS", 0.02)
+    webapp = SimpleNamespace(
+        chat_service=service,
+        chat_typing=lambda username, instance, active: calls.append(("typing", username, instance, active)),
+        yoagent_chat=fake_yoagent,
+        publish_background_client_event=lambda *args, **kwargs: calls.append(("publish", args, kwargs)),
+    )
+
+    result = app_module.TmuxWebtermApp.chat_yoagent(
+        webapp,
+        "guest",
+        "readonly",
+        {"browser_instance_id": "browser-a", "message_id": 17, "message": "spoofed"},
+        "en",
+    )
+
+    assert result["source_message_id"] == 17
+    typing_calls = [call for call in calls if call[0] == "typing"]
+    assert typing_calls[0] == ("typing", "YO!agent", "yolomux-yoagent-17", True)
+    assert typing_calls[-1] == ("typing", "YO!agent", "yolomux-yoagent-17", False)
+    assert sum(call[-1] is True for call in typing_calls) >= 2, "long YO!agent work refreshes the shared five-second lease"
+    assert next(call for call in calls if call[0] == "yoagent") == (
+        "yoagent",
+        {"message": "what should I work on?", "locale": "en", "request_id": "yochat-17"},
+        "readonly",
+    )
+    record_call = next(call for call in calls if call[0] == "record")
+    publish_call = next(call for call in calls if call[0] == "publish")
+    assert record_call[1]["answer"] == "Work on the failing test."
+    assert publish_call[1][0] == "chat_messages_changed"
 
 
 def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch, tmp_path):

@@ -284,7 +284,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   box-shadow: 10px 14px 32px var(--paint-shadow-62);
   pointer-events: none;
 }
-.file-image-preview-popover img {
+.file-image-preview-popover img,
+.file-image-preview-popover video {
   display: block;
   max-width: 100%;
   max-height: 100%;
@@ -1311,7 +1312,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-chat-notice-backend {
   font-weight: 800;
 }
-.yoagent-message {
+.conversation-message {
   display: grid;
   gap: var(--space-3);
   min-width: 0;
@@ -1322,7 +1323,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   overflow: visible;
   overscroll-behavior: auto;
 }
-.yoagent-message.assistant {
+.conversation-message.assistant {
   align-self: flex-start;
   margin-inline-end: 28px;
   padding-inline-start: var(--space-12);
@@ -1365,21 +1366,21 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-recent-agents-message .yoagent-recent-agents {
   padding: 0;
 }
-.yoagent-message.user {
+.conversation-message.user {
   align-self: flex-end;
   margin-inline-start: 28px;
   padding-inline-end: var(--space-12);
   border-color: var(--link-soft);
   border-inline-end-width: 4px;
 }
-.yoagent-message-role {
+.conversation-message-role {
   display: flex;
   align-items: center;
   gap: var(--space-8);
   color: var(--muted);
   font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
-  text-transform: uppercase;
 }
+.yoagent-message:not(.yochat-message) .conversation-message-role { text-transform: uppercase; }
 .yoagent-message-time {
   color: var(--muted);
   font-weight: 600;
@@ -1391,7 +1392,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   text-transform: none;
   white-space: nowrap;
 }
-.yoagent-message-body {
+.conversation-message-body {
   min-width: 0;
   overflow-x: visible;
   overflow-y: visible;
@@ -1560,7 +1561,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 /* Composer (mockup 044): one rounded container with the input on top and a control row below —
    the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
-.yoagent-chat-form {
+.conversation-composer {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -1569,11 +1570,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border: 1px solid var(--link-soft);
   border-radius: 14px;
 }
-.yoagent-chat-form:focus-within {
+.conversation-composer:focus-within {
   border-color: var(--link-soft);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--link-soft) 45%, transparent);
 }
-.yoagent-chat-input {
+.conversation-composer-input {
   min-width: 0;
   width: 100%;
   height: 22px;
@@ -1583,14 +1584,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border: 0;
   font: var(--terminal-font-size)/1.3 var(--ui-font);
 }
-.yoagent-chat-input:focus { outline: 0; }
-.yoagent-chat-controls {
+.conversation-composer-input:focus { outline: 0; }
+.conversation-composer-controls {
   display: flex;
   align-items: center;
   gap: var(--space-4);
   flex-wrap: wrap;
 }
-.yoagent-chat-controls-spacer { flex: 1 1 auto; }
+.conversation-composer-controls-spacer { flex: 1 1 auto; }
 .yoagent-composer-pill,
 .yoagent-backend-pill {
   height: 24px;
@@ -1666,7 +1667,7 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
   background: var(--panel2);
 }
 .yoagent-chat-clear:disabled { display: none; }
-.yoagent-chat-send,
+.conversation-send,
 .yoagent-chat-stop {
   display: inline-flex;
   align-items: center;
@@ -1678,13 +1679,13 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
   border-radius: 50%;
   cursor: pointer;
 }
-.yoagent-chat-send {
+.conversation-send-primary {
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border: 1px solid var(--active-control-border);
 }
-.yoagent-chat-send:disabled { opacity: 0.5; cursor: default; }
-.yoagent-chat-send-icon { width: 16px; height: 16px; }
+.conversation-send-primary:disabled { opacity: 0.5; cursor: default; }
+.conversation-send-icon { width: 16px; height: 16px; }
 .yoagent-chat-stop {
   color: var(--text);
   background: color-mix(in srgb, var(--bad) 24%, var(--panel2));
@@ -1734,10 +1735,10 @@ body.theme-light .yoagent-message.assistant {
 body.theme-light .yoagent-message.assistant.yoagent-agent-result {
   background: color-mix(in srgb, var(--accent-gold) 10%, var(--paint-white));
 }
-body.theme-light .yoagent-message,
-body.theme-light .yoagent-message-body,
-body.theme-light .yoagent-message-body.markdown-body,
-body.theme-light .yoagent-message-body.markdown-body * {
+body.theme-light .conversation-message,
+body.theme-light .conversation-message-body,
+body.theme-light .conversation-message-body.markdown-body,
+body.theme-light .conversation-message-body.markdown-body * {
   color: var(--yoagent-content-text);
 }
 body.theme-light .yoagent-global-head,
@@ -1747,7 +1748,7 @@ body.theme-light .yoagent-line {
 }
 body.theme-light .yoagent-generated,
 body.theme-light .yoagent-empty,
-body.theme-light .yoagent-message-role,
+body.theme-light .conversation-message-role,
 body.theme-light .yoagent-message-time,
 body.theme-light .yoagent-message-latency {
   color: var(--yoagent-detail-text);
@@ -1842,6 +1843,313 @@ body.theme-light .yoagent-global .markdown-body :not(pre) > code {
 body.theme-light .yoagent-chat .markdown-body pre code,
 body.theme-light .yoagent-global .markdown-body pre code {
   color: var(--lt-code-block-text);
+}
+
+/* YO!chat reuses the shared conversation message/composer owners above. This block owns only its
+   timeline, search, presence, and picker geometry. */
+.chat-panel > .panel-head { grid-row: 1; }
+.chat-panel > .chat-actions-bar { grid-row: 2; }
+.chat-panel > .chat-pane {
+  grid-row: 3;
+  align-self: stretch;
+}
+.chat-pane {
+  position: relative;
+  display: grid;
+  grid-template-areas:
+    "timeline"
+    "new-messages"
+    "typing"
+    "composer";
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-6) var(--space-8);
+}
+.chat-actions-bar form {
+  flex: 1 1 auto;
+}
+.chat-actions-bar[hidden] {
+  display: none;
+}
+.chat-actions-bar .search-history-input {
+  width: 100%;
+}
+.chat-history-search-split {
+  display: grid;
+  grid-area: timeline;
+  grid-template-rows: fit-content(calc(50% - var(--space-2))) minmax(0, 1fr);
+  min-height: 0;
+}
+.chat-history-search-split.search-open {
+  gap: var(--space-4);
+}
+.chat-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+  overscroll-behavior: contain;
+}
+.chat-history-sentry + .yochat-introduction {
+  margin-block-start: auto;
+}
+.yochat-message,
+.yochat-composer {
+  --yochat-author-accent: var(--active-control-border);
+  --yochat-author-border: color-mix(in srgb, var(--yochat-author-accent) 68%, var(--line));
+}
+.yochat-author-tone-0 { --yochat-author-accent: var(--link-soft); }
+.yochat-author-tone-1 { --yochat-author-accent: var(--good); }
+.yochat-author-tone-2 { --yochat-author-accent: var(--accent-gold); }
+.yochat-author-tone-3 { --yochat-author-accent: var(--pr-status-merged); }
+.yochat-author-tone-4 { --yochat-author-accent: var(--git-untracked-badge); }
+.yochat-author-tone-5 { --yochat-author-accent: var(--icon-archive); }
+.yochat-author-tone-6 { --yochat-author-accent: var(--transcript-summary-accent); }
+.yochat-author-tone-7 { --yochat-author-accent: var(--accent-sky-strong); }
+.yochat-author-tone-8 { --yochat-author-accent: var(--accent-lime); }
+.yochat-author-tone-9 { --yochat-author-accent: var(--git-deleted); }
+.yochat-message:not(.yochat-agent-message):not(.yochat-introduction) {
+  border: 1px solid var(--yochat-author-border);
+  background: color-mix(in srgb, var(--yochat-author-accent) 8%, var(--panel2));
+}
+.yochat-message.user:not(.yochat-agent-message):not(.yochat-introduction) { border-inline-end-width: 4px; }
+.yochat-message.assistant:not(.yochat-agent-message):not(.yochat-introduction) { border-inline-start-width: 4px; }
+.yochat-message:not(.yochat-agent-message) .conversation-message-role > span:first-child {
+  color: var(--yochat-author-accent);
+}
+.yochat-message:not(.yochat-agent-message) .conversation-message-body {
+  white-space: pre-wrap;
+}
+.yochat-message-metadata {
+  color: var(--text-muted-strong);
+  font-weight: 500;
+  text-transform: none;
+}
+.yochat-message-metadata .yoagent-message-time { color: inherit; }
+body.theme-light .yochat-message-metadata { color: var(--text-muted-soft); }
+.yochat-introduction {
+  border: 1px solid var(--active-control-soft-border);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 62%, var(--panel2));
+}
+.yochat-introduction .conversation-message-body { display: grid; gap: var(--space-5); }
+.yochat-introduction p { margin: 0; }
+.yochat-message.pending { opacity: 0.72; }
+.yochat-message.failed { border-color: var(--bad); }
+.yochat-external-link {
+  overflow-wrap: anywhere;
+}
+.yochat-media-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+.yochat-media-thumbnail {
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  padding: var(--space-2);
+  background: var(--panel2);
+  border: 1px solid var(--yochat-author-border, var(--line));
+  border-radius: var(--radius-control);
+}
+.yochat-media-thumbnail img,
+.yochat-media-thumbnail video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+.yochat-media-panel .info-pane {
+  min-height: 0;
+}
+.yochat-media-panel-content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: var(--space-8);
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-8);
+}
+.yochat-media-panel-stage {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: auto;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.yochat-media-panel-stage img,
+.yochat-media-panel-stage video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.yochat-media-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.yochat-media-panel-content > a {
+  overflow-wrap: anywhere;
+  color: var(--link-soft);
+  font: var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.chat-message-pending,
+.chat-typing,
+.chat-search-empty,
+.chat-emoji-empty {
+  color: var(--muted);
+  font: var(--ui-font-size-sm)/1.3 var(--ui-font);
+}
+.chat-message-retry,
+.chat-new-messages,
+.chat-emoji-button {
+  border-radius: var(--radius-control);
+}
+.chat-new-messages {
+  grid-area: new-messages;
+  justify-self: center;
+  padding: var(--space-4) var(--space-8);
+}
+.chat-typing {
+  grid-area: typing;
+  min-height: 1.3em;
+  padding-inline: var(--space-8);
+}
+.yochat-composer {
+  grid-area: composer;
+  flex: 0 0 auto;
+  border-color: var(--yochat-author-border);
+}
+.yochat-composer:focus-within {
+  border-color: var(--yochat-author-border);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--yochat-author-accent, var(--active-control-border)) 45%, transparent);
+}
+.yochat-composer .conversation-send-primary {
+  background: var(--yochat-author-accent);
+  border-color: var(--yochat-author-border);
+}
+.yochat-input {
+  min-height: 42px;
+  height: auto;
+  overflow-y: hidden;
+  resize: none;
+}
+.chat-emoji-button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: var(--ui-font-size-lg);
+}
+.chat-emoji-picker {
+  position: absolute;
+  inset-inline-start: clamp(var(--space-8), 4%, 32px);
+  inset-inline-end: clamp(var(--space-8), 4%, 32px);
+  bottom: 86px;
+  z-index: var(--z-terminal-popover);
+  max-height: min(60%, 420px);
+  overflow: hidden;
+  padding: var(--space-8);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.chat-emoji-head {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
+}
+.chat-emoji-head input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.chat-emoji-categories {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  margin-bottom: var(--space-6);
+}
+.chat-emoji-categories button {
+  flex: 0 0 auto;
+  min-width: 32px;
+  padding: var(--space-2);
+}
+.chat-emoji-categories button.active {
+  border-color: var(--active-control-border);
+  background: var(--active-control-soft-bg);
+}
+.chat-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: var(--space-3);
+  max-height: 310px;
+  overflow: auto;
+}
+.chat-emoji-grid button {
+  min-width: 36px;
+  min-height: 36px;
+  padding: var(--space-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-size: 22px;
+  cursor: pointer;
+}
+.chat-emoji-grid button:is(:hover, :focus-visible) {
+  background: var(--panel2);
+  border-color: var(--active-control-border);
+  outline: 0;
+}
+.chat-search-results {
+  display: grid;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+}
+.chat-search-result {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  text-align: start;
+}
+.chat-search-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-8);
+  color: var(--muted);
+}
+.chat-search-context {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.chat-search-result mark {
+  color: var(--info-tree-search-match-text);
+  background: var(--info-tree-search-match-bg);
+}
+.chat-status-marker {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+@media (max-width: 520px) {
+  .chat-pane {
+    padding: var(--space-4);
+  }
+  .chat-emoji-picker {
+    inset-inline: var(--space-4);
+    bottom: 78px;
+  }
 }
 .info-tree {
   --info-tree-sticky-level-block: 27px;

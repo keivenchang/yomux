@@ -82,6 +82,8 @@ const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 24 * 60 * 60, label: '24h'},
 ]);
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
+const jsDebugGraphMaxDisplayPoints = 120;
+const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -1646,16 +1648,19 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
 }
 
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
-  // The selected domain owns the normal chart resolution. A recent 1m/15m
-  // view is always one-second resolution even if a stale/coarse source record
-  // happens to be present; only fixed-resolution charts such as Agent status
-  // can request a coarser minimum.
   const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  const domainSpanMs = Number.isFinite(domainStartMs) && Number.isFinite(domainEndMs)
+    ? Math.max(jsDebugGraphRawBucketMs, domainEndMs - domainStartMs)
+    : jsDebugGraphDefaultRangeSeconds * 1000;
+  const targetMs = domainSpanMs / jsDebugGraphMaxDisplayPoints;
+  const displayMs = jsDebugGraphDisplayBucketMs.find(bucketMs => bucketMs >= targetMs)
+    || jsDebugGraphDisplayBucketMs.at(-1);
   const retainedMs = Number.isFinite(domainStartMs)
     ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
     : jsDebugGraphRawBucketMs;
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs);
+  return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
 function debugGraphSourceBuckets(domain) {
@@ -2366,12 +2371,11 @@ function debugGraphTimeLabel(ms, {includeDate = false, includeSeconds = !include
 
 function debugGraphExactTimeLabel(ms) {
   if (!Number.isFinite(ms)) return '';
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return '';
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${debugGraphLocalDateKey(ms)} ${hours}:${minutes}:${seconds}`;
+  const localized = localizedDateTimeFormat(ms / 1000, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  return localized || debugGraphTimeLabel(ms, {includeDate: true, includeSeconds: true});
 }
 
 function debugGraphSeriesTimeMs(series, index) {
@@ -2384,16 +2388,26 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null) {
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0) {
   const segments = [];
   let current = [];
+  let previousDataEndMs = NaN;
   values.forEach((value, index) => {
     if (hasDataValues && hasDataValues[index] !== true) {
-      if (current.length) segments.push(current);
-      current = [];
+      if (gapThresholdMs <= 0 && current.length) {
+        segments.push(current);
+        current = [];
+      }
       return;
     }
-    current.push(debugGraphPointForValue(value, times[index], chartMax, domain).join(','));
+    const timeMs = Number(times[index]);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+    if (gapThresholdMs > 0 && current.length && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs) {
+      segments.push(current);
+      current = [];
+    }
+    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain).join(','));
+    previousDataEndMs = Number.isFinite(timeMs) ? timeMs + durationMs : NaN;
   });
   if (current.length) segments.push(current);
   return segments;
@@ -2444,8 +2458,9 @@ function debugGraphDisconnectedRanges(buckets, domain) {
     .map(range => ({...range, disconnectedMs: range.endMs - range.startMs}));
 }
 
-function debugGraphDisconnectedRectsHtml(buckets, domain) {
-  return debugGraphDisconnectedRanges(buckets, domain).map((range, index) => {
+function debugGraphDisconnectedRectsHtml(buckets, domain, ranges = null) {
+  const disconnectedRanges = Array.isArray(ranges) ? ranges : debugGraphDisconnectedRanges(buckets, domain);
+  return disconnectedRanges.map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
@@ -2512,6 +2527,11 @@ function debugGraphCurrentClientSeriesItems(seriesItems) {
 function debugGraphCurrentClientHeartbeatCount(bucket) {
   const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
   return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
+}
+
+function debugGraphCommunicationGapThresholdMs(seriesItems) {
+  const displayResolutionMs = Math.max(jsDebugGraphRawBucketMs, ...(seriesItems || []).flatMap(series => series?.durations || []));
+  return jsDebugStatsHistoryFlushMs + Math.min(jsDebugStatsHistoryFlushMs, displayResolutionMs);
 }
 
 function debugGraphNoDataRuns(buckets, domain, seriesItems) {
@@ -2646,12 +2666,15 @@ function debugGraphSeriesTokenAgentAttrs(series) {
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain) {
+  const gapThresholdMs = series?.clientMetric === true ? debugGraphCommunicationGapThresholdMs([series]) : 0;
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
     chartMax,
     domain,
     debugGraphSeriesPlotHasDataValues(series),
+    series.durations || [],
+    gapThresholdMs,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -2952,7 +2975,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
   const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
@@ -2996,7 +3019,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain) : ''}
+          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
@@ -3016,10 +3039,11 @@ function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
+  const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
   const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges);
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -3933,5 +3957,3 @@ function bindDebugPanel(panel) {
     }
   });
 }
-
-startJsDebugStatsPolling();

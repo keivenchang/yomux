@@ -1162,6 +1162,7 @@ function openFileOwnerSessionsForPath(path) {
 function removePanelForItem(item) {
   const panel = panelNodes.get(item);
   if (!panel) return;
+  tabTypeForItem(item)?.cleanup?.(item, panel);
   panel.remove();
   panelNodes.delete(item);
 }
@@ -2841,7 +2842,7 @@ function blameAnnotationText(info) {
 
 function blameHoverText(info) {
   const author = info.author || '';
-  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
+  const abs = info.time ? localizedExactDateTimeFormat(info.time) : '';
   const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
   return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
 }

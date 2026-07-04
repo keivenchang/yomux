@@ -588,7 +588,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     if (!node?.style) continue;
     if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
-    if (localDelay && localDelay !== delay) node.style.removeProperty('--attention-animation-delay');
+    if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
   }
 }

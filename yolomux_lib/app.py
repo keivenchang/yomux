@@ -114,6 +114,11 @@ from .events import read_yolomux_state
 from .events import update_yolomux_state
 from .agent_tui import classify_agent_pane
 from .agent_tui import normalized_prompt_state
+from .chat_store import ChatStore
+from .chat_service import CHAT_YOAGENT_INSTANCE_ID
+from .chat_service import CHAT_YOAGENT_USERNAME
+from .chat_service import ChatService
+from .chat_store import CHAT_TYPING_LEASE_SECONDS
 from .metadata import MetadataCache
 from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
@@ -858,7 +863,13 @@ PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
-BACKGROUND_CLIENT_EVENT_TYPES = frozenset({"attention_acks_changed", "background_owner_changed", "background_refresh_done"})
+BACKGROUND_CLIENT_EVENT_TYPES = frozenset({
+    "attention_acks_changed",
+    "background_owner_changed",
+    "background_refresh_done",
+    "chat_messages_changed",
+    "chat_typing_changed",
+})
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
 BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
 CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
@@ -1571,6 +1582,12 @@ class TmuxWebtermApp:
         self.share_tokens: dict[str, dict[str, Any]] = {}
         self.share_tokens_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
+        self.chat_store = ChatStore(common.STATE_DIR / "yochat.sqlite3")
+        self.chat_service = ChatService(
+            self.chat_store,
+            cursor_secret_path=common.STATE_DIR / "chat-cursor.key",
+            retention_days=self.chat_retention_days,
+        )
         # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
@@ -5018,6 +5035,89 @@ class TmuxWebtermApp:
 
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
+
+    def chat_retention_days(self) -> int:
+        value = self.settings_payload().get("settings", {}).get("chat", {}).get("retention_days", 7)
+        try:
+            return max(1, min(365, int(value)))
+        except (TypeError, ValueError):
+            return 7
+
+    def chat_bootstrap(self, username: str, reader_id: Any, browser_instance_id: Any) -> dict[str, Any]:
+        return self.chat_service.bootstrap(username=username, reader_id=reader_id, browser_instance_id=browser_instance_id)
+
+    def chat_page(self, username: str, **kwargs: Any) -> dict[str, Any]:
+        return self.chat_service.page(username=username, **kwargs)
+
+    def chat_delta(self, username: str, **kwargs: Any) -> dict[str, Any]:
+        return self.chat_service.delta(username=username, **kwargs)
+
+    def chat_context(self, username: str, **kwargs: Any) -> dict[str, Any]:
+        return self.chat_service.context(username=username, **kwargs)
+
+    def chat_search(self, username: str, **kwargs: Any) -> dict[str, Any]:
+        return self.chat_service.search(username=username, **kwargs)
+
+    def chat_send(self, username: str, payload: dict[str, Any], locale: str, sender_ip: str = "") -> dict[str, Any]:
+        result, created = self.chat_service.send(username=username, sender_ip=sender_ip, payload=payload, locale=locale)
+        if created:
+            self.publish_background_client_event(
+                "chat_messages_changed",
+                {"revision": result["revision"], "message_id": result["message"]["id"]},
+                trigger="chat-send",
+                cache="ready",
+            )
+        return result
+
+    def chat_yoagent(self, username: str, access_role: str, payload: dict[str, Any], locale: str) -> dict[str, Any]:
+        source, query = self.chat_service.yoagent_source(
+            username=username,
+            browser_instance_id=payload.get("browser_instance_id"),
+            message_id=payload.get("message_id"),
+        )
+        typing_instance_id = f"{CHAT_YOAGENT_INSTANCE_ID}-{source.id}"
+        typing_stop = threading.Event()
+        self.chat_typing(CHAT_YOAGENT_USERNAME, typing_instance_id, True)
+
+        def refresh_typing() -> None:
+            while not typing_stop.wait(CHAT_TYPING_LEASE_SECONDS / 2):
+                self.chat_typing(CHAT_YOAGENT_USERNAME, typing_instance_id, True)
+
+        typing_thread = threading.Thread(target=refresh_typing, name=f"yochat-typing-{source.id}", daemon=True)
+        typing_thread.start()
+        try:
+            response, _status = self.yoagent_chat(
+                {"message": query, "locale": locale, "request_id": f"yochat-{source.id}"},
+                access_role=access_role,
+            )
+        finally:
+            typing_stop.set()
+            typing_thread.join()
+            self.chat_typing(CHAT_YOAGENT_USERNAME, typing_instance_id, False)
+        descriptor = response.get("user_message") if isinstance(response.get("user_message"), dict) else {}
+        answer = str(response.get("answer") or descriptor.get("fallback") or response.get("error") or "").strip()
+        result, created = self.chat_service.record_yoagent_reply(source=source, answer=answer)
+        if created:
+            self.publish_background_client_event(
+                "chat_messages_changed",
+                {"revision": result["revision"], "message_id": result["message"]["id"]},
+                trigger="chat-yoagent",
+                cache="ready",
+            )
+        return {**result, "source_message_id": source.id}
+
+    def chat_typing(self, username: str, browser_instance_id: Any, typing: Any) -> dict[str, Any]:
+        result = self.chat_service.typing(username=username, browser_instance_id=browser_instance_id, typing=typing)
+        self.publish_background_client_event(
+            "chat_typing_changed",
+            {"revision": time.time_ns()},
+            trigger="chat-typing",
+            cache="ready",
+        )
+        return result
+
+    def chat_read(self, username: str, reader_id: Any, message_id: Any) -> dict[str, Any]:
+        return self.chat_service.read(username=username, reader_id=reader_id, message_id=message_id)
 
     def summary_settings(self) -> dict[str, Any]:
         return normalized_summary_settings(self.settings_payload().get("settings"))
@@ -8592,7 +8692,15 @@ class TmuxWebtermApp:
         return self.yoagent_controller.run_yoagent_claude_cli(*args, **kwargs)
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        previous_retention_days = settings_payload().get("settings", {}).get("chat", {}).get("retention_days", 7)
         payload = save_settings(patch)
+        chat_patch = patch.get("chat") if isinstance(patch, dict) else None
+        if isinstance(chat_patch, dict) and "retention_days" in chat_patch:
+            retention_days = payload.get("settings", {}).get("chat", {}).get("retention_days", 7)
+            self.chat_store.prune_if_due(
+                retention_days=retention_days,
+                previous_retention_days=previous_retention_days,
+            )
         self.sync_tmux_theme_from_settings(payload, force=patch_updates_active_color(patch))
         self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.wake_client_event_watcher()
@@ -9074,6 +9182,14 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
         transcript_payload = self.transcripts_payload(force=True)
+        client_events = self.client_events.snapshot()
+        chat_events = {
+            event_type: {
+                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
+                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
+            }
+            for event_type in ("chat_messages_changed", "chat_typing_changed")
+        }
         return {
             "ok": True,
             "state_dir": str(common.STATE_DIR),
@@ -9094,7 +9210,12 @@ class TmuxWebtermApp:
             "top_endpoints": self.runtime_top_endpoints(status),
             "top_background_work": self.runtime_top_background_work(status),
             "top_event_types": self.runtime_top_event_types(),
-            "client_events": self.client_events.snapshot(),
+            "client_events": client_events,
+            "chat": {
+                **self.chat_service.diagnostics(),
+                "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
+                "events": chat_events,
+            },
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }

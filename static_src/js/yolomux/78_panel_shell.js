@@ -863,7 +863,8 @@ function positionPaneTabPopover(tab, popover = null) {
 function paneInfoTabHtml(item = infoItemId, options = {}) {
   // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
+  const status = item === chatItemId && typeof chatStatusMarkerHtml === 'function' ? chatStatusMarkerHtml() : '';
+  return `<span class="pane-tab-core">${status}${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {

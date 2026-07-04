@@ -492,6 +492,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     EventSource: TestEventSource,
     File: TestFile,
     FormData: TestFormData,
+    URL,
     URLSearchParams,
     WebSocket: TestWebSocket,
     __testWebSocketInstances: TestWebSocket.instances,
@@ -995,6 +996,7 @@ globalThis.__layoutTestApi = {
   debugPanelHtmlForTest: debugPanelHtml,
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
+  debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
   debugGraphEventRecordsForTest() {
     return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
       id,
@@ -1060,6 +1062,7 @@ globalThis.__layoutTestApi = {
   bindDebugPanelForTest: bindDebugPanel,
   setDebugSubTabForTest: setDebugSubTab,
   setDebugGraphRangeForTest: setDebugGraphRange,
+  setDebugGraphZoomDomainForTest(startMs, endMs) { jsDebugGraphZoomDomain = {startMs, endMs}; },
   setDebugGraphChartVisibleForTest: setDebugGraphChartVisible,
   clearDebugGraphZoomForTest: clearDebugGraphZoom,
   clearJsDebugEventsForTest: clearJsDebugEvents,
@@ -1156,7 +1159,67 @@ globalThis.__layoutTestApi = {
   layoutTreeKey,
   leafNode,
   yoagentItemId,
+  chatItemId,
   fileExplorerItemId,
+  virtualTabItems,
+  conversationClampSelectionToGraphemesForTest: conversationClampSelectionToGraphemes,
+  conversationInsertAtSelectionForTest: conversationInsertAtSelection,
+  chatNotificationSnippetForTest: chatNotificationSnippet,
+  chatMessageTimestampForTest: chatMessageTimestamp,
+  chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
+  setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
+  debugGraphTimeLabelForTest: debugGraphTimeLabel,
+  debugGraphExactTimeLabelForTest: debugGraphExactTimeLabel,
+  chatEmojiSearchTextForTest: chatEmojiSearchText,
+  chatRecentEmojiForTest: chatRecentEmoji,
+  rememberChatEmojiForTest: rememberChatEmoji,
+  chatMessageHtmlForTest: chatMessageHtml,
+  chatMediaUrlMatchesForTest: chatMediaUrlMatches,
+  chatMediaKindForTest: chatMediaKind,
+  chatMediaItemForTest: chatMediaItemFor,
+  chatMediaUrlForItemForTest: chatMediaUrlForItem,
+  chatMediaActionItemsForTest: chatMediaActionItems,
+  chatAuthorToneAssignmentsForTest: chatAuthorToneAssignments,
+  chatIntroductionHtmlForTest: chatIntroductionHtml,
+  chatIntroductionGreetingKeyForTest: chatIntroductionGreetingKey,
+  chatYoagentQueryForTest: chatYoagentQuery,
+  openChatSearchForTest: openChatSearch,
+  replaceChatTypingForTest: replaceChatTyping,
+  conversationAutosizeTextareaForTest: conversationAutosizeTextarea,
+  chatPanelIsEngagedForTest: chatPanelIsEngaged,
+  chatStatusTonesForTest: chatStatusTones,
+  chatTypingTextForTest: chatTypingText,
+  chatStatusMarkerHtmlForTest: chatStatusMarkerHtml,
+  chatMergeMessagesForTest: chatMergeMessages,
+  loadChatBootstrapForTest: loadChatBootstrap,
+  loadChatDeltaForTest: loadChatDelta,
+  loadOlderChatMessagesForTest: loadOlderChatMessages,
+  chatRequestStateForTest() {
+    return {
+      loaded: chatState.loaded,
+      loading: chatState.loadingRequest !== null,
+      loadingRequest: chatState.loadingRequest ? {...chatState.loadingRequest} : null,
+      requestGeneration: chatState.requestGeneration,
+      olderGeneration: chatState.olderGeneration,
+      contextGeneration: chatState.contextGeneration,
+      messageIds: [...chatState.messages.keys()],
+    };
+  },
+  setChatStateForTest(value = {}) {
+    if (value.loaded !== undefined) chatState.loaded = value.loaded === true;
+    if (value.loading === false) chatState.loadingRequest = null;
+    if (value.requestGeneration !== undefined) chatState.requestGeneration = Number(value.requestGeneration) || 0;
+    if (value.olderGeneration !== undefined) chatState.olderGeneration = Number(value.olderGeneration) || 0;
+    if (value.clientIp !== undefined) chatState.clientIp = String(value.clientIp || '');
+    if (value.contextGeneration !== undefined) chatState.contextGeneration = Number(value.contextGeneration) || 0;
+    if (value.olderCursor !== undefined) chatState.olderCursor = String(value.olderCursor || '');
+    if (value.hasMore !== undefined) chatState.hasMore = value.hasMore === true;
+    if (Array.isArray(value.messages)) chatState.messages = new Map(value.messages.map(message => [Number(message.id), message]));
+    if (Array.isArray(value.typing)) chatState.typing = value.typing;
+    if (Array.isArray(value.unread)) chatState.unread = new Map(value.unread.map(message => [Number(message.id), message]));
+    if (value.acknowledgedTone !== undefined) chatState.acknowledgedTone = String(value.acknowledgedTone || '');
+    if (value.acknowledgementStartedAt !== undefined) chatState.acknowledgementStartedAt = Number(value.acknowledgementStartedAt) || 0;
+  },
   prefsItemId,
   menuTabCommand,
   activateTerminalDetailTabForTest: activateTab,

@@ -1143,8 +1143,7 @@ function applySettingsPayload(payload, options = {}) {
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
-    if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-    if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+    rerenderDateTimeFormatSurfaces();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain

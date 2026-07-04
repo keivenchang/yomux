@@ -22,6 +22,8 @@ from .common import SUMMARY_LOOKBACK_SECONDS
 from .common import auth_setup_required
 from .common import error_payload
 from .common import parse_bool
+from .chat_service import ChatServiceError
+from .chat_store import ChatStoreValidationError
 from .locales import resolve_locale_preference
 from .web import html_page
 from .web import server_string
@@ -394,6 +396,7 @@ def get_home(request: Any, parsed: Any, route: Route) -> None:
         dangerously_yolo=request.server.app.dangerously_yolo,
         share=request.share_bootstrap_payload(share_record) if share_record else None,
         accept_language=getattr(request, "headers", {}).get("Accept-Language", ""),
+        auth_username=request.auth_identity().username,
     )
     compute_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", compute_ms)
@@ -690,6 +693,168 @@ def get_summary(request: Any, parsed: Any, route: Route) -> None:
     qs = parse_qs(parsed.query)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.summary(session))
+
+
+def _chat_write_result(request: Any, operation: Callable[[], dict[str, Any]], *, created: bool = False) -> None:
+    if request.share_token_text():
+        request.reject_forbidden(request.auth_identity(), "authenticated user")
+        return
+    try:
+        payload = operation()
+    except ChatServiceError as error:
+        request.write_json(
+            error_payload(str(error), message_key="common.requestFailed", status=error.status, code=error.code),
+            status=error.status,
+        )
+        return
+    except (ChatStoreValidationError, TypeError, ValueError) as error:
+        request.write_json(
+            error_payload(str(error), message_key="common.requestFailed", status=HTTPStatus.BAD_REQUEST, code="invalid"),
+            status=HTTPStatus.BAD_REQUEST,
+        )
+        return
+    request.write_json(payload, status=HTTPStatus.CREATED if created and payload.get("created") else HTTPStatus.OK)
+
+
+def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    identity = request.auth_identity()
+    client_ip = str(request.client_address[0]) if isinstance(request.client_address, tuple) and request.client_address else ""
+
+    def bootstrap_payload() -> dict[str, Any]:
+        payload = request.server.app.chat_bootstrap(
+            identity.username,
+            str(query_one(qs, "reader_id", "") or ""),
+            str(query_one(qs, "browser_instance_id", "") or ""),
+        )
+        payload["client_ip"] = client_ip
+        return payload
+
+    _chat_write_result(
+        request,
+        bootstrap_payload,
+    )
+
+
+def get_chat_page(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_page(
+            request.auth_identity().username,
+            before=str(query_one(qs, "before", "") or ""),
+            limit=str(query_one(qs, "limit", "50") or "50"),
+        ),
+    )
+
+
+def get_chat_delta(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_delta(
+            request.auth_identity().username,
+            after=str(query_one(qs, "after", "") or ""),
+            limit=str(query_one(qs, "limit", "200") or "200"),
+        ),
+    )
+
+
+def get_chat_context(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_context(
+            request.auth_identity().username,
+            message_id=str(query_one(qs, "message_id", "") or ""),
+            before=str(query_one(qs, "before", "3") or "3"),
+            after=str(query_one(qs, "after", "3") or "3"),
+        ),
+    )
+
+
+def get_chat_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = parse_qs(parsed.query)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_search(
+            request.auth_identity().username,
+            query=str(query_one(qs, "query", "") or ""),
+            cursor=str(query_one(qs, "cursor", "") or ""),
+            limit=str(query_one(qs, "limit", "20") or "20"),
+        ),
+    )
+
+
+def post_chat_send(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    identity = request.auth_identity()
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_send(
+            identity.username,
+            payload,
+            request.request_locale_pref(),
+            sender_ip=str(request.client_address[0]),
+        ),
+        created=True,
+    )
+
+
+def post_chat_yoagent(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    identity = request.auth_identity()
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_yoagent(
+            identity.username,
+            identity.role,
+            payload,
+            request.request_locale_pref(),
+        ),
+        created=True,
+    )
+
+
+def post_chat_typing(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_typing(
+            request.auth_identity().username,
+            payload.get("browser_instance_id"),
+            payload.get("typing") is True,
+        ),
+    )
+
+
+def post_chat_read(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_read(
+            request.auth_identity().username,
+            payload.get("reader_id"),
+            payload.get("message_id"),
+        ),
+    )
 
 
 def get_fs_list(request: Any, parsed: Any, route: Route) -> None:
@@ -1213,6 +1378,18 @@ YOAGENT_ROUTES = (
     Route("POST", "/api/yoagent/reset", "admin", post_yoagent_reset, group="yoagent"),
 )
 
+CHAT_ROUTES = (
+    Route("GET", "/api/chat/bootstrap", "readonly", get_chat_bootstrap, group="chat"),
+    Route("GET", "/api/chat/page", "readonly", get_chat_page, group="chat"),
+    Route("GET", "/api/chat/delta", "readonly", get_chat_delta, group="chat"),
+    Route("GET", "/api/chat/context", "readonly", get_chat_context, group="chat"),
+    Route("GET", "/api/chat/search", "readonly", get_chat_search, group="chat"),
+    Route("POST", "/api/chat/send", "readonly", post_chat_send, body_limit=12 * 1024, group="chat"),
+    Route("POST", "/api/chat/yoagent", "readonly", post_chat_yoagent, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/typing", "readonly", post_chat_typing, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/read", "readonly", post_chat_read, body_limit=4096, group="chat"),
+)
+
 FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/fs/search", "readonly", get_fs_search, group="filesystem"),
@@ -1254,6 +1431,7 @@ ROUTE_GROUPS = {
     "core": CORE_ROUTES,
     "share": SHARE_ROUTES,
     "yoagent": YOAGENT_ROUTES,
+    "chat": CHAT_ROUTES,
     "filesystem": FILESYSTEM_ROUTES,
     "tmux": TMUX_ROUTES,
 }

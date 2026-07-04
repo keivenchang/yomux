@@ -1821,8 +1821,8 @@ function setFocusedPanelItem(item, options = {}) {
   if (alreadyFocused) {
     rememberActivePaneItem(item);
     if (isTmuxSession(item)) lastFocusedTmuxSession = item;
+    dismissNotificationsForTarget(item);
     if (options.userInitiated === true) {
-      if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
       applyUserInitiatedPanelFocus(item, previousItem, options);
     }
     return;
@@ -1831,10 +1831,10 @@ function setFocusedPanelItem(item, options = {}) {
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
+  dismissNotificationsForTarget(item);
   clearPendingFileEditorFocusExcept(item);
   if (isTmuxSession(item)) {
     lastFocusedTmuxSession = item;
-    dismissAttentionAlertsForSession(item);
   }
   updateFocusOnlyChrome();
   sharePublish('focus', {item});
@@ -2917,37 +2917,79 @@ function copyDebug(stage, fields = {}) {
   console.log(`[copy-debug] ${stage} ${parts}`);
 }
 
-function createContextMenuController() {
-  let menu = null;
-  const close = () => {
-    if (!menu) return;
-    menu.remove();
-    menu = null;
+function overlayFocusableElements(overlay) {
+  return Array.from(overlay?.querySelectorAll?.('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+}
+
+function createDismissableOverlayController(options = {}) {
+  let overlay = null;
+  let trigger = null;
+  let removeOnClose = false;
+  const close = (closeOptions = {}) => {
+    if (!overlay) return false;
+    const closed = overlay;
+    const returnTarget = trigger;
+    if (removeOnClose) closed.remove();
+    else closed.hidden = true;
+    overlay = null;
+    trigger = null;
+    removeOnClose = false;
     document.removeEventListener('pointerdown', pointerdown, true);
     document.removeEventListener('keydown', keydown, true);
-    window.removeEventListener('blur', close);
-    scheduleSharePopupLayerPublish({immediate: true});
+    window.removeEventListener('blur', blur);
+    options.onClose?.(closed);
+    if (closeOptions.returnFocus !== false && returnTarget?.isConnected !== false) returnTarget?.focus?.();
+    return true;
   };
   const pointerdown = event => {
-    if (menu?.contains(event.target)) return;
-    close();
+    if (overlay?.contains(event.target) || trigger?.contains?.(event.target)) return;
+    close({returnFocus: false});
   };
   const keydown = event => {
-    if (event.key === 'Escape') close();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== 'Tab' || options.trapFocus !== true) return;
+    const focusable = overlayFocusableElements(overlay);
+    const index = focusable.indexOf(document.activeElement);
+    if (!focusable.length || (!event.shiftKey && index < focusable.length - 1) || (event.shiftKey && index > 0)) return;
+    event.preventDefault();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
   };
+  const blur = () => close({returnFocus: false});
   return {
     close,
-    isOpen: () => Boolean(menu),
-    open(nextMenu, x, y) {
-      close();
-      menu = nextMenu;
-      menu.addEventListener('pointerdown', event => event.stopPropagation());
-      appOverlayRootElement().appendChild(menu);
-      positionContextMenu(menu, x, y);
+    isOpen: () => Boolean(overlay),
+    open(nextOverlay, openOptions = {}) {
+      close({returnFocus: false});
+      overlay = nextOverlay;
+      trigger = openOptions.trigger || null;
+      removeOnClose = openOptions.removeOnClose === true;
+      overlay.hidden = false;
+      overlay.addEventListener('pointerdown', event => event.stopPropagation());
       document.addEventListener('pointerdown', pointerdown, true);
       document.addEventListener('keydown', keydown, true);
-      window.addEventListener('blur', close);
-      scheduleSharePopupLayerPublish();
+      if (openOptions.closeOnBlur !== false) window.addEventListener('blur', blur);
+      options.onOpen?.(overlay);
+      return overlay;
+    },
+  };
+}
+
+function createContextMenuController() {
+  const overlay = createDismissableOverlayController({
+    onOpen: () => scheduleSharePopupLayerPublish(),
+    onClose: () => scheduleSharePopupLayerPublish({immediate: true}),
+  });
+  return {
+    close: overlay.close,
+    isOpen: overlay.isOpen,
+    open(menu, x, y) {
+      appOverlayRootElement().appendChild(menu);
+      positionContextMenu(menu, x, y);
+      overlay.open(menu, {removeOnClose: true});
     },
   };
 }
@@ -3147,6 +3189,33 @@ function closeContextMenus() {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeLinkContextMenu();
+}
+
+function normalizedExternalHttpUrl(value, options = {}) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > Math.max(1, Number(options.maxLength) || 8192)) return '';
+  try {
+    const url = new URL(options.decodeHtmlAmpersands === true ? raw.replace(/&amp;/gi, '&') : raw);
+    if (!['http:', 'https:'].includes(url.protocol.toLowerCase()) || url.username || url.password) return '';
+    return url.href;
+  } catch (_) {
+    return '';
+  }
+}
+
+function triggerExternalUrlDownload(value) {
+  const url = normalizedExternalHttpUrl(value);
+  if (!url || !document.body) return false;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = basenameOf(new URL(url).pathname) || 'download';
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  anchor.hidden = true;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
 }
 
 function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {

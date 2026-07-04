@@ -33,6 +33,7 @@ function applyAgentAvailabilityPayload(payload = {}) {
   return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
+const authUsername = String(bootstrap.authUsername || '');
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
@@ -608,6 +609,7 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
   appearance: 'appearance',
   terminalEditor: 'terminal_editor',
   notifications: 'notifications',
+  chat: 'chat',
   fileExplorer: 'file_explorer',
   uploads: 'uploads',
   performance: 'performance',
@@ -636,6 +638,7 @@ const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
   GitHub: PREFERENCE_SECTION_IDS.github,
   'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
+  'YO!chat': PREFERENCE_SECTION_IDS.chat,
   'YO!share': PREFERENCE_SECTION_IDS.share,
   YOLO: PREFERENCE_SECTION_IDS.yolo,
 });
@@ -852,6 +855,8 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
+const chatItemId = '__chat__';
+function chatTabLabel() { return t('brand.tab.chat'); }
 // Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
@@ -859,11 +864,24 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
+  {itemId: fileExplorerItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
+  {itemId: searchHistoryItemId},
+  {itemId: infoItemId},
+  {itemId: yoagentItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.yoagent},
+  {itemId: debugPaneItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.performance},
+  {itemId: chatItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.chat},
+]);
+const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
+  ...FILE_MENU_PANEL_DEFINITIONS.map(item => item.preferenceSectionId).filter(Boolean),
+  PREFERENCE_SECTION_IDS.share,
+]);
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const imageViewerItemPrefix = 'image:';
+const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
 function urlFlagEnabled(name) {
   try {
@@ -1092,6 +1110,48 @@ const TAB_TYPES = [
     prunePriority: () => 0,
   },
   {
+    key: 'chat',
+    id: chatItemId,
+    aliases: ['chat', 'yochat', 'yo!chat', 'yo-chat', chatItemId],
+    match: item => item === chatItemId,
+    label: () => chatTabLabel(),
+    shortLabel: () => chatTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: chatTabLabel()}),
+    sortRank: 0.2,
+    param: () => 'chat',
+    detail: () => t('menu.file.chat.detail'),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createChatPanel(),
+    renderAttached: () => mountChatPanel(),
+    cleanup: () => clearChatLifecycle({destroy: true, keepalive: true}),
+    relocalize: (_item, panel) => relocalizeChatPanel(panel),
+    focusSearch: (_item, panel) => openChatSearch(panel),
+    className: () => 'chat',
+    icon: 'chat',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: chatTabLabel()}),
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'chat-media',
+    prefix: chatMediaItemPrefix,
+    match: item => typeof item === 'string' && item.startsWith(chatMediaItemPrefix),
+    label: item => chatMediaLabel(chatMediaUrlForItem(item)),
+    shortLabel: () => t('popover.kind.image'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
+    sortRank: 0.21,
+    param: item => item,
+    detail: item => chatMediaUrlForItem(item),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: item => createChatMediaPanel(item),
+    relocalize: (item, panel) => relocalizeChatMediaPanel(panel, item),
+    className: () => 'chat-media',
+    icon: 'image',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('popover.kind.image')}),
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
     key: 'files',
     id: fileExplorerItemId,
     aliases: ['files', fileExplorerItemId],
@@ -1213,6 +1273,8 @@ function tabTypeForParam(value) {
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
+function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
+function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
@@ -1321,8 +1383,11 @@ function applyFileExplorerStaticLabels() {
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
+const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  if (!shareViewMode) items.splice(2, 0, chatItemId);
+  return [...items, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1425,6 +1490,7 @@ let notificationDelivery = {...notificationDeliveryDefaults};
 const sessionStatusRecords = new Map();
 const watchedPrNotificationLastSent = new Map();
 const toastRecords = new Map();
+const browserNotificationsByTarget = new Map();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
@@ -1764,6 +1830,26 @@ function localizedDateTimeFormat(timestampSeconds, options = {}) {
   }
 }
 
+function localizedExactDateTimeFormat(timestampSeconds) {
+  const value = Number(timestampSeconds || 0);
+  if (!value) return '';
+  if (!String(i18nActiveLocale || '').toLowerCase().startsWith('en')) {
+    return localizedDateTimeFormat(value, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
+  const date = new Date(value * 1000);
+  const pad = number => String(number).padStart(2, '0');
+  let hour = date.getHours();
+  let suffix = '';
+  if (normalizeDateTimeHourCycle(dateTimeHourCycle) === '12') {
+    suffix = hour >= 12 ? ' PM' : ' AM';
+    hour = hour % 12 || 12;
+  }
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(hour)}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${suffix}`;
+}
+
 function i18nSetCatalogForTest(locale, catalog) {
   i18nCatalogs.set(locale, catalog || {});
 }
@@ -1866,6 +1952,12 @@ function rerenderForLocale(options = {}) {
   // separate registry below, so adding a surface cannot require another bespoke branch here.
   relocalizeMountedPanels(options);
   localeGlobalSurfaceHooks.forEach(run => run(options));
+}
+
+function rerenderDateTimeFormatSurfaces() {
+  relocalizeMountedPanels({dateTimeFormatChange: true});
+  if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
+  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -3690,8 +3782,8 @@ function setFocusedPanelItem(item, options = {}) {
   if (alreadyFocused) {
     rememberActivePaneItem(item);
     if (isTmuxSession(item)) lastFocusedTmuxSession = item;
+    dismissNotificationsForTarget(item);
     if (options.userInitiated === true) {
-      if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
       applyUserInitiatedPanelFocus(item, previousItem, options);
     }
     return;
@@ -3700,10 +3792,10 @@ function setFocusedPanelItem(item, options = {}) {
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
+  dismissNotificationsForTarget(item);
   clearPendingFileEditorFocusExcept(item);
   if (isTmuxSession(item)) {
     lastFocusedTmuxSession = item;
-    dismissAttentionAlertsForSession(item);
   }
   updateFocusOnlyChrome();
   sharePublish('focus', {item});
@@ -4786,37 +4878,79 @@ function copyDebug(stage, fields = {}) {
   console.log(`[copy-debug] ${stage} ${parts}`);
 }
 
-function createContextMenuController() {
-  let menu = null;
-  const close = () => {
-    if (!menu) return;
-    menu.remove();
-    menu = null;
+function overlayFocusableElements(overlay) {
+  return Array.from(overlay?.querySelectorAll?.('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+}
+
+function createDismissableOverlayController(options = {}) {
+  let overlay = null;
+  let trigger = null;
+  let removeOnClose = false;
+  const close = (closeOptions = {}) => {
+    if (!overlay) return false;
+    const closed = overlay;
+    const returnTarget = trigger;
+    if (removeOnClose) closed.remove();
+    else closed.hidden = true;
+    overlay = null;
+    trigger = null;
+    removeOnClose = false;
     document.removeEventListener('pointerdown', pointerdown, true);
     document.removeEventListener('keydown', keydown, true);
-    window.removeEventListener('blur', close);
-    scheduleSharePopupLayerPublish({immediate: true});
+    window.removeEventListener('blur', blur);
+    options.onClose?.(closed);
+    if (closeOptions.returnFocus !== false && returnTarget?.isConnected !== false) returnTarget?.focus?.();
+    return true;
   };
   const pointerdown = event => {
-    if (menu?.contains(event.target)) return;
-    close();
+    if (overlay?.contains(event.target) || trigger?.contains?.(event.target)) return;
+    close({returnFocus: false});
   };
   const keydown = event => {
-    if (event.key === 'Escape') close();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== 'Tab' || options.trapFocus !== true) return;
+    const focusable = overlayFocusableElements(overlay);
+    const index = focusable.indexOf(document.activeElement);
+    if (!focusable.length || (!event.shiftKey && index < focusable.length - 1) || (event.shiftKey && index > 0)) return;
+    event.preventDefault();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
   };
+  const blur = () => close({returnFocus: false});
   return {
     close,
-    isOpen: () => Boolean(menu),
-    open(nextMenu, x, y) {
-      close();
-      menu = nextMenu;
-      menu.addEventListener('pointerdown', event => event.stopPropagation());
-      appOverlayRootElement().appendChild(menu);
-      positionContextMenu(menu, x, y);
+    isOpen: () => Boolean(overlay),
+    open(nextOverlay, openOptions = {}) {
+      close({returnFocus: false});
+      overlay = nextOverlay;
+      trigger = openOptions.trigger || null;
+      removeOnClose = openOptions.removeOnClose === true;
+      overlay.hidden = false;
+      overlay.addEventListener('pointerdown', event => event.stopPropagation());
       document.addEventListener('pointerdown', pointerdown, true);
       document.addEventListener('keydown', keydown, true);
-      window.addEventListener('blur', close);
-      scheduleSharePopupLayerPublish();
+      if (openOptions.closeOnBlur !== false) window.addEventListener('blur', blur);
+      options.onOpen?.(overlay);
+      return overlay;
+    },
+  };
+}
+
+function createContextMenuController() {
+  const overlay = createDismissableOverlayController({
+    onOpen: () => scheduleSharePopupLayerPublish(),
+    onClose: () => scheduleSharePopupLayerPublish({immediate: true}),
+  });
+  return {
+    close: overlay.close,
+    isOpen: overlay.isOpen,
+    open(menu, x, y) {
+      appOverlayRootElement().appendChild(menu);
+      positionContextMenu(menu, x, y);
+      overlay.open(menu, {removeOnClose: true});
     },
   };
 }
@@ -5016,6 +5150,33 @@ function closeContextMenus() {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeLinkContextMenu();
+}
+
+function normalizedExternalHttpUrl(value, options = {}) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > Math.max(1, Number(options.maxLength) || 8192)) return '';
+  try {
+    const url = new URL(options.decodeHtmlAmpersands === true ? raw.replace(/&amp;/gi, '&') : raw);
+    if (!['http:', 'https:'].includes(url.protocol.toLowerCase()) || url.username || url.password) return '';
+    return url.href;
+  } catch (_) {
+    return '';
+  }
+}
+
+function triggerExternalUrlDownload(value) {
+  const url = normalizedExternalHttpUrl(value);
+  if (!url || !document.body) return false;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = basenameOf(new URL(url).pathname) || 'download';
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  anchor.hidden = true;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
 }
 
 function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
@@ -6966,6 +7127,14 @@ function registerImageViewerLayoutItem(path) {
   return imageViewerItemFor(path);
 }
 
+function registerDynamicVirtualLayoutItem(item) {
+  const text = String(item || '');
+  if (!tabTypeForItem(text)?.prefix) return null;
+  dynamicVirtualLayoutItems.add(text);
+  layoutItems = computeLayoutItems();
+  return text;
+}
+
 function resolveLayoutItem(value) {
   const text = String(value || '');
   if (text === 'changes' || text === '__changes__') {
@@ -6975,6 +7144,7 @@ function resolveLayoutItem(value) {
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
+  if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -9773,16 +9943,30 @@ function shouldNotifyState(state) {
 }
 
 function sendBrowserNotification(title, options = {}) {
-  const icon = options.icon === undefined
+  const targetItem = String(options.targetItem || options.session || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) return null;
+  const {onClick, session, targetItem: _targetItem, url, ...notificationOptions} = options;
+  const icon = notificationOptions.icon === undefined
     ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
     : '';
-  const notification = new Notification(title, icon ? {icon, ...options} : options);
+  const notification = new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions);
+  if (targetItem) {
+    if (!browserNotificationsByTarget.has(targetItem)) browserNotificationsByTarget.set(targetItem, new Set());
+    browserNotificationsByTarget.get(targetItem).add(notification);
+    notification.onclose = () => {
+      const notifications = browserNotificationsByTarget.get(targetItem);
+      notifications?.delete(notification);
+      if (!notifications?.size) browserNotificationsByTarget.delete(targetItem);
+    };
+  }
   notification.onclick = () => {
     window.focus();
-    if (options.session) selectSession(options.session, {userInitiated: true});
+    notification.close?.();
+    if (typeof onClick === 'function') onClick();
+    else if (session) selectSession(session, {userInitiated: true});
     // a watched-PR notification opens the PR (no session to focus); safe blank-target open.
-    else if (options.url) {
-      try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    else if (url) {
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {}
     }
   };
   return notification;
@@ -9930,12 +10114,18 @@ function resumeToastRemoval(id, node, reason) {
 }
 
 function showToast(title, lines, options = {}) {
+  const targetItem = String(options.targetItem || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) {
+    dismissNotificationsForTarget(targetItem);
+    return null;
+  }
   const container = options.container || attentionAlerts;
   if (!container) return null;
   const id = ++attentionAlertSequence;
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  if (targetItem) node.dataset.toastTargetItem = targetItem;
   const bodyNode = ensureToastShell(node, {
     title,
     closeLabel: options.closeLabel,
@@ -10112,6 +10302,12 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
+function notificationTargetIsFocused(item) {
+  const target = String(item || '').trim();
+  if (!target || document.visibilityState !== 'visible' || document.hasFocus?.() !== true) return false;
+  return itemIsActivePaneTab(target) && (focusedPanelItem === target || focusedTerminal === target);
+}
+
 function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
@@ -10245,7 +10441,11 @@ function showAttentionAlert(session, state) {
     attentionToastLine(session, state),
     {
       container: displayToastContainer(session),
-      onClick: () => { void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent); },
+      targetItem: session,
+      onClick: () => {
+        dismissSessionToasts(session);
+        void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent);
+      },
     },
   );
   if (node) {
@@ -10254,13 +10454,24 @@ function showAttentionAlert(session, state) {
   }
 }
 
-function dismissSessionToasts(session, options = {}) {
+function dismissNotificationsForTarget(item, options = {}) {
+  const target = String(item || '').trim();
+  if (!target) return;
   const kind = String(options.kind || '');
   for (const [id, record] of toastRecords.entries()) {
     const node = record.node;
-    if (node.dataset.toastSession !== session) continue;
+    if (node.dataset.toastTargetItem !== target && node.dataset.toastSession !== target) continue;
     if (!kind || node.dataset.toastKind === kind) removeAttentionAlert(id);
   }
+  const notifications = browserNotificationsByTarget.get(target);
+  if (notifications) {
+    for (const notification of [...notifications]) notification.close?.();
+    browserNotificationsByTarget.delete(target);
+  }
+}
+
+function dismissSessionToasts(session, options = {}) {
+  dismissNotificationsForTarget(session, options);
 }
 
 function dismissAttentionAlertsForSession(session) {
@@ -10268,11 +10479,7 @@ function dismissAttentionAlertsForSession(session) {
 }
 
 function attentionAlreadyVisible(session) {
-  if (document.visibilityState !== 'visible') return false;
-  if (!activeSessions.includes(session)) return false;
-  const panel = document.getElementById(panelDomId(session));
-  if (!panel || !panel.isConnected) return false;
-  return focusedPanelItem === session || focusedTerminal === session || activeSessions.length === 1;
+  return notificationTargetIsFocused(session);
 }
 
 function removeAttentionAlert(id) {
@@ -10462,6 +10669,12 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
     : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
+  if (notificationTargetIsFocused(session)) {
+    recordSessionNotificationSent(session, key, now);
+    dismissNotificationsForTarget(session);
+    postEvent(session, 'agent_window_transition_notification_suppressed_visible', '', {agent: target.kind, tone});
+    return false;
+  }
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
   const lastSent = sessionNotificationLastSentAt(session, key);
   if (now - lastSent < throttleMs) return false;
@@ -10471,10 +10684,18 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   const title = t(`notify.working.${descriptor.copyKey}.title`);
   const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
   if (notificationDeliveryEnabled('inApp')) {
-    showToast(title, agentToastTargetLine(session, target, {reason: body}), {
+    const node = showToast(title, agentToastTargetLine(session, target, {reason: body}), {
       container: displayToastContainer(session),
-      onClick: () => { void focusAgentToastTarget(session, target); },
+      targetItem: session,
+      onClick: () => {
+        dismissSessionToasts(session);
+        void focusAgentToastTarget(session, target);
+      },
     });
+    if (node) {
+      node.dataset.toastSession = session;
+      node.dataset.toastKind = 'working-agent-transition';
+    }
   }
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
@@ -10908,11 +11129,9 @@ const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
-  try {
-    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
-  } catch (_) {
-    return new Date().toString();
-  }
+  return localizedDateTimeFormat(Date.now() / 1000, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
 }
 
 function openAboutLinkedIn() {
@@ -11523,6 +11742,20 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
+function fileMenuPanelCommands() {
+  return FILE_MENU_PANEL_DEFINITIONS.map(({itemId}) => {
+    if (itemId === fileExplorerItemId) {
+      return menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
+        checked: itemInLayout(fileExplorerItemId),
+        detail: appShortcutText('B'),
+        iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
+        targetItem: fileExplorerItemId,
+      });
+    }
+    return fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || '');
+  });
+}
+
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const shareSessions = shareSessionsFromLayout();
@@ -11530,7 +11763,6 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
@@ -11541,16 +11773,7 @@ function appMenuTree() {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
-          menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
-            checked: itemInLayout(fileExplorerItemId),
-            detail: appShortcutText('B'),
-            iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
-            targetItem: fileExplorerItemId,
-          }),
-          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
-          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
-          fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
-          debugMenuItem,
+          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
@@ -15136,22 +15359,30 @@ function positionFileImagePreview(anchor, popover, point = null) {
   popover.style.top = `${Math.round(top)}px`;
 }
 
-function openFileImagePreview(anchor, path, entry, point = null) {
+function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   closeFileImagePreview();
   if (!anchor || !document.body) return;
   const popover = document.createElement('div');
-  popover.className = 'file-image-preview-popover';
+  popover.className = ['file-image-preview-popover', options.className || ''].filter(Boolean).join(' ');
   popover.dataset.previewPath = path;
-  const img = document.createElement('img');
-  img.src = rawFileUrl(path);
-  img.alt = entry?.name || basenameOf(path);
-  popover.appendChild(img);
+  const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
+  const media = document.createElement(mediaKind === 'video' ? 'video' : 'img');
+  media.src = options.sourceUrl || rawFileUrl(path);
+  if (mediaKind === 'video') {
+    media.autoplay = true;
+    media.loop = true;
+    media.muted = true;
+    media.playsInline = true;
+  } else {
+    media.alt = entry?.name || basenameOf(path);
+  }
+  popover.appendChild(media);
   appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
 }
 
-function bindFileImagePreview(anchor, path, entry) {
+function bindFileImagePreview(anchor, path, entry, options = {}) {
   if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
   anchor.dataset.imagePreviewBound = 'true';
   let pointer = null;
@@ -15171,7 +15402,7 @@ function bindFileImagePreview(anchor, path, entry) {
     onOpen: event => {
       updatePointer(event);
       fileImagePreviewController = controller;
-      openFileImagePreview(anchor, path, entry, pointer);
+      openFileImagePreview(anchor, path, entry, pointer, options);
     },
     onClose: () => {
       if (fileImagePreviewPopover?.dataset.previewPath === path) closeFileImagePreview({fromController: true});
@@ -17549,7 +17780,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     if (!node?.style) continue;
     if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
-    if (localDelay && localDelay !== delay) node.style.removeProperty('--attention-animation-delay');
+    if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
   }
 }
@@ -19341,6 +19572,7 @@ function openFileOwnerSessionsForPath(path) {
 function removePanelForItem(item) {
   const panel = panelNodes.get(item);
   if (!panel) return;
+  tabTypeForItem(item)?.cleanup?.(item, panel);
   panel.remove();
   panelNodes.delete(item);
 }
@@ -21020,7 +21252,7 @@ function blameAnnotationText(info) {
 
 function blameHoverText(info) {
   const author = info.author || '';
-  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
+  const abs = info.time ? localizedExactDateTimeFormat(info.time) : '';
   const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
   return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
 }
@@ -23411,8 +23643,7 @@ function applySettingsPayload(payload, options = {}) {
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
-    if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-    if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+    rerenderDateTimeFormatSurfaces();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
@@ -25811,6 +26042,7 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (options.userInitiated === true) dismissSessionToasts(session);
   if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
   }
@@ -26918,6 +27150,7 @@ async function killTmuxSession(session) {
 function focusPanel(session, options = {}) {
   const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
+  if (options.userInitiated === true) dismissSessionToasts(session);
   if (options.userInitiated === true || options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }
@@ -31269,7 +31502,8 @@ function positionPaneTabPopover(tab, popover = null) {
 function paneInfoTabHtml(item = infoItemId, options = {}) {
   // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
+  const status = item === chatItemId && typeof chatStatusMarkerHtml === 'function' ? chatStatusMarkerHtml() : '';
+  return `<span class="pane-tab-core">${status}${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -32835,6 +33069,67 @@ function createSearchHistoryPanel() {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Shared conversation markup and text-selection helpers for YO!agent and YO!chat.
+
+function conversationMessageShellHtml(options = {}) {
+  const roleClass = options.self === true ? 'user' : 'assistant';
+  const className = ['conversation-message', roleClass, String(options.className || '')].filter(Boolean).join(' ');
+  const timestamp = String(options.timestampHtml || '');
+  const body = String(options.bodyHtml || '');
+  const extras = String(options.extrasHtml || '');
+  return `<article class="${esc(className)}"${options.attributes ? ` ${options.attributes}` : ''}>
+    <div class="conversation-message-role yoagent-message-role"><span>${esc(options.author || '')}</span>${timestamp}</div>
+    ${body}${extras}
+  </article>`;
+}
+
+function conversationGraphemeBoundaries(text) {
+  const value = String(text || '');
+  if (typeof Intl?.Segmenter !== 'function') return Array.from({length: value.length + 1}, (_item, index) => index);
+  const boundaries = [0];
+  for (const segment of new Intl.Segmenter(i18nActiveLocale, {granularity: 'grapheme'}).segment(value)) {
+    boundaries.push(segment.index + segment.segment.length);
+  }
+  return [...new Set(boundaries)].sort((a, b) => a - b);
+}
+
+function conversationClampSelectionToGraphemes(text, selectionStart, selectionEnd) {
+  const value = String(text || '');
+  const boundaries = conversationGraphemeBoundaries(value);
+  const start = Math.max(0, Math.min(value.length, Number(selectionStart) || 0));
+  const end = Math.max(start, Math.min(value.length, Number(selectionEnd) || start));
+  const clampedStart = boundaries.filter(boundary => boundary <= start).at(-1) ?? 0;
+  const clampedEnd = boundaries.find(boundary => boundary >= end) ?? value.length;
+  return {start: clampedStart, end: clampedEnd};
+}
+
+function conversationInsertAtSelection(input, insertion) {
+  if (!input) return '';
+  const value = String(input.value || '');
+  const selection = conversationClampSelectionToGraphemes(value, input.selectionStart, input.selectionEnd);
+  const inserted = String(insertion || '');
+  input.value = `${value.slice(0, selection.start)}${inserted}${value.slice(selection.end)}`;
+  const caret = selection.start + inserted.length;
+  input.setSelectionRange?.(caret, caret);
+  const inputEvent = typeof Event === 'function' ? new Event('input', {bubbles: true}) : {type: 'input', bubbles: true};
+  input.dispatchEvent?.(inputEvent);
+  input.focus?.();
+  return input.value;
+}
+
+function conversationAutosizeTextarea(textarea, maxHeight = Number.POSITIVE_INFINITY) {
+  if (!textarea) return 0;
+  // Measure content from a collapsed baseline. `auto` can preserve a grid/flex-stretched height
+  // after its pane shrinks, feeding that stale height back into scrollHeight on every resize.
+  textarea.style.height = '0px';
+  const limit = Number.isFinite(Number(maxHeight)) ? Math.max(0, Number(maxHeight)) : Number.POSITIVE_INFINITY;
+  const height = Math.min(textarea.scrollHeight, limit);
+  textarea.style.height = `${height}px`;
+  textarea.style.overflowY = textarea.scrollHeight > limit ? 'auto' : 'hidden';
+  return height;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // YO!info and YO!agent panel shells split from 80_panes_preferences.js.
 
 function setInfoSessionFileLookbackHours(hours, options = {}) {
@@ -33290,19 +33585,10 @@ function activitySummaryLinesHtml(lines, options = {}) {
 function yoagentTimestampText(value) {
   const date = value ? new Date(value) : new Date();
   if (!Number.isFinite(date.getTime())) return '';
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      timeZoneName: 'short',
-    }).format(date);
-  } catch (_) {
-    return date.toLocaleString();
-  }
+  return localizedDateTimeFormat(date.getTime() / 1000, {
+    timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  });
 }
 
 function yoagentMessageResponseMs(message) {
@@ -33502,7 +33788,7 @@ function yoagentMessageStreamItemsHtml(message, key = '') {
   const thinkingActive = yoagentThinkingPreviewActive(message);
   return `<div class="yoagent-message-stream">${items.map((item, index) => {
     if (item.kind === 'assistant') {
-      return `<div class="yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
+      return `<div class="conversation-message-body yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
     }
     return yoagentStreamAuxiliaryItemHtml(item, key, index, {active: thinkingActive});
   }).join('')}</div>`;
@@ -33559,14 +33845,10 @@ function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
     ? t('yoagent.updated.justNow')
     : t('yoagent.updated.wrap', {rel: relativeTimeFormat(seconds)});
   let title = payload?.generated_at || '';
-  try {
-    title = new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      timeZoneName: 'short',
-    }).format(new Date(ts * 1000));
-  } catch (_) {}
+  title = localizedDateTimeFormat(ts, {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }) || title;
   return {text, title};
 }
 
@@ -33622,9 +33904,9 @@ function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
     const output = parts.output
       ? `<div class="yoagent-agent-result-output markdown-body" data-yoagent-markdown>${esc(parts.output)}</div>`
       : '';
-    return `<div class="yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
+    return `<div class="conversation-message-body yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
   }
-  const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+  const bodyClass = roleClass === 'assistant' ? 'conversation-message-body yoagent-message-body markdown-body' : 'conversation-message-body yoagent-message-body';
   const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
   return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
 }
@@ -33650,14 +33932,14 @@ function yoagentChatMessagesHtml() {
     const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
       ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
       : '';
-    return `<div class="${messageClass}">
-      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null)}</div>
-      ${streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
-      ${stoppedState}
-      ${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
-      ${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}
-      ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
-    </div>`;
+    return conversationMessageShellHtml({
+      self: roleClass === 'user',
+      className: messageClass,
+      author: role,
+      timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
+      bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
+      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+    });
   }).join('');
   return `${messageHtml}${startupInfo}`;
 }
@@ -33754,10 +34036,12 @@ function yoagentIntroMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const text = yoagentIntroMessageText(payload);
   if (!text || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-intro-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-intro-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: `<div class="conversation-message-body yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>`,
+  });
 }
 
 function yoagentStartupInfoHtml() {
@@ -34232,10 +34516,12 @@ function yoagentRecentAgentsMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const html = yoagentRecentAgentsHtml(payload);
   if (!html || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-recent-agents-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    ${html}
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-recent-agents-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: html,
+  });
 }
 
 async function loadYoagentConversation(options = {}) {
@@ -34442,14 +34728,14 @@ function yoagentChatHtml() {
   const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
   const submitButton = yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
-    : `<button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
-          <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    : `<button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
+          <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>`;
-  const form = `<form class="yoagent-chat-form" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="yoagent-chat-controls">
+  const form = `<form class="yoagent-chat-form conversation-composer" data-yoagent-chat-form>
+      <input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
+      <div class="conversation-composer-controls yoagent-chat-controls">
         ${yoagentComposerControlsHtml(backendDisabled)}
-        <span class="yoagent-chat-controls-spacer"></span>
+        <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>
         ${submitButton}
       </div>
@@ -34899,6 +35185,1345 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// One global YO!chat timeline. SQLite and the authenticated API remain authoritative.
+
+const chatBrowserInstanceId = (() => {
+  const key = 'yolomux.chat.browserInstance';
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = randomShareViewerId();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return randomShareViewerId();
+  }
+})();
+const chatReaderId = chatBrowserInstanceId;
+const chatIntroductionGreetingKeys = Object.freeze([
+  'chat.intro.greeting.hiThere',
+  'chat.intro.greeting.hello',
+  'chat.intro.greeting.heyThere',
+]);
+const chatRecentEmojiStorageKey = 'yolomux.chat.recentEmoji';
+const chatRecentEmojiLimit = 24;
+const chatMessageMaxBytes = 8 * 1024;
+const chatTypingRefreshMs = 3000;
+const chatRelativeTimeRefreshMs = 5000;
+const chatRelativeTimeLimitSeconds = 4 * 60 * 60;
+const chatTailThresholdPx = 32;
+const chatAuthorToneCount = 10;
+const chatSelfAuthorTone = 2;
+const chatMediaMaxUrlLength = 2048;
+const chatMediaMaxPerMessage = 4;
+const chatExternalUrlPattern = /\bhttps?:\/\/[^\s<>"')\]}]+/gi;
+const chatImageExtensions = new Set(['avif', 'gif', 'jpeg', 'jpg', 'png', 'webp']);
+const chatVideoExtensions = new Set(['m4v', 'mov', 'mp4', 'ogv', 'webm']);
+const chatEmojiCategories = Object.freeze([
+  ['recent', '★'], ['smileys-emotion', '😀'], ['people-body', '👋'], ['animals-nature', '🐻'],
+  ['food-drink', '🍎'], ['travel-places', '🚗'], ['activities', '⚽'], ['objects', '💡'],
+  ['symbols', '❤️'], ['flags', '🏳️'],
+]);
+const chatState = {
+  loaded: false,
+  loadingRequest: null,
+  messages: new Map(),
+  pending: new Map(),
+  unread: new Map(),
+  typing: [],
+  revision: 0,
+  readUpToId: 0,
+  newerCursor: '',
+  olderCursor: '',
+  hasMore: false,
+  olderRequested: false,
+  followTail: true,
+  draft: '',
+  typingActive: false,
+  typingTimer: null,
+  typingExpiryTimer: null,
+  requestGeneration: 0,
+  olderGeneration: 0,
+  contextGeneration: 0,
+  requestController: null,
+  searchGeneration: 0,
+  searchOpen: false,
+  searchVisible: false,
+  searchResults: [],
+  searchCursor: '',
+  searchSnapshot: null,
+  acknowledgedTone: '',
+  acknowledgementStartedAt: 0,
+  acknowledgementTimer: null,
+  notifiedIds: new Set(),
+  emojiCatalogPromise: null,
+  emojiOpen: false,
+  emojiCategory: 'recent',
+  searchQuery: '',
+  olderObserver: null,
+  olderObserverTarget: null,
+  statusSignature: null,
+  timelineSignature: '',
+  lastAnnouncement: '',
+  renderedAnnouncement: '',
+  clientIp: '',
+};
+const chatEmojiOverlayController = createDismissableOverlayController({
+  trapFocus: true,
+  onOpen: () => {
+    chatState.emojiOpen = true;
+    document.querySelector(`#${cssEscape(panelDomId(chatItemId))} [data-chat-emoji-button]`)?.setAttribute('aria-expanded', 'true');
+  },
+  onClose: () => {
+    chatState.emojiOpen = false;
+    document.querySelector(`#${cssEscape(panelDomId(chatItemId))} [data-chat-emoji-button]`)?.setAttribute('aria-expanded', 'false');
+  },
+});
+
+function chatApiPost(path, payload, options = {}) {
+  const keepalive = options.keepalive === true;
+  return apiFetchJson(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload || {}),
+    keepalive,
+  });
+}
+
+function chatRequestOptions() {
+  if (!chatState.requestController || chatState.requestController.signal.aborted) {
+    chatState.requestController = new AbortController();
+  }
+  return {signal: chatState.requestController.signal};
+}
+
+function beginChatLoadingRequest(generationKey) {
+  if (chatState.loadingRequest) return null;
+  const request = {generationKey, generation: ++chatState[generationKey]};
+  chatState.loadingRequest = request;
+  return request;
+}
+
+function finishChatLoadingRequest(request) {
+  if (!request || chatState.loadingRequest !== request) return false;
+  chatState.loadingRequest = null;
+  if (chatState.olderRequested) void loadOlderChatMessages();
+  return true;
+}
+
+function chatPreciseRelativeTimeFormat(secondsAgo) {
+  const seconds = Math.max(0, Number(secondsAgo) || 0);
+  let value;
+  let unit;
+  let style;
+  if (seconds < 1) {
+    value = 0;
+    unit = 'minute';
+    style = 'long';
+  } else if (seconds < 60) {
+    value = Math.ceil(seconds / 5) * 5;
+    unit = 'second';
+    style = 'short';
+  } else if (seconds <= 60 * 60) {
+    value = Math.ceil(seconds / 6) / 10;
+    unit = 'minute';
+    style = 'short';
+  } else if (seconds <= 24 * 60 * 60) {
+    value = Math.ceil(seconds / 360) / 10;
+    unit = 'hour';
+    style = 'long';
+  } else {
+    value = Math.ceil(seconds / 8640) / 10;
+    unit = 'day';
+    style = 'long';
+  }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always', style})
+      .format(-value, unit)
+      .replace(/(\p{L})\./gu, '$1');
+  } catch (_) {
+    return relativeTimeFormat(seconds);
+  }
+}
+
+function chatMessageTimestamp(timestampSeconds, nowSeconds = Date.now() / 1000) {
+  const ageSeconds = Math.max(0, Number(nowSeconds) - Number(timestampSeconds || 0));
+  const relative = chatPreciseRelativeTimeFormat(ageSeconds);
+  if (ageSeconds < chatRelativeTimeLimitSeconds) return relative;
+  const exact = localizedExactDateTimeFormat(timestampSeconds).replace(/ ([AP]M)$/u, '$1');
+  return `${exact} ${relative}`;
+}
+
+function chatOrderedMessages() {
+  return [...chatState.messages.values(), ...chatState.pending.values()].sort((left, right) => {
+    const leftId = Number(left.id) || Number.MAX_SAFE_INTEGER;
+    const rightId = Number(right.id) || Number.MAX_SAFE_INTEGER;
+    if (leftId !== rightId) return leftId - rightId;
+    return Number(left.created_at_utc || 0) - Number(right.created_at_utc || 0);
+  });
+}
+
+function chatMediaUrlMatches(body) {
+  const text = String(body || '');
+  const matches = [];
+  chatExternalUrlPattern.lastIndex = 0;
+  let match;
+  while ((match = chatExternalUrlPattern.exec(text))) {
+    const rawMatch = match[0];
+    const rawUrl = rawMatch.replace(/[.,;:!?]+$/, '');
+    const url = normalizedExternalHttpUrl(rawUrl, {decodeHtmlAmpersands: true, maxLength: chatMediaMaxUrlLength});
+    matches.push({start: match.index, end: match.index + rawMatch.length, rawUrl, trailing: rawMatch.slice(rawUrl.length), url});
+  }
+  return matches;
+}
+
+function chatMediaKind(url) {
+  const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
+  if (!normalized) return '';
+  const parsed = new URL(normalized);
+  const extension = parsed.pathname.split('.').at(-1)?.toLowerCase() || '';
+  if (chatVideoExtensions.has(extension)) return 'video';
+  if (chatImageExtensions.has(extension)) return 'image';
+  return /(?:^|[\/_-])(?:image|images|img|photo|picture|thumb|thumbnail|media)(?:$|[\/_-])/i.test(parsed.pathname)
+    ? 'image'
+    : '';
+}
+
+function chatLinkedTextHtml(body) {
+  const text = String(body || '');
+  const matches = chatMediaUrlMatches(text);
+  if (!matches.length) return esc(text);
+  const parts = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start > cursor) parts.push(esc(text.slice(cursor, match.start)));
+    parts.push(match.url
+      ? `<a class="yochat-external-link" href="${esc(match.url)}" target="_blank" rel="noopener noreferrer">${esc(match.rawUrl)}</a>`
+      : esc(match.rawUrl));
+    if (match.trailing) parts.push(esc(match.trailing));
+    cursor = match.end;
+  }
+  if (cursor < text.length) parts.push(esc(text.slice(cursor)));
+  return parts.join('');
+}
+
+function chatMediaPreviewsHtml(body) {
+  const seen = new Set();
+  const items = [];
+  for (const match of chatMediaUrlMatches(body)) {
+    const kind = chatMediaKind(match.url);
+    if (!kind || seen.has(match.url)) continue;
+    seen.add(match.url);
+    const media = kind === 'video'
+      ? `<video src="${esc(match.url)}" muted loop playsinline preload="metadata"></video>`
+      : `<img src="${esc(match.url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
+    items.push(`<button type="button" class="yochat-media-thumbnail" data-chat-media-url="${esc(match.url)}" data-chat-media-kind="${esc(kind)}" title="${esc(t('contextmenu.openNewTab'))}" aria-label="${esc(`${t('common.open')}: ${chatMediaLabel(match.url)}`)}">${media}</button>`);
+    if (items.length >= chatMediaMaxPerMessage) break;
+  }
+  return items.length ? `<div class="yochat-media-strip">${items.join('')}</div>` : '';
+}
+
+function chatMessageBodyHtml(message) {
+  const markdown = chatMessageIsYoagent(message);
+  const body = String(message.body || '');
+  const bodyHtml = markdown ? esc(body) : `${chatLinkedTextHtml(body)}${chatMediaPreviewsHtml(body)}`;
+  return `<div class="conversation-message-body yoagent-message-body${markdown ? ' markdown-body' : ''}"${markdown ? ' data-yoagent-markdown' : ''}>${bodyHtml}</div>`;
+}
+
+function chatAuthorIdentity(message) {
+  return String(message?.username || '');
+}
+
+function chatMessageIsYoagent(message) {
+  return chatAuthorIdentity(message) === 'YO!agent';
+}
+
+function chatAuthorHash(identity) {
+  let hash = 2166136261;
+  for (const character of String(identity || '')) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function chatAuthorToneAssignments(messages) {
+  const authors = [...new Set((messages || []).map(chatAuthorIdentity).filter(identity => identity && identity !== 'YO!agent'))].sort();
+  const used = new Set();
+  const assignments = new Map();
+  const selfAuthor = String(authUsername || '');
+  if (selfAuthor && authors.includes(selfAuthor)) {
+    assignments.set(selfAuthor, chatSelfAuthorTone);
+    used.add(chatSelfAuthorTone);
+  }
+  for (const author of authors) {
+    if (author === selfAuthor) continue;
+    let tone = chatAuthorHash(author) % chatAuthorToneCount;
+    for (let offset = 0; offset < chatAuthorToneCount && used.has(tone); offset += 1) {
+      tone = (tone + 1) % chatAuthorToneCount;
+    }
+    assignments.set(author, tone);
+    used.add(tone);
+  }
+  return assignments;
+}
+
+function chatMessageMetadataHtml(message, timestamp, options = {}) {
+  const ip = String(message.sender_ip || '').trim();
+  const parts = [];
+  if (options.self === true) parts.push(`<span class="yochat-message-self">${esc(t('chat.message.myself'))}</span>`);
+  const timeHtml = timestamp
+    ? `<time class="conversation-message-time yoagent-message-time" data-chat-created-at="${esc(message.created_at_utc)}" datetime="${esc(new Date(Number(message.created_at_utc) * 1000).toISOString())}">${esc(timestamp)}</time>`
+    : '';
+  if (timeHtml) parts.push(timeHtml);
+  if (ip) parts.push(`<span class="yochat-message-ip">${esc(ip)}</span>`);
+  if (!parts.length) return '';
+  return `<span class="yochat-message-metadata">(${parts.join('<span aria-hidden="true">, </span>')})</span>`;
+}
+
+function chatMessageHtml(message, authorTones = new Map()) {
+  const self = message.pending === true || String(message.username || '') === String(authUsername || '');
+  const state = message.failed ? `<button type="button" class="chat-message-retry" data-chat-retry="${esc(message.client_message_uuid)}">${esc(t('common.retry'))}</button>`
+    : message.pending ? `<span class="chat-message-pending">${esc(t('yoagent.action.state.sending'))}</span>` : '';
+  const timestamp = chatMessageTimestamp(message.created_at_utc);
+  const agentMessage = chatMessageIsYoagent(message);
+  const tone = authorTones.get(chatAuthorIdentity(message));
+  const toneClass = Number.isInteger(tone) ? ` yochat-author-tone-${tone}` : '';
+  return conversationMessageShellHtml({
+    self,
+    className: `yoagent-message yochat-message${agentMessage ? ' yochat-agent-message' : toneClass}${message.pending ? ' pending' : ''}${message.failed ? ' failed' : ''}`,
+    author: message.username,
+    timestampHtml: chatMessageMetadataHtml(message, timestamp, {self}),
+    bodyHtml: chatMessageBodyHtml(message),
+    extrasHtml: state,
+    attributes: `data-chat-message-id="${esc(message.id)}"`,
+  });
+}
+
+function chatTypingParticipantNames() {
+  return [...new Set(chatState.typing.map(item => String(item.username || '')).filter(Boolean))];
+}
+
+function chatTypingText() {
+  const names = chatTypingParticipantNames();
+  if (!names.length) return '';
+  if (names.length === 1) return t('chat.typing.one', {name: names[0]});
+  if (names.length === 2) return t('chat.typing.two', {first: names[0], second: names[1]});
+  return t('chat.typing.many', {names: chatTypingNamesText(names)});
+}
+
+function chatTypingNamesText(names) {
+  const participants = (Array.isArray(names) ? names : []).map(String).filter(Boolean);
+  if (String(i18nActiveLocale || '').toLowerCase().startsWith('en')) {
+    return `${participants.slice(0, -1).join(', ')}, & ${participants.at(-1)}`;
+  }
+  try {
+    return new Intl.ListFormat(i18nActiveLocale, {style: 'long', type: 'conjunction'}).format(participants);
+  } catch (_) {
+    return participants.join(', ');
+  }
+}
+
+function chatStatusTones() {
+  const tones = [];
+  if (chatState.unread.size) {
+    tones.push([...chatState.unread.values()].some(message => message.is_question) ? 'attention' : 'cooldown');
+  }
+  if (chatTypingParticipantNames().length) tones.push(STATE_KEY.working);
+  return tones;
+}
+
+function chatStatusMarkerHtml() {
+  const tones = chatStatusTones();
+  const typing = tones.includes(STATE_KEY.working);
+  if (chatState.acknowledgedTone) {
+    const elapsed = Math.max(0, Date.now() - chatState.acknowledgementStartedAt);
+    const acknowledged = agentWindowStatusDotHtml({
+      state: chatState.acknowledgedTone,
+      icon: '●',
+      label: t('chat.status.acknowledged'),
+      acknowledging: true,
+      acknowledgementDurationMs: agentStatusPulsePeriodMs,
+      acknowledgementElapsedMs: elapsed,
+    }, {label: t('chat.status.acknowledged')});
+    const green = typing ? agentWindowStatusDotHtmlForTone(STATE_KEY.working, {label: t('chat.status.typing'), pulse: true}) : '';
+    return `<span class="session-agent-activity-marker chat-status-marker">${acknowledged}${green}</span>`;
+  }
+  if (!tones.length) return '';
+  const primary = tones[0];
+  const label = primary === 'attention' ? t('chat.status.question') : primary === 'cooldown' ? t('chat.status.unread') : t('chat.status.typing');
+  const item = {
+    state: primary,
+    icon: '●',
+    label,
+    aggregateTones: tones,
+    allAggregateTones: tones,
+    pulseActive: true,
+    transitionPulseActive: true,
+  };
+  return `<span class="session-agent-activity-marker chat-status-marker">${agentWindowStatusDotHtml(item, {label})}</span>`;
+}
+
+function renderChatStatus() {
+  const signature = chatStatusMarkerHtml();
+  if (signature === chatState.statusSignature) return false;
+  chatState.statusSignature = signature;
+  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
+  return true;
+}
+
+function renderChatPanel(options = {}) {
+  const panel = document.getElementById(panelDomId(chatItemId));
+  if (!panel) return;
+  const timeline = panel.querySelector('[data-chat-timeline]');
+  if (!timeline) return;
+  const previousScrollTop = timeline.scrollTop;
+  const previousBottom = timeline.scrollHeight - timeline.scrollTop;
+  const wasAtTail = chatTimelineIsNearBottom(timeline);
+  const shouldFollowTail = options.prepend !== true && (options.scrollBottom === true || chatState.followTail || wasAtTail);
+  const messages = chatOrderedMessages();
+  const authorTones = chatAuthorToneAssignments([...messages, {username: authUsername}]);
+  const composer = panel.querySelector('[data-chat-form]');
+  const composerTone = authorTones.get(String(authUsername || ''));
+  for (let index = 0; index < chatAuthorToneCount; index += 1) composer?.classList.remove(`yochat-author-tone-${index}`);
+  if (Number.isInteger(composerTone)) composer?.classList.add(`yochat-author-tone-${composerTone}`);
+  const timelineSignature = JSON.stringify(messages.map(message => [message.id, message.client_message_uuid, message.pending === true, message.failed === true, message.username, message.sender_ip, message.created_at_utc, message.body]));
+  if (timelineSignature !== chatState.timelineSignature) {
+    const timelineBody = `${chatIntroductionHtml()}${messages.map(message => chatMessageHtml(message, authorTones)).join('')}`;
+    timeline.innerHTML = `<div class="chat-history-sentry" data-chat-history-sentry aria-hidden="true"></div>${timelineBody}`;
+    chatState.timelineSignature = timelineSignature;
+    if (options.prepend === true) {
+      chatState.followTail = false;
+      timeline.scrollTop = Math.max(0, timeline.scrollHeight - previousBottom);
+    } else if (shouldFollowTail) {
+      chatState.followTail = true;
+      timeline.scrollTop = timeline.scrollHeight;
+    } else {
+      timeline.scrollTop = previousScrollTop;
+    }
+  }
+  renderConversationMessageMarkdown(panel);
+  bindChatMediaPreviews(panel);
+  refreshChatRelativeTimes(panel);
+  const typingNode = panel.querySelector('[data-chat-typing]');
+  if (typingNode) {
+    const text = chatTypingText();
+    if (typingNode.dataset.chatTypingText !== text) {
+      typingNode.dataset.chatTypingText = text;
+      typingNode.innerHTML = text ? textWithMovingEllipsisHtml(text, 'chat-typing-dots') : '';
+    }
+    typingNode.hidden = !text;
+  }
+  if (shouldFollowTail) timeline.scrollTop = timeline.scrollHeight;
+  const liveNode = panel.querySelector('[data-chat-live]');
+  if (liveNode && chatState.lastAnnouncement !== chatState.renderedAnnouncement) {
+    liveNode.textContent = chatState.lastAnnouncement;
+    chatState.renderedAnnouncement = chatState.lastAnnouncement;
+  }
+  const searchBar = panel.querySelector('[data-chat-search-bar]');
+  if (searchBar) searchBar.hidden = !chatState.searchVisible;
+  syncChatTailState(panel, timeline);
+  renderChatSearchResults(panel);
+  syncChatHistoryObserver(panel);
+  renderChatStatus();
+}
+
+function chatTimelineIsNearBottom(timeline) {
+  if (!timeline) return true;
+  return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= chatTailThresholdPx;
+}
+
+function syncChatTailState(panel, timeline = panel?.querySelector('[data-chat-timeline]')) {
+  const atTail = chatTimelineIsNearBottom(timeline);
+  chatState.followTail = atTail;
+  const newMessages = panel?.querySelector('[data-chat-new-messages]');
+  if (newMessages) newMessages.hidden = chatState.unread.size === 0 || atTail;
+  return atTail;
+}
+
+function chatScrollTimelineToBottom(panel = document.getElementById(panelDomId(chatItemId))) {
+  const timeline = panel?.querySelector('[data-chat-timeline]');
+  if (!timeline) return false;
+  timeline.scrollTop = timeline.scrollHeight;
+  syncChatTailState(panel, timeline);
+  requestAnimationFrame(() => syncChatTailState(panel, timeline));
+  return true;
+}
+
+function refreshChatRelativeTimes(panel = document.getElementById(panelDomId(chatItemId)), nowSeconds = Date.now() / 1000) {
+  if (!panel) return 0;
+  let updated = 0;
+  panel.querySelectorAll('[data-chat-created-at]').forEach(node => {
+    const next = chatMessageTimestamp(Number(node.dataset.chatCreatedAt), nowSeconds);
+    if (node.textContent === next) return;
+    node.textContent = next;
+    updated += 1;
+  });
+  return updated;
+}
+
+function chatMediaItemFor(url) {
+  const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
+  return normalized ? `${chatMediaItemPrefix}${encodeURIComponent(normalized)}` : '';
+}
+
+function chatMediaUrlForItem(item) {
+  const text = String(item || '');
+  if (!text.startsWith(chatMediaItemPrefix)) return '';
+  return normalizedExternalHttpUrl(safeDecodeURIComponent(text.slice(chatMediaItemPrefix.length)), {maxLength: chatMediaMaxUrlLength});
+}
+
+function chatMediaLabel(url) {
+  const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
+  if (!normalized) return t('popover.kind.image');
+  const parsed = new URL(normalized);
+  const basename = safeDecodeURIComponent(parsed.pathname.split('/').filter(Boolean).at(-1) || '');
+  return basename || parsed.hostname || t('popover.kind.image');
+}
+
+function chatMediaElementHtml(url, options = {}) {
+  const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
+  if (!normalized) return '';
+  if (chatMediaKind(normalized) === 'video') {
+    return `<video src="${esc(normalized)}"${options.controls === true ? ' controls' : ''} muted loop playsinline preload="metadata"></video>`;
+  }
+  return `<img src="${esc(normalized)}" alt="${esc(chatMediaLabel(normalized))}" referrerpolicy="no-referrer">`;
+}
+
+function openChatMediaTab(url) {
+  const item = resolveLayoutItem(chatMediaItemFor(url));
+  if (!item) return false;
+  selectSession(item, {userInitiated: true});
+  return true;
+}
+
+function chatMediaActionItems(url) {
+  const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
+  if (!normalized) return [];
+  return [
+    {id: 'tab', label: t('contextmenu.openNewTab'), run: () => openChatMediaTab(normalized)},
+    {id: 'browser', label: t('contextmenu.openUrl'), run: () => window.open(normalized, '_blank', 'noopener,noreferrer')},
+    {id: 'copy', label: t('contextmenu.copyUrl'), run: () => copyTextToClipboard(normalized)},
+    {id: 'download', label: t('common.download'), run: () => triggerExternalUrlDownload(normalized)},
+  ];
+}
+
+function runChatMediaAction(url, actionId) {
+  const action = chatMediaActionItems(url).find(item => item.id === String(actionId || ''));
+  if (!action) return false;
+  action.run();
+  return true;
+}
+
+function showChatMediaActions(anchor, x = null, y = null) {
+  const url = normalizedExternalHttpUrl(anchor?.dataset?.chatMediaUrl, {maxLength: chatMediaMaxUrlLength});
+  if (!url) return false;
+  closeContextMenus();
+  closeOtherSessionPopovers(null);
+  const rect = anchor.getBoundingClientRect();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu link-context-menu yochat-media-context-menu';
+  menu.setAttribute('role', 'menu');
+  for (const action of chatMediaActionItems(url)) {
+    appendContextMenuButton(menu, action.label, action.run, closeLinkContextMenu);
+  }
+  linkContextMenu.open(menu, Number.isFinite(x) ? x : rect.left, Number.isFinite(y) ? y : rect.bottom);
+  return true;
+}
+
+function bindChatMediaPreviews(panel = document.getElementById(panelDomId(chatItemId))) {
+  if (!panel) return 0;
+  const thumbnails = panel.querySelectorAll('[data-chat-media-url]');
+  thumbnails.forEach(thumbnail => {
+    const url = normalizedExternalHttpUrl(thumbnail.dataset.chatMediaUrl, {maxLength: chatMediaMaxUrlLength});
+    if (!url) return;
+    bindFileImagePreview(thumbnail, url, {name: chatMediaLabel(url)}, {
+      sourceUrl: url,
+      mediaKind: thumbnail.dataset.chatMediaKind,
+      className: 'yochat-media-preview-popover',
+    });
+  });
+  return thumbnails.length;
+}
+
+function chatMediaPanelBodyHtml(url) {
+  return `<div class="yochat-media-panel-content">
+    <div class="yochat-media-panel-stage">${chatMediaElementHtml(url, {controls: true})}</div>
+    <div class="yochat-media-panel-actions">${chatMediaActionItems(url).slice(1).map(action => `<button type="button" data-chat-media-action="${esc(action.id)}">${esc(action.label)}</button>`).join('')}</div>
+    <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>
+  </div>`;
+}
+
+function createChatMediaPanel(item) {
+  const url = chatMediaUrlForItem(item);
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel chat-media-panel';
+  panel.id = panelDomId(item);
+  panel.dataset.chatMediaUrl = url;
+  panel.innerHTML = `<div class="panel-head">
+      ${virtualPanelControlsHtml(item)}
+      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
+    </div>
+    <div class="info-pane panel-overlay-root yochat-media-pane">${chatMediaPanelBodyHtml(url)}</div>`;
+  bindPanelShell(panel, item);
+  installLinkContextMenu(panel);
+  panel.addEventListener('click', event => {
+    const action = event.target.closest('[data-chat-media-action]');
+    if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
+  });
+  return panel;
+}
+
+function relocalizeChatMediaPanel(panel, item) {
+  if (!panel) return false;
+  const url = chatMediaUrlForItem(item);
+  relocalizeVirtualPanelChrome(panel, chatMediaLabel(url));
+  const body = panel.querySelector('.yochat-media-pane');
+  if (body) body.innerHTML = chatMediaPanelBodyHtml(url);
+  return true;
+}
+
+function chatIntroductionHtml() {
+  const greeting = t(chatIntroductionGreetingKey());
+  return conversationMessageShellHtml({
+    self: false,
+    className: 'yoagent-message yochat-message yochat-introduction',
+    author: yoagentTabLabel(),
+    bodyHtml: `<div class="conversation-message-body yoagent-message-body markdown-body" data-yoagent-markdown>${esc(`${greeting} ${t('chat.intro.chat')}\n\n${t('chat.intro.yoagent')}`)}</div>`,
+  });
+}
+
+function chatIntroductionGreetingKey(browserInstanceId = chatBrowserInstanceId) {
+  return chatIntroductionGreetingKeys[chatAuthorHash(browserInstanceId) % chatIntroductionGreetingKeys.length];
+}
+
+function replaceChatTyping(typing) {
+  chatState.typing = (Array.isArray(typing) ? typing : []).filter(item => Number(item?.expires_at_utc) > Date.now() / 1000);
+  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
+  chatState.typingExpiryTimer = null;
+  const earliest = Math.min(...chatState.typing.map(item => Number(item.expires_at_utc)).filter(Number.isFinite));
+  if (!Number.isFinite(earliest)) return;
+  chatState.typingExpiryTimer = setTimeout(() => {
+    chatState.typingExpiryTimer = null;
+    replaceChatTyping(chatState.typing);
+    renderChatPanel();
+    loadChatBootstrap({incoming: false});
+  }, Math.max(0, (earliest * 1000) - Date.now()) + 20);
+}
+
+function chatMergeMessages(messages, options = {}) {
+  let changed = false;
+  for (const raw of Array.isArray(messages) ? messages : []) {
+    const message = raw && typeof raw === 'object' ? {...raw} : null;
+    if (!message || !Number.isFinite(Number(message.id))) continue;
+    const id = Number(message.id);
+    message.id = id;
+    if (!chatState.messages.has(id)) changed = true;
+    chatState.messages.set(id, message);
+    chatState.pending.delete(String(message.client_message_uuid || ''));
+    if (String(message.username || '') === String(authUsername || '') && message.sender_ip) {
+      chatState.clientIp = String(message.sender_ip);
+    }
+    chatState.revision = Math.max(chatState.revision, id);
+    const fromThisInstance = message.sender_instance_id === chatBrowserInstanceId;
+    if (options.incoming === true && fromThisInstance && id > chatState.readUpToId) chatAdvanceReadCursor(id);
+    if (options.incoming === true && !fromThisInstance) {
+      if (chatState.acknowledgementTimer) {
+        clearTimeout(chatState.acknowledgementTimer);
+        chatState.acknowledgementTimer = null;
+      }
+      chatState.acknowledgedTone = '';
+      chatState.unread.set(id, message);
+      chatState.lastAnnouncement = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+      maybeNotifyChatMessage(message);
+    }
+  }
+  return changed;
+}
+
+async function loadChatBootstrap(options = {}) {
+  if (shareViewMode || !authUsername || chatState.loadingRequest) return false;
+  const request = beginChatLoadingRequest('requestGeneration');
+  try {
+    const params = new URLSearchParams({reader_id: chatReaderId, browser_instance_id: chatBrowserInstanceId});
+    const payload = await apiFetchJson(`/api/chat/bootstrap?${params}`, chatRequestOptions());
+    if (request.generation !== chatState.requestGeneration) return false;
+    const wasLoaded = chatState.loaded;
+    chatState.loaded = true;
+    chatState.revision = Math.max(chatState.revision, Number(payload.revision) || 0);
+    chatState.readUpToId = Math.max(chatState.readUpToId, Number(payload.read_up_to_id) || 0);
+    chatState.newerCursor = String(payload.newer_cursor || chatState.newerCursor);
+    chatState.olderCursor = String(payload.older_cursor || '');
+    chatState.hasMore = payload.has_more_older === true;
+    chatState.clientIp = String(payload.client_ip || chatState.clientIp || '');
+    replaceChatTyping(payload.typing);
+    chatMergeMessages(payload.messages, {incoming: wasLoaded || options.incoming === true});
+    renderChatPanel({scrollBottom: !wasLoaded});
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('common.requestFailed'));
+    return false;
+  } finally {
+    finishChatLoadingRequest(request);
+  }
+}
+
+async function loadOlderChatMessages() {
+  if (!chatState.olderCursor || !chatState.hasMore) {
+    chatState.olderRequested = false;
+    return false;
+  }
+  if (chatState.loadingRequest) return false;
+  chatState.olderRequested = false;
+  const request = beginChatLoadingRequest('olderGeneration');
+  try {
+    const params = new URLSearchParams({before: chatState.olderCursor, limit: '50'});
+    const payload = await apiFetchJson(`/api/chat/page?${params}`, chatRequestOptions());
+    if (request.generation !== chatState.olderGeneration) return false;
+    chatMergeMessages(payload.messages);
+    chatState.olderCursor = String(payload.older_cursor || '');
+    chatState.hasMore = payload.has_more === true;
+    renderChatPanel({prepend: true});
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('common.requestFailed'));
+    return false;
+  } finally {
+    finishChatLoadingRequest(request);
+  }
+}
+
+async function loadChatDelta() {
+  if (!chatState.loaded) return loadChatBootstrap({incoming: true});
+  const generation = ++chatState.requestGeneration;
+  const params = new URLSearchParams({after: chatState.newerCursor, limit: '200'});
+  try {
+    const payload = await apiFetchJson(`/api/chat/delta?${params}`, chatRequestOptions());
+    if (generation !== chatState.requestGeneration) return false;
+    chatState.newerCursor = String(payload.newer_cursor || chatState.newerCursor);
+    chatMergeMessages(payload.messages, {incoming: true});
+    renderChatPanel();
+    return true;
+  } catch (error) {
+    console.warn('YO!chat delta refresh failed', error);
+    return false;
+  }
+}
+
+function chatPanelIsEngaged() {
+  return notificationTargetIsFocused(chatItemId);
+}
+
+function chatNotificationSnippet(body, limit = 80) {
+  const segments = typeof Intl?.Segmenter === 'function'
+    ? [...new Intl.Segmenter(i18nActiveLocale, {granularity: 'grapheme'}).segment(String(body || ''))].map(item => item.segment)
+    : Array.from(String(body || ''));
+  return `${segments.slice(0, limit).join('')}${segments.length > limit ? '…' : ''}`;
+}
+
+function openChatNotification(messageId) {
+  selectSession(chatItemId, {userInitiated: true}).then(() => openChatMessageContext(messageId));
+}
+
+function maybeNotifyChatMessage(message) {
+  const id = Number(message?.id) || 0;
+  if (!id || chatState.notifiedIds.has(id) || message.sender_instance_id === chatBrowserInstanceId || chatPanelIsEngaged()) return false;
+  chatState.notifiedIds.add(id);
+  const body = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+  const onClick = () => openChatNotification(id);
+  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), [body], {targetItem: chatItemId, onClick});
+  if (notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
+    sendBrowserNotification(chatTabLabel(), {body, tag: `yolomux:chat:${id}`, targetItem: chatItemId, onClick});
+  }
+  return true;
+}
+
+async function chatAdvanceReadCursor(messageId) {
+  const newest = Number(messageId) || 0;
+  if (!newest || newest <= chatState.readUpToId) return false;
+  const previous = chatState.readUpToId;
+  chatState.readUpToId = newest;
+  try {
+    const payload = await chatApiPost('/api/chat/read', {reader_id: chatReaderId, message_id: newest});
+    chatState.readUpToId = Math.max(chatState.readUpToId, Number(payload.read_up_to_id) || newest);
+    return true;
+  } catch (error) {
+    if (chatState.readUpToId === newest) chatState.readUpToId = previous;
+    console.warn('YO!chat read acknowledgement failed', error);
+    return false;
+  }
+}
+
+async function chatAcknowledge() {
+  if (!chatState.unread.size) return false;
+  const newest = Math.max(...chatState.unread.keys());
+  const tone = [...chatState.unread.values()].some(message => message.is_question) ? 'attention' : 'cooldown';
+  chatState.unread.clear();
+  chatState.acknowledgedTone = tone;
+  chatState.acknowledgementStartedAt = Date.now();
+  if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
+  chatState.acknowledgementTimer = setTimeout(() => {
+    chatState.acknowledgedTone = '';
+    chatState.acknowledgementTimer = null;
+    renderChatStatus();
+  }, agentStatusPulsePeriodMs);
+  renderChatStatus();
+  return chatAdvanceReadCursor(newest);
+}
+
+function setChatTyping(active, options = {}) {
+  const next = active === true;
+  if (chatState.typingTimer) {
+    clearTimeout(chatState.typingTimer);
+    chatState.typingTimer = null;
+  }
+  if (next === chatState.typingActive && !options.heartbeat) return;
+  chatState.typingActive = next;
+  chatApiPost('/api/chat/typing', {browser_instance_id: chatBrowserInstanceId, typing: next}, {keepalive: options.keepalive}).catch(() => {});
+  if (next) {
+    chatState.typingTimer = setTimeout(() => setChatTyping(true, {heartbeat: true}), chatTypingRefreshMs);
+  }
+}
+
+function chatYoagentQuery(body) {
+  const match = String(body || '').trim().match(/^\/yo\s+([\s\S]+)$/);
+  return match?.[1]?.trim() || '';
+}
+
+async function requestChatYoagent(sourceMessage) {
+  if (!chatYoagentQuery(sourceMessage?.body)) return false;
+  try {
+    const payload = await chatApiPost('/api/chat/yoagent', {
+      browser_instance_id: chatBrowserInstanceId,
+      message_id: sourceMessage.id,
+    });
+    chatMergeMessages([payload.message]);
+    renderChatPanel({scrollBottom: chatState.followTail});
+    await chatAdvanceReadCursor(payload.message?.id);
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('common.requestFailed'));
+    return false;
+  }
+}
+
+async function sendChatPending(message) {
+  message.pending = true;
+  message.failed = false;
+  chatState.pending.set(message.client_message_uuid, message);
+  renderChatPanel({scrollBottom: true});
+  try {
+    const payload = await chatApiPost('/api/chat/send', {
+      browser_instance_id: chatBrowserInstanceId,
+      client_message_uuid: message.client_message_uuid,
+      body: message.body,
+    });
+    chatState.pending.delete(message.client_message_uuid);
+    chatMergeMessages([payload.message]);
+    chatState.revision = Math.max(chatState.revision, Number(payload.revision) || 0);
+    renderChatPanel({scrollBottom: true});
+    await chatAdvanceReadCursor(payload.message?.id);
+    await loadChatBootstrap();
+    if (chatYoagentQuery(payload.message?.body)) requestChatYoagent(payload.message);
+    return true;
+  } catch (error) {
+    message.failed = true;
+    message.pending = false;
+    chatState.pending.set(message.client_message_uuid, message);
+    renderChatPanel();
+    return false;
+  }
+}
+
+function submitChatDraft() {
+  const body = String(chatState.draft || '');
+  if (!body) return false;
+  if (new TextEncoder().encode(body).length > chatMessageMaxBytes) {
+    statusErr(localizedHtml('chat.error.tooLarge'));
+    return false;
+  }
+  const uuid = randomShareViewerId();
+  const message = {
+    id: `pending:${uuid}`,
+    created_at_utc: Date.now() / 1000,
+    username: authUsername,
+    sender_ip: chatState.clientIp,
+    sender_instance_id: chatBrowserInstanceId,
+    client_message_uuid: uuid,
+    body,
+    is_question: false,
+  };
+  chatState.draft = '';
+  const input = document.querySelector(`#${cssEscape(panelDomId(chatItemId))} [data-chat-input]`);
+  if (input) input.value = '';
+  setChatTyping(false);
+  sendChatPending(message);
+  return true;
+}
+
+function loadChatEmojiCatalog() {
+  if (Array.isArray(globalThis.YOLOMUX_EMOJI_DATA)) return Promise.resolve(globalThis.YOLOMUX_EMOJI_DATA);
+  if (chatState.emojiCatalogPromise) return chatState.emojiCatalogPromise;
+  chatState.emojiCatalogPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = '/static/emoji-data.js';
+    script.onload = () => resolve(Array.isArray(globalThis.YOLOMUX_EMOJI_DATA) ? globalThis.YOLOMUX_EMOJI_DATA : []);
+    script.onerror = () => reject(new Error(t('common.requestFailed')));
+    document.head.appendChild(script);
+  });
+  return chatState.emojiCatalogPromise;
+}
+
+function chatRecentEmoji() {
+  try {
+    const stored = JSON.parse(storageGet(chatRecentEmojiStorageKey, '[]'));
+    return Array.isArray(stored) ? stored.map(String).slice(0, chatRecentEmojiLimit) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function rememberChatEmoji(glyph) {
+  const recent = [String(glyph), ...chatRecentEmoji().filter(item => item !== glyph)].slice(0, chatRecentEmojiLimit);
+  storageSet(chatRecentEmojiStorageKey, JSON.stringify(recent));
+}
+
+function chatEmojiSearchText(item) {
+  const localized = item.names?.[i18nActiveLocale] || item.names?.[i18nFallbackLocale] || '';
+  const keywords = item.keywords?.[i18nActiveLocale] || item.keywords?.[i18nFallbackLocale] || [];
+  return [item.emoji, localized, ...keywords].join(' ').toLocaleLowerCase(i18nActiveLocale);
+}
+
+function renderChatEmojiGrid(panel, catalog, query = '') {
+  const grid = panel?.querySelector('[data-chat-emoji-grid]');
+  if (!grid) return;
+  const needle = String(query || '').trim().toLocaleLowerCase(i18nActiveLocale);
+  const recent = chatRecentEmoji();
+  const ordered = [...recent.map(glyph => catalog.find(item => item.emoji === glyph)).filter(Boolean), ...catalog.filter(item => !recent.includes(item.emoji))];
+  const filtered = ordered.filter(item => {
+    if (needle) return chatEmojiSearchText(item).includes(needle);
+    if (chatState.emojiCategory === 'recent') return recent.includes(item.emoji);
+    return item.category === chatState.emojiCategory || (chatState.emojiCategory === 'people-body' && item.category === 'component');
+  }).slice(0, 240);
+  grid.innerHTML = filtered.map((item, index) => `<button type="button" role="gridcell" tabindex="${index === 0 ? '0' : '-1'}" data-chat-emoji="${esc(item.emoji)}" aria-label="${esc(item.names?.[i18nActiveLocale] || item.names?.en || item.emoji)}">${esc(item.emoji)}</button>`).join('')
+    || `<div class="chat-emoji-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
+}
+
+async function openChatEmojiPicker() {
+  const panel = document.getElementById(panelDomId(chatItemId));
+  const picker = panel?.querySelector('[data-chat-emoji-picker]');
+  if (!picker) return false;
+  const catalog = await loadChatEmojiCatalog();
+  if (!chatRecentEmoji().length && chatState.emojiCategory === 'recent') chatState.emojiCategory = 'smileys-emotion';
+  chatEmojiOverlayController.open(picker, {trigger: panel.querySelector('[data-chat-emoji-button]'), closeOnBlur: false});
+  const search = picker.querySelector('[data-chat-emoji-search]');
+  renderChatEmojiGrid(panel, catalog, search?.value || '');
+  search?.focus();
+  return true;
+}
+
+function closeChatEmojiPicker(options = {}) {
+  chatEmojiOverlayController.close({returnFocus: options.returnFocus !== false});
+}
+
+function insertChatEmoji(glyph) {
+  const input = document.querySelector(`#${cssEscape(panelDomId(chatItemId))} [data-chat-input]`);
+  conversationInsertAtSelection(input, glyph);
+  rememberChatEmoji(glyph);
+}
+
+function chatEmojiGridMove(grid, current, key) {
+  const cells = [...grid.querySelectorAll('[data-chat-emoji]')];
+  const index = Math.max(0, cells.indexOf(current));
+  const columns = Math.max(1, Math.round(grid.clientWidth / Math.max(1, current.getBoundingClientRect().width)));
+  const inlineDirection = getComputedStyle(grid).direction === 'rtl' ? -1 : 1;
+  const delta = {ArrowLeft: -inlineDirection, ArrowRight: inlineDirection, ArrowUp: -columns, ArrowDown: columns}[key] || 0;
+  const target = cells[Math.max(0, Math.min(cells.length - 1, index + delta))];
+  if (!target) return false;
+  cells.forEach(cell => { cell.tabIndex = cell === target ? 0 : -1; });
+  target.focus();
+  return true;
+}
+
+function chatEmojiCategoriesHtml() {
+  return chatEmojiCategories.map(([category, glyph]) => {
+    const label = category === 'recent' ? t('palette.group.recent') : t(`chat.emoji.category.${category}`);
+    return `<button type="button" data-chat-emoji-category="${esc(category)}" class="${category === chatState.emojiCategory ? 'active' : ''}" aria-pressed="${category === chatState.emojiCategory ? 'true' : 'false'}" title="${esc(label)}" aria-label="${esc(label)}">${esc(glyph)}</button>`;
+  }).join('');
+}
+
+function chatSearchResultsHtml() {
+  if (!chatState.searchOpen) return '';
+  if (!chatState.searchResults.length) return `<div class="chat-search-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
+  return chatState.searchResults.map(context => {
+    const message = context.target || {};
+    const body = chatHighlightedSnippetHtml(message.body, chatState.searchQuery);
+    const before = (context.before || []).at(-1);
+    const after = (context.after || [])[0];
+    const surrounding = [before, after].filter(Boolean).map(item => `<span>${esc(chatNotificationSnippet(item.body, 80))}</span>`).join('');
+    return `<button type="button" class="chat-search-result" data-chat-search-result="${esc(message.id)}">
+      <span class="chat-search-result-head"><strong>${esc(message.username || '')}</strong><time data-chat-created-at="${esc(message.created_at_utc)}">${esc(chatMessageTimestamp(message.created_at_utc))}</time></span>
+      <span>${body}</span><span class="chat-search-context">${surrounding}</span>
+    </button>`;
+  }).join('');
+}
+
+function chatHighlightedSnippetHtml(body, query) {
+  const text = chatNotificationSnippet(body, 160);
+  const needle = String(query || '');
+  if (!needle) return esc(text);
+  const index = text.toLocaleLowerCase(i18nActiveLocale).indexOf(needle.toLocaleLowerCase(i18nActiveLocale));
+  if (index < 0) return esc(text);
+  return `${esc(text.slice(0, index))}<mark>${esc(text.slice(index, index + needle.length))}</mark>${esc(text.slice(index + needle.length))}`;
+}
+
+function renderChatSearchResults(panel = document.getElementById(panelDomId(chatItemId))) {
+  const results = panel?.querySelector('[data-chat-search-results]');
+  if (!results) return;
+  results.hidden = !chatState.searchOpen;
+  results.innerHTML = chatSearchResultsHtml();
+  results.parentElement?.classList.toggle('search-open', chatState.searchOpen);
+}
+
+function openChatSearch(panel = document.getElementById(panelDomId(chatItemId))) {
+  if (!panel) return false;
+  chatState.searchVisible = true;
+  renderChatPanel();
+  return focusPanelSearchInput(panel, '[data-chat-search]', {panelSelector: '.chat-panel', select: true});
+}
+
+async function searchChatHistory(query, options = {}) {
+  const text = String(query || '').trim();
+  chatState.searchOpen = true;
+  if (!text) {
+    chatState.searchResults = [];
+    renderChatPanel();
+    return false;
+  }
+  const generation = ++chatState.searchGeneration;
+  chatState.searchQuery = text;
+  const params = new URLSearchParams({query: text, limit: '20'});
+  if (options.next === true && chatState.searchCursor) params.set('cursor', chatState.searchCursor);
+  try {
+    const payload = await apiFetchJson(`/api/chat/search?${params}`, chatRequestOptions());
+    if (generation !== chatState.searchGeneration) return false;
+    chatState.searchResults = options.next === true ? [...chatState.searchResults, ...(payload.hits || [])] : (payload.hits || []);
+    chatState.searchCursor = String(payload.next_cursor || '');
+    renderChatPanel();
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('common.searchFailed'));
+    return false;
+  }
+}
+
+async function openChatMessageContext(messageId) {
+  const panel = document.getElementById(panelDomId(chatItemId));
+  const timeline = panel?.querySelector('[data-chat-timeline]');
+  if (!chatState.searchSnapshot && timeline) chatState.searchSnapshot = {messages: new Map(chatState.messages), scrollTop: timeline.scrollTop};
+  try {
+    const generation = ++chatState.contextGeneration;
+    const payload = await apiFetchJson(`/api/chat/context?${new URLSearchParams({message_id: String(messageId), before: '3', after: '3'})}`, chatRequestOptions());
+    if (generation !== chatState.contextGeneration) return false;
+    chatState.messages = new Map([...(payload.before || []), payload.target, ...(payload.after || [])].filter(Boolean).map(message => [Number(message.id), message]));
+    chatState.followTail = false;
+    renderChatPanel();
+    panel?.querySelector(`[data-chat-message-id="${cssEscape(String(messageId))}"]`)?.scrollIntoView?.({block: 'center'});
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('common.requestFailed'));
+    return false;
+  }
+}
+
+function closeChatSearch() {
+  const panel = document.getElementById(panelDomId(chatItemId));
+  const snapshot = resetChatSearchState();
+  if (snapshot) {
+    chatState.messages = snapshot.messages;
+    renderChatPanel();
+    const timeline = panel?.querySelector('[data-chat-timeline]');
+    if (timeline) {
+      timeline.scrollTop = snapshot.scrollTop;
+      chatState.followTail = chatTimelineIsNearBottom(timeline);
+    }
+  } else {
+    renderChatPanel();
+  }
+}
+
+function resetChatSearchState() {
+  const snapshot = chatState.searchSnapshot;
+  chatState.searchOpen = false;
+  chatState.searchVisible = false;
+  chatState.searchResults = [];
+  chatState.searchCursor = '';
+  chatState.searchQuery = '';
+  chatState.searchGeneration += 1;
+  chatState.searchSnapshot = null;
+  return snapshot;
+}
+
+function bindChatPanel(panel) {
+  panel.addEventListener('submit', event => {
+    if (event.target.matches('[data-chat-form]')) {
+      event.preventDefault();
+      submitChatDraft();
+    } else if (event.target.matches('[data-chat-search-form]')) {
+      event.preventDefault();
+      searchChatHistory(event.target.querySelector('[data-chat-search]')?.value || '');
+    }
+  });
+  panel.addEventListener('input', event => {
+    if (event.target.matches('[data-chat-input]')) {
+      chatState.draft = event.target.value || '';
+      autosizeChatComposer(panel);
+      setChatTyping(Boolean(chatState.draft));
+      chatAcknowledge();
+    } else if (event.target.matches('[data-chat-emoji-search]')) {
+      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, event.target.value || ''));
+    }
+  });
+  panel.addEventListener('keydown', event => {
+    if (event.target.matches('[data-chat-input]') && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      submitChatDraft();
+      return;
+    }
+    const cell = event.target.closest('[data-chat-emoji]');
+    if (cell && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      chatEmojiGridMove(cell.closest('[role="grid"]'), cell, event.key);
+    } else if (cell && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      insertChatEmoji(cell.dataset.chatEmoji || '');
+    }
+  });
+  panel.addEventListener('click', event => {
+    chatAcknowledge();
+    const media = event.target.closest('[data-chat-media-url]');
+    if (media) {
+      event.preventDefault();
+      showChatMediaActions(media, event.clientX, event.clientY);
+      return;
+    }
+    const emoji = event.target.closest('[data-chat-emoji]');
+    if (emoji) insertChatEmoji(emoji.dataset.chatEmoji || '');
+    else if (event.target.closest('[data-chat-emoji-category]')) {
+      chatState.emojiCategory = event.target.closest('[data-chat-emoji-category]').dataset.chatEmojiCategory || 'recent';
+      panel.querySelector('[data-chat-emoji-categories]').innerHTML = chatEmojiCategoriesHtml();
+      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, panel.querySelector('[data-chat-emoji-search]')?.value || ''));
+    }
+    else if (event.target.closest('[data-chat-emoji-button]')) openChatEmojiPicker();
+    else if (event.target.closest('[data-chat-emoji-close]')) closeChatEmojiPicker();
+    else if (event.target.closest('[data-chat-new-messages]')) chatScrollTimelineToBottom(panel);
+    else if (event.target.closest('[data-chat-search-close]')) closeChatSearch();
+    else if (event.target.closest('[data-chat-search-result]')) openChatMessageContext(event.target.closest('[data-chat-search-result]').dataset.chatSearchResult);
+    else if (event.target.closest('[data-chat-retry]')) {
+      const pending = chatState.pending.get(event.target.closest('[data-chat-retry]').dataset.chatRetry || '');
+      if (pending) sendChatPending(pending);
+    }
+  });
+  panel.addEventListener('contextmenu', event => {
+    const media = event.target.closest('[data-chat-media-url]');
+    if (!media) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showChatMediaActions(media, event.clientX, event.clientY);
+  });
+  panel.addEventListener('focusout', event => {
+    if (event.target.matches('[data-chat-input]')) setChatTyping(false);
+  });
+  panel.addEventListener('wheel', event => {
+    const timeline = event.target.closest('[data-chat-timeline]');
+    if (timeline && event.deltaY < 0 && timeline.scrollTop <= 2) {
+      chatState.olderRequested = true;
+      loadOlderChatMessages();
+    }
+  }, {passive: true});
+  panel.addEventListener('scroll', event => {
+    const timeline = event.target.closest?.('[data-chat-timeline]');
+    if (!timeline) return;
+    syncChatTailState(panel, timeline);
+    if (timeline.scrollTop > 80 || timeline.scrollHeight <= timeline.clientHeight) return;
+    chatState.olderRequested = true;
+    loadOlderChatMessages();
+  }, {capture: true, passive: true});
+}
+
+function autosizeChatComposer(panel = document.getElementById(panelDomId(chatItemId))) {
+  const pane = panel?.querySelector('.chat-pane');
+  const input = panel?.querySelector('[data-chat-input]');
+  const composer = panel?.querySelector('[data-chat-form]');
+  const controls = panel?.querySelector('.conversation-composer-controls');
+  if (!pane || !input || !composer) return 0;
+  const style = getComputedStyle(composer);
+  const inputStyle = getComputedStyle(input);
+  const fixedHeight = (controls?.offsetHeight || 0)
+    + (Number.parseFloat(style.paddingTop) || 0)
+    + (Number.parseFloat(style.paddingBottom) || 0)
+    + (Number.parseFloat(style.rowGap || style.gap) || 0)
+    + (Number.parseFloat(style.borderTopWidth) || 0)
+    + (Number.parseFloat(style.borderBottomWidth) || 0);
+  const minimumHeight = Number.parseFloat(inputStyle.minHeight) || 0;
+  return conversationAutosizeTextarea(input, Math.max(minimumHeight, (pane.clientHeight / 2) - fixedHeight));
+}
+
+function installChatComposerResizeObserver(panel) {
+  if (!panel) return false;
+  panel?._chatComposerResizeObserver?.disconnect?.();
+  panel._chatComposerResizeObserver = null;
+  const pane = panel?.querySelector('.chat-pane');
+  if (!pane || typeof ResizeObserver !== 'function') return false;
+  panel._chatComposerResizeObserver = new ResizeObserver(() => {
+    autosizeChatComposer(panel);
+    if (chatState.followTail) chatScrollTimelineToBottom(panel);
+    else syncChatTailState(panel);
+  });
+  panel._chatComposerResizeObserver.observe(pane);
+  return true;
+}
+
+function syncChatHistoryObserver(panel = document.getElementById(panelDomId(chatItemId))) {
+  const target = panel?.querySelector('[data-chat-history-sentry]');
+  if (chatState.olderObserverTarget === target && chatState.olderObserver) return true;
+  chatState.olderObserver?.disconnect?.();
+  chatState.olderObserver = null;
+  chatState.olderObserverTarget = null;
+  if (!target || typeof IntersectionObserver !== 'function') return false;
+  chatState.olderObserver = new IntersectionObserver(entries => {
+    if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;
+    loadOlderChatMessages();
+  }, {root: panel.querySelector('[data-chat-timeline]'), threshold: 0});
+  chatState.olderObserver.observe(target);
+  chatState.olderObserverTarget = target;
+  return true;
+}
+
+function createChatPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel chat-panel';
+  panel.id = panelDomId(chatItemId);
+  panel.innerHTML = `
+    <div class="panel-head">
+      ${virtualPanelControlsHtml(chatItemId)}
+      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
+    </div>
+    <div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+      <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
+      <button type="button" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
+    </div>
+    <div class="info-pane panel-overlay-root chat-pane">
+      <div id="panel-toasts-${chatItemId}" class="panel-toast-stack"></div>
+      <div class="chat-history-search-split">
+        <div class="chat-search-results" data-chat-search-results hidden></div>
+        <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
+      </div>
+      <div class="a11y-only" data-chat-live role="status" aria-live="polite" aria-atomic="true"></div>
+      <button type="button" class="chat-new-messages" data-chat-new-messages hidden>${esc(t('chat.newMessages'))}</button>
+      <div class="chat-typing" data-chat-typing role="status" aria-live="polite" hidden></div>
+      <form class="conversation-composer yochat-composer" data-chat-form>
+        <textarea class="conversation-composer-input yochat-input" data-chat-input rows="2" placeholder="${esc(t('common.message'))}" aria-label="${esc(t('common.message'))}"></textarea>
+        <div class="conversation-composer-controls yoagent-chat-controls">
+          <button type="button" class="chat-emoji-button" data-chat-emoji-button aria-haspopup="dialog" aria-expanded="false" title="${esc(t('chat.emoji.open'))}" aria-label="${esc(t('chat.emoji.open'))}">☺</button>
+          <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
+          <button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send" title="${esc(t('yoagent.action.send'))}" aria-label="${esc(t('yoagent.action.send'))}">
+            <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </form>
+      <div class="chat-emoji-picker" data-chat-emoji-picker role="dialog" aria-modal="true" aria-label="${esc(t('chat.emoji.label'))}" hidden>
+        <div class="chat-emoji-head"><input type="search" class="search-history-input" data-chat-emoji-search placeholder="${esc(t('common.search'))}" aria-label="${esc(t('common.search'))}"><button type="button" data-chat-emoji-close aria-label="${esc(t('common.close'))}">×</button></div>
+        <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
+        <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
+      </div>
+    </div>`;
+  bindPanelShell(panel, chatItemId);
+  bindChatPanel(panel);
+  return panel;
+}
+
+function mountChatPanel() {
+  if (shareViewMode) return false;
+  chatRequestOptions();
+  syncChatHistoryObserver();
+  renderChatPanel();
+  const installComposer = () => {
+    const panel = document.getElementById(panelDomId(chatItemId));
+    if (!panel) return false;
+    autosizeChatComposer(panel);
+    return installChatComposerResizeObserver(panel);
+  };
+  if (!installComposer()) requestAnimationFrame(installComposer);
+  resetRuntimeInterval('chat-relative-times', () => refreshChatRelativeTimes(), chatRelativeTimeRefreshMs);
+  loadChatDelta();
+  return true;
+}
+
+function relocalizeChatPanel(panel = document.getElementById(panelDomId(chatItemId))) {
+  if (!panel) return false;
+  relocalizeVirtualPanelChrome(panel, chatTabLabel());
+  const search = panel.querySelector('[data-chat-search]');
+  if (search) {
+    search.placeholder = t('chat.search.placeholder');
+    search.setAttribute('aria-label', t('common.search'));
+  }
+  const input = panel.querySelector('[data-chat-input]');
+  if (input) {
+    input.placeholder = t('common.message');
+    input.setAttribute('aria-label', t('common.message'));
+  }
+  chatState.timelineSignature = '';
+  renderChatPanel();
+  return true;
+}
+
+function handleChatInvalidation(type) {
+  if (type === 'chat_typing_changed') return loadChatBootstrap({incoming: false});
+  return loadChatDelta();
+}
+
+function clearChatLifecycle(options = {}) {
+  if (chatState.typingTimer) clearTimeout(chatState.typingTimer);
+  chatState.typingTimer = null;
+  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
+  chatState.typingExpiryTimer = null;
+  if (chatState.typingActive) setChatTyping(false, {keepalive: options.keepalive === true});
+  closeChatEmojiPicker({returnFocus: false});
+  if (options.destroy === true) {
+    const panel = document.getElementById(panelDomId(chatItemId));
+    panel?._chatComposerResizeObserver?.disconnect?.();
+    if (panel) panel._chatComposerResizeObserver = null;
+    chatState.requestGeneration += 1;
+    chatState.olderGeneration += 1;
+    chatState.contextGeneration += 1;
+    chatState.searchGeneration += 1;
+    chatState.loadingRequest = null;
+    chatState.requestController?.abort?.();
+    chatState.requestController = null;
+    chatState.olderObserver?.disconnect?.();
+    chatState.olderObserver = null;
+    chatState.olderObserverTarget = null;
+    chatState.olderRequested = false;
+    chatState.followTail = true;
+    chatState.timelineSignature = '';
+    clearRuntimeInterval('chat-relative-times');
+    resetChatSearchState();
+  }
+}
+
+function syncChatActiveLifecycle() {
+  if (!itemIsActivePaneTab(chatItemId) && chatState.typingActive) setChatTyping(false, {keepalive: true});
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') clearChatLifecycle({keepalive: true});
+  else if (chatState.loaded) loadChatDelta();
+});
+window.addEventListener('pagehide', () => clearChatLifecycle({keepalive: true}));
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Preferences panel choices, rendering, and binding split from 80_panes_preferences.js.
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -35123,8 +36748,27 @@ function preferencesStatusPulseExampleHtml() {
   return `<span class="preferences-status-pulse-example">${groupHtml('tab')}${groupHtml('subwindow')}${groupHtml('acknowledgement')}</span>`;
 }
 
+function orderedPreferenceSections(sections) {
+  const orderedIds = [
+    PREFERENCE_SECTION_IDS.general,
+    PREFERENCE_SECTION_IDS.appearance,
+    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.notifications,
+    ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
+      id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
+    )),
+    PREFERENCE_SECTION_IDS.github,
+    PREFERENCE_SECTION_IDS.yolo,
+  ];
+  const rank = new Map(orderedIds.map((id, index) => [id, index]));
+  return sections
+    .map((section, index) => ({section, index}))
+    .sort((left, right) => (rank.get(left.section.id) ?? orderedIds.length) - (rank.get(right.section.id) ?? orderedIds.length) || left.index - right.index)
+    .map(({section}) => section);
+}
+
 function preferenceSections() {
-  return [
+  const sections = [
     {id: PREFERENCE_SECTION_IDS.general, title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
       preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
@@ -35191,6 +36835,9 @@ function preferenceSections() {
       preferenceSettingItem('performance.workflow_transition_glow_seconds', {type: 'number', min: 0, max: 300, step: 1, suffix: 's'}),
       preferenceSettingItem('general.reload_on_update', {type: 'boolean'}),
       preferenceSettingItem('general.reload_on_update_auto', {type: 'boolean'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.chat, title: t('brand.tab.chat'), items: [
+      preferenceSettingItem('chat.retention_days', {type: 'number', min: 1, max: 365, step: 1}),
     ]},
     {id: PREFERENCE_SECTION_IDS.fileExplorer, title: fileExplorerLabel(), items: [
       preferenceSettingItem('file_explorer.root_mode', {type: 'radio', choices: [
@@ -35268,6 +36915,7 @@ function preferenceSections() {
       ]}),
     ]},
   ];
+  return orderedPreferenceSections(sections);
 }
 
 function preferenceItemByPath(path) {
@@ -35720,8 +37368,7 @@ function renderPreferencesPanels(options = {}) {
 function autosizePreferenceTextarea(textarea) {
   if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
   const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
-  textarea.style.height = 'auto';
-  let height = textarea.scrollHeight;
+  let maxHeight = Number.POSITIVE_INFINITY;
   if (Number.isFinite(maxRows) && maxRows > 0) {
     const style = window.getComputedStyle?.(textarea);
     const lineHeight = Number.parseFloat(style?.lineHeight || '');
@@ -35730,12 +37377,10 @@ function autosizePreferenceTextarea(textarea) {
     const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
     const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
     if (Number.isFinite(lineHeight) && lineHeight > 0) {
-      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
-      height = Math.min(height, maxHeight);
-      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+      maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
     }
   }
-  textarea.style.height = `${height}px`;
+  conversationAutosizeTextarea(textarea, maxHeight);
 }
 
 function clampPreferenceListControl(control) {
@@ -35976,6 +37621,8 @@ const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 24 * 60 * 60, label: '24h'},
 ]);
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
+const jsDebugGraphMaxDisplayPoints = 120;
+const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -37540,16 +39187,19 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
 }
 
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
-  // The selected domain owns the normal chart resolution. A recent 1m/15m
-  // view is always one-second resolution even if a stale/coarse source record
-  // happens to be present; only fixed-resolution charts such as Agent status
-  // can request a coarser minimum.
   const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  const domainSpanMs = Number.isFinite(domainStartMs) && Number.isFinite(domainEndMs)
+    ? Math.max(jsDebugGraphRawBucketMs, domainEndMs - domainStartMs)
+    : jsDebugGraphDefaultRangeSeconds * 1000;
+  const targetMs = domainSpanMs / jsDebugGraphMaxDisplayPoints;
+  const displayMs = jsDebugGraphDisplayBucketMs.find(bucketMs => bucketMs >= targetMs)
+    || jsDebugGraphDisplayBucketMs.at(-1);
   const retainedMs = Number.isFinite(domainStartMs)
     ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
     : jsDebugGraphRawBucketMs;
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs);
+  return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
 function debugGraphSourceBuckets(domain) {
@@ -38260,12 +39910,11 @@ function debugGraphTimeLabel(ms, {includeDate = false, includeSeconds = !include
 
 function debugGraphExactTimeLabel(ms) {
   if (!Number.isFinite(ms)) return '';
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return '';
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${debugGraphLocalDateKey(ms)} ${hours}:${minutes}:${seconds}`;
+  const localized = localizedDateTimeFormat(ms / 1000, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  return localized || debugGraphTimeLabel(ms, {includeDate: true, includeSeconds: true});
 }
 
 function debugGraphSeriesTimeMs(series, index) {
@@ -38278,16 +39927,26 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null) {
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0) {
   const segments = [];
   let current = [];
+  let previousDataEndMs = NaN;
   values.forEach((value, index) => {
     if (hasDataValues && hasDataValues[index] !== true) {
-      if (current.length) segments.push(current);
-      current = [];
+      if (gapThresholdMs <= 0 && current.length) {
+        segments.push(current);
+        current = [];
+      }
       return;
     }
-    current.push(debugGraphPointForValue(value, times[index], chartMax, domain).join(','));
+    const timeMs = Number(times[index]);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+    if (gapThresholdMs > 0 && current.length && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs) {
+      segments.push(current);
+      current = [];
+    }
+    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain).join(','));
+    previousDataEndMs = Number.isFinite(timeMs) ? timeMs + durationMs : NaN;
   });
   if (current.length) segments.push(current);
   return segments;
@@ -38338,8 +39997,9 @@ function debugGraphDisconnectedRanges(buckets, domain) {
     .map(range => ({...range, disconnectedMs: range.endMs - range.startMs}));
 }
 
-function debugGraphDisconnectedRectsHtml(buckets, domain) {
-  return debugGraphDisconnectedRanges(buckets, domain).map((range, index) => {
+function debugGraphDisconnectedRectsHtml(buckets, domain, ranges = null) {
+  const disconnectedRanges = Array.isArray(ranges) ? ranges : debugGraphDisconnectedRanges(buckets, domain);
+  return disconnectedRanges.map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
@@ -38406,6 +40066,11 @@ function debugGraphCurrentClientSeriesItems(seriesItems) {
 function debugGraphCurrentClientHeartbeatCount(bucket) {
   const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
   return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
+}
+
+function debugGraphCommunicationGapThresholdMs(seriesItems) {
+  const displayResolutionMs = Math.max(jsDebugGraphRawBucketMs, ...(seriesItems || []).flatMap(series => series?.durations || []));
+  return jsDebugStatsHistoryFlushMs + Math.min(jsDebugStatsHistoryFlushMs, displayResolutionMs);
 }
 
 function debugGraphNoDataRuns(buckets, domain, seriesItems) {
@@ -38540,12 +40205,15 @@ function debugGraphSeriesTokenAgentAttrs(series) {
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain) {
+  const gapThresholdMs = series?.clientMetric === true ? debugGraphCommunicationGapThresholdMs([series]) : 0;
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
     chartMax,
     domain,
     debugGraphSeriesPlotHasDataValues(series),
+    series.durations || [],
+    gapThresholdMs,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -38846,7 +40514,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
   const groupLabel = debugGraphLocalizedLabel(group);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
@@ -38890,7 +40558,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain) : ''}
+          ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
@@ -38910,10 +40578,11 @@ function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
+  const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
   const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges);
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -39827,8 +41496,6 @@ function bindDebugPanel(panel) {
     }
   });
 }
-
-startJsDebugStatsPolling();
 const changesOutsideRepoKey = 'Outside repo';
 
 function sessionForFileRepo(path) {
@@ -55013,7 +56680,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!chat) return false;
   const openDetails = yoagentOpenMessageDetailsState(node);
   chat.outerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   return true;
@@ -55085,7 +56752,7 @@ function installYoagentSessionLinks(container) {
   }
 }
 
-function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+function renderConversationMessageMarkdown(node = document.getElementById('yoagent-content')) {
   // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
   // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
@@ -55127,7 +56794,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   node.innerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   if (shouldScrollBottom) {
@@ -57971,6 +59638,7 @@ function syncPanelVisibility(previousActive = []) {
     const pane = document.getElementById(`terminal-pane-${session}`);
     if (pane?.classList.contains(CLS.active)) scheduleFit(session);
   }
+  if (typeof syncChatActiveLifecycle === 'function') syncChatActiveLifecycle();
 }
 
 function activateTab(session, name, options = {}) {
@@ -59354,7 +61022,7 @@ function transcriptItemHtml(item) {
     summary: 'transcript.role.summary',
     system: 'transcript.role.system',
   };
-  const roleLabel = t(roleKeys[role] || 'transcript.role.message');
+  const roleLabel = t(roleKeys[role] || 'common.message');
   const meta = [item.timestamp, item.cwd].map(value => String(value || '')).filter(Boolean).join(', ');
   const header = meta ? t('transcript.itemHeader', {role: roleLabel, meta}) : roleLabel;
   return `<div class="transcript-item ${role}">
@@ -59381,7 +61049,7 @@ function eventItemHtml(event) {
 function formatEventTime(value) {
   const date = new Date(value || 0);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString([], {
+  return localizedDateTimeFormat(date.getTime() / 1000, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -59600,6 +61268,7 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
   if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
     await primeJsDebugStatsBeforeLongLivedStreams();
   }
@@ -59980,6 +61649,12 @@ function handleClientPushEventNow(type, payload = {}) {
     refreshActivitySummary({force: true, render: yoagentPanelIsActive()}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
+  if (type === 'chat_messages_changed' || type === 'chat_typing_changed') {
+    if (typeof handleChatInvalidation === 'function') {
+      handleChatInvalidation(type, payload);
+    }
+    return;
+  }
   if (type === 'session_files_ready') {
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
       applySessionFilesPayloadFromPush(payload.data, payload.request || {});
@@ -60004,6 +61679,8 @@ function clientEventDemandDescriptor() {
   const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
   const channels = new Set();
   const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
+  const notificationChat = typeof notificationDeliveryEnabled === 'function'
+    && (notificationDeliveryEnabled('inApp') || notificationDeliveryEnabled('system'));
   if (visible) {
     channels.add('core');
     channels.add('status');
@@ -60020,11 +61697,13 @@ function clientEventDemandDescriptor() {
       channels.add('transcripts');
       channels.add('yoagent');
     }
+    if (activeItems.includes(chatItemId) || notificationChat) channels.add('chat');
     if (activeItems.some(item => isTmuxSession(item) && typeof transcriptPreviewPaneIsActive === 'function' && transcriptPreviewPaneIsActive(item))) {
       channels.add('transcripts');
     }
   } else if (notificationAttention) {
     channels.add('attention');
+    channels.add('chat');
   }
   return {
     visibility: visible ? 'visible' : 'hidden',
@@ -60032,6 +61711,7 @@ function clientEventDemandDescriptor() {
     active_subtabs: {
       finder: finderActiveMode(),
       yoagent: activeItems.includes(yoagentItemId),
+      chat: activeItems.includes(chatItemId),
     },
     channels: Array.from(channels).sort(),
     notification_attention: notificationAttention,
@@ -60075,6 +61755,7 @@ function openClientEventStream(descriptor) {
     if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
     if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
     if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
@@ -60087,7 +61768,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;

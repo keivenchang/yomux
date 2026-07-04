@@ -32,6 +32,7 @@ function applyAgentAvailabilityPayload(payload = {}) {
   return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
+const authUsername = String(bootstrap.authUsername || '');
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
@@ -607,6 +608,7 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
   appearance: 'appearance',
   terminalEditor: 'terminal_editor',
   notifications: 'notifications',
+  chat: 'chat',
   fileExplorer: 'file_explorer',
   uploads: 'uploads',
   performance: 'performance',
@@ -635,6 +637,7 @@ const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
   GitHub: PREFERENCE_SECTION_IDS.github,
   'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
+  'YO!chat': PREFERENCE_SECTION_IDS.chat,
   'YO!share': PREFERENCE_SECTION_IDS.share,
   YOLO: PREFERENCE_SECTION_IDS.yolo,
 });
@@ -851,6 +854,8 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
+const chatItemId = '__chat__';
+function chatTabLabel() { return t('brand.tab.chat'); }
 // Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
@@ -858,11 +863,24 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
+  {itemId: fileExplorerItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
+  {itemId: searchHistoryItemId},
+  {itemId: infoItemId},
+  {itemId: yoagentItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.yoagent},
+  {itemId: debugPaneItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.performance},
+  {itemId: chatItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.chat},
+]);
+const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
+  ...FILE_MENU_PANEL_DEFINITIONS.map(item => item.preferenceSectionId).filter(Boolean),
+  PREFERENCE_SECTION_IDS.share,
+]);
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const imageViewerItemPrefix = 'image:';
+const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
 function urlFlagEnabled(name) {
   try {
@@ -1091,6 +1109,48 @@ const TAB_TYPES = [
     prunePriority: () => 0,
   },
   {
+    key: 'chat',
+    id: chatItemId,
+    aliases: ['chat', 'yochat', 'yo!chat', 'yo-chat', chatItemId],
+    match: item => item === chatItemId,
+    label: () => chatTabLabel(),
+    shortLabel: () => chatTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: chatTabLabel()}),
+    sortRank: 0.2,
+    param: () => 'chat',
+    detail: () => t('menu.file.chat.detail'),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createChatPanel(),
+    renderAttached: () => mountChatPanel(),
+    cleanup: () => clearChatLifecycle({destroy: true, keepalive: true}),
+    relocalize: (_item, panel) => relocalizeChatPanel(panel),
+    focusSearch: (_item, panel) => openChatSearch(panel),
+    className: () => 'chat',
+    icon: 'chat',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: chatTabLabel()}),
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
+    key: 'chat-media',
+    prefix: chatMediaItemPrefix,
+    match: item => typeof item === 'string' && item.startsWith(chatMediaItemPrefix),
+    label: item => chatMediaLabel(chatMediaUrlForItem(item)),
+    shortLabel: () => t('popover.kind.image'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
+    sortRank: 0.21,
+    param: item => item,
+    detail: item => chatMediaUrlForItem(item),
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: item => createChatMediaPanel(item),
+    relocalize: (item, panel) => relocalizeChatMediaPanel(panel, item),
+    className: () => 'chat-media',
+    icon: 'image',
+    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('popover.kind.image')}),
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
+    prunePriority: () => 0,
+  },
+  {
     key: 'files',
     id: fileExplorerItemId,
     aliases: ['files', fileExplorerItemId],
@@ -1212,6 +1272,8 @@ function tabTypeForParam(value) {
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
+function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
+function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
@@ -1320,8 +1382,11 @@ function applyFileExplorerStaticLabels() {
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
+const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  if (!shareViewMode) items.splice(2, 0, chatItemId);
+  return [...items, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1424,6 +1489,7 @@ let notificationDelivery = {...notificationDeliveryDefaults};
 const sessionStatusRecords = new Map();
 const watchedPrNotificationLastSent = new Map();
 const toastRecords = new Map();
+const browserNotificationsByTarget = new Map();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {

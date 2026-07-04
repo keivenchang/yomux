@@ -325,6 +325,13 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["appearance.tab_width"]["units"] == "pixels"
     assert catalog["performance.workflow_transition_glow_seconds"]["default"] == 60
     assert catalog["performance.workflow_transition_glow_seconds"]["limits"] == {"min": 0, "max": 300}
+    assert catalog["chat.retention_days"] == {
+        **catalog["chat.retention_days"],
+        "default": 7,
+        "limits": {"min": 1, "max": 365},
+        "units": "days",
+        "gui": {"section": "YO!chat", "section_locale_key": "brand.tab.chat", "visible": True},
+    }
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
     assert catalog["uploads.image_action_order"]["list_limit"] == 9
@@ -373,6 +380,23 @@ def test_stale_yoagent_model_settings_revert_to_valid_defaults():
     assert sanitized["yoagent"]["codex_model"] == "gpt-5.3-codex-spark"
     assert sanitized["yoagent"]["claude_model"] == "claude-fable-5"
     assert sanitize_settings({"yoagent": {"claude_model": "claude-fable-6"}})["yoagent"]["claude_model"] == "claude-haiku-4-5"
+
+
+def test_chat_retention_setting_defaults_clamps_and_rejects_stale_values(tmp_path):
+    assert default_settings()["chat"]["retention_days"] == 7
+    assert sanitize_settings({"chat": {"retention_days": 0}})["chat"]["retention_days"] == 1
+    assert sanitize_settings({"chat": {"retention_days": 999}})["chat"]["retention_days"] == 365
+    assert sanitize_settings({"chat": {"retention_days": "stale"}})["chat"]["retention_days"] == 7
+
+    payload = save_settings({"chat": {"retention_days": 30}}, tmp_path / "settings.yaml")
+    assert payload["settings"]["chat"]["retention_days"] == 30
+
+
+def test_every_locale_has_chat_retention_catalog_keys():
+    required = {"brand.tab.chat", "pref.chat.retention_days.label", "pref.chat.retention_days.help"}
+    for path in sorted((REPO_ROOT / "static_src/locales").glob("*.json")):
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+        assert required <= set(catalog), path.name
 
 
 def test_summary_settings_reject_invalid_backend_defaults():

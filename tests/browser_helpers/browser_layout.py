@@ -1662,7 +1662,7 @@ def split_seam_fixture_html():
     )
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -1676,6 +1676,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         "sessions": sessions,
         "availableAgents": list(available_agents) if available_agents is not None else ["term"],
         "accessRole": access_role,
+        "authUsername": auth_username if share_bootstrap is None else "",
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
@@ -1731,7 +1732,9 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         stack: event.error?.stack || '',
       }));
       window.addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
-      window.marked = {parse(text) { return String(text || ''); }};
+      window.marked = {parse(text) {
+        return String(text || '').replace(/`\\/yo <query>`/g, '<code>/yo &lt;query&gt;</code>');
+      }};
       window.hljs = {highlightAuto(text) { return {value: String(text || '')}; }, highlightElement() {}};
       window.Notification = {permission: 'denied', requestPermission: async () => 'denied'};
       class FakeTerminal {
@@ -1866,11 +1869,148 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         return result;
       }
       window.__fixtureAccessRole = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).accessRole || 'admin';
+      window.__fixtureAuthUsername = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).authUsername || 'alice';
       window.__fixtureYoagentMessages = [];
+      window.__fixtureChatMessages = [];
+      window.__fixtureChatMessageKeys = {};
+      window.__fixtureChatReaders = {};
+      window.__fixtureChatTyping = [];
+      window.__fixtureHoldChatYoagent = false;
+      window.__fixtureReleaseChatYoagent = null;
+      window.__fixtureHoldChatRead = false;
+      window.__fixtureReleaseChatRead = null;
+      window.__fixtureHoldChatBootstrap = false;
+      window.__fixtureReleaseChatBootstrap = null;
+      window.__fixtureChatSendAs = (username, senderInstanceId, messageBody, isQuestion = false, senderIp = '10.1.123.12') => {
+        const message = {
+          id: window.__fixtureChatMessages.length + 1,
+          created_at_utc: Date.now() / 1000,
+          username: String(username),
+          sender_ip: String(senderIp),
+          sender_instance_id: String(senderInstanceId),
+          client_message_uuid: `fixture-${window.__fixtureChatMessages.length + 1}`,
+          body: String(messageBody),
+          is_question: isQuestion === true,
+        };
+        window.__fixtureChatMessages.push(message);
+        emitFixtureClientEvent('chat_messages_changed', {revision: message.id});
+        return message;
+      };
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
         window.__bootFetches.push({path: url.pathname, search: url.search, method: options.method || 'GET', body});
+        if (url.pathname === '/api/chat/bootstrap') {
+          if (window.__fixtureHoldChatBootstrap) {
+            await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
+            window.__fixtureReleaseChatBootstrap = null;
+          }
+          const reader = url.searchParams.get('reader_id') || '';
+          const instance = url.searchParams.get('browser_instance_id') || '';
+          const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
+          const firstRegistration = !Object.hasOwn(window.__fixtureChatReaders, reader);
+          if (firstRegistration) window.__fixtureChatReaders[reader] = latest;
+          const readUpTo = Number(window.__fixtureChatReaders[reader] || 0);
+          window.__fixtureLastChatBootstrapMessages = window.__fixtureChatMessages.filter(message => message.id > readUpTo);
+          return jsonResponse({
+            revision: latest,
+            newer_cursor: String(latest),
+            older_cursor: latest ? String(window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1)) : null,
+            has_more_older: window.__fixtureChatMessages.some(message => message.id < (window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1))),
+            read_up_to_id: readUpTo,
+            first_registration: firstRegistration,
+            messages: window.__fixtureLastChatBootstrapMessages,
+            typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance),
+            retention_days: 7,
+            client_ip: '10.1.123.12',
+          });
+        }
+        if (url.pathname === '/api/chat/delta') {
+          const after = Number(url.searchParams.get('after') || 0);
+          const messages = window.__fixtureChatMessages.filter(message => message.id > after);
+          const revision = messages.at(-1)?.id || after;
+          return jsonResponse({messages, revision, newer_cursor: String(revision)});
+        }
+        if (url.pathname === '/api/chat/page') {
+          const before = Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER);
+          const limit = Number(url.searchParams.get('limit') || 50);
+          const eligible = window.__fixtureChatMessages.filter(message => message.id < before);
+          const messages = eligible.slice(-limit);
+          return jsonResponse({messages, older_cursor: messages[0]?.id ? String(messages[0].id) : null, has_more: eligible.length > messages.length});
+        }
+        if (url.pathname === '/api/chat/context') {
+          const id = Number(url.searchParams.get('message_id') || 0);
+          const index = window.__fixtureChatMessages.findIndex(message => message.id === id);
+          return jsonResponse({
+            target: window.__fixtureChatMessages[index] || null,
+            before: window.__fixtureChatMessages.slice(Math.max(0, index - 3), Math.max(0, index)),
+            after: window.__fixtureChatMessages.slice(index + 1, index + 4),
+          });
+        }
+        if (url.pathname === '/api/chat/search') {
+          const query = String(url.searchParams.get('query') || '').toLocaleLowerCase();
+          const hits = window.__fixtureChatMessages.filter(message => message.body.toLocaleLowerCase().includes(query)).map(message => ({target: message, before: [], after: []}));
+          return jsonResponse({hits, next_cursor: null, has_more: false});
+        }
+        if (url.pathname === '/api/chat/send') {
+          if (window.__fixtureFailNextChatSendBeforeInsert) {
+            window.__fixtureFailNextChatSendBeforeInsert = false;
+            throw new TypeError('fixture chat send failed before insert');
+          }
+          const key = `${window.__fixtureAuthUsername}\u001f${body?.browser_instance_id || ''}\u001f${body?.client_message_uuid || ''}`;
+          let message = window.__fixtureChatMessageKeys[key];
+          const created = !message;
+          if (!message) {
+            message = window.__fixtureChatSendAs(window.__fixtureAuthUsername, body?.browser_instance_id || '', body?.body || '', false);
+            message.client_message_uuid = body?.client_message_uuid || message.client_message_uuid;
+            window.__fixtureChatMessageKeys[key] = message;
+          }
+          if (window.__fixtureDropNextChatSendResponse) {
+            window.__fixtureDropNextChatSendResponse = false;
+            throw new TypeError('fixture dropped chat response');
+          }
+          return jsonResponse({message, revision: message.id, created});
+        }
+        if (url.pathname === '/api/chat/yoagent') {
+          const sourceId = Number(body?.message_id || 0);
+          const typingInstance = `yolomux-yoagent-${sourceId}`;
+          const refreshYoagentTyping = () => {
+            window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+            window.__fixtureChatTyping.push({username: 'YO!agent', browser_instance_id: typingInstance, expires_at_utc: Date.now() / 1000 + 5});
+            emitFixtureClientEvent('chat_typing_changed', {});
+          };
+          refreshYoagentTyping();
+          let typingHeartbeat = null;
+          if (window.__fixtureHoldChatYoagent) {
+            typingHeartbeat = setInterval(refreshYoagentTyping, 2500);
+            try {
+              await new Promise(resolve => { window.__fixtureReleaseChatYoagent = resolve; });
+            } finally {
+              clearInterval(typingHeartbeat);
+              window.__fixtureReleaseChatYoagent = null;
+            }
+          }
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+          emitFixtureClientEvent('chat_typing_changed', {});
+          const source = window.__fixtureChatMessages.find(message => message.id === sourceId);
+          const message = window.__fixtureChatSendAs('YO!agent', 'yolomux-yoagent', `YO!agent answer for: ${String(source?.body || '').replace(/^\\/yo\\s+/, '')}`, false, '');
+          return jsonResponse({message, revision: message.id, created: true, source_message_id: source?.id || 0});
+        }
+        if (url.pathname === '/api/chat/typing') {
+          const instance = String(body?.browser_instance_id || '');
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance);
+          if (body?.typing) window.__fixtureChatTyping.push({username: window.__fixtureAuthUsername, browser_instance_id: instance, expires_at_utc: Date.now() / 1000 + 5});
+          emitFixtureClientEvent('chat_typing_changed', {});
+          return jsonResponse({typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance)});
+        }
+        if (url.pathname === '/api/chat/read') {
+          if (window.__fixtureHoldChatRead) {
+            await new Promise(resolve => { window.__fixtureReleaseChatRead = resolve; });
+            window.__fixtureReleaseChatRead = null;
+          }
+          window.__fixtureChatReaders[String(body?.reader_id || '')] = Number(body?.message_id || 0);
+          return jsonResponse({read_up_to_id: Number(body?.message_id || 0)});
+        }
         if (url.pathname === '/api/yoagent/chat' && window.__fixtureYoagentChatMode === 'settings') {
           const message = String(body?.message || '');
           const answer = fixtureYoagentChatResponse(message);

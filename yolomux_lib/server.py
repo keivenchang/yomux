@@ -1756,6 +1756,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 dev=getattr(self.server, 'dev', False),
                 dangerously_yolo=self.server.app.dangerously_yolo,
                 accept_language=self.headers.get("Accept-Language", ""),
+                auth_username=self.auth_identity().username,
             ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")

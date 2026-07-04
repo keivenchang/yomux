@@ -354,17 +354,30 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
           const index = Number(button?.dataset?.windowIndex);
             const samples = window.__subwindowGrayClickSamples[String(index)];
             if (!samples || window.__subwindowGrayClicked.has(index)) return;
-                window.__subwindowGrayClicked.add(index);
-                const clickedAt = performance.now();
-                const captureSettled = () => {
-                  refreshAgentWindowActivityDisplays();
-                  const sample = read(index, 'settled');
+                    window.__subwindowGrayClicked.add(index);
+                    const clickedAt = performance.now();
+                    const captureAt = (label, currentTime) => {
+                      refreshAgentWindowActivityDisplays();
+                      const dot = findButton(index)?.querySelector('.agent-window-status-dot');
+                      dot?.style.setProperty('--agent-status-acknowledgement-delay', '0s');
+                      const animation = dot?.getAnimations().find(item => item.animationName === 'agent-status-acknowledgement-fade');
+                      if (animation) {
+                        animation.pause();
+                        animation.currentTime = currentTime;
+                      }
+                      samples.push(read(index, label));
+                    };
+                    const captureSettled = () => {
+                      refreshAgentWindowActivityDisplays();
+                      const sample = read(index, 'settled');
               if (!sample.gray || performance.now() - clickedAt >= 3000) samples.push(sample);
               else setTimeout(captureSettled, 100);
             };
-            setTimeout(() => samples.push(read(index, 'immediate')), 0);
-            setTimeout(() => samples.push(read(index, '400ms')), 400);
-            setTimeout(() => samples.push(read(index, '900ms')), 900);
+                setTimeout(() => {
+                  captureAt('100ms', 100);
+                  captureAt('500ms', 500);
+                  captureAt('1000ms', 1000);
+                }, 0);
             setTimeout(captureSettled, 1400);
         }, {capture: true});
         return window.__subwindowGrayClickSamples;
@@ -529,16 +542,16 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
         <div class="js-debug-chart-body">
           <div class="js-debug-y-axis js-debug-y-axis--integer" data-js-debug-axis="activity">
             <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="3" data-js-debug-axis-max="activity" style="--js-debug-axis-y: 6.667%;">3</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="2" style="--js-debug-axis-y: 35.556%;">2</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="1" style="--js-debug-axis-y: 64.444%;">1</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="0" data-js-debug-axis-zero="activity" style="--js-debug-axis-y: 93.333%;">0</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="2" style="--js-debug-axis-y: 37.778%;">2</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="1" style="--js-debug-axis-y: 68.889%;">1</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="0" data-js-debug-axis-zero="activity" style="--js-debug-axis-y: 100%;">0</span>
           </div>
           <div class="js-debug-plot">
             <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
               <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="3" x1="0" y1="8.0" x2="600" y2="8.0" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="2" x1="0" y1="42.7" x2="600" y2="42.7" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="1" x1="0" y1="77.3" x2="600" y2="77.3" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="0" x1="0" y1="112.0" x2="600" y2="112.0" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="2" x1="0" y1="45.3" x2="600" y2="45.3" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="1" x1="0" y1="82.7" x2="600" y2="82.7" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="0" x1="0" y1="120.0" x2="600" y2="120.0" vector-effect="non-scaling-stroke"></line>
             </svg>
           </div>
           <div class="js-debug-x-axis" data-js-debug-x-axis>
@@ -584,7 +597,7 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
         for value in labeled_values
     )
     grid_html = "".join(
-        f'<line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-value="{value}" x1="0" y1="{8 + (1 - value / axis_max) * 104:.1f}" x2="600" y2="{8 + (1 - value / axis_max) * 104:.1f}" vector-effect="non-scaling-stroke"></line>'
+        f'<line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-value="{value}" x1="0" y1="{8 + (1 - value / axis_max) * 112:.1f}" x2="600" y2="{8 + (1 - value / axis_max) * 112:.1f}" vector-effect="non-scaling-stroke"></line>'
         for value in grid_values
     )
     page = tmp_path / "debug-agent-status-hidden-integer-guides.html"
@@ -817,7 +830,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
       </div>
       <section id="chart" class="js-debug-chart" style="width:420px">
         <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(123.4k, Σ displayed reqs)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
-        <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 93.333%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
+        <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 100%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
       </section>
     """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
@@ -834,14 +847,112 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     assert all(item["left"] >= metrics["axis"]["left"] - 0.5 and item["right"] <= metrics["axis"]["right"] + 0.5 for item in metrics["axisItems"]), metrics
     assert all(item["top"] >= metrics["chart"]["top"] and item["bottom"] <= metrics["chart"]["bottom"] for item in metrics["axisItems"]), metrics
     assert abs(((metrics["axisMax"]["top"] + metrics["axisMax"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 8 / 120))) <= 0.75, metrics
-    assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 112 / 120))) <= 0.75, metrics
-    assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5 and metrics["axisZero"]["bottom"] <= metrics["yAxis"]["bottom"] + 0.5, metrics
+    assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - metrics["svg"]["bottom"]) <= 0.75, metrics
+    assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5, metrics
     assert metrics["rangeStart"]["left"] >= metrics["range"]["right"] + 4, metrics
     assert metrics["resolution"]["left"] >= metrics["rangeStart"]["right"] + 4, metrics
     assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["range"]["right"] + metrics["resolution"]["left"]) / 2)) <= 1.5, metrics
     assert metrics["rangeEnd"]["right"] <= metrics["range"]["right"] + 0.5, metrics
     assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
     assert metrics["rangeSlider"]["right"] <= metrics["rangeEnd"]["left"] - 4, metrics
+
+
+def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const currentClientId = jsDebugStatsClientIdForRequest();
+        const records = Array.from({length: 300}, (_item, index) => ({
+          start: nowSeconds - 300 + index,
+          duration: 1,
+          sequence: index + 1,
+          cpu_total_percent: 1,
+          cpu_count: 1,
+          ...(index % 3 === 0 ? {
+            clients: {
+              [currentClientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+            },
+          } : {}),
+        }));
+        setDebugGraphRange(5 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 300, records});
+        renderDebugPanels({force: true});
+        let chart = document.querySelector('[data-js-debug-chart="latency"]');
+        const svg = chart.querySelector('.js-debug-line-chart');
+        const zero = chart.querySelector('[data-js-debug-axis-zero="latency"]');
+        const zeroRect = zero.getBoundingClientRect();
+        const svgRect = svg.getBoundingClientRect();
+        const fiveSecond = {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          lineSegments: chart.querySelectorAll('[data-js-debug-series="latency"]').length,
+          noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
+        };
+
+        clearJsDebugGraphData();
+        const tenSecondRecords = Array.from({length: 90}, (_item, index) => ({
+          start: nowSeconds - (15 * 60) + (index * 10),
+          duration: 10,
+          sequence: index + 1,
+          cpu_total_percent: 1,
+          cpu_count: 1,
+          ...(index % 2 === 0 ? {
+            clients: {
+              [currentClientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+            },
+          } : {}),
+        }));
+        setDebugGraphRange(15 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 90, records: tenSecondRecords});
+        renderDebugPanels({force: true});
+        chart = document.querySelector('[data-js-debug-chart="bandwidth"]');
+        const tenSecond = {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          lineSegments: chart.querySelectorAll('[data-js-debug-series="bandwidth"]').length,
+          noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
+        };
+
+        clearJsDebugGraphData();
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({sequence: 3, records: [{
+          start: nowSeconds - 3, duration: 1, sequence: 1, disconnected_ms: 1000,
+          clients: {'client-stale': {disconnected_ms: 1000}},
+        }, {
+          start: nowSeconds - 2, duration: 1, sequence: 2,
+          clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+        }, {
+          start: nowSeconds - 1, duration: 1, sequence: 3, disconnected_ms: 1000,
+          clients: {'client-stale': {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
+        }]});
+        renderDebugPanels({force: true});
+        const thisClientOutageRegions = document.querySelectorAll('[data-js-debug-chart="bandwidth"] [data-js-debug-disconnected-range]').length;
+        return {
+          fiveSecond,
+          tenSecond,
+          thisClientOutageRegions,
+          zeroBaselineDelta: Math.abs((zeroRect.top + zeroRect.height / 2) - svgRect.bottom),
+          zeroStyle: zero.style.getPropertyValue('--js-debug-axis-y'),
+        };
+        """
+    )
+    assert metrics["fiveSecond"]["resolution"] == 5, metrics
+    assert metrics["fiveSecond"]["lineSegments"] == 1, metrics
+    assert metrics["fiveSecond"]["noDataRegions"] <= 2, metrics
+    assert metrics["tenSecond"] == {"resolution": 10, "lineSegments": 1, "noDataRegions": 0}, metrics
+    assert metrics["thisClientOutageRegions"] == 2, metrics
+    assert metrics["zeroBaselineDelta"] <= 0.75, metrics
+    assert metrics["zeroStyle"] == "100.000%", metrics
 
 
 def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
@@ -868,7 +979,7 @@ def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, t
 
 def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap(browser, tmp_path):
     chart = """
-      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span style="--js-debug-axis-y:6.667%">100%</span><span style="--js-debug-axis-y:93.333%">0%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
+      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span style="--js-debug-axis-y:6.667%">100%</span><span style="--js-debug-axis-y:100%">0%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
     """
     load_static_html_fixture(browser, tmp_path, "debug-graph-flow-layout.html", page_html(f"""
       <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:300px">
@@ -1695,7 +1806,7 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
     assert metrics["pointCount"] >= 2, metrics
 
 
-def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path):
+def test_debug_graph_agent_status_uses_stacked_bounded_resolution_bars(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1712,10 +1823,11 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
         clearJsDebugGraphData();
         jsDebugStatsPollState.firstSampleReceived = true;
         setDebugGraphRange(60 * 60);
-        const nowSeconds = Math.floor(Date.now() / 10000) * 10;
+        const displayBucketSeconds = 30;
+        const nowSeconds = Math.floor(Date.now() / (displayBucketSeconds * 1000)) * displayBucketSeconds;
         recordJsDebugStatsSample({history: {sequence: 2, records: [
           {
-            start: nowSeconds - 30,
+            start: nowSeconds - (displayBucketSeconds * 2),
             duration: 1,
             sequence: 1,
             ask_agent_total: 1,
@@ -1725,7 +1837,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
             agent_activity_samples: 1,
           },
           {
-            start: nowSeconds - 20,
+            start: nowSeconds - displayBucketSeconds,
             duration: 1,
             sequence: 2,
             ask_agent_total: 1,
@@ -1754,7 +1866,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
         const activitySvg = chart?.querySelector('.js-debug-line-chart');
         const activityGrid = chart?.closest('[data-js-debug-graph]')?.querySelector('[data-js-debug-chart-grid]');
         const activityRect = activitySvg?.getBoundingClientRect();
-        const hoverTime = (nowSeconds - 25) * 1000;
+        const hoverTime = (nowSeconds - (displayBucketSeconds * 1.5)) * 1000;
         const hoverRatio = (hoverTime - Number(activityGrid?.dataset.jsDebugDomainStart)) / (Number(activityGrid?.dataset.jsDebugDomainEnd) - Number(activityGrid?.dataset.jsDebugDomainStart));
         activitySvg?.dispatchEvent(new PointerEvent('pointermove', {
           bubbles: true,
@@ -1790,7 +1902,7 @@ def test_debug_graph_agent_status_uses_stacked_ten_second_bars(browser, tmp_path
     assert metrics["stacked"] == "true", metrics
     assert metrics["areaCount"] == 0, metrics
     assert metrics["barCount"] == 8, metrics
-    assert all(1.5 <= width <= 1.7 for width in metrics["widths"]), metrics
+    assert all(4.9 <= width <= 5.1 for width in metrics["widths"]), metrics
     assert set(metrics["gaps"]) == {0}, metrics
     assert sorted(metrics["barsPerX"]) == [4, 4], metrics
     assert len(set(metrics["fillBySeries"].values())) == 4, metrics
@@ -2118,7 +2230,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
             const panel = document.querySelector('.js-debug-panel');
             return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
               && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
-              && document.querySelector('[data-js-debug-resolution]')?.textContent.trim() === 'Resolution: 60s'
+                  && document.querySelector('[data-js-debug-resolution]')?.textContent.trim() === 'Resolution: 120s'
               && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
               && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
             """
@@ -2397,7 +2509,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert float(metrics["hoverOpacity"]) > 0.0, metrics
     assert metrics["hoverTooltip"]["hidden"] is False, metrics
     assert metrics["hoverTooltip"]["max"] == "0.0%", metrics
-    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", metrics["hoverTooltip"]["time"]), metrics
+    assert re.search(r"[12]\d{3}.*\d{1,2}:\d{2}:\d{2}", metrics["hoverTooltip"]["time"]), metrics
     assert metrics["hoverTooltip"]["rightOfCursor"] is True, metrics
     assert metrics["hoverTooltip"]["aboveCursor"] is True, metrics
     assert metrics["hoverTooltip"]["contained"] is True, metrics
@@ -4991,10 +5103,10 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
       <section id="finder-pane" class="file-explorer-pane"></section>
       <section id="finder-tree" class="file-explorer-tree-panel"></section>
       <section id="yoagent-chat" class="yoagent-chat"></section>
-      <article id="yoagent-message" class="yoagent-message"></article>
-      <article id="yoagent-assistant" class="yoagent-message assistant"></article>
-      <article id="yoagent-result" class="yoagent-message assistant yoagent-agent-result"></article>
-      <article id="yoagent-user" class="yoagent-message user"></article>
+      <article id="yoagent-message" class="conversation-message yoagent-message"></article>
+      <article id="yoagent-assistant" class="conversation-message yoagent-message assistant"></article>
+      <article id="yoagent-result" class="conversation-message yoagent-message assistant yoagent-agent-result"></article>
+      <article id="yoagent-user" class="conversation-message yoagent-message user"></article>
       <div class="file-editor-codemirror"><div class="cm-search"><button id="cm-close" class="cm-dialog-close">×</button></div></div>
       <section class="file-explorer-changes-panel">
         <section id="embedded-comparison" class="changes-comparison-head"></section>
@@ -5236,7 +5348,7 @@ def test_code_surfaces_and_audited_css_families_share_computed_owners(browser, t
       <div class="yoagent-chat"><div class="markdown-body"><pre id="chat-code-block">chat</pre></div></div>
       <div id="preview-overlay" class="file-editor-preview-pane" style="position:static;"></div>
       <div id="preview-panel" class="file-editor-preview-pane-panel"></div>
-      <button id="chat-send" class="yoagent-chat-send"></button>
+      <button id="chat-send" class="conversation-send conversation-send-primary yoagent-chat-send"></button>
       <button id="chat-stop" class="yoagent-chat-stop"></button>
       <div id="explorer-title" class="file-explorer-title">Finder</div>
       <div id="explorer-panel-title" class="file-explorer-panel-title">Differ</div>
@@ -8053,6 +8165,900 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["panelVisible"]
     assert metrics["notifyActive"] is True
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=chat&layout=slot1&tabs=slot1:chat",
+            sessions=["1"],
+            grid_width=760,
+            grid_height=560,
+        )
+    except AssertionError as error:
+        raise AssertionError(f"{error}; browser_log={browser.get_log('browser')}") from error
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-input]') && window.__eventSources.length > 0"
+        )
+    )
+    initial = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const grid = document.getElementById('grid');
+        const originalGridHeight = grid.style.height;
+        grid.style.height = '900px';
+        const timeline = panel?.querySelector('[data-chat-timeline]');
+        const introduction = panel?.querySelector('.yochat-introduction');
+        const pane = panel?.querySelector('.chat-pane');
+        const composer = panel?.querySelector('[data-chat-form]');
+        const panelRect = panel?.getBoundingClientRect();
+        const timelineRect = timeline?.getBoundingClientRect();
+        const introductionRect = introduction?.getBoundingClientRect();
+        const paneRect = pane?.getBoundingClientRect();
+        const composerRect = composer?.getBoundingClientRect();
+        const result = {
+          panelConnected: panel?.isConnected === true,
+          emojiCatalogRequested: window.__bootFetches.some(item => item.path === '/static/emoji-data.js'),
+          oldBodies: panel?.querySelectorAll('[data-chat-message-id]').length || 0,
+          searchHidden: panel?.querySelector('[data-chat-search-bar]')?.hidden === true,
+          searchDisplay: getComputedStyle(panel?.querySelector('[data-chat-search-bar]')).display,
+          introduction: panel?.querySelector('[data-chat-timeline]')?.textContent || '',
+          introductionCode: introduction?.querySelector('code')?.textContent || '',
+          introductionBottomGap: (timelineRect?.bottom || 0) - (introductionRect?.bottom || 0),
+          introductionComposerGap: (composerRect?.top || 0) - (introductionRect?.bottom || 0),
+          composerBottomGap: (paneRect?.bottom || 0) - (composerRect?.bottom || 0),
+          panePanelBottomGap: (panelRect?.bottom || 0) - (paneRect?.bottom || 0),
+          composerPanelBottomGap: (panelRect?.bottom || 0) - (composerRect?.bottom || 0),
+          panelClasses: panel?.className || '',
+          panelGridRows: getComputedStyle(panel).gridTemplateRows,
+          olderButton: panel?.querySelector('[data-chat-load-older]') !== null,
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        grid.style.height = originalGridHeight;
+        return result;
+        """
+    )
+    assert initial["panelConnected"] is True and initial["emojiCatalogRequested"] is False and initial["oldBodies"] == 0
+    assert initial["searchHidden"] is True and initial["searchDisplay"] == "none" and initial["olderButton"] is False
+    assert "YO!agent" in initial["introduction"] and "ask me" in initial["introduction"] and "/yo <query>" in initial["introduction"]
+    assert initial["introductionCode"] == "/yo <query>"
+    assert 0 <= initial["introductionBottomGap"] <= 8, initial
+    assert 0 <= initial["introductionComposerGap"] <= 16, initial
+    assert 0 <= initial["composerBottomGap"] <= 10, initial
+    assert 0 <= initial["panePanelBottomGap"] <= 2 and 0 <= initial["composerPanelBottomGap"] <= 12, initial
+    assert initial["errors"] == [] and initial["rejections"] == []
+
+    exact_body = "😀 👍🏽 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈 🇺🇸 1️⃣ ☕️ مرحبا 😀"
+    browser.execute_script(
+        """
+        setFocusedPanelItem(chatItemId, {userInitiated: true});
+        document.querySelector('#panel-__chat__ [data-chat-input]').focus();
+        window.__fixtureChatSendAs('bob', 'browser-b', arguments[0], true);
+        """,
+        exact_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-message-id]')?.textContent.includes(arguments[0])",
+            exact_body,
+        )
+    )
+    message = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const row = panel.querySelector('[data-chat-message-id]');
+        const time = row.querySelector('time');
+        const marker = document.querySelector('.chat-status-marker');
+        return {
+          body: row.querySelector('.conversation-message-body').textContent,
+          author: row.querySelector('.conversation-message-role span').textContent,
+          ip: row.querySelector('.yochat-message-ip')?.textContent || '',
+          timestamp: time.textContent,
+          datetime: time.getAttribute('datetime'),
+          red: marker?.querySelector('.state-attention, .attention, [data-state="attention"]') !== null || marker?.textContent.length > 0,
+          toastCount: document.querySelectorAll('.toast').length,
+          liveText: panel.querySelector('[data-chat-live]').textContent,
+          timelineLive: panel.querySelector('[data-chat-timeline]').getAttribute('aria-live'),
+        };
+        """
+    )
+    assert message["body"] == exact_body
+    assert message["author"] == "bob"
+    assert message["ip"] == "10.1.123.12"
+    assert "ago" in message["timestamp"]
+    assert message["datetime"].endswith("Z")
+    assert message["red"] is True
+    assert message["toastCount"] == 0, "focused, visible YO!chat suppresses in-app notifications"
+    assert exact_body in message["liveText"]
+    assert message["timelineLive"] == "off", "the dedicated live region announces only new messages instead of replaying the whole timeline"
+    assert browser.execute_script(
+        "return document.querySelectorAll('#panel-__chat__ .yochat-introduction').length"
+    ) == 1, "the non-persisted introduction remains the first timeline card when messages exist"
+    parity = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const host = document.createElement('div');
+        host.innerHTML = conversationMessageShellHtml({
+          className: 'yoagent-message fixture-agent-message',
+          author: 'YO!agent',
+          bodyHtml: '<div class="conversation-message-body yoagent-message-body">fixture</div>',
+        });
+        panel.querySelector('[data-chat-timeline]').appendChild(host.firstElementChild);
+        const read = theme => {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          document.body.classList.toggle('theme-dark', theme === 'dark');
+          const chat = getComputedStyle(panel.querySelector('.yochat-message'));
+          const agent = getComputedStyle(panel.querySelector('.fixture-agent-message'));
+          const chatBody = getComputedStyle(panel.querySelector('.yochat-message .conversation-message-body'));
+          const agentBody = getComputedStyle(panel.querySelector('.fixture-agent-message .conversation-message-body'));
+          return {
+            radius: [chat.borderRadius, agent.borderRadius],
+            padding: [chat.padding, agent.padding],
+            bodyFont: [chatBody.font, agentBody.font],
+            bodyColor: [chatBody.color, agentBody.color],
+          };
+        };
+        const result = {dark: read('dark'), light: read('light')};
+        document.body.classList.remove('theme-light');
+        document.body.classList.add('theme-dark');
+        return result;
+        """
+    )
+    for theme in ("dark", "light"):
+        assert parity[theme]["radius"][0] == parity[theme]["radius"][1]
+        assert parity[theme]["padding"][0] == parity[theme]["padding"][1]
+        assert parity[theme]["bodyFont"][0] == parity[theme]["bodyFont"][1]
+        assert parity[theme]["bodyColor"][0] == parity[theme]["bodyColor"][1]
+
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('carol', 'browser-c', 'unfocused pane notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification'))"
+        )
+    )
+    assert browser.execute_script(
+        "return [...document.querySelectorAll('.toast')].filter(node => node.textContent.includes('unfocused pane notification')).length"
+    ) == 1, "active-but-unfocused YO!chat delivers one deduplicated in-app notification"
+    browser.execute_script("setFocusedPanelItem(chatItemId, {userInitiated: true})")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return ![...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification'))"
+        )
+    )
+    browser.execute_script("window.__fixtureChatSendAs('dave', 'browser-d', 'already focused notification', false)")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent === 'already focused notification')"
+        )
+    )
+    assert browser.execute_script(
+        "return ![...document.querySelectorAll('.toast')].some(node => node.textContent.includes('already focused notification'))"
+    ), "the exact focused target Tab suppresses new in-app notifications"
+
+    author_colors = browser.execute_script(
+        """
+        const rows = [...document.querySelectorAll('#panel-__chat__ .yochat-message[data-chat-message-id]')];
+        return Object.fromEntries(rows.map(row => [row.querySelector('.conversation-message-role > span')?.textContent || '', getComputedStyle(row).borderColor]));
+        """
+    )
+    assert author_colors["bob"] != author_colors["carol"], "each visible person gets a distinct existing-token border scheme"
+
+    browser.execute_script(
+        """
+        window.__fixtureChatTyping = [{username: 'bob', browser_instance_id: 'browser-b', expires_at_utc: Date.now() / 1000 + 5}];
+        emitFixtureClientEvent('chat_typing_changed', {});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: "bob" in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-timeline]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.chat-status-marker .agent-window-status-dot--acknowledging') !== null"
+        )
+    )
+    acknowledgement = browser.execute_script(
+        """
+        const marker = document.querySelector('.chat-status-marker');
+        return {
+          gray: marker.querySelector('.agent-window-status-dot--acknowledging') !== null,
+          greenRemains: marker.querySelectorAll('.agent-window-status-dot').length >= 2,
+          readPosts: window.__bootFetches.filter(item => item.path === '/api/chat/read').length,
+        };
+        """
+    )
+    assert acknowledgement == {"gray": True, "greenRemains": True, "readPosts": 1}
+
+    browser.execute_script(
+        """
+        window.__fixtureChatTyping = [{username: 'stale-user', browser_instance_id: 'stale-browser', expires_at_utc: Date.now() / 1000 + 0.2}];
+        emitFixtureClientEvent('chat_typing_changed', {});
+        """
+    )
+    WebDriverWait(browser, 3).until(
+        lambda driver: "stale-user" not in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+
+    typing_requests = browser.execute_script(
+        """
+        const input = document.querySelector('#panel-__chat__ [data-chat-input]');
+        input.value = 'h';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.value = 'he';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+        return window.__bootFetches
+          .filter(item => item.path === '/api/chat/typing')
+          .map(item => item.body.typing);
+        """
+    )
+    assert typing_requests == [True, False], "typing sends one leading lease, not one request per keystroke, then explicitly stops on blur"
+
+    search_shortcut = browser.execute_script(
+        """
+        const event = new KeyboardEvent('keydown', {
+          key: 'f',
+          code: 'KeyF',
+          metaKey: isMacPlatform(),
+          ctrlKey: !isMacPlatform(),
+          bubbles: true,
+          cancelable: true,
+        });
+        (document.activeElement || document.body).dispatchEvent(event);
+        return event.defaultPrevented;
+        """
+    )
+    assert search_shortcut is True, "Cmd/Ctrl-F is claimed by the focused YO!chat tab"
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-search-bar]')?.hidden === false && document.activeElement?.matches('[data-chat-search]')"
+        )
+    )
+    browser.execute_script(
+        """
+        const firstWeatherId = window.__fixtureChatMessages.length + 1;
+        for (let index = 0; index < 12; index += 1) {
+          window.__fixtureChatMessages.push({
+            id: firstWeatherId + index,
+            created_at_utc: Date.now() / 1000,
+            username: 'weather-fixture',
+            sender_ip: '10.1.123.12',
+            sender_instance_id: 'weather-browser',
+            client_message_uuid: `weather-${index}`,
+            body: `weather result ${index} for California`,
+            is_question: false,
+          });
+        }
+        const search = document.querySelector('#panel-__chat__ [data-chat-search]');
+        search.value = 'wea';
+        search.closest('form').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-search-result]').length === 12"
+        )
+    )
+    search_split = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const split = panel.querySelector('.chat-history-search-split');
+        const results = panel.querySelector('[data-chat-search-results]');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        const first = results.querySelector('[data-chat-search-result]');
+        const splitRect = split.getBoundingClientRect();
+        const resultsRect = results.getBoundingClientRect();
+        const timelineRect = timeline.getBoundingClientRect();
+        const firstRect = first.getBoundingClientRect();
+        return {
+          matchText: first.textContent,
+          resultsHeight: resultsRect.height,
+          timelineHeight: timelineRect.height,
+          splitHeight: splitRect.height,
+          resultsScrollable: results.scrollHeight > results.clientHeight,
+          timelineScrollable: timeline.scrollHeight > timeline.clientHeight,
+          firstFullyVisible: firstRect.top >= resultsRect.top - 1 && firstRect.bottom <= resultsRect.bottom + 1,
+          separated: resultsRect.bottom <= timelineRect.top + 1,
+        };
+        """
+    )
+    assert "weather" in search_split["matchText"].lower(), search_split
+    assert search_split["resultsHeight"] <= search_split["splitHeight"] / 2 + 1, search_split
+    assert search_split["timelineHeight"] >= search_split["splitHeight"] / 2 - 3, search_split
+    assert search_split["resultsScrollable"] is True and search_split["timelineScrollable"] is True, search_split
+    assert search_split["firstFullyVisible"] is True and search_split["separated"] is True, search_split
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-search-close]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-search-bar]')?.hidden === true"
+        )
+    )
+    assert browser.execute_script(
+        "return document.querySelector('#panel-__chat__ [data-chat-search-results]')?.hidden === true"
+    ), "X hides both the Cmd/Ctrl-F search chrome and its results"
+
+    browser.set_window_size(430, 650)
+    composer_size = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const pane = panel.querySelector('.chat-pane');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = '';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const compact = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        input.value = Array.from({length: 40}, (_, index) => `line ${index}`).join('\\n');
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const grown = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        const grownOverflow = getComputedStyle(input).overflowY;
+        const paneHeight = pane.getBoundingClientRect().height;
+        input.value = '';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const compactAfter = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        return {compact, grown, grownOverflow, paneHeight, compactAfter};
+        """
+    )
+    assert composer_size["grown"] > composer_size["compact"], composer_size
+    assert composer_size["grown"] <= composer_size["paneHeight"] / 2 + 2, composer_size
+    assert composer_size["grownOverflow"] == "auto", composer_size
+    assert abs(composer_size["compactAfter"] - composer_size["compact"]) < 1, composer_size
+    browser.execute_script(
+        """
+        globalThis.YOLOMUX_EMOJI_DATA = [
+          {emoji: '😀', category: 'smileys-emotion', names: {en: 'grinning face'}, keywords: {en: ['smile']}},
+          {emoji: '👨‍👩‍👧‍👦', category: 'people-body', names: {en: 'family'}, keywords: {en: ['family']}}
+        ];
+        const input = document.querySelector('#panel-__chat__ [data-chat-input]');
+        input.value = 'ab';
+        input.setSelectionRange(1, 1);
+        document.querySelector('#panel-__chat__ [data-chat-emoji-button]').click();
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-emoji-picker]')?.hidden === false"
+        )
+    )
+    browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const search = panel.querySelector('[data-chat-emoji-search]');
+        search.value = 'family';
+        search.dispatchEvent(new Event('input', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-emoji=" + '"👨‍👩‍👧‍👦"' + "]') !== null"
+        )
+    )
+    picker = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const glyph = panel.querySelector('[data-chat-emoji="👨‍👩‍👧‍👦"]');
+        glyph.click();
+        const input = panel.querySelector('[data-chat-input]');
+        const picker = panel.querySelector('[data-chat-emoji-picker]');
+        const panelRect = panel.getBoundingClientRect();
+        const pickerRect = picker.getBoundingClientRect();
+        return {
+          value: input.value,
+          pickerOpen: !picker.hidden,
+          withinPanel: pickerRect.left >= panelRect.left - 1 && pickerRect.right <= panelRect.right + 1,
+          ariaExpanded: panel.querySelector('[data-chat-emoji-button]').getAttribute('aria-expanded'),
+          catalogNetworkFetches: window.__bootFetches.filter(item => item.path === '/static/emoji-data.js').length,
+        };
+        """
+    )
+    assert picker == {
+        "value": "a👨‍👩‍👧‍👦b",
+        "pickerOpen": True,
+        "withinPanel": True,
+        "ariaExpanded": "true",
+        "catalogNetworkFetches": 0,
+    }
+    browser.set_window_size(1748, 1248)
+    browser.execute_script("document.getElementById('panel-__chat__').classList.add('details-collapsed')")
+    tall_picker_geometry = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const pane = panel.querySelector('.chat-pane');
+        const composer = panel.querySelector('[data-chat-form]');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        const panelRect = panel.getBoundingClientRect();
+        const paneRect = pane.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        return {
+          panePanelBottomGap: panelRect.bottom - paneRect.bottom,
+          composerPanelBottomGap: panelRect.bottom - composerRect.bottom,
+          composerPaneBottomGap: paneRect.bottom - composerRect.bottom,
+          timelineHeight: timeline.getBoundingClientRect().height,
+          paneRows: getComputedStyle(pane).gridTemplateRows,
+          panelRows: getComputedStyle(panel).gridTemplateRows,
+          panelClasses: panel.className,
+        };
+        """
+    )
+    assert 0 <= tall_picker_geometry["composerPanelBottomGap"] <= 12, tall_picker_geometry
+
+    retry_body = "retry once 👩‍💻"
+    browser.execute_script(
+        """
+        closeChatEmojiPicker();
+        window.__fixtureDropNextChatSendResponse = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = arguments[0];
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const form = panel.querySelector('[data-chat-form]');
+        form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """,
+        retry_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length === 1 && document.querySelector('#panel-__chat__ [data-chat-retry]') === null",
+            retry_body,
+        )
+    )
+    lost_response = browser.execute_script(
+        """
+        return {
+          stored: window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length,
+          requests: window.__bootFetches.filter(item => item.path === '/api/chat/send' && item.body.body === arguments[0]).length,
+          rendered: [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].filter(node => node.textContent === arguments[0]).length,
+        };
+        """,
+        retry_body,
+    )
+    assert lost_response == {"stored": 1, "requests": 1, "rendered": 1}, "SSE reconciliation canonicalizes a lost response without a duplicate retry"
+
+    retry_body = "retry after rejection 🏳️‍🌈"
+    browser.execute_script(
+        """
+        window.__fixtureFailNextChatSendBeforeInsert = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = arguments[0];
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        panel.querySelector('[data-chat-form]').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """,
+        retry_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-retry]') !== null"
+        )
+    )
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-retry]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-retry]') === null && window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length === 1",
+            retry_body,
+        )
+    )
+    after_retry = browser.execute_script(
+        """
+        return {
+          stored: window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length,
+          requests: window.__bootFetches.filter(item => item.path === '/api/chat/send' && item.body.body === arguments[0]).length,
+          rendered: [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].filter(node => node.textContent === arguments[0]).length,
+        };
+        """,
+        retry_body,
+    )
+    assert after_retry == {"stored": 1, "requests": 2, "rendered": 1}, "retry reuses the same client UUID and replaces the pending row"
+
+    browser.execute_script(
+        """
+        window.__fixtureHoldChatYoagent = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = '/yo summarize current tasks';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        panel.querySelector('[data-chat-form]').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: "YO!agent is typing" in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    optimistic = browser.execute_script(
+        """
+        const row = [...document.querySelectorAll('#panel-__chat__ .yochat-message.user')]
+          .find(item => item.querySelector('.conversation-message-body')?.textContent === '/yo summarize current tasks');
+        return {
+          visible: row?.offsetParent !== null,
+          author: row?.querySelector('.conversation-message-role > span')?.textContent || '',
+          expectedAuthor: window.__fixtureAuthUsername,
+          metadata: row?.querySelector('.yochat-message-metadata')?.textContent || '',
+          atTail: (() => {
+            const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+            return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32;
+          })(),
+        };
+        """
+    )
+    assert optimistic["visible"] is True and optimistic["author"] == optimistic["expectedAuthor"] and optimistic["atTail"] is True, optimistic
+    assert "myself" in optimistic["metadata"] and "10.1.123.12" in optimistic["metadata"], optimistic
+    assert browser.execute_script(
+        "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent.includes('YO!agent is thinking'))"
+    ) is False, "/yo reuses human typing presence instead of adding a fake thinking message"
+    browser.execute_script(
+        "window.__fixtureHoldChatRead = true; window.__fixtureHoldChatYoagent = false; window.__fixtureReleaseChatYoagent?.()"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .yochat-agent-message .conversation-message-body')].some(node => node.textContent.includes('summarize current tasks'))"
+        )
+    )
+    assert browser.execute_script(
+        "return window.__fixtureHoldChatRead === true && window.__fixtureReleaseChatRead !== null"
+    ), "the YO!agent reply paints before the read-cursor request is released"
+    browser.execute_script("window.__fixtureHoldChatRead = false; window.__fixtureReleaseChatRead?.()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: "YO!agent" not in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    assert browser.execute_script(
+        "return window.__bootFetches.filter(item => item.path === '/api/chat/yoagent').length"
+    ) == 1, "/yo invokes the server bridge exactly once after the source chat message is durable"
+
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Math.max(0, ...Object.values(window.__fixtureChatReaders).map(Number)) === window.__fixtureChatMessages.at(-1).id"
+        )
+    )
+    media_url = "https://encrypted-tbn0.gstatic.com/images?q=fixture&s=10"
+    browser.execute_script(
+        "window.__fixtureChatSendAs('guest-media', 'browser-media', `picture ${arguments[0]}`, false)",
+        media_url,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-media-url]')?.dataset.chatMediaUrl === arguments[0]",
+            media_url,
+        )
+    )
+    fast_pointer_actions(browser).move_to_element(
+        browser.find_element("css selector", "#panel-__chat__ [data-chat-media-url]")
+    ).perform()
+    thumbnail = browser.execute_script(
+        """
+        const node = document.querySelector('#panel-__chat__ [data-chat-media-url]');
+        const rect = node.getBoundingClientRect();
+        return {width: rect.width, height: rect.height, kind: node.dataset.chatMediaKind, link: node.closest('.conversation-message-body').querySelector('a')?.href || ''};
+        """
+    )
+    assert thumbnail["kind"] == "image" and 40 <= thumbnail["width"] <= 48 and 40 <= thumbnail["height"] <= 48, thumbnail
+    assert thumbnail["link"] == media_url, thumbnail
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.yochat-media-preview-popover img')?.src === arguments[0]",
+            media_url,
+        )
+    )
+    media_menu = browser.execute_script(
+        """
+        const node = document.querySelector('#panel-__chat__ [data-chat-media-url]');
+        node.click();
+        return [...document.querySelectorAll('.yochat-media-context-menu button')].map(button => button.textContent.trim());
+        """
+    )
+    assert media_menu == ["Open in new tab", "Open URL in a new tab", "Copy URL", "Download"]
+    browser.execute_script("document.querySelector('.yochat-media-context-menu button').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.chat-media-panel .yochat-media-panel-stage img')?.src === arguments[0]",
+            media_url,
+        )
+    )
+    browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
+    reload_result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        chatState.loading = false;
+        renderChatPanel();
+        (async () => {
+          const first = await loadChatBootstrap();
+          const result = first || await loadChatBootstrap();
+          done({
+            result,
+            transferredBodies: window.__fixtureLastChatBootstrapMessages?.length ?? -1,
+            renderedBodies: document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert reload_result["transferredBodies"] == 0 and reload_result["renderedBodies"] == 0, "reload transfers and paints no previously read message bodies"
+    queued_older = browser.execute_script(
+        """
+        const firstQueuedId = window.__fixtureChatMessages.length + 1;
+        for (let index = 0; index < 60; index += 1) {
+          window.__fixtureChatMessages.push({
+            id: firstQueuedId + index,
+            created_at_utc: Date.now() / 1000,
+            username: 'history-fixture',
+            sender_ip: '10.1.123.12',
+            sender_instance_id: 'history-browser',
+            client_message_uuid: `queued-history-${index}`,
+            body: `queued history ${index}`,
+            is_question: false,
+          });
+        }
+        const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
+        window.__fixtureChatReaders[chatReaderId] = Math.max(0, latest - 1);
+        window.__fixtureHoldChatBootstrap = true;
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        renderChatPanel();
+        const beforeRequests = window.__bootFetches.filter(item => item.path === '/api/chat/page').length;
+        window.__fixtureQueuedOlderBeforeRequests = beforeRequests;
+        void loadChatBootstrap();
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = 0;
+        timeline.dispatchEvent(new WheelEvent('wheel', {deltaY: -100, bubbles: true}));
+        return {
+          bootstrapHeld: window.__fixtureReleaseChatBootstrap !== null,
+          pageRequests: window.__bootFetches.filter(item => item.path === '/api/chat/page').length - beforeRequests,
+          olderRequested: chatState.olderRequested,
+        };
+        """
+    )
+    assert queued_older == {"bootstrapHeld": True, "pageRequests": 0, "olderRequested": True}
+    browser.execute_script("window.__fixtureHoldChatBootstrap = false; window.__fixtureReleaseChatBootstrap?.()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length === 51"
+        )
+    )
+    older_page = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => done({
+          pageRequests: window.__bootFetches.filter(item => item.path === '/api/chat/page').length - window.__fixtureQueuedOlderBeforeRequests,
+          olderRequested: chatState.olderRequested,
+          hasMore: chatState.hasMore,
+          renderedBodies: document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length,
+        })));
+        """
+    )
+    assert older_page["pageRequests"] == 1, "one upward gesture queues exactly one older-history request"
+    assert older_page["olderRequested"] is False, "the queued gesture is consumed when paging starts"
+    assert older_page["hasMore"] is True and older_page["renderedBodies"] == 51
+    cleanup = browser.execute_script(
+        """
+        removePanelForItem(chatItemId);
+        return {
+          panelConnected: document.getElementById('panel-__chat__')?.isConnected === true,
+          observer: chatState.olderObserver,
+          controller: chatState.requestController,
+          emojiOpen: chatEmojiOverlayController.isOpen(),
+        };
+        """
+    )
+    assert cleanup == {"panelConnected": False, "observer": None, "controller": None, "emojiOpen": False}
+
+
+def test_yochat_follows_new_messages_only_from_the_tail_and_resets_initial_chrome(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=chat&layout=slot1&tabs=slot1:chat",
+        sessions=["1"],
+        grid_width=640,
+        grid_height=520,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-timeline]') && window.__eventSources.length > 0"
+        )
+    )
+    browser.execute_script(
+        """
+        window.marked.parse = text => String(text).includes('| City |')
+          ? '<table><thead><tr><th>City</th><th>Temp</th></tr></thead><tbody><tr><td>San Jose</td><td>65°F</td></tr></tbody></table>'
+          : String(text || '');
+        window.__fixtureChatSendAs('YO!agent', 'yolomux-yoagent', '| City | Temp |\\n| --- | --- |\\n| San Jose | 65°F |', false, '');
+        window.__fixtureChatSendAs(window.__fixtureAuthUsername, 'browser-self', 'own color', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ .yochat-agent-message table td')?.textContent === 'San Jose'"
+        )
+    )
+    composer_color = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const selfRow = [...panel.querySelectorAll('.yochat-message.user')].find(row => row.querySelector('.conversation-message-role span')?.textContent === window.__fixtureAuthUsername);
+        const probe = document.createElement('span');
+        probe.style.border = '1px solid color-mix(in srgb, var(--accent-gold) 68%, var(--line))';
+        probe.style.background = 'var(--accent-gold)';
+        panel.appendChild(probe);
+        const goldBorder = getComputedStyle(probe).borderColor;
+        const goldBackground = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const send = panel.querySelector('.conversation-send-primary');
+        return {
+          composer: getComputedStyle(panel.querySelector('[data-chat-form]')).borderColor,
+          message: getComputedStyle(selfRow).borderColor,
+          sendBackground: getComputedStyle(send).backgroundColor,
+          sendBorder: getComputedStyle(send).borderColor,
+          goldBorder,
+          goldBackground,
+        };
+        """
+    )
+    assert composer_color["composer"] == composer_color["message"] == composer_color["goldBorder"], composer_color
+    assert composer_color["sendBorder"] == composer_color["goldBorder"] and composer_color["sendBackground"] == composer_color["goldBackground"], composer_color
+    browser.execute_script(
+        """
+        for (let index = 0; index < 24; index += 1) {
+          window.__fixtureChatSendAs('guest', 'browser-guest', `history ${index}`, false);
+        }
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length >= 26"
+        )
+    )
+
+    bottom_before = browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event('scroll', {bubbles: true}));
+        return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+        """
+    )
+    assert bottom_before < 32
+    browser.execute_script("window.__fixtureChatSendAs('guest', 'browser-guest', 'follow the tail', false)")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return [...panel.querySelectorAll('.conversation-message-body')].some(node => node.textContent === 'follow the tail')
+              && timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = timeline.scrollHeight;
+        chatState.followTail = false;
+        window.__fixtureChatSendAs('guest', 'browser-guest', 'measure the real tail', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return [...panel.querySelectorAll('.conversation-message-body')].some(node => node.textContent === 'measure the real tail')
+              && timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = 0;
+        timeline.dispatchEvent(new Event('scroll', {bubbles: true}));
+        window.__fixtureChatSendAs('guest', 'browser-guest', 'preserve scrollback', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent === 'preserve scrollback')"
+        )
+    )
+    scrollback = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        return {
+          top: timeline.scrollTop,
+          bottomGap: timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+          newMessagesVisible: panel.querySelector('[data-chat-new-messages]').hidden === false,
+        };
+        """
+    )
+    assert scrollback["top"] <= 2 and scrollback["bottomGap"] > 32 and scrollback["newMessagesVisible"] is True
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-new-messages]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    reset = browser.execute_script(
+        """
+        openChatSearch(document.getElementById('panel-__chat__'));
+        clearChatLifecycle({destroy: true});
+        renderChatPanel();
+        const panel = document.getElementById('panel-__chat__');
+        return {
+          searchHidden: panel.querySelector('[data-chat-search-bar]').hidden,
+          introductionCount: panel.querySelectorAll('.yochat-introduction').length,
+          messageCount: panel.querySelectorAll('[data-chat-message-id]').length,
+        };
+        """
+    )
+    assert reset == {"searchHidden": True, "introductionCount": 1, "messageCount": 29}
+
+
+def test_twelve_hour_setting_repaints_yostats_and_tab_navigation_dismisses_addressed_toasts(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphExactTimeLabel === 'function' && document.getElementById('panel-1')"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const timestamp = new Date(2026, 6, 4, 18, 5, 6).getTime();
+        const before = debugGraphExactTimeLabel(timestamp);
+        const next = {mtime_ns: Date.now(), defaults: clientSettingsDefaults, settings: JSON.parse(JSON.stringify(clientSettings))};
+        next.settings.appearance = next.settings.appearance || {};
+        next.settings.appearance.date_time_hour_cycle = '12';
+        applySettingsPayload(next, {force: true});
+        const after = debugGraphExactTimeLabel(timestamp);
+        setFocusedPanelItem(prefsItemId);
+        const node = showToast('Working AI needs your attention', 'fixture', {container: displayToastContainer('1'), targetItem: '1'});
+        node.dataset.toastKind = 'working-agent-transition';
+        const beforeNavigate = document.querySelectorAll('[data-toast-target-item="1"]').length;
+        selectSession('1', {userInitiated: true});
+        const afterNavigate = document.querySelectorAll('[data-toast-target-item="1"]').length;
+        const suppressed = showToast('Working AI finished', 'fixture', {container: displayToastContainer('1'), targetItem: '1'});
+        return {before, after, beforeNavigate, afterNavigate, suppressed: suppressed === null};
+        """
+    )
+    assert not re.search(r"\b(?:AM|PM)\b", result["before"])
+    assert re.search(r"\b(?:AM|PM)\b", result["after"]), result
+    assert result["beforeNavigate"] == 1 and result["afterNavigate"] == 0
+    assert result["suppressed"] is True
 
 
 def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(browser, tmp_path):

@@ -224,8 +224,27 @@ function preferencesStatusPulseExampleHtml() {
   return `<span class="preferences-status-pulse-example">${groupHtml('tab')}${groupHtml('subwindow')}${groupHtml('acknowledgement')}</span>`;
 }
 
+function orderedPreferenceSections(sections) {
+  const orderedIds = [
+    PREFERENCE_SECTION_IDS.general,
+    PREFERENCE_SECTION_IDS.appearance,
+    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.notifications,
+    ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
+      id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
+    )),
+    PREFERENCE_SECTION_IDS.github,
+    PREFERENCE_SECTION_IDS.yolo,
+  ];
+  const rank = new Map(orderedIds.map((id, index) => [id, index]));
+  return sections
+    .map((section, index) => ({section, index}))
+    .sort((left, right) => (rank.get(left.section.id) ?? orderedIds.length) - (rank.get(right.section.id) ?? orderedIds.length) || left.index - right.index)
+    .map(({section}) => section);
+}
+
 function preferenceSections() {
-  return [
+  const sections = [
     {id: PREFERENCE_SECTION_IDS.general, title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
       preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
@@ -292,6 +311,9 @@ function preferenceSections() {
       preferenceSettingItem('performance.workflow_transition_glow_seconds', {type: 'number', min: 0, max: 300, step: 1, suffix: 's'}),
       preferenceSettingItem('general.reload_on_update', {type: 'boolean'}),
       preferenceSettingItem('general.reload_on_update_auto', {type: 'boolean'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.chat, title: t('brand.tab.chat'), items: [
+      preferenceSettingItem('chat.retention_days', {type: 'number', min: 1, max: 365, step: 1}),
     ]},
     {id: PREFERENCE_SECTION_IDS.fileExplorer, title: fileExplorerLabel(), items: [
       preferenceSettingItem('file_explorer.root_mode', {type: 'radio', choices: [
@@ -369,6 +391,7 @@ function preferenceSections() {
       ]}),
     ]},
   ];
+  return orderedPreferenceSections(sections);
 }
 
 function preferenceItemByPath(path) {
@@ -821,8 +844,7 @@ function renderPreferencesPanels(options = {}) {
 function autosizePreferenceTextarea(textarea) {
   if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
   const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
-  textarea.style.height = 'auto';
-  let height = textarea.scrollHeight;
+  let maxHeight = Number.POSITIVE_INFINITY;
   if (Number.isFinite(maxRows) && maxRows > 0) {
     const style = window.getComputedStyle?.(textarea);
     const lineHeight = Number.parseFloat(style?.lineHeight || '');
@@ -831,12 +853,10 @@ function autosizePreferenceTextarea(textarea) {
     const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
     const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
     if (Number.isFinite(lineHeight) && lineHeight > 0) {
-      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
-      height = Math.min(height, maxHeight);
-      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+      maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
     }
   }
-  textarea.style.height = `${height}px`;
+  conversationAutosizeTextarea(textarea, maxHeight);
 }
 
 function clampPreferenceListControl(control) {

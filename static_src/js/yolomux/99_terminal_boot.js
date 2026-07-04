@@ -478,7 +478,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!chat) return false;
   const openDetails = yoagentOpenMessageDetailsState(node);
   chat.outerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   return true;
@@ -550,7 +550,7 @@ function installYoagentSessionLinks(container) {
   }
 }
 
-function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+function renderConversationMessageMarkdown(node = document.getElementById('yoagent-content')) {
   // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
   // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
@@ -592,7 +592,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   node.innerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   if (shouldScrollBottom) {
@@ -3436,6 +3436,7 @@ function syncPanelVisibility(previousActive = []) {
     const pane = document.getElementById(`terminal-pane-${session}`);
     if (pane?.classList.contains(CLS.active)) scheduleFit(session);
   }
+  if (typeof syncChatActiveLifecycle === 'function') syncChatActiveLifecycle();
 }
 
 function activateTab(session, name, options = {}) {
@@ -4819,7 +4820,7 @@ function transcriptItemHtml(item) {
     summary: 'transcript.role.summary',
     system: 'transcript.role.system',
   };
-  const roleLabel = t(roleKeys[role] || 'transcript.role.message');
+  const roleLabel = t(roleKeys[role] || 'common.message');
   const meta = [item.timestamp, item.cwd].map(value => String(value || '')).filter(Boolean).join(', ');
   const header = meta ? t('transcript.itemHeader', {role: roleLabel, meta}) : roleLabel;
   return `<div class="transcript-item ${role}">
@@ -4846,7 +4847,7 @@ function eventItemHtml(event) {
 function formatEventTime(value) {
   const date = new Date(value || 0);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString([], {
+  return localizedDateTimeFormat(date.getTime() / 1000, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -5065,6 +5066,7 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
   if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
     await primeJsDebugStatsBeforeLongLivedStreams();
   }
@@ -5445,6 +5447,12 @@ function handleClientPushEventNow(type, payload = {}) {
     refreshActivitySummary({force: true, render: yoagentPanelIsActive()}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
+  if (type === 'chat_messages_changed' || type === 'chat_typing_changed') {
+    if (typeof handleChatInvalidation === 'function') {
+      handleChatInvalidation(type, payload);
+    }
+    return;
+  }
   if (type === 'session_files_ready') {
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
       applySessionFilesPayloadFromPush(payload.data, payload.request || {});
@@ -5469,6 +5477,8 @@ function clientEventDemandDescriptor() {
   const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
   const channels = new Set();
   const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
+  const notificationChat = typeof notificationDeliveryEnabled === 'function'
+    && (notificationDeliveryEnabled('inApp') || notificationDeliveryEnabled('system'));
   if (visible) {
     channels.add('core');
     channels.add('status');
@@ -5485,11 +5495,13 @@ function clientEventDemandDescriptor() {
       channels.add('transcripts');
       channels.add('yoagent');
     }
+    if (activeItems.includes(chatItemId) || notificationChat) channels.add('chat');
     if (activeItems.some(item => isTmuxSession(item) && typeof transcriptPreviewPaneIsActive === 'function' && transcriptPreviewPaneIsActive(item))) {
       channels.add('transcripts');
     }
   } else if (notificationAttention) {
     channels.add('attention');
+    channels.add('chat');
   }
   return {
     visibility: visible ? 'visible' : 'hidden',
@@ -5497,6 +5509,7 @@ function clientEventDemandDescriptor() {
     active_subtabs: {
       finder: finderActiveMode(),
       yoagent: activeItems.includes(yoagentItemId),
+      chat: activeItems.includes(chatItemId),
     },
     channels: Array.from(channels).sort(),
     notification_attention: notificationAttention,
@@ -5540,6 +5553,7 @@ function openClientEventStream(descriptor) {
     if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
     if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
     if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
@@ -5552,7 +5566,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;

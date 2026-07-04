@@ -19,19 +19,10 @@ function activitySummaryLinesHtml(lines, options = {}) {
 function yoagentTimestampText(value) {
   const date = value ? new Date(value) : new Date();
   if (!Number.isFinite(date.getTime())) return '';
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      timeZoneName: 'short',
-    }).format(date);
-  } catch (_) {
-    return date.toLocaleString();
-  }
+  return localizedDateTimeFormat(date.getTime() / 1000, {
+    timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  });
 }
 
 function yoagentMessageResponseMs(message) {
@@ -231,7 +222,7 @@ function yoagentMessageStreamItemsHtml(message, key = '') {
   const thinkingActive = yoagentThinkingPreviewActive(message);
   return `<div class="yoagent-message-stream">${items.map((item, index) => {
     if (item.kind === 'assistant') {
-      return `<div class="yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
+      return `<div class="conversation-message-body yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
     }
     return yoagentStreamAuxiliaryItemHtml(item, key, index, {active: thinkingActive});
   }).join('')}</div>`;
@@ -288,14 +279,10 @@ function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
     ? t('yoagent.updated.justNow')
     : t('yoagent.updated.wrap', {rel: relativeTimeFormat(seconds)});
   let title = payload?.generated_at || '';
-  try {
-    title = new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      timeZoneName: 'short',
-    }).format(new Date(ts * 1000));
-  } catch (_) {}
+  title = localizedDateTimeFormat(ts, {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }) || title;
   return {text, title};
 }
 
@@ -351,9 +338,9 @@ function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
     const output = parts.output
       ? `<div class="yoagent-agent-result-output markdown-body" data-yoagent-markdown>${esc(parts.output)}</div>`
       : '';
-    return `<div class="yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
+    return `<div class="conversation-message-body yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
   }
-  const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+  const bodyClass = roleClass === 'assistant' ? 'conversation-message-body yoagent-message-body markdown-body' : 'conversation-message-body yoagent-message-body';
   const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
   return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
 }
@@ -379,14 +366,14 @@ function yoagentChatMessagesHtml() {
     const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
       ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
       : '';
-    return `<div class="${messageClass}">
-      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null)}</div>
-      ${streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
-      ${stoppedState}
-      ${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
-      ${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}
-      ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
-    </div>`;
+    return conversationMessageShellHtml({
+      self: roleClass === 'user',
+      className: messageClass,
+      author: role,
+      timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
+      bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
+      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+    });
   }).join('');
   return `${messageHtml}${startupInfo}`;
 }
@@ -483,10 +470,12 @@ function yoagentIntroMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const text = yoagentIntroMessageText(payload);
   if (!text || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-intro-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-intro-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: `<div class="conversation-message-body yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>`,
+  });
 }
 
 function yoagentStartupInfoHtml() {
@@ -961,10 +950,12 @@ function yoagentRecentAgentsMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const html = yoagentRecentAgentsHtml(payload);
   if (!html || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-recent-agents-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    ${html}
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-recent-agents-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: html,
+  });
 }
 
 async function loadYoagentConversation(options = {}) {
@@ -1171,14 +1162,14 @@ function yoagentChatHtml() {
   const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
   const submitButton = yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
-    : `<button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
-          <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    : `<button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
+          <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>`;
-  const form = `<form class="yoagent-chat-form" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="yoagent-chat-controls">
+  const form = `<form class="yoagent-chat-form conversation-composer" data-yoagent-chat-form>
+      <input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
+      <div class="conversation-composer-controls yoagent-chat-controls">
         ${yoagentComposerControlsHtml(backendDisabled)}
-        <span class="yoagent-chat-controls-spacer"></span>
+        <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>
         ${submitButton}
       </div>

@@ -487,6 +487,7 @@ def test_preformatted_text_wrapping_has_one_shared_selector_owner():
         ".tmux-snapshot",
         ".transcript-text",
         ".yoagent-message-body",
+        ".conversation-message-body",
         ".yoagent-details-preview",
         ".yoagent-message-details pre",
         ".modal pre",
@@ -772,7 +773,7 @@ def test_audited_css_families_have_one_grouped_owner():
     assert ".changes-summary-totals,\n.changes-repo-totals {" in preferences_css
     assert ".keyboard-shortcut-row,\n.keyboard-legend-row {" in preferences_css
     assert ".info-tree-search-control input:focus,\n.preferences-search:focus,\n.search-history-input:focus {" in file_tree_css
-    assert ".yoagent-chat-send,\n.yoagent-chat-stop {" in file_tree_css
+    assert ".conversation-send,\n.yoagent-chat-stop {" in file_tree_css
     assert ".file-editor-preview-pane,\n.file-editor-preview-pane-panel {" in panels_css
     assert ".file-explorer-title,\n.file-explorer-panel-title,\n.file-editor-title {" in panels_css
     assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)

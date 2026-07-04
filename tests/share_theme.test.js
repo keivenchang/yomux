@@ -37,7 +37,7 @@ async function runShareThemeSuite() {
   test('t@2560', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug layout item resolves to the normal YO!stats tab');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
@@ -2931,9 +2931,9 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('YO!stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenuLabels[0], 'Open file', 'File -> Open file is the first File menu command');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 7)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 8)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands');
     const firstYoIndex = fileMenuLabels.indexOf('YO!info');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 4)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!stats after YO!agent');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
     for (const label of [api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
@@ -3316,7 +3316,7 @@ async function runShareThemeSuite() {
       assert.ok(/function detachPaneTabPopover\(tab, popover\)[\s\S]*const host = appOverlayRootElement\(\)[\s\S]*host\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: detached tab popovers mount under the replayed app overlay root');
       assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
       assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: repo hover popovers mount under the replayed app overlay root');
-      assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: image preview popovers mount under the replayed app overlay root');
+      assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null, options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: local and external image preview popovers mount under the replayed app overlay root');
       assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(shareSource), 'DOIT.72 P4.3: rename dialogs mount under the replayed app overlay root');
       assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(shareSource), 'DOIT.72 P4.3: editor decision dialogs mount under the replayed app overlay root');
       assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: command palette modal DOM mounts under the replayed app overlay root');

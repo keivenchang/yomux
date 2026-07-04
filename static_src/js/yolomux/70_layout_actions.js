@@ -642,6 +642,7 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (options.userInitiated === true) dismissSessionToasts(session);
   if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
   }
@@ -1749,6 +1750,7 @@ async function killTmuxSession(session) {
 function focusPanel(session, options = {}) {
   const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
+  if (options.userInitiated === true) dismissSessionToasts(session);
   if (options.userInitiated === true || options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }

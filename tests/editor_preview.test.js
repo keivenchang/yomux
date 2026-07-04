@@ -129,7 +129,7 @@ async function runEditorPreviewSuite() {
     const en = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 
     const sectionIds = [...preferencesSource.matchAll(/\{id: PREFERENCE_SECTION_IDS\.(\w+), title:/g)].map(match => match[1]);
-    assert.deepStrictEqual(sectionIds, ['general', 'appearance', 'terminalEditor', 'notifications', 'fileExplorer', 'uploads', 'performance', 'github', 'yoagent', 'share', 'yolo'], 'every Preferences section has one stable ID owned by PREFERENCE_SECTION_IDS');
+    assert.deepStrictEqual(sectionIds, ['general', 'appearance', 'terminalEditor', 'notifications', 'chat', 'fileExplorer', 'uploads', 'performance', 'github', 'yoagent', 'share', 'yolo'], 'every Preferences section has one stable ID owned by PREFERENCE_SECTION_IDS');
     assert.ok(/function normalizeCollapsedPreferenceSections\(values, sections = \[\]\)[\s\S]*validIds[\s\S]*legacyTitleIds/.test(coreSource), 'collapsed Preferences state migrates legacy titles through one normalizer');
     assert.ok(preferencesSource.includes('collapsedPreferenceSections.has(section.id)') && preferencesSource.includes('data-preference-section="${esc(section.id)}"'), 'Preferences rendering uses stable IDs rather than translated titles');
     assert.equal(preferencesSource.includes("choices: ['fixed', 'sync']"), false, 'Finder root-mode choices do not use title-cased protocol values');
@@ -578,7 +578,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function refreshAgentWindowActivityDisplays\(\)[\s\S]*renderPanels\(activePaneItems\(\), \{reason: 'agent-window-activity'\}\);[\s\S]*renderPaneTabStrips\(\)/.test(activitySource), 'sub-window activity refreshes redraw parent pane tab strips immediately');
     assert.ok(/mutationTouchesAgentWindowActivity\(mutation\)[\s\S]*status-indicator[\s\S]*heartbeat-pulse[\s\S]*querySelector\?\.\('\.status-indicator\.heartbeat-pulse, \.status-indicator\.attention-pulse'/.test(activitySource), 'the shared animation sync observer watches attention status indicators as well as agent activity wrappers');
     assert.ok(/function syncAgentWindowPulseAnimationCurrentTime\(node, nowMs = Date\.now\(\)\)[\s\S]*animation\.currentTime = Number\(nowMs\) \|\| 0/.test(activitySource), 'red/yellow/green attention balls are phase-synced from one sampled timeline value');
-    assert.ok(/function syncAgentWindowActivityAnimationDelays\(root = document\)[\s\S]*agentWindowActivityPulseSelector[\s\S]*attentionAnimationClockDelay\(nowMs\)[\s\S]*localDelay && localDelay !== delay[\s\S]*node\.style\.removeProperty\('--attention-animation-delay'\)[\s\S]*syncAgentWindowPulseAnimationCurrentTime\(node, nowMs\)/.test(activitySource), 'red/yellow/green attention balls share one root delay while stale local delays are cleared instead of rewritten');
+    assert.ok(/function syncAgentWindowActivityAnimationDelays\(root = document\)[\s\S]*agentWindowActivityPulseSelector[\s\S]*attentionAnimationClockDelay\(nowMs\)[\s\S]*if \(localDelay\) node\.style\.removeProperty\('--attention-animation-delay'\)[\s\S]*syncAgentWindowPulseAnimationCurrentTime\(node, nowMs\)/.test(activitySource), 'red/yellow/green attention balls share one root delay while stale local delays are cleared instead of rewritten');
     assert.ok(/function ensureAgentWindowActivityMutationObserver\(\)[\s\S]*!statusPulseAnimationEnabled\(\)[\s\S]*return[\s\S]*observe\(document\.body, \{childList: true, subtree: true\}/.test(activitySource) && /function disconnectAgentWindowActivityMutationObserver\(\)[\s\S]*disconnect\?\.\(\)[\s\S]*agentWindowActivityMutationObserver = null/.test(activitySource) && /function scheduleAgentWindowActivityAnimationSync\(root = document\)[\s\S]*!statusPulseAnimationEnabled\(\)[\s\S]*disconnectAgentWindowActivityMutationObserver\(\)[\s\S]*ensureAgentWindowActivityMutationObserver\(\)[\s\S]*syncAgentWindowActivityAnimationDelays\(root\)/.test(activitySource), 'agent-window animation phase sync keeps explicit render-path sync while installing the body mutation observer only when status pulsing is enabled');
     assert.ok(/\.status-indicator\s*\{[^}]*display:\s*inline-flex/.test(sessionsCss), 'attention/activity-dot markers share the status-indicator parent');
     assert.ok(/\.status-indicator--text\s*\{[^}]*border:\s*1px solid var\(--divider\)/.test(sessionsCss), 'text status badges inherit pill framing from the shared parent modifier');
@@ -1319,7 +1319,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__files__', '__search_history__', '__prefs__', '__debug__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__files__', '__search_history__', '__prefs__', '__debug__', '3']);
   });
 
   test('t@6373', () => {
@@ -2454,7 +2454,10 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('function renderBrowserAppIconDataUrl(options = {})'), 'favicon and OS notifications share one app-icon renderer');
     assert.ok(source.includes('return renderBrowserAppIconDataUrl({count, showBadge: true})'), 'the favicon enables the activity-count badge through the shared renderer');
     assert.ok(source.includes('renderBrowserAppIconDataUrl({size: 192, showBadge: false})'), 'OS notifications use a badge-free 192px icon through the shared renderer');
-    assert.ok(source.includes("new Notification(title, icon ? {icon, ...options} : options)"), 'the shared OS-notification boundary applies the icon to every notification');
+    assert.ok(source.includes("new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions)"), 'the shared OS-notification boundary applies the icon to every notification');
+    assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*focusedPanelItem === target \|\| focusedTerminal === target/.test(source), 'one exact-target focus classifier suppresses chat and session notifications only on the viewed Tab');
+    assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*toastTargetItem[\s\S]*browserNotificationsByTarget/.test(source), 'focusing a target Tab dismisses both its in-app and system notifications through one owner');
+    assert.ok(/function maybeNotifyWorkingAgentTransition\(session, agentKey, tone, options = \{\}\)[\s\S]*notificationTargetIsFocused\(session\)[\s\S]*dismissNotificationsForTarget\(session\)[\s\S]*return false[\s\S]*showToast\(title/.test(source), 'RUN-to-stop/pause notifications are suppressed before either delivery path when their exact Tab is focused');
     const notificationApi = loadYolomux('', ['1']);
     notificationApi.setTranscriptInfoForTest('1', {
       selected_pane: {current_path: '/home/test/yolomux.dev8001'},
@@ -3049,7 +3052,7 @@ async function runEditorPreviewSuite() {
     assert.equal(api.debugModeExplicitUrlEnabledForTest(), true, 'debug=1 is tracked separately from menu-opened YO!stats');
     api.recordClientPerfCounterForTest('focusSet', 0.2, {nodes: 1});
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-client-perf'), 'explicit debug=1 graph shows raw client-work counters');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -3150,7 +3153,7 @@ async function runEditorPreviewSuite() {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
       assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
     }
-    assert.match(html, /data-js-debug-resolution(?:-seconds="1")?/, 'YO!stats graph shows its automatic displayed resolution');
+    assert.ok(html.includes('data-js-debug-resolution-seconds="10"'), 'the default fifteen-minute YO!stats graph reports its automatic ten-second display resolution');
     assert.equal(html.includes('data-js-debug-scale='), false, 'YO!stats does not expose manual aggregation controls');
     for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
       assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph exposes the ${range}s range slider tick`);
@@ -3333,7 +3336,7 @@ async function runEditorPreviewSuite() {
     assert.ok(summary.middleBuckets > 0 && summary.middleBuckets <= 3, 'ninety-minute-old per-second samples compress into ten-second buckets');
     assert.equal(summary.oldBuckets, 1, 'three-hour-old samples compress into one sixty-second bucket');
     assert.deepStrictEqual([...summary.tierBucketCounts].slice(2), [1, 1, 1, 1], 'older samples use the 1m, 2m, 5m, and 10m tiers');
-    assert.equal(summary.resolutionSeconds, 1, 'YO!stats defaults to the one-second retained resolution for the recent 15-minute domain');
+    assert.equal(summary.resolutionSeconds, 10, 'YO!stats defaults to a bounded ten-second display resolution for the recent 15-minute domain');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
@@ -3381,7 +3384,7 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
-    assert.equal(summary.resolutionSeconds, 10, 'a two-hour range automatically uses its ten-second retained resolution');
+    assert.equal(summary.resolutionSeconds, 60, 'a two-hour range automatically bounds the displayed point count at one-minute resolution');
     assert.equal(summary.displayBuckets, 0, 'changing range does not resurrect history discarded after a server restart');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 18,
@@ -3432,7 +3435,7 @@ async function runEditorPreviewSuite() {
     assert.ok(summary.rawBuckets > 0, 'recent server timing samples stay in one-second buckets');
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 10, 'the selected two-hour graph reports its automatic aggregate interval');
+    assert.equal(summary.resolutionSeconds, 60, 'the selected two-hour graph reports its automatic aggregate interval');
     const html = api.debugPanelHtmlForTest();
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
@@ -3509,9 +3512,9 @@ async function runEditorPreviewSuite() {
     });
     api.setDebugGraphRangeForTest(86400);
     const html = api.debugPanelHtmlForTest();
-    const match = html.match(/data-js-debug-series="api"[^>]*points="([^"]+)"/);
-    assert.ok(match, 'API series renders point coordinates');
-    const xValues = match[1].trim().split(/\s+/).map(point => Number(point.split(',')[0]));
+    const matches = [...html.matchAll(/data-js-debug-series="api"[^>]*points="([^"]+)"/g)];
+    assert.equal(matches.length, 2, 'a real one-hour gap splits the sparse API history into two segments');
+    const xValues = matches.flatMap(match => match[1].trim().split(/\s+/).map(point => Number(point.split(',')[0])));
     assert.equal(xValues.length, 2, 'sparse history only renders recorded buckets');
     assert.ok(xValues[0] > 550, `one-hour-old data stays near the right edge of the 24h graph, got ${xValues[0]}`);
     assert.ok(xValues[1] > xValues[0] && xValues[1] <= 600, `newer data stays later in the selected 24h graph, got ${xValues.join(',')}`);
@@ -3543,7 +3546,7 @@ async function runEditorPreviewSuite() {
       }],
     });
     const summary = api.debugGraphBucketSummaryForTest(now);
-    assert.deepStrictEqual([...summary.displayBucketSeconds], [60], 'a four-hour domain aggregates 1s and 10s source buckets to the coarsest intersecting 60s source interval');
+    assert.deepStrictEqual([...summary.displayBucketSeconds], [120], 'a four-hour domain aggregates every retained source tier to its bounded two-minute display interval');
     assert.equal(summary.displayBuckets, 3, 'uniform aggregation retains one displayed bucket per distinct minute instead of mixing persistence-tier resolutions');
   });
 
@@ -3558,13 +3561,141 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 1, 'a one-minute graph always selects one-second resolution even when a stale coarse source record is present');
     assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="1"'), 'the read-only control reports one second for the one-minute graph');
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 5, 'a five-minute graph aggregates irregular client events into five-second display buckets');
+    api.setDebugGraphRangeForTest(15 * 60, {render: false});
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 10, 'a fifteen-minute graph stays within the shared display point budget');
     api.setDebugGraphRangeForTest(8 * 60 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 120, 'an eight-hour range reports the two-minute retained resolution before history finishes loading');
-    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="120"'), 'the read-only control reports the selected eight-hour resolution');
+    assert.equal(summary.resolutionSeconds, 300, 'an eight-hour range reports its bounded five-minute display resolution before history finishes loading');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="300"'), 'the read-only control reports the selected eight-hour resolution');
     api.setDebugGraphRangeForTest(16 * 60 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 600, 'a sixteen-hour range reports the ten-minute retained resolution');
+  });
+
+  test('YO!stats aggregates irregular client events but preserves real communication gaps', () => {
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const historyRecords = (clientId, gap) => Array.from({length: 300}, (_item, index) => {
+      const hasClientSample = index % 3 === 0 && !(gap && index >= 120 && index < 180);
+      return {
+        start: (now / 1000) - 300 + index,
+        duration: 1,
+        sequence: index + 1,
+        cpu_total_percent: 1,
+        cpu_count: 1,
+        ...(hasClientSample ? {
+          clients: {
+            [clientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+          },
+        } : {}),
+      };
+    });
+    const latencyChart = api => {
+      const html = api.debugGraphInnerHtmlForTest(now);
+      const start = html.indexOf('data-js-debug-chart="latency"');
+      return html.slice(start, html.indexOf('</section>', start));
+    };
+
+    const continuous = loadYolomux('?debug=1&sessions=debug', ['1']);
+    continuous.clearJsDebugEventsForTest();
+    continuous.setDebugGraphRangeForTest(5 * 60, {render: false});
+    continuous.debugGraphApplyServerHistoryForTest({sequence: 300, records: historyRecords(continuous.jsDebugStatsClientIdForRequestForTest(), false)});
+    const continuousSummary = continuous.debugGraphBucketSummaryForTest(now);
+    const continuousChart = latencyChart(continuous);
+    assert.equal(continuousSummary.resolutionSeconds, 5, 'five-minute sparse history uses five-second display buckets');
+    assert.deepStrictEqual([...continuousSummary.displayBucketSeconds], [5], 'every client chart consumes the shared five-second aggregation');
+    assert.equal((continuousChart.match(/data-js-debug-series="latency"/g) || []).length, 1, 'three-second event cadence renders as one continuous aggregate line');
+    const continuousNoDataRegions = (continuousChart.match(/data-js-debug-no-data-range=/g) || []).length;
+    assert.ok(continuousNoDataRegions <= 2, `empty raw seconds produce at most the two partial-domain edge regions, got ${continuousNoDataRegions}`);
+
+    const gapped = loadYolomux('?debug=1&sessions=debug', ['1']);
+    gapped.clearJsDebugEventsForTest();
+    gapped.setDebugGraphRangeForTest(5 * 60, {render: false});
+    gapped.debugGraphApplyServerHistoryForTest({sequence: 300, records: historyRecords(gapped.jsDebugStatsClientIdForRequestForTest(), true)});
+    const gappedChart = latencyChart(gapped);
+    assert.equal((gappedChart.match(/data-js-debug-series="latency"/g) || []).length, 2, 'a real one-minute communication gap still splits the line');
+    assert.equal((gappedChart.match(/data-js-debug-no-data-range=/g) || []).length, continuousNoDataRegions + 1, 'the same real gap adds exactly one consolidated no-data region');
+  });
+
+  test('YO!stats does not treat sparse ten-second client buckets as communication outages', () => {
+    const now = Math.floor(Date.now() / 10_000) * 10_000;
+    const historyRecords = (clientId, gap) => Array.from({length: 90}, (_item, index) => {
+      const hasClientSample = index % 2 === 0 && !(gap && index >= 30 && index < 38);
+      return {
+        start: (now / 1000) - (15 * 60) + (index * 10),
+        duration: 10,
+        sequence: index + 1,
+        cpu_total_percent: 1,
+        cpu_count: 1,
+        ...(hasClientSample ? {
+          clients: {
+            [clientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+          },
+        } : {}),
+      };
+    });
+    const bandwidthChart = api => {
+      const html = api.debugGraphInnerHtmlForTest(now);
+      const start = html.indexOf('data-js-debug-chart="bandwidth"');
+      return html.slice(start, html.indexOf('</section>', start));
+    };
+
+    const continuous = loadYolomux('?debug=1&sessions=debug', ['1']);
+    continuous.clearJsDebugEventsForTest();
+    continuous.setDebugGraphRangeForTest(15 * 60, {render: false});
+    continuous.debugGraphApplyServerHistoryForTest({sequence: 90, records: historyRecords(continuous.jsDebugStatsClientIdForRequestForTest(), false)});
+    const continuousChart = bandwidthChart(continuous);
+    assert.equal(continuous.debugGraphBucketSummaryForTest(now).resolutionSeconds, 10, 'fifteen-minute client history uses ten-second display buckets');
+    assert.equal((continuousChart.match(/data-js-debug-series="bandwidth"/g) || []).length, 1, 'twenty-second event cadence remains one line at ten-second display resolution');
+    assert.equal((continuousChart.match(/data-js-debug-no-data-range=/g) || []).length, 0, 'single empty ten-second buckets do not produce red no-data stripes');
+
+    const gapped = loadYolomux('?debug=1&sessions=debug', ['1']);
+    gapped.clearJsDebugEventsForTest();
+    gapped.setDebugGraphRangeForTest(15 * 60, {render: false});
+    gapped.debugGraphApplyServerHistoryForTest({sequence: 90, records: historyRecords(gapped.jsDebugStatsClientIdForRequestForTest(), true)});
+    const gappedChart = bandwidthChart(gapped);
+    assert.equal((gappedChart.match(/data-js-debug-series="bandwidth"/g) || []).length, 2, 'a real eighty-second communication gap still splits the ten-second line');
+    assert.equal((gappedChart.match(/data-js-debug-no-data-range=/g) || []).length, 1, 'the same real gap renders one consolidated no-data region');
+  });
+
+  test('YO!stats keeps this-client outage overlays visible while a peer reports data', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 3,
+      records: [{
+        start: (now / 1000) - 3,
+        duration: 1,
+        sequence: 1,
+        disconnected_ms: 1000,
+        clients: {'client-stale': {disconnected_ms: 1000}},
+      }, {
+        start: (now / 1000) - 2,
+        duration: 1,
+        sequence: 2,
+        clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+      }, {
+        start: (now / 1000) - 1,
+        duration: 1,
+        sequence: 3,
+        disconnected_ms: 1000,
+        clients: {
+          'client-stale': {disconnected_ms: 1000},
+          'client-live': {disconnected_ms: 1000},
+        },
+      }],
+    });
+    const html = api.debugGraphInnerHtmlForTest(now);
+    for (const chart of ['latency', 'count', 'bandwidth']) {
+      const start = html.indexOf(`data-js-debug-chart="${chart}"`);
+      const chartHtml = html.slice(start, html.indexOf('</section>', start));
+      assert.equal((chartHtml.match(/data-js-debug-disconnected-range=/g) || []).length, 2, `${chart} preserves both this-client outage ranges even while a peer is represented`);
+    }
   });
 
   test('YO!stats uses server-aggregated token points for wide time ranges', () => {
@@ -3766,7 +3897,7 @@ async function runEditorPreviewSuite() {
         'debug.graph.control.timeRange',
       ]) {
         const rendered = key === 'debug.graph.control.resolution'
-          ? catalog[key].replace('{resolution}', '1s')
+          ? catalog[key].replace('{resolution}', '10s')
           : catalog[key];
         assert.ok(html.includes(escaped(rendered)), `${locale} YO!stats renders ${key}`);
       }
@@ -3854,6 +3985,7 @@ async function runEditorPreviewSuite() {
     const now = Date.now();
     const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
     api.debugGraphApplyServerHistoryForTest({
       sequence: 72,
       records: [{
@@ -4214,7 +4346,7 @@ async function runEditorPreviewSuite() {
 
     pointerdown({target: range, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
-    assert.equal(api.debugGraphBucketSummaryForTest().resolutionSeconds, 10, 'the range immediately chooses its ten-second retained resolution');
+    assert.equal(api.debugGraphBucketSummaryForTest().resolutionSeconds, 60, 'the range immediately chooses its bounded one-minute display resolution');
     assert.equal(prevented, 1, 'graph controls claim pointerdown before a refresh can remove the clicked button');
     pointerdown({type: 'pointerdown', target: slider, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'range slider pointerdown leaves native dragging to the browser');
@@ -4248,7 +4380,7 @@ async function runEditorPreviewSuite() {
     const html = reloaded.debugPanelHtmlForTest();
     const summary = reloaded.debugGraphBucketSummaryForTest();
     assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'the selected YO!stats sub-tab survives reload');
-    assert.equal(summary.resolutionSeconds, 60, 'the graph automatically restores the four-hour retained resolution without a saved scale preference');
+    assert.equal(summary.resolutionSeconds, 120, 'the graph automatically restores the four-hour bounded display resolution without a saved scale preference');
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
     assert.ok(html.includes('data-js-debug-chart-restore="gpuMemory"'), 'the top restore strip retains a closed chart after reload');
@@ -4268,7 +4400,7 @@ async function runEditorPreviewSuite() {
       }],
     });
     api.setDebugGraphRangeForTest(8 * 60 * 60);
-    assert.equal(api.debugGraphBucketSummaryForTest(now).resolutionSeconds, 120, 'the unzoomed eight-hour domain uses its retained two-minute resolution');
+    assert.equal(api.debugGraphBucketSummaryForTest(now).resolutionSeconds, 300, 'the unzoomed eight-hour domain uses its bounded five-minute display resolution');
     const panel = new TestElement('debug-panel');
     const graph = new TestElement('graph');
     graph.dataset.jsDebugGraph = '';
@@ -4313,7 +4445,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(prevented === 1 && summary.zoomed, 'drag-select claims the pointer and creates a graph zoom domain');
     assert.ok(summary.zoomRangeSeconds > 140 && summary.zoomRangeSeconds < 160, `zoom range follows selected chart ratio, got ${summary.zoomRangeSeconds}`);
-    assert.equal(summary.resolutionSeconds, 1, 'a drag-zoom into the recent five-minute domain automatically returns to one-second resolution');
+    assert.equal(summary.resolutionSeconds, 2, 'a drag-zoom into a 150-second domain automatically refines to two-second resolution');
 
     const reset = new TestElement('graph-reset', 'button');
     reset.dataset.jsDebugZoomReset = '';
@@ -4412,6 +4544,10 @@ async function runEditorPreviewSuite() {
   });
 
   await testAsync('YO!stats client health polling runs without an open or visible stats pane', async () => {
+    const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    const bootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.equal(debugSource.trimEnd().endsWith('startJsDebugStatsPolling();'), false, 'loading the debug partial has no recurring top-level side effect');
+    assert.ok(/if \(!shareViewMode && typeof startJsDebugStatsPolling === 'function'\) startJsDebugStatsPolling\(\);/.test(bootSource), 'normal application boot starts background client health collection independent of pane visibility');
     const api = loadYolomux('', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -4955,7 +5091,7 @@ async function runEditorPreviewSuite() {
     assert.equal(term.options.theme.cursor, '#ffea00', 'reconnect restores the focused terminal cursor preference');
   });
 
-  test('YO!stats shades client communication no-data gaps without shading server-side charts', () => {
+  test('YO!stats ignores short event-driven client gaps without shading server-side charts', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
@@ -5027,7 +5163,6 @@ async function runEditorPreviewSuite() {
     for (const chart of ['cpu', 'activity', 'agentTokens']) {
       assert.equal(chartHtml(chart).includes('data-js-debug-no-data-range='), false, `YO!stats does not shade server-side ${chart} chart for client no-data spans`);
     }
-    assert.ok(html.includes('No client communication data collected'), 'no-data overlays explain that client communication collection was absent');
     const debugPaneCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
     assert.ok(/\.js-debug-no-data-range\s*\{[\s\S]*fill:\s*rgb\(var\(--js-debug-bad-connection-rgb\) \/ 0\.12\)/.test(debugPaneCss), 'generic no-data overlays use a very light red opacity');
   });
@@ -6348,7 +6483,7 @@ async function runEditorPreviewSuite() {
     assert.ok(enabledChatHtml.includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
     assert.ok(enabledChatHtml.includes('Your most recent work is about editor fixes'), 'Claude-backed YO!agent chat shows the regular intro message only during startup');
     assert.ok(enabledChatHtml.includes('Ask anything'), 'Claude-backed YO!agent composer uses the localized ask-anything placeholder');
-    assert.ok(enabledChatHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), 'YO!agent chat shows recent agents as an assistant-style response during startup');
+    assert.ok(/conversation-message assistant[^\"]*yoagent-message yoagent-recent-agents-message/.test(enabledChatHtml), 'YO!agent chat shows recent agents through the shared assistant conversation shell during startup');
     assert.ok(enabledChatHtml.includes('<ul class="yoagent-recent-agents-list">'), 'YO!agent chat shows recent agents as a bullet list');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-session">session 5'), 'YO!agent recent agents show the session in a fixed field');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-window">2:codex'), 'YO!agent recent agents show the tmux sub-window name in a fixed field');
@@ -6381,7 +6516,7 @@ async function runEditorPreviewSuite() {
     api.setYoagentMessagesForTest([{role: 'user', content: 'what changed?'}, {role: 'assistant', content: 'Checking the activity context.'}]);
     const chatWithHistoryHtml = api.yoagentChatHtml();
     assert.ok(chatWithHistoryHtml.includes('Checking the activity context.'), 'YO!agent chat keeps persisted messages');
-    assert.ok(chatWithHistoryHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), 'YO!agent chat keeps Recent Agents visible after a question');
+    assert.ok(/conversation-message assistant[^\"]*yoagent-message yoagent-recent-agents-message/.test(chatWithHistoryHtml), 'YO!agent chat keeps Recent Agents visible after a question');
     assert.ok(chatWithHistoryHtml.includes('Your most recent work is about editor fixes'), 'YO!agent chat keeps the current-work summary visible after a question');
     api.setActivitySummaryPayloadForTest({yoagent_summaries: {mode: 'first_launch', running: true, updated_ts: 1760000000, updated_at: '2025-10-09T08:53:20+00:00'}, global: {headline: 'Cached rolling context'}, sessions: {}, session_order: []});
     assert.equal(api.yoagentChatHtml().includes('Background transcript summaries on'), false, 'YO!agent chat no longer renders a continuous background-summary status notice');
@@ -6411,6 +6546,7 @@ async function runEditorPreviewSuite() {
       {role: 'assistant', content: 'first answer', createdAt: '2026-06-13T17:38:01Z'},
       {role: 'user', content: 'second question', createdAt: '2026-06-13T17:39:00Z'},
     ]);
+    api.setDateTimeHourCycleForTest('12');
     assert.ok(/:\d{2}\s*[AP]M\s*PDT/.test(api.yoagentChatHtml()), 'YO!agent message timestamps include seconds');
     api.setYoagentDraftForTest('new draft');
     const historyInput = {value: 'new draft', disabled: false, setSelectionRange(start, end) { this.selection = [start, end]; }};
@@ -6436,7 +6572,7 @@ async function runEditorPreviewSuite() {
     assert.ok(transcriptHtml.includes('yoagent-transcript-path'), 'YO!agent chat shows the persisted transcript location at the top');
     assert.ok(transcriptHtml.includes('~/.local/state/yolomux/yoagent/conversation.jsonl'), 'YO!agent transcript row uses the compact display path');
     assert.ok(transcriptHtml.includes('data-copy-path="/home/test/.local/state/yolomux/yoagent/conversation.jsonl"'), 'YO!agent transcript path can be copied');
-    assert.equal(transcriptHtml.includes('yoagent-message assistant yoagent-recent-agents-message'), true, 'persisted YO!agent messages keep the one-shot Recent agents block visible');
+    assert.equal(/conversation-message assistant[^\"]*yoagent-message yoagent-recent-agents-message/.test(transcriptHtml), true, 'persisted YO!agent messages keep the one-shot Recent agents block visible');
     assert.ok(transcriptHtml.includes('class="yoagent-recent-agents-label yoagent-section-title"'), 'Recent agents uses the shared YO!agent section title');
     api.applyYoagentConversationPayloadForTest({
       messages: [{role: 'user', content: 'ask 6 and 7 for status', createdAt: '2026-06-13T17:39:00Z'}],
@@ -6455,7 +6591,7 @@ async function runEditorPreviewSuite() {
     assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-6"'), 'pending waits expose a clear control');
     assert.ok(pendingWaitsHtml.includes('data-yoagent-wait-clear="wait-7"'), 'each pending wait can be cleared independently');
     assert.ok(/data-yoagent-chat-input[^>]*placeholder="Ask anything…"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent composer input');
-    assert.ok(/class="yoagent-chat-send"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent send button');
+    assert.ok(/class="conversation-send conversation-send-primary yoagent-chat-send"(?![^>]* disabled)/.test(pendingWaitsHtml), 'pending waits do not disable the YO!agent send button');
     api.applyYoagentConversationPayloadForTest({
       messages: [
         {role: 'user', content: 'ask 6 for status', createdAt: '2026-06-13T17:39:00Z'},
@@ -7630,6 +7766,10 @@ async function runEditorPreviewSuite() {
     assert.ok(/workingAgentTransitionNotificationDescriptors\s*=\s*Object\.freeze\([\s\S]*notify_working_attention[\s\S]*notify_working_done/.test(notificationSource), 'one notification descriptor owns both working-agent transition toggles');
     assert.ok(/cooldown:\s*Object\.freeze\(\{settingPath:\s*'notifications\.notify_working_done',[\s\S]*copyKey:\s*'done'\}\)[\s\S]*notify\.working\.\$\{descriptor\.copyKey\}\.title/.test(notificationSource), 'the internal cooldown tone maps through the shared descriptor to human-readable done notification copy');
     assert.ok(/function agentToastTargetLine\(session, agent, options = \{\}\)[\s\S]*function workingAgentTransitionNotificationTarget[\s\S]*showToast\(title, agentToastTargetLine\(session, target, \{reason: body\}\),[\s\S]*focusAgentToastTarget\(session, target\)/.test(notificationSource), 'finished-AI notifications reuse the shared Tab and window target controls and focus path');
+    assert.ok(notificationSource.includes("node.dataset.toastKind = 'working-agent-transition'"), 'working transition popups are tagged for shared session acknowledgement');
+    assert.ok(notificationSource.includes('dismissSessionToasts(session);\n        void focusAgentToastTarget(session, target);'), 'clicking a working transition popup dismisses it before opening the target');
+    const layoutActionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    assert.ok(/function focusPanel\(session, options = \{\}\)[\s\S]*options\.userInitiated === true\) dismissSessionToasts\(session\)/.test(layoutActionsSource), 'direct user navigation to a target Tab dismisses its addressed popups');
     const workingPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude'}]}}};
     const attentionPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 1, window_label: '1:claude', attention_key: 'working-to-attention'}]}}};
     assert.equal(api.applyAutoApprovePayloadForTest(workingPayload, {render: false}).workingAgentTransitionNotifications, 0, 'the first auto-approve payload establishes a quiet baseline');
@@ -7893,7 +8033,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
     assert.ok(/function transcriptPreviewPaneIsActive\(session\)[\s\S]*pane\?\.classList\?\.contains\(CLS\.active\)[\s\S]*preview\?\.isConnected/.test(source), 'transcript context previews only subscribe when their transcript pane is active');
     assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
-    assert.ok(source.includes("['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']"), 'client listens for the expected push event types');
+    assert.ok(source.includes("['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']"), 'client listens for the expected push event types');
     assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
     assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshAutoStatuses\(\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
     assert.ok(/addEventListener\('ready',[\s\S]{0,700}refreshBackgroundOwnerStatus\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
@@ -7958,8 +8098,14 @@ async function runEditorPreviewSuite() {
     api.setNotificationDeliveryForTest({inApp: true, system: false});
     api.installClientEventStreamForTest();
     let state = api.clientEventTransportStateForTest();
-    assert.deepEqual(state.demand.channels, ['core', 'files', 'status']);
-    assert.ok(state.source.url.includes('channels=core%2Cfiles%2Cstatus'), 'visible Finder subscribes only to core, file, and status channels');
+    assert.deepEqual(state.demand.channels, ['chat', 'core', 'files', 'status']);
+    assert.ok(state.source.url.includes('channels=chat%2Ccore%2Cfiles%2Cstatus'), 'visible Finder also retains chat invalidations while in-app notifications are enabled');
+
+    api.setNotificationDeliveryForTest({inApp: false, system: false});
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.deepEqual(state.demand.channels, ['core', 'files', 'status'], 'inactive YO!chat has no event demand when both notification deliveries are disabled');
+    api.setNotificationDeliveryForTest({inApp: true, system: false});
 
     api.setDocumentVisibilityForTest('hidden');
     api.syncClientEventDemandForTest({immediate: true});
@@ -7970,15 +8116,15 @@ async function runEditorPreviewSuite() {
     api.setNotificationDeliveryForTest({inApp: true, system: true});
     api.syncClientEventDemandForTest({immediate: true});
     state = api.clientEventTransportStateForTest();
-    assert.deepEqual(state.demand.channels, ['attention']);
-    assert.ok(state.source.url.includes('channels=attention'), 'hidden page retains only the attention channel for system notifications');
+    assert.deepEqual(state.demand.channels, ['attention', 'chat']);
+    assert.ok(state.source.url.includes('channels=attention%2Cchat'), 'hidden page retains attention plus durable chat invalidations for system notifications');
 
     slots.slot1 = api.paneStateWithTabs([api.yoagentItemId], api.yoagentItemId);
     api.setLayoutSlotsForTest(slots);
     api.setDocumentVisibilityForTest('visible');
     api.syncClientEventDemandForTest({immediate: true});
     state = api.clientEventTransportStateForTest();
-    assert.deepEqual(state.demand.channels, ['activity', 'core', 'files', 'status', 'transcripts', 'yoagent']);
+    assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'files', 'status', 'transcripts', 'yoagent']);
   });
 
   test('share host backup polling requires an active share', () => {
@@ -8226,13 +8372,13 @@ async function runEditorPreviewSuite() {
     // row below — backend/model/effort selectors (wired to YO!agent settings) + subtle Clear + a circular send arrow.
     const src = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/class="yoagent-chat-controls"/.test(src), 'YO!agent composer has a control row');
+    assert.ok(/class="conversation-composer-controls yoagent-chat-controls"/.test(src), 'YO!agent composer inherits the shared conversation control row');
     assert.ok(/function yoagentComposerControlsHtml/.test(src) && /kind: 'backend'/.test(src) && /kind: 'model'/.test(src) && /kind: 'effort'/.test(src), 'composer renders backend/model/effort selectors');
     assert.ok(/data-yoagent-setting-path/.test(src) && /saveSettingsPatch\(settingPatchForPath\(path, yoagentSetting\.value\)/.test(src), 'changing a composer selector writes the real YO!agent setting path through the shared patch helper');
-    assert.ok(/class="yoagent-chat-send-icon"[\s\S]*?<path/.test(src), 'send button is a circular arrow icon (not a text "Ask" button)');
-    assert.ok(/\.yoagent-chat-form\s*\{[^}]*border-radius:\s*14px/.test(css), 'composer is one rounded container');
-    assert.ok(/\.yoagent-chat-form\s*\{[\s\S]*border:\s*1px solid var\(--link-soft\)/.test(css), 'YO!agent composer border reuses the YOU bubble color token');
-    assert.ok(/\.yoagent-chat-send,\s*\n\.yoagent-chat-stop\s*\{[^}]*border-radius:\s*50%/.test(css), 'send and stop buttons inherit circular geometry from one owner');
+    assert.ok(/class="conversation-send-icon yoagent-chat-send-icon"[\s\S]*?<path/.test(src), 'send button is a circular arrow icon (not a text "Ask" button)');
+    assert.ok(/\.conversation-composer\s*\{[^}]*border-radius:\s*14px/.test(css), 'YO!agent and YO!chat share one rounded composer owner');
+    assert.ok(/\.conversation-composer\s*\{[\s\S]*border:\s*1px solid var\(--link-soft\)/.test(css), 'both conversation composers reuse the YOU bubble color token');
+    assert.ok(/\.conversation-send,\s*\n\.yoagent-chat-stop\s*\{[^}]*border-radius:\s*50%/.test(css), 'send and stop buttons inherit circular geometry from one owner');
     assert.ok(/\.yoagent-composer-pill,\s*\n\.yoagent-backend-pill\s*\{/.test(css), 'composer selectors are styled as compact pills');
     assert.ok(/\.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--agent-inactive-marker-bg\)[\s\S]*border:\s*2px solid var\(--yoagent-inactive-backend-dot-border\)[\s\S]*box-shadow:/.test(css), 'YO!agent inactive backend dot is a clear black circle with a token-owned visible border');
     assert.ok(/\.yoagent-composer-pill-backend:not\(:has\(select:disabled\)\) \.yoagent-backend-pill-dot\s*\{[\s\S]*background:\s*var\(--pr-status-passing\)[\s\S]*box-shadow:/.test(css), 'YO!agent usable backend dot switches to the green active status without reusing the current-window marker');
@@ -8241,7 +8387,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-recent-agents-list\s*\{[^}]*display:\s*grid/.test(css), 'YO!agent recent agents render as a compact bullet list inside the chat history');
     assert.ok(/function yoagentRecentAgentPathText\(agent, signal = yoagentRecentAgentSignal\(agent\)\)[\s\S]*agent\?\.recent_paths[\s\S]*compactHomePath/.test(src), 'YO!agent recent agents display backend recent_paths with compact home paths');
     assert.ok(/function yoagentRecentAgentsHtml\(payload = yoagentStartupActivityPayload\(\)\)[\s\S]*payload\?\.agents[\s\S]*<ul class="yoagent-recent-agents-list">/.test(src), 'YO!agent recent agents render from the startup activity-summary snapshot as a list');
-    assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(payload\)[\s\S]*yoagent-message assistant yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped as an assistant response for the startup one-shot');
+    assert.ok(/function yoagentRecentAgentsMessageHtml\(\)[\s\S]*yoagentRecentAgentsHtml\(payload\)[\s\S]*conversationMessageShellHtml\([\s\S]*yoagent-message yoagent-recent-agents-message/.test(src), 'YO!agent recent agents are wrapped by the shared assistant conversation shell for the startup one-shot');
     assert.ok(/const yoagentConversationState = \{[\s\S]*streamingMessages: new Map\(\)/.test(src), 'YO!agent keeps transient streaming assistant messages in the shared conversation state');
     assert.ok(/function yoagentStreamingMessagesList\(\)[\s\S]*yoagentConversationState.streamingMessages\.values/.test(src), 'YO!agent exposes streamed assistant deltas as renderable messages');
     assert.ok(/function applyYoagentStreamPayload\(payload = \{\}\)[\s\S]*payload\.stream_items[\s\S]*yoagentStreamItems[\s\S]*detailRows\.push\(\{key: 'yoagent\.details\.hiddenThinking'/.test(src), 'YO!agent stream events retain structured streamItems and safe descriptor detailRows without raw chain-of-thought');
@@ -8280,14 +8426,17 @@ async function runEditorPreviewSuite() {
     assert.ok(src.includes("loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: 'auto'})"), 'YO!agent background result pushes preserve manual scrollback unless the chat is already near bottom');
     assert.ok(/\.yoagent-transcript-path,[\s\S]*\.file-explorer-panel-meta\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*gap:\s*var\(--space-6\)/.test(css) && /\.yoagent-transcript-path\s*\{[^}]*min-width:\s*0/.test(css), 'YO!agent transcript path consumes the shared compact flex-row owner and keeps its local ellipsis sizing');
     assert.ok(/\.share-viewer-banner-text,[\s\S]*\.yoagent-transcript-value,[\s\S]*\.share-users-row span,[\s\S]*\.terminal-drop-suggestion-label\s*\{[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/.test(css), 'YO!agent transcript paths and terminal drop labels consume the complete shared single-line ellipsis owner');
-    assert.ok(/\.yoagent-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent assistant bubbles are left-indented and use the active theme accent');
+    assert.ok(/\.conversation-message\.assistant\s*\{[\s\S]*align-self:\s*flex-start[\s\S]*margin-inline-end:\s*28px[\s\S]*border-color:\s*var\(--active-control-border\)[\s\S]*background:\s*color-mix\(in srgb, var\(--active-control-soft-bg\)/.test(css), 'YO!agent and YO!chat assistant bubbles share the left-indented active-theme owner');
     assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result\s*\{[\s\S]*border-inline-start-color:\s*var\(--accent-gold\)[\s\S]*border-inline-start-width:\s*6px/.test(css), 'YO!agent target-agent result bubbles have a stronger colored left rule');
     assert.ok(/function yoagentAgentResultParts\(text\)[\s\S]*heading[\s\S]*output/.test(src), 'YO!agent target-agent result parser splits the heading from the output');
     assert.ok(/\.yoagent-agent-result-body\s*\{[\s\S]*display:\s*grid[\s\S]*gap:\s*0/.test(css), 'YO!agent target-agent result body stacks heading and output without extra vertical gap');
     assert.ok(/\.yoagent-message\.assistant\.yoagent-agent-result \.yoagent-agent-result-output\s*\{[\s\S]*padding-inline-start:\s*14px[\s\S]*border-inline-start:\s*3px solid var\(--accent-gold\)/.test(css), 'YO!agent target-agent result output is indented behind a full-height left bar');
-    assert.ok(/\.yoagent-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'YO!agent user bubbles are right-indented with the secondary/link border color');
-    assert.ok(/\.yoagent-message\s*\{[\s\S]*overflow:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bubbles are not vertical scroll containers that swallow wheel input');
-    assert.ok(/\.yoagent-message-body\s*\{[\s\S]*overflow-x:\s*visible[\s\S]*overflow-y:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'YO!agent message bodies leave vertical wheel scrolling to the chat history owner');
+    assert.ok(/\.conversation-message\.user\s*\{[\s\S]*align-self:\s*flex-end[\s\S]*margin-inline-start:\s*28px[\s\S]*border-color:\s*var\(--link-soft\)/.test(css), 'both conversation user bubbles share the right-indented secondary/link border owner');
+    assert.ok(/\.yochat-message,\s*\n\.yochat-composer\s*\{[^}]*--yochat-author-border:\s*color-mix\(in srgb, var\(--yochat-author-accent\) 68%, var\(--line\)\)/.test(css), 'YO!chat messages and composer derive their border color from one shared author-tone owner');
+    assert.ok(/\.yochat-message:not\([^}]+\)\s*\{[^}]*border:\s*1px solid var\(--yochat-author-border\)/.test(css) && /\.yochat-composer\s*\{[^}]*border-color:\s*var\(--yochat-author-border\)/.test(css), 'the outgoing message and composer consume the identical computed border token');
+    assert.ok(/\.yochat-composer \.conversation-send-primary\s*\{[^}]*background:\s*var\(--yochat-author-accent\)[^}]*border-color:\s*var\(--yochat-author-border\)/.test(css), 'YO!chat Send consumes the same authenticated-author accent and border owners as the composer');
+    assert.ok(/\.conversation-message\s*\{[\s\S]*overflow:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'shared conversation message bubbles are not vertical scroll containers that swallow wheel input');
+    assert.ok(/\.conversation-message-body\s*\{[\s\S]*overflow-x:\s*visible[\s\S]*overflow-y:\s*visible[\s\S]*overscroll-behavior:\s*auto/.test(css), 'all conversation message bodies leave vertical wheel scrolling to their history owner');
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
     assert.ok(/function yoagentMessageLatencyHtml[\s\S]*yoagent-message-latency[\s\S]*yoagent\.responseLatency/.test(src), 'YO!agent assistant timestamps include a localized response-latency suffix');
     assert.ok(/function yoagentStreamAuxiliaryItemHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'structured YO!agent stream diagnostics render as expandable items with stable keys');
@@ -8308,7 +8457,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yoagent-details-preview\.yoagent-thinking-live-preview\s*\{[\s\S]*max-height:\s*calc\(5 \* max/.test(css), 'YO!agent live thinking collapsed preview reserves five visual lines while running');
     assert.ok(/\.yoagent-details-preview\s*\{[\s\S]*overflow:\s*clip/.test(css), 'YO!agent collapsed auxiliary preview clips without becoming a hidden scroll container');
     assert.ok(/\.yoagent-message-details pre\.yoagent-auxiliary-stream\s*\{[\s\S]*color:\s*color-mix/.test(css), 'YO!agent auxiliary stream is visually quieter than normal chat text');
-    assert.ok(/body\.theme-light \.yoagent-message,[\s\S]*body\.theme-light \.yoagent-message-body,[\s\S]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode message bodies use readable light-mode text');
+    assert.ok(/body\.theme-light \.conversation-message,[\s\S]*body\.theme-light \.conversation-message-body,[\s\S]*color:\s*var\(--yoagent-content-text\)/.test(css), 'both conversation panels use the shared readable light-mode text owner');
     assert.ok(/body\.theme-light \.yoagent-chat-input\s*\{[\s\S]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode composer input uses readable light-mode text');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*overflow-x:\s*hidden[\s\S]*overflow-y:\s*auto[\s\S]*scrollbar-gutter:\s*stable/.test(css), 'YO!agent chat history is the single normal vertical scrollbar with a stable gutter');
     assert.ok(/\.yoagent-chat-history\s*\{[\s\S]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track\)/.test(css), 'YO!agent history keeps the normal rail neutral during active-pane hover');
@@ -8332,7 +8481,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/body\.theme-light \.yoagent-action-text,[\s\S]*body\.theme-light \.yoagent-chat \.markdown-body pre,[\s\S]*body\.theme-light \.yoagent-global \.markdown-body pre\s*\{[\s\S]*color:\s*var\(--lt-code-block-text\);[\s\S]*background:\s*var\(--lt-code-block-bg\);[\s\S]*border-color:\s*var\(--lt-code-block-border\);/.test(css), 'R4: YO!agent action and markdown code blocks share one neutral light-code paint owner');
     assert.ok(/\.file-editor-theme-panel\.theme-vanilla\s*\{[\s\S]*background:\s*var\(--lt-editor-bg\);[\s\S]*border-color:\s*var\(--lt-line\);/.test(css), 'R4: editor vanilla swatch uses light editor tokens');
     assert.ok(/body\.theme-light \.command-palette-dialog,[\s\S]*body\.theme-light \.keyboard-shortcuts-dialog\s*\{[\s\S]*background:\s*var\(--panel\);[\s\S]*border-color:\s*var\(--line\);/.test(css), 'R4: command palette and shortcuts dialogs use shared light panel tokens');
-    assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
+    assert.ok(/body\.theme-light \.conversation-message-body\.markdown-body,[\s\S]*color:\s*var\(--yoagent-content-text\)/.test(css), 'conversation light-mode markdown bodies use readable app text instead of editor markdown colors');
+    assert.ok(/body\.theme-light \.yoagent-global \.markdown-body\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent global markdown retains its readable light-mode text owner');
     assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*var\(--lt-text\)/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
     assert.ok(/--yoagent-action-heading-light:\s*#0f4c81/.test(css) && /body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*var\(--yoagent-action-heading-light\)/.test(css), 'YO!agent light-mode inline code uses the shared readable app-blue token');
     // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
@@ -9555,18 +9705,15 @@ async function runEditorPreviewSuite() {
   });
 
   test('t@7900', () => {
-    // Preferences order is grouped by how the settings are used: general startup defaults, visual appearance,
-    // terminal/editor behavior, notifications, file handling, polling/performance, then agent controls.
+    // Preferences with matching File-menu panels use that menu's shared order; app-wide sections frame them.
     const api = loadYolomux('', ['1']);
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     api.setActiveLocaleForTest('en');
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'performance', 'github', 'yoagent', 'share', 'yolo'];
-    assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections render in the grouped order');
-    const yoagentIndex = sectionOrder.indexOf('yoagent');
-    const shareIndex = sectionOrder.indexOf('share');
-    const yoloIndex = sectionOrder.indexOf('yolo');
-    assert.deepStrictEqual([yoagentIndex, shareIndex, yoloIndex], [sectionOrder.length - 3, sectionOrder.length - 2, sectionOrder.length - 1], 'YO!agent, YO!share, and YOLO sections stay adjacent at the end; YO!info has no standalone Preferences settings');
+    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'share', 'github', 'yolo'];
+    assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
+    assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
       const start = html.indexOf(`data-preference-section="${title}"`);
       assert.ok(start >= 0, `${title} section renders`);
@@ -9810,6 +9957,232 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('function fileExplorerTypeaheadSelect('), 'type-ahead selection exists');
     assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead');
     assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'repo-row hover popover anchors to the RIGHT of the cursor');
+  });
+
+  test('YO!chat uses the virtual-tab and shared conversation contracts', () => {
+    const api = loadYolomux();
+    assert.equal(api.resolveLayoutItem('chat'), api.chatItemId);
+    assert.ok(api.virtualTabItems().includes(api.chatItemId));
+    assert.equal(typeof api.TAB_TYPES.find(type => type.key === 'chat').focusSearch, 'function');
+
+    const family = '👨‍👩‍👧‍👦';
+    const emojiMatrix = ['😀', '👍🏽', '👩‍💻', family, '🏳️‍🌈', '🇺🇸', '1️⃣', '☕️', 'مرحبا 😀'];
+    assert.deepStrictEqual(canonical(api.conversationClampSelectionToGraphemesForTest(family, 2, 3)), {start: 0, end: family.length});
+    assert.equal(api.chatNotificationSnippetForTest(`${family}abc`, 1), `${family}…`);
+    assert.equal(api.chatNotificationSnippetForTest(emojiMatrix.join(' '), 1000), emojiMatrix.join(' '), 'notification snippets preserve every exact emoji sequence');
+    const input = {
+      value: `a${family}b`,
+      selectionStart: 2,
+      selectionEnd: 3,
+      setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+      dispatchEvent() {},
+      focus() { this.focused = true; },
+    };
+    assert.equal(api.conversationInsertAtSelectionForTest(input, '👍🏽'), 'a👍🏽b', 'picker replacement expands a partial UTF-16 selection to the whole grapheme');
+    assert.equal(input.selectionStart, 'a👍🏽'.length, 'caret lands after the complete inserted grapheme');
+    assert.equal(input.focused, true, 'picker insertion restores composer focus');
+    for (const glyph of emojiMatrix) api.rememberChatEmojiForTest(glyph);
+    assert.deepStrictEqual(canonical(api.chatRecentEmojiForTest()), [...emojiMatrix].reverse(), 'recent emoji preserve exact graphemes in newest-first order');
+    for (let index = 0; index < 30; index += 1) api.rememberChatEmojiForTest(`fixture-${index}`);
+    assert.equal(api.chatRecentEmojiForTest().length, 24, 'browser-local emoji recents stay bounded');
+    assert.ok(api.chatEmojiSearchTextForTest({emoji: family, names: {en: 'family'}, keywords: {en: ['parents']}}).includes('parents'), 'picker search uses localized CLDR keywords');
+    const exactTimestamp = 1700000000;
+    api.setDateTimeHourCycleForTest('24');
+    assert.match(api.chatMessageTimestampForTest(exactTimestamp, exactTimestamp + 5 * 60 * 60), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 5 hours ago$/, 'English chat timestamps combine the required exact 24-hour shape with age after four hours');
+    api.setDateTimeHourCycleForTest('12');
+    assert.match(api.chatMessageTimestampForTest(exactTimestamp, exactTimestamp + 5 * 60 * 60), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[AP]M 5 hours ago$/, 'English exact chat timestamps retain the 12-hour preference without spacing the meridiem away from the clock');
+    assert.match(api.debugGraphTimeLabelForTest(1700000000000), /[AP]M/i, 'YO!stats x-axis labels use the shared 12-hour preference');
+    assert.match(api.debugGraphExactTimeLabelForTest(1700000000000), /[AP]M/i, 'YO!stats hover timestamps use the shared 12-hour preference');
+    const nowSeconds = Date.now() / 1000;
+    assert.equal(api.chatMessageTimestampForTest(nowSeconds, nowSeconds), '0 minutes ago', 'a just-created message starts at the explicit zero-minute state');
+    assert.equal(api.chatMessageTimestampForTest(nowSeconds - 42, nowSeconds), '45 sec ago', 'sub-minute ages round up to the next five-second update');
+    assert.equal(api.chatMessageTimestampForTest(nowSeconds - 181, nowSeconds), '3.1 min ago', 'minute ages retain one decimal and round upward');
+    assert.equal(api.chatMessageTimestampForTest(nowSeconds - 3661, nowSeconds), '1.1 hours ago', 'ages over sixty minutes switch to rounded-up decimal hours');
+    assert.equal(api.chatMessageTimestampForTest(nowSeconds - (1.25 * 24 * 60 * 60), nowSeconds).split(' ').slice(-3).join(' '), '1.3 days ago', 'ages over twenty-four hours switch to rounded-up decimal days');
+    assert.match(api.chatMessageTimestampForTest(nowSeconds - (4.89 * 60 * 60), nowSeconds), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[AP]M 4\.9 hours ago$/, 'ages after four hours retain both exact local time and precise relative age');
+    const html = api.chatMessageHtmlForTest({
+      id: 7,
+      created_at_utc: 1700000000,
+      username: '<script>alert(1)</script>',
+      sender_ip: '10.1.123.12',
+      sender_instance_id: 'other-browser',
+      client_message_uuid: 'm-7',
+      body: `hello ${family} <img src=x>`,
+    });
+    assert.ok(html.includes('hello 👨‍👩‍👧‍👦 &lt;img src=x&gt;'));
+    assert.ok(html.includes('10.1.123.12') && html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'exact username and server IP are rendered in the shared header');
+    assert.ok(!html.includes('>YOU<'), 'human chat never replaces the authenticated username with YOU');
+    assert.ok(!html.includes('<script>') && !html.includes('<img src=x>'));
+    const selfApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {authUsername: 'keivenc'});
+    const selfHtml = selfApi.chatMessageHtmlForTest({id: 8, created_at_utc: Date.now() / 1000, username: 'keivenc', sender_ip: '10.1.123.12', body: 'hello'});
+    assert.ok(selfHtml.includes('keivenc') && selfHtml.includes('yochat-message-self">myself') && selfHtml.includes('0 minutes ago') && selfHtml.includes('10.1.123.12'), 'self rows keep the authenticated name and add myself, precise age, and IP in one metadata group');
+    const tones = api.chatAuthorToneAssignmentsForTest([
+      {username: 'guest'}, {username: 'guest'}, {username: 'keivenc'}, {username: 'guest2'},
+    ]);
+    assert.equal(new Set([...tones.values()]).size, 3, 'visible people receive distinct palette tones while one person stays consistent');
+    const selfTones = selfApi.chatAuthorToneAssignmentsForTest([
+      {username: 'guest'}, {username: 'keivenc'}, {username: 'guest2'},
+    ]);
+    assert.equal(selfTones.get('keivenc'), 2, 'the authenticated user reserves the existing gold palette tone');
+    assert.ok([...selfTones].filter(([author]) => author !== 'keivenc').every(([, tone]) => tone !== 2), 'other visible people rotate through distinct theme tones without taking the self tone');
+    assert.equal(api.chatYoagentQueryForTest('/yo summarize current tasks'), 'summarize current tasks');
+    assert.equal(api.chatYoagentQueryForTest('plain message'), '');
+    const intro = api.chatIntroductionHtmlForTest();
+    assert.ok(intro.includes('YO!agent') && !intro.includes('YOLOmux') && intro.includes('`/yo &lt;query&gt;`') && intro.includes('ask me') && intro.includes('data-yoagent-markdown'), 'empty chat introduction speaks in YO!agent first person and marks the command as inline Markdown code');
+    assert.equal(new Set(Array.from({length: 40}, (_, index) => api.chatIntroductionGreetingKeyForTest(`browser-${index}`))).size, 3, 'stable browser identities distribute the introduction across all localized greetings');
+    const agentMarkdown = api.chatMessageHtmlForTest({id: 11, created_at_utc: 1700000000, username: 'YO!agent', body: '| City | Temp |\n| --- | --- |\n| San Jose | 65°F |'});
+    assert.ok(agentMarkdown.includes('markdown-body') && agentMarkdown.includes('data-yoagent-markdown'), 'YO!chat marks YO!agent messages for the shared sanitized Markdown renderer');
+    assert.ok(!api.chatMessageHtmlForTest({id: 12, created_at_utc: 1700000000, username: 'alice', body: '**plain human text**'}).includes('data-yoagent-markdown'), 'human YO!chat messages remain escaped plain text');
+    const mediaUrl = 'https://encrypted-tbn0.gstatic.com/images?q=fixture&amp;s=10';
+    const mediaMessage = api.chatMessageHtmlForTest({id: 13, created_at_utc: nowSeconds, username: 'alice', body: `picture ${mediaUrl}`});
+    assert.equal(api.chatMediaUrlMatchesForTest(mediaUrl)[0].url, 'https://encrypted-tbn0.gstatic.com/images?q=fixture&s=10', 'HTML-escaped query separators normalize only for the safe media request URL');
+    assert.equal(api.chatMediaKindForTest('https://example.test/photo.webp'), 'image');
+    assert.equal(api.chatMediaKindForTest('https://example.test/clip.webm'), 'video');
+    assert.equal(api.chatMediaKindForTest('javascript:alert(1)'), '');
+    assert.ok(mediaMessage.includes('yochat-media-thumbnail') && mediaMessage.includes('yochat-external-link'), 'safe external picture URLs render one escaped link plus a compact preview');
+    const mediaItem = api.chatMediaItemForTest('https://example.test/photo.png');
+    assert.equal(api.chatMediaUrlForItemForTest(mediaItem), 'https://example.test/photo.png');
+    assert.equal(api.resolveLayoutItem(mediaItem), mediaItem, 'safe external media URLs round-trip through normal layout serialization');
+    assert.deepStrictEqual([...api.chatMediaActionItemsForTest('https://example.test/photo.png')].map(item => item.id), ['tab', 'browser', 'copy', 'download'], 'thumbnail and full-tab controls consume one media action registry');
+
+    api.setChatStateForTest({unread: [{id: 8, is_question: true}], typing: [{username: 'alice'}]});
+    assert.deepStrictEqual(canonical(api.chatStatusTonesForTest()), ['attention', 'working']);
+    api.setChatStateForTest({unread: [{id: 9, is_question: false}], typing: [{username: 'alice'}]});
+    assert.deepStrictEqual(canonical(api.chatStatusTonesForTest()), ['cooldown', 'working']);
+    api.setChatStateForTest({unread: [], typing: [{username: 'alice'}], acknowledgedTone: 'attention', acknowledgementStartedAt: Date.now()});
+    const acknowledged = api.chatStatusMarkerHtmlForTest();
+    assert.ok(acknowledged.includes('agent-window-status-dot--acknowledging'), 'acknowledgement reuses the shared gray status fade');
+    assert.ok((acknowledged.match(/agent-window-status-dot/g) || []).length >= 2, 'green typing remains beside the gray acknowledgement');
+    api.setChatStateForTest({unread: [], typing: [{username: 'person1'}, {username: 'person2'}, {username: 'person 3'}]});
+    assert.equal(api.chatTypingTextForTest(), 'person1, person2, & person 3 are typing', 'three or more typists remain named with the compact English conjunction');
+    api.setNotificationDeliveryForTest({inApp: false, system: false});
+    api.chatMergeMessagesForTest([{id: 10, username: 'bob', sender_instance_id: 'other', client_message_uuid: 'm-10', body: 'new?', is_question: true}], {incoming: true});
+    assert.equal(api.chatStatusMarkerHtmlForTest().includes('agent-window-status-dot--acknowledging'), false, 'a new message cancels an in-flight acknowledgement fade');
+    assert.deepStrictEqual(canonical(api.chatStatusTonesForTest()), ['attention', 'working'], 'the new question restores red while typing remains green');
+
+    const bootstrap = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const shared = fs.readFileSync('static_src/js/yolomux/79_conversation_shared.js', 'utf8');
+    const chat = fs.readFileSync('static_src/js/yolomux/82_chat_panel.js', 'utf8');
+    const agent = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
+    const conversationCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(bootstrap.includes("if (!shareViewMode) items.splice(2, 0, chatItemId)"), 'YO!share cannot enumerate YO!chat');
+    assert.ok(shared.includes('function conversationMessageShellHtml('));
+    assert.ok(agent.includes('return conversationMessageShellHtml({'), 'YO!agent routes through the shared message builder');
+    assert.ok(chat.includes('return conversationMessageShellHtml({'), 'YO!chat routes through the shared message builder');
+    assert.ok(chat.includes("script.src = '/static/emoji-data.js'"), 'emoji CLDR data is lazy-loaded only when the picker opens');
+    assert.ok(chat.includes('data-chat-search-bar hidden'), 'history search starts hidden until the shared focusSearch action opens it');
+    assert.ok(/\.chat-actions-bar\[hidden\]\s*\{[^}]*display:\s*none/.test(conversationCss), 'hidden search chrome remains visually absent despite the shared actions-bar flex display');
+    assert.ok(/\.chat-history-sentry \+ \.yochat-introduction\s*\{[^}]*margin-block-start:\s*auto/.test(conversationCss), 'short initial history consumes empty space above the introduction so the first card sits by the composer');
+    assert.ok(!chat.includes('data-chat-load-older'), 'older history has no visible button and is loaded by upward scrolling');
+    assert.ok(chat.includes("chatApiPost('/api/chat/yoagent'"), '/yo delegates through the dedicated server bridge to the existing YO!agent pipeline');
+    assert.ok(chat.includes("if (event.target.matches('[data-chat-input]')) setChatTyping(false);"), 'composer blur always clears typing, even when a draft remains');
+    assert.ok(chat.includes('new IntersectionObserver(entries =>'), 'older history paging uses one gated sentry observer');
+    assert.ok(chat.includes('if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;'), 'the sentry never transfers old bodies before explicit upward paging intent');
+    assert.ok(chat.includes('chatState.requestController?.abort?.();'), 'panel teardown aborts stale read/search requests');
+    assert.ok(chat.includes('const timelineBody = `${chatIntroductionHtml()}${messages.map('), 'the non-persisted YOLOmux introduction remains first even when the initial view contains messages');
+    assert.ok(chat.includes('function chatTypingParticipantNames()') && chat.includes('if (chatTypingParticipantNames().length) tones.push(STATE_KEY.working)'), 'human and YO!agent leases share one typing-presence and status owner');
+    assert.ok(chat.includes('renderConversationMessageMarkdown(panel);'), 'YO!chat routes YO!agent bodies through the same sanitized Markdown pass as YO!agent');
+    assert.ok(/chatMergeMessages\(\[payload\.message\]\);\s*renderChatPanel\(\{scrollBottom: chatState\.followTail\}\);\s*await chatAdvanceReadCursor/.test(chat), 'YO!agent replies paint before read-cursor I/O can delay them');
+    assert.ok(/chatMergeMessages\(\[payload\.message\]\);[\s\S]{0,180}renderChatPanel\(\{scrollBottom: true\}\);[\s\S]{0,180}await chatAdvanceReadCursor/.test(chat), 'committed self messages paint before read/bootstrap reconciliation');
+    assert.ok(chat.includes("resetRuntimeInterval('chat-relative-times'") && chat.includes("clearRuntimeInterval('chat-relative-times')"), 'mounted chat ages repaint every five seconds through the shared runtime scheduler and stop on teardown');
+    assert.ok(chat.includes('bindFileImagePreview(thumbnail, url'), 'external chat media hover reuses the shared bounded image-preview controller');
+    assert.ok(!chat.includes('yoagentPendingIds'), 'YO!agent typing has no divergent client-only pending source');
+    assert.ok(!chat.includes("body: t('chat.yoagent.thinking')"), '/yo no longer renders a fake thinking message bubble');
+    assert.ok(chat.includes('function chatTimelineIsNearBottom(') && chat.includes('options.scrollBottom === true || chatState.followTail'), 'one follow-tail owner scrolls appended messages only while the reader is at the tail');
+    assert.ok(chat.includes('function syncChatTailState(') && chat.includes('syncChatTailState(panel, timeline);'), 'render, scroll, resize, and click-to-bottom share one New messages visibility owner');
+    assert.ok(!chat.includes('readingHistory'), 'historical browsing is not a permanent flag that can disable tail following after returning to the bottom');
+    assert.ok(/options\.destroy === true[\s\S]*chatState\.timelineSignature = ''[\s\S]*resetChatSearchState\(\)/.test(chat), 'panel recreation invalidates stale timeline and search chrome before the next initial render');
+    assert.ok(chat.includes('const chatEmojiOverlayController = createDismissableOverlayController({'), 'emoji dismissal, Escape, and focus containment reuse the shared overlay controller');
+    assert.ok(agent.includes('conversation-composer-controls yoagent-chat-controls') && chat.includes('conversation-composer-controls yoagent-chat-controls'), 'both conversation panels inherit one composer control-row owner');
+    assert.ok(shared.includes('function conversationAutosizeTextarea(') && chat.includes('conversationAutosizeTextarea(input'), 'chat and Preferences reuse one textarea autosize owner');
+    assert.ok(shared.includes("textarea.style.height = '0px'"), 'shared textarea autosizing measures from a collapsed baseline instead of preserving a stretched grid height');
+    assert.ok(/\.chat-pane\s*\{[\s\S]*grid-template-areas:[\s\S]*"timeline"[\s\S]*"composer"/.test(conversationCss), 'chat timeline and composer use stable named grid rows when optional rows hide or appear');
+    assert.ok(/\.chat-panel > \.panel-head\s*\{\s*grid-row:\s*1/.test(conversationCss) && /\.chat-panel > \.chat-actions-bar\s*\{\s*grid-row:\s*2/.test(conversationCss) && /\.chat-panel > \.chat-pane\s*\{[^}]*grid-row:\s*3[^}]*align-self:\s*stretch/.test(conversationCss), 'the hidden search bar cannot shift the chat body out of the flexible panel row and lift the composer off the bottom');
+    assert.ok(chat.includes('class="chat-history-search-split"') && /\.chat-history-search-split\s*\{[^}]*grid-template-rows:\s*fit-content\(calc\(50% - var\(--space-2\)\)\) minmax\(0, 1fr\)/.test(conversationCss), 'search results and history share one bounded split whose result region cannot exceed half');
+    assert.ok(/\.chat-search-results\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss) && /\.chat-timeline\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss), 'search results and ordinary history retain independent scroll owners');
+    assert.ok(agent.includes('conversation-send conversation-send-primary yoagent-chat-send') && chat.includes('conversation-send conversation-send-primary yoagent-chat-send'), 'both conversation panels inherit one send-button owner');
+    assert.ok(!fs.readFileSync('static/yolomux.js', 'utf8').includes('YOLOMUX_EMOJI_DATA = ['), 'emoji data does not ride the main bundle');
+    assert.ok(fs.readFileSync('static/emoji-data.js', 'utf8').includes('Unicode Emoji 16.0 and CLDR 47.0.0'));
+  });
+
+  await testAsync('YO!chat releases its loading owner when a newer delta invalidates bootstrap', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {authUsername: 'keivenc'});
+    api.setChatStateForTest({loaded: true, loading: false, requestGeneration: 0});
+    let resolveBootstrap;
+    api.setFetchForTest(url => {
+      const path = String(url);
+      if (path.includes('/api/chat/bootstrap')) {
+        return new Promise(resolve => {
+          resolveBootstrap = () => resolve(jsonResponse({
+            revision: 0,
+            newer_cursor: 'bootstrap-cursor',
+            older_cursor: null,
+            read_up_to_id: 0,
+            messages: [],
+            typing: [],
+          }));
+        });
+      }
+      if (path.includes('/api/chat/delta')) {
+        return Promise.resolve(jsonResponse({revision: 0, newer_cursor: 'delta-cursor', messages: []}));
+      }
+      throw new Error(`unexpected chat request ${path}`);
+    });
+
+    const bootstrap = api.loadChatBootstrapForTest();
+    assert.equal(typeof resolveBootstrap, 'function');
+    assert.equal(api.chatRequestStateForTest().loading, true);
+    await api.loadChatDeltaForTest();
+    resolveBootstrap();
+    await bootstrap;
+
+    const state = api.chatRequestStateForTest();
+    assert.equal(state.loaded, true);
+    assert.equal(state.loading, false, 'the invalidated bootstrap releases its own loading flag');
+    assert.equal(state.loadingRequest, null, 'the loading owner is retired with the invalidated response');
+    assert.equal(state.requestGeneration, 2, 'the newer delta remains the authoritative request generation');
+  });
+
+  await testAsync('YO!chat keeps an explicit older page when a live delta completes first', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {authUsername: 'keivenc'});
+    api.setChatStateForTest({
+      loaded: true,
+      loading: false,
+      requestGeneration: 0,
+      olderGeneration: 0,
+      olderCursor: 'older-cursor',
+      hasMore: true,
+      messages: [],
+    });
+    let resolveOlder;
+    api.setFetchForTest(url => {
+      const path = String(url);
+      if (path.includes('/api/chat/page')) {
+        return new Promise(resolve => {
+          resolveOlder = () => resolve(jsonResponse({
+            messages: [{id: 7, created_at_utc: 1700000000, username: 'alice', sender_instance_id: 'other', client_message_uuid: 'm-7', body: 'older'}],
+            older_cursor: null,
+            has_more: false,
+          }));
+        });
+      }
+      if (path.includes('/api/chat/delta')) {
+        return Promise.resolve(jsonResponse({revision: 0, newer_cursor: 'delta-cursor', messages: []}));
+      }
+      throw new Error(`unexpected chat request ${path}`);
+    });
+
+    const older = api.loadOlderChatMessagesForTest();
+    assert.equal(typeof resolveOlder, 'function');
+    await api.loadChatDeltaForTest();
+    resolveOlder();
+    assert.equal(await older, true, 'the explicit page is not made stale by an unrelated live delta');
+
+    const state = api.chatRequestStateForTest();
+    assert.equal(state.loading, false);
+    assert.deepStrictEqual([...state.messageIds], [7]);
+    assert.equal(state.requestGeneration, 1);
+    assert.equal(state.olderGeneration, 1);
   });
 }
 

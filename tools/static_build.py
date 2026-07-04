@@ -448,7 +448,7 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
 })
 I18N_ALLOWED_IDENTICAL_LOCALE_KEYS: dict[str, frozenset[str]] = {
     "de": frozenset({"transcript.role.system"}),
-    "fr": frozenset({"transcript.role.message"}),
+    "fr": frozenset({"common.message"}),
     "it": frozenset({"menu.file"}),
     "pl": frozenset({"transcript.role.system"}),
 }
@@ -519,6 +519,9 @@ _PSEUDO_ACCENTS = str.maketrans({
 })
 
 ASSETS: dict[str, list[str]] = {
+    "emoji-data.js": [
+        "static_src/js/emoji/emoji_data.js",
+    ],
     "yolomux.js": [
         "static_src/js/yolomux/00_bootstrap_state.js",
         "static_src/js/yolomux/02_timing.js",
@@ -536,8 +539,10 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/78_panel_dom_actions.js",
         "static_src/js/yolomux/78_panel_shell.js",
+        "static_src/js/yolomux/79_conversation_shared.js",
         "static_src/js/yolomux/80_info_panel.js",
         "static_src/js/yolomux/81_yoagent_panel.js",
+        "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/82_preferences_panel.js",
         "static_src/js/yolomux/83_debug_panel.js",
         "static_src/js/yolomux/90_changes_editor.js",

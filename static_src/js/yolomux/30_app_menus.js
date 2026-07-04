@@ -45,11 +45,9 @@ const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
-  try {
-    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
-  } catch (_) {
-    return new Date().toString();
-  }
+  return localizedDateTimeFormat(Date.now() / 1000, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
 }
 
 function openAboutLinkedIn() {
@@ -660,6 +658,20 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
+function fileMenuPanelCommands() {
+  return FILE_MENU_PANEL_DEFINITIONS.map(({itemId}) => {
+    if (itemId === fileExplorerItemId) {
+      return menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
+        checked: itemInLayout(fileExplorerItemId),
+        detail: appShortcutText('B'),
+        iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
+        targetItem: fileExplorerItemId,
+      });
+    }
+    return fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || '');
+  });
+}
+
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const shareSessions = shareSessionsFromLayout();
@@ -667,7 +679,6 @@ function appMenuTree() {
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
@@ -678,16 +689,7 @@ function appMenuTree() {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
-          menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
-            checked: itemInLayout(fileExplorerItemId),
-            detail: appShortcutText('B'),
-            iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
-            targetItem: fileExplorerItemId,
-          }),
-          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
-          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
-          fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
-          debugMenuItem,
+          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),

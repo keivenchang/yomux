@@ -161,6 +161,26 @@ function localizedDateTimeFormat(timestampSeconds, options = {}) {
   }
 }
 
+function localizedExactDateTimeFormat(timestampSeconds) {
+  const value = Number(timestampSeconds || 0);
+  if (!value) return '';
+  if (!String(i18nActiveLocale || '').toLowerCase().startsWith('en')) {
+    return localizedDateTimeFormat(value, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
+  const date = new Date(value * 1000);
+  const pad = number => String(number).padStart(2, '0');
+  let hour = date.getHours();
+  let suffix = '';
+  if (normalizeDateTimeHourCycle(dateTimeHourCycle) === '12') {
+    suffix = hour >= 12 ? ' PM' : ' AM';
+    hour = hour % 12 || 12;
+  }
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(hour)}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${suffix}`;
+}
+
 function i18nSetCatalogForTest(locale, catalog) {
   i18nCatalogs.set(locale, catalog || {});
 }
@@ -263,4 +283,10 @@ function rerenderForLocale(options = {}) {
   // separate registry below, so adding a surface cannot require another bespoke branch here.
   relocalizeMountedPanels(options);
   localeGlobalSurfaceHooks.forEach(run => run(options));
+}
+
+function rerenderDateTimeFormatSurfaces() {
+  relocalizeMountedPanels({dateTimeFormatChange: true});
+  if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
+  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }

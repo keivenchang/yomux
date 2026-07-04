@@ -95,7 +95,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/id: 'dark', get label\(\) \{ return yolomuxEditorSchemeLabel\('dark'\); \}/.test(bootstrapSource)
       && /id: 'yolomux-light', get label\(\) \{ return yolomuxEditorSchemeLabel\('light'\); \}/.test(bootstrapSource), 'YOLOmux Dark/Light scheme labels resolve lazily while proper theme names stay stable');
     assert.ok(/popoutDisabledReason: item => t\(fileItemPath\(item\)[\s\S]*pane\.popout\.filePreviewRequired[\s\S]*pane\.popout\.filePathRequired/.test(bootstrapSource), 'file popout disabled reasons resolve lazily by capability');
-    assert.ok((bootstrapSource.match(/popoutDisabledReason: \(\) => t\('pane\.popout\.interactiveDisabled'/g) || []).length === 4, 'interactive tab types share one localized popout-disabled template');
+    assert.ok((bootstrapSource.match(/popoutDisabledReason: \(\) => t\('pane\.popout\.interactiveDisabled'/g) || []).length === 6, 'interactive tab types share one localized popout-disabled template');
     assert.equal(/Hide tab metadata|Show tab metadata/.test(bootstrapSource), false, 'bootstrap does not initialize tab metadata controls with raw English');
     assert.ok(/function renderTabMetaToggle\(\)[\s\S]*labelOn: t\('menu\.view\.tabMeta\.hide'\)[\s\S]*labelOff: t\('menu\.view\.tabMeta\.show'\)/.test(coreSource), 'tab metadata tooltip and aria state reuse existing locale keys');
 
@@ -1592,7 +1592,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function clearSessionEphemeralRuntimeState\(session\)[\s\S]*tmuxWindowNavigationRecords\.delete\(session\)[\s\S]*terminalTmuxInputStates\.delete\(session\)[\s\S]*altScreenWheelRemainder\.delete\(session\)[\s\S]*clearAgentWindowActivityRecordsForSession\(session\)[\s\S]*clearSessionAttentionAcknowledgementRecords\(session\)/.test(source), 'one detach helper clears every in-flight session runtime family');
     assert.equal((source.match(/pendingPaneViewStateCaptures\.delete\(session\)/g) || []).length, 1, 'pending pane-view captures have one session lifecycle owner');
     assert.ok(/function detachSessionUi\(session\)[\s\S]*pendingPaneViewStateCaptures\.delete\(session\)[\s\S]*function clearSessionUiState/.test(source), 'detach owns pending pane-view capture cleanup before durable session state is cleared or migrated');
-    assert.ok(/function dismissSessionToasts\(session, options = \{\}\)[\s\S]*for \(const \[id, record\] of toastRecords\.entries\(\)\)/.test(source), 'session toast cleanup consumes the record owner');
+    assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*for \(const \[id, record\] of toastRecords\.entries\(\)\)[\s\S]*function dismissSessionToasts\(session, options = \{\}\)[\s\S]*dismissNotificationsForTarget\(session, options\)/.test(source), 'session toast cleanup delegates to the shared target-notification record owner');
     assert.equal(/moveAttentionAlertsForSession|querySelectorAll\(['"]\.toast\[data-toast-kind=/.test(source), false, 'toast cleanup has no metadata-only rename path or parallel DOM scan');
     assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
     assert.ok(/async function boot\(\)[\s\S]*?initialAutoStatusesPromise = loadAutoStatuses\(\)\.catch[\s\S]*?\}\s*bindClipboardPaste\(\);/.test(source), 'image paste binding is installed during boot and does not wait on background auto-status refresh');
@@ -2693,16 +2693,16 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function handleYoagentSessionLinkClick[\s\S]*?selectSession\(session, \{userInitiated: true\}\)/.test(source), 'YO!agent Markdown session links select the matching tab');
     assert.ok(source.includes('function installYoagentSessionLinks'), 'YO!agent Markdown session links install a scoped click handler');
     assert.ok(/function linkYoagentSessionCodeReferences[\s\S]*?sessions\.includes\(session\)[\s\S]*?\(tmux\\s\+\)\?session\\s\*\$[\s\S]*?link\.href = `\?yoagent-session=\$\{encodeURIComponent\(session\)\}`/.test(source), 'YO!agent inline `tmux session `code`` references are converted to clickable session links');
-    assert.ok(/function renderYoagentMessageMarkdown[\s\S]*?renderMarkdownPreviewInto\(body, yoagentTightMarkdown[\s\S]*?installYoagentSessionLinks\(body\)/.test(source), 'YO!agent Markdown rendering makes session links clickable after sanitization');
+    assert.ok(/function renderConversationMessageMarkdown[\s\S]*?renderMarkdownPreviewInto\(body, yoagentTightMarkdown[\s\S]*?installYoagentSessionLinks\(body\)/.test(source), 'shared conversation Markdown rendering makes session links clickable after sanitization');
     assert.ok(/const localeGlobalSurfaceHooks = Object\.freeze\(\[[\s\S]*?options\.localeChange === true[\s\S]*?refreshActivitySummary\(\{force: true, silent: true, localeChange: true\}\)[\s\S]*?\]\)/.test(source), 'the global locale registry forces the activity summary through the new locale');
     assert.ok(/key:\s*'yoagent'[\s\S]*?relocalize:\s*\(_item, panel, options = \{\}\)[\s\S]*?allowBusyRebuild: options\.localeChange === true/.test(source), 'the YO!agent tab-type relocalizer rebuilds busy UI on language changes');
     // #45: assistant replies are structured Markdown — flag the body and render it through marked.js.
-    assert.ok(source.includes('function renderYoagentMessageMarkdown'), '#45: YO!agent assistant replies render their multi-section Markdown body');
+    assert.ok(source.includes('function renderConversationMessageMarkdown'), '#45: YO!agent and YO!chat assistant replies share one Markdown render pass');
     assert.ok(source.includes('data-yoagent-global-markdown'), 'YO!agent global summary lines are flagged for markdown rendering');
     assert.ok(/\.yoagent-global \[data-yoagent-global-markdown\][\s\S]*?renderMarkdownPreviewInto\(body, yoagentTightMarkdown/.test(source), 'YO!agent global summary markdown is rendered through the sanitizer');
     assert.ok(/\.yoagent-message\.assistant \[data-yoagent-markdown\]/.test(source), '#45: the markdown render pass targets flagged assistant message nodes, including split agent-result blocks');
     assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(body\.textContent/.test(source), '#45/#129: assistant message Markdown is rendered (tightened) from the escaped-text fallback');
-    assert.ok(source.includes("roleClass === 'assistant' ? 'yoagent-message-body markdown-body'"), '#45: assistant message bodies get the markdown-body class for formatting');
+    assert.ok(source.includes("roleClass === 'assistant' ? 'conversation-message-body yoagent-message-body markdown-body'"), '#45: assistant message bodies inherit the shared conversation body and markdown formatting classes');
     // #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) move OFF the tab strip
     // onto a dedicated toolbar line below the tabs; the tab strip keeps only tabs + frame controls.
     const editorToolbarIdx = source.indexOf('function fileEditorToolbarHtml(');

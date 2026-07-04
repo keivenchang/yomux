@@ -2785,22 +2785,30 @@ function positionFileImagePreview(anchor, popover, point = null) {
   popover.style.top = `${Math.round(top)}px`;
 }
 
-function openFileImagePreview(anchor, path, entry, point = null) {
+function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   closeFileImagePreview();
   if (!anchor || !document.body) return;
   const popover = document.createElement('div');
-  popover.className = 'file-image-preview-popover';
+  popover.className = ['file-image-preview-popover', options.className || ''].filter(Boolean).join(' ');
   popover.dataset.previewPath = path;
-  const img = document.createElement('img');
-  img.src = rawFileUrl(path);
-  img.alt = entry?.name || basenameOf(path);
-  popover.appendChild(img);
+  const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
+  const media = document.createElement(mediaKind === 'video' ? 'video' : 'img');
+  media.src = options.sourceUrl || rawFileUrl(path);
+  if (mediaKind === 'video') {
+    media.autoplay = true;
+    media.loop = true;
+    media.muted = true;
+    media.playsInline = true;
+  } else {
+    media.alt = entry?.name || basenameOf(path);
+  }
+  popover.appendChild(media);
   appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
 }
 
-function bindFileImagePreview(anchor, path, entry) {
+function bindFileImagePreview(anchor, path, entry, options = {}) {
   if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
   anchor.dataset.imagePreviewBound = 'true';
   let pointer = null;
@@ -2820,7 +2828,7 @@ function bindFileImagePreview(anchor, path, entry) {
     onOpen: event => {
       updatePointer(event);
       fileImagePreviewController = controller;
-      openFileImagePreview(anchor, path, entry, pointer);
+      openFileImagePreview(anchor, path, entry, pointer, options);
     },
     onClose: () => {
       if (fileImagePreviewPopover?.dataset.previewPath === path) closeFileImagePreview({fromController: true});
