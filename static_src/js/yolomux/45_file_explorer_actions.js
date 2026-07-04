@@ -683,8 +683,7 @@ function finderTreeRowEntry(row, path) {
 function handleFileExplorerArrowNav(event) {
   const intent = fileExplorerKeyIntent(event.key, {shift: event.shiftKey, mod: event.metaKey || event.ctrlKey, alt: event.altKey});
   if (!intent) return false;
-  if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
-  if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
+  if (!fileExplorerKeyboardEventAllowsAction(event)) return false;
   const consume = () => { event.preventDefault(); event.stopPropagation(); };
   // Cmd-Up opens the enclosing folder (move the Finder root up a level) — independent of the row list.
   if (intent === 'enclosing') {

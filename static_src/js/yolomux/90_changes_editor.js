@@ -2332,10 +2332,7 @@ const differTreeInteractionController = createSharedTreeInteractionController({
 
 const originalFileExplorerArrowNavForSharedTree = handleFileExplorerArrowNav;
 handleFileExplorerArrowNav = event => {
-  // Tabber/Finder navigation never steals terminal input. This precedes every tree-state
-  // branch because a stale selection must not consume Enter or arrows before xterm sees them.
-  if (typeof globalShortcutTargetIsTerminalSurface === 'function' && globalShortcutTargetIsTerminalSurface(event?.target)) return false;
-  if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target)) return false;
+  if (!fileExplorerKeyboardEventAllowsAction(event)) return false;
   const panel = event?.target?.closest?.('.file-explorer-panel')
     || event?.target?.closest?.('.file-explorer-changes-panel')
     || document.querySelector('.file-explorer-panel')

@@ -81,6 +81,17 @@ async function runTabberSuite() {
     assert.equal(arrowDown.defaultPrevented, true, 'Finder ArrowDown is consumed');
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'Finder ArrowDown moves selection to the next row');
     assert.equal(fileRow.classList.contains('selected'), true, 'Finder selected row keeps the shared selected class');
+
+    api.selectFileTreePath('/repo');
+    const terminal = new TestElement('finder-auto-focus-terminal');
+    terminal.classList.add('xterm');
+    api.setDocumentActiveElementForTest(terminal);
+    api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-tree-panel' ? panel : null);
+    api.setAutoFocusEnabledForTest(true);
+    api.selectPanelOnHover(api.fileExplorerItemId);
+    const autoFocusedArrowDown = treeKeyEvent('ArrowDown', terminal);
+    assert.equal(api.handleFileExplorerArrowNavForTest(autoFocusedArrowDown), true, 'auto-focused Finder owns ArrowDown while the browser focus remains in xterm');
+    assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'auto-focused Finder moves the shared selection');
   });
 
   test('Tabber shared tree controller handles keyboard navigation and active-window sync', () => {
@@ -143,6 +154,14 @@ async function runTabberSuite() {
     assert.notEqual(terminalEnter.defaultPrevented, true, 'terminal Enter remains available to xterm');
     assert.equal(api.currentSessionActionTarget(), '1', 'terminal Enter does not activate the selected Tabber row');
 
+    api.setAutoFocusEnabledForTest(true);
+    api.selectPanelOnHover(api.fileExplorerItemId);
+    const autoFocusedArrowDown = treeKeyEvent('ArrowDown', terminal);
+    assert.equal(api.handleFileExplorerArrowNavForTest(autoFocusedArrowDown), true, 'auto-focused Tabber owns ArrowDown while the browser focus remains in xterm');
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'auto-focused Tabber moves the selected row');
+
+    api.setFocusedPanelItem('1');
+    api.syncTabberTreeActiveSelectionForTest(panel);
     api.setDocumentActiveElementForTest(panel);
     const panelArrowDown = treeKeyEvent('ArrowDown', panel);
     assert.equal(api.handleFileExplorerArrowNavForTest(panelArrowDown), true, 'Tabber ArrowDown works after Tabber owns focus');
@@ -154,6 +173,7 @@ async function runTabberSuite() {
     assert.equal(api.handleFileExplorerArrowNavForTest(enter), true, 'Tabber Enter activates the selected row');
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
 
+    api.setAutoFocusEnabledForTest(false);
     api.setFocusedPanelItem(api.fileExplorerItemId);
     api.syncTabberTreeActiveSelectionForTest(panel);
     assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), [], 'Tabber clears a stale selection when the finder pane is focused');
@@ -397,6 +417,17 @@ async function runTabberSuite() {
     assert.equal(api.handleFileExplorerArrowNavForTest(arrowDown), true, 'global key wrapper routes Differ ArrowDown to the shared controller');
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'Differ ArrowDown moves selection to the changed file row');
     assert.equal(fileRow.classList.contains('selected'), true, 'Differ key selection applies the shared selected class');
+
+    api.selectFileTreePath('/repo');
+    const terminal = new TestElement('differ-auto-focus-terminal');
+    terminal.classList.add('xterm');
+    api.setDocumentActiveElementForTest(terminal);
+    api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-panel' ? panel : null);
+    api.setAutoFocusEnabledForTest(true);
+    api.selectPanelOnHover(api.fileExplorerItemId);
+    const autoFocusedArrowDown = treeKeyEvent('ArrowDown', terminal);
+    assert.equal(api.handleFileExplorerArrowNavForTest(autoFocusedArrowDown), true, 'auto-focused Differ owns ArrowDown while the browser focus remains in xterm');
+    assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'auto-focused Differ moves the shared selection');
 
     const diffRefInput = new TestElement('diff-ref-from', 'input');
     diffRefInput.dataset.diffRefFrom = 'true';

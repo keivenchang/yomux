@@ -9793,7 +9793,8 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('function handleFileExplorerArrowNav('), 'arrow-nav handler exists');
     assert.ok(source.includes('function fileExplorerKeyIntent('), 'pure key->intent map exists');
     assert.ok(/if \(handleFileExplorerArrowNav\(event\)\) return;/.test(source), 'wired into the global keydown after the delete shortcut');
-    assert.ok(source.includes('!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)'), 'gated on the Finder/Differ surface');
+    assert.ok(source.includes('function fileExplorerKeyboardEventAllowsAction(event)'), 'one shared Finder/Differ/Tabber keyboard-ownership gate exists');
+    assert.ok(source.includes('if (!fileExplorerKeyboardEventAllowsAction(event)) return false;'), 'every tree mode uses the shared keyboard-ownership gate');
     assert.ok(/const finderTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'finder'/.test(source), 'Finder uses the shared tree interaction controller');
     assert.ok(source.includes('function fileTreeDirectoryExpanded(') && source.includes('function setFileTreeDirectoryExpanded('), 'one shared expand/collapse parent for both surfaces');
     assert.ok(/setFileTreeDirectoryExpanded[\s\S]{0,260}closest\('\.file-explorer-changes-panel'\)[\s\S]{0,220}changesFolderCollapsed[\s\S]{0,220}expandDirectoryRow/.test(source), 'the parent dispatches Differ (changesFolderCollapsed) vs Finder (expandDirectoryRow) — no per-surface key code');

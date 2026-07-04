@@ -1746,7 +1746,33 @@ function markFileExplorerInteraction() {
 }
 
 function eventTargetIsFileExplorerSurface(target) {
-  return Boolean(target?.closest?.('#fileExplorer, .panel.file-explorer-panel, .file-explorer-tree-panel'));
+  return Boolean(
+    target?.closest?.('#fileExplorer')
+    || target?.closest?.('.panel.file-explorer-panel')
+    || target?.closest?.('.file-explorer-tree-panel')
+    || target?.closest?.('.file-explorer-changes-panel')
+  );
+}
+
+// Finder, Differ, and Tabber share one layout item and one tree-key dispatcher. Normally the
+// browser focus is already inside that item. With Auto-focus, the hovered pane owns keyboard
+// navigation even though xterm may still be the document's active element; text and popup
+// controls always retain their own keys.
+function fileExplorerHasAutoFocusedKeyboardOwnership() {
+  return autoFocusEnabled && isFileExplorerItem(focusedPanelItem);
+}
+
+function fileExplorerKeyboardOwnsEvent(event) {
+  if (eventTargetIsFileExplorerSurface(event?.target)) return true;
+  return fileExplorerHasAutoFocusedKeyboardOwnership();
+}
+
+function fileExplorerKeyboardEventAllowsAction(event) {
+  if (!fileExplorerKeyboardOwnsEvent(event)) return false;
+  if (globalShortcutTargetAllowsAppAction(event?.target)) return true;
+  // Auto-focus may intentionally leave xterm as the DOM focus target. That is the sole blocked
+  // surface it may override; editors, inputs, menus, popovers, and dialogs retain their keys.
+  return fileExplorerHasAutoFocusedKeyboardOwnership() && globalShortcutTargetIsTerminalSurface(event?.target);
 }
 
 function fileExplorerUserIsActive() {
@@ -3185,7 +3211,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     const rows = controller.rows(panel);
     if (!rows.length) return false;
     const eventTargetsOwnedPanel = panel?.contains?.(event?.target) || event?.target === panel;
-    if (typeof globalShortcutTargetAllowsAppAction === 'function' && !globalShortcutTargetAllowsAppAction(event?.target) && !eventTargetsOwnedPanel) return false;
+    if (!eventTargetsOwnedPanel && !fileExplorerKeyboardEventAllowsAction(event)) return false;
     const lead = controller.leadRow(panel);
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
@@ -4479,7 +4505,15 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
 });
 
 function syncTabberTreeActiveSelection(panel = document, options = {}) {
-  if (!activeTabberRowPath()) {
+  const currentPath = activeTabberRowPath();
+  // Hovering Tabber with Auto-focus makes it the keyboard owner. Keep its existing cursor while
+  // it owns that focus; otherwise the focus refresh would erase the cursor before ArrowUp/Down
+  // can advance it. A normal focus move into Tabber still clears stale selection as before.
+  if (!currentPath && fileExplorerHasAutoFocusedKeyboardOwnership() && tabberTreeSelectedPaths.size) {
+    tabberTreeInteractionController.applyState(panel, options);
+    return true;
+  }
+  if (!currentPath) {
     tabberTreeSelectedPaths.clear();
     tabberTreeSelectionLead = '';
     tabberTreeInteractionController.applyState(panel, options);
