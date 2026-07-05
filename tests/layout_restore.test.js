@@ -386,7 +386,7 @@ async function runLayoutRestoreSuite() {
       && /function dropActionResultPresentation[\s\S]*structuredMessageText[\s\S]*messageDescriptorText[\s\S]*userMessageText\(source\)/.test(dropSource), 'drop-action errors and structured results share the message descriptor parents');
     assert.ok(/summary_error[\s\S]*userMessageText\(payload, t\('summary\.stream\.failed'\)\)/.test(summarySource), 'summary SSE errors share the same structured message resolver');
     assert.ok(/function ensureSession[\s\S]*userMessageText\(error, t\('status\.sessionCreateFailedDefault'\)\)[\s\S]*function createNextSession[\s\S]*userMessageText\(error, t\('status\.sessionCreateFailedDefault'\)\)/.test(layoutSource), 'ensure/create session failures share the structured message resolver');
-    assert.ok(/function renameTmuxSession[\s\S]*userMessageText\(error, t\('status\.sessionRenameFailedDefault'\)\)/.test(layoutSource), 'session rename failures use the structured message resolver');
+    assert.ok(/function showSessionRenameDialog[\s\S]*renameResult\?\.error[\s\S]*function renameTmuxSession[\s\S]*userMessageText\(error, t\('status\.sessionRenameFailedDefault'\)\)/.test(layoutSource), 'session rename failures use the structured message resolver and show the same error in the dialog');
     assert.ok(/function fetchTmuxSelectionText[\s\S]*userMessageText\(payload, t\('status\.nothingSelected'\)\)/.test(coreSource), 'tmux copy-selection failures use the structured message resolver');
     assert.ok(/function showFileTransferError\(error, options = \{\}\)[\s\S]*userMessageText\(error,/.test(actionsSource)
       && /function uploadFiles[\s\S]*showFileTransferError\(error, \{session,/.test(summarySource)

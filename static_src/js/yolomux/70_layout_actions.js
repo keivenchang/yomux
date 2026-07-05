@@ -1660,9 +1660,9 @@ function showSessionRenameDialog(session) {
       return;
     }
     errorNode.hidden = true;
-    const renamed = await renameTmuxSession(session, nextName);
-    if (!renamed) {
-      showError(t('status.renameFailedSeeStatus'));
+    const renameResult = await renameTmuxSession(session, nextName);
+    if (renameResult !== true) {
+      showError(renameResult?.error || t('status.renameFailedSeeStatus'));
       input.focus();
     }
   });
@@ -1706,12 +1706,11 @@ async function renameTmuxSession(session, proposedName) {
     statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
     return true;
   } catch (error) {
-    if (error?.status) {
-      statusErr(esc(userMessageText(error, t('status.sessionRenameFailedDefault'))));
-      return false;
-    }
-    statusErr(localizedHtml('status.sessionRenameFailed', {error}));
-    return false;
+    const errorText = error?.status
+      ? userMessageText(error, t('status.sessionRenameFailedDefault'))
+      : t('status.sessionRenameFailed', {error: error?.message || String(error)});
+    statusErr(esc(errorText));
+    return {error: errorText};
   }
 }
 
