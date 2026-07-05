@@ -139,14 +139,14 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     html_calls = []
     clock = iter([100.0, 100.037])
 
-    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language="", auth_username=""):
-        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language, auth_username))
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language="", auth_username="", recent_sessions=None):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language, auth_username, recent_sessions))
         return "<html>boot</html>"
 
     monkeypatch.setattr(http_routes, "html_page", fake_html_page)
     monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
     request = SimpleNamespace(
-        server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True), dev=True),
+        server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True, tmux_recency_ordered_sessions=lambda sessions: list(sessions)), dev=True),
         share_sessions=lambda: [],
         share_record=lambda: None,
         share_bootstrap_payload=lambda record: {"record": record},
@@ -157,7 +157,7 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
 
     assert writes == ["<html>boot</html>"]
-    assert html_calls == [(["5"], "admin", True, True, None, "", "alice")]
+    assert html_calls == [(["5"], "admin", True, True, None, "", "alice", ["5"])]
     assert request._http_response_compute_ms == pytest.approx(37.0)
     assert request._http_response_performance_details == {
         "html_page": True,

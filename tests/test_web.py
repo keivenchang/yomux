@@ -87,6 +87,12 @@ def test_html_page_bootstrap_includes_linear_issue_base_url():
     assert bootstrap["linearIssueBaseUrl"] == "https://linear.app/issue"
 
 
+def test_html_page_bootstrap_preserves_server_ranked_recent_sessions():
+    bootstrap = json.loads(_bootstrap_json(web.html_page(["old", "new"], recent_sessions=["new", "old"])))
+
+    assert bootstrap["recentSessions"] == ["new", "old"]
+
+
 def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, tmp_path):
     xterm_root = tmp_path / "@xterm" / "xterm"
     addon_path = tmp_path / "@xterm" / "addon-unicode11" / "lib" / "addon-unicode11.js"

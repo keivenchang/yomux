@@ -417,23 +417,45 @@
   cursor: row-resize;
 }
 @media (pointer: coarse) {
+  /* Touch: the ENTIRE divider length is a transparent grab zone, so a finger landing
+     anywhere near the line (not just on a dot) starts the resize — "close enough" — and
+     setPointerCapture in bindLayoutResizer keeps the drag alive as the finger drifts off.
+     The visible affordance is a small centered grip pill (::before), not a big filled disc. */
   .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
   .resizer-row::after {
-    inset-block: auto;
-    inset-block-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
-    block-size: var(--pane-resizer-touch-handle-size);
-    background: var(--pane-resizer-hover-bg);
-    border-radius: var(--radius-pill);
-    box-shadow: var(--pane-resizer-hover-shadow);
+    inset-block: 0;
+    inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
+    block-size: auto;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
   }
   .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
   .resizer-column::after {
-    inset-inline: auto;
-    inset-inline-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
-    inline-size: var(--pane-resizer-touch-handle-size);
-    background: var(--pane-resizer-hover-bg);
+    inset-inline: 0;
+    inset-block: calc(-1 * var(--pane-resizer-hit-inset));
+    inline-size: auto;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before,
+  .resizer-row::before {
+    top: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    bottom: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    left: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    right: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
     border-radius: var(--radius-pill);
-    box-shadow: var(--pane-resizer-hover-shadow);
+    background: var(--pane-resizer-hover-bg);
+  }
+  .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before,
+  .resizer-column::before {
+    left: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    right: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    top: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    bottom: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    border-radius: var(--radius-pill);
+    background: var(--pane-resizer-hover-bg);
   }
 }
 body.layout-resizing-row,

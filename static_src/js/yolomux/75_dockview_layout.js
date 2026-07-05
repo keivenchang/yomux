@@ -88,6 +88,7 @@ function dockviewThemeForApp() {
 }
 
 function dockviewRootBoundaryDropIntent(event) {
+  if (mobileSinglePaneMode) return null;
   if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -131,7 +132,7 @@ function dockviewContentDropCanUseRootBoundary(event, zone) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const zone = event.position === 'center' ? 'middle' : event.position;
+  const zone = mobileSinglePaneMode ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -160,6 +161,8 @@ function dockviewPaneContentDropIntent(event) {
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
   return Boolean(info && (
+    (mobileSinglePaneMode && event.position !== 'center')
+      ||
     dockviewPinnedTabCrossPaneViolation(info.intent)
       || !dropIntentAllowsSession(info.item, info.intent)
   ));

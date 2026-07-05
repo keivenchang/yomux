@@ -839,6 +839,13 @@ const layoutTreeParamPrefix = 'tree:';
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
 const minNonFileExplorerSplitPercent = 30;
+// Phone layout is deliberately a touch-device policy: a resized desktop must preserve its layout.
+// 760px covers portrait phones and narrow iPad split view; 960x520 catches phone landscape without
+// collapsing a full-size tablet.
+const mobileSinglePaneMaxWidthPx = 760;
+const mobileSinglePaneLandscapeMaxWidthPx = 960;
+const mobileSinglePaneLandscapeMaxHeightPx = 520;
+const mobileSinglePaneTabLimit = 2;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -889,6 +896,24 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
+
+function browserUsesCoarsePointer() {
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
+  if (media?.matches === true) return true;
+  const navigatorValue = globalThis.navigator || {};
+  return Number(navigatorValue.maxTouchPoints || 0) > 0
+    && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
+}
+
+function phoneLikeMobileViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width <= mobileSinglePaneMaxWidthPx
+    || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
+}
+
+const mobileSinglePaneMode = phoneLikeMobileViewport();
 const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;

@@ -67,11 +67,11 @@ function cloneLayoutSlots(slots = layoutSlots) {
 }
 
 function layoutSlotsSignature(slots = layoutSlots) {
-  return JSON.stringify(normalizeLayoutSlots(cloneLayoutSlots(slots)));
+  return JSON.stringify(normalizeLayoutSlotsForViewport(cloneLayoutSlots(slots)));
 }
 
 function compactCurrentLayoutSlots(options = {}) {
-  const normalized = normalizeLayoutSlots(layoutSlots);
+  const normalized = normalizeLayoutSlotsForViewport(layoutSlots);
   if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
   applyLayoutSlots(normalized, {
     focusSession: options.focusSession || focusedPanelItem || undefined,
@@ -841,12 +841,57 @@ function shareBootstrapLayoutParams() {
   return layout || tabs || sharedSessions.length ? params : null;
 }
 
+function mobileRecentTmuxItems() {
+  const source = Array.isArray(bootstrap.recentSessions) && bootstrap.recentSessions.length
+    ? bootstrap.recentSessions
+    : visibleSessions;
+  const items = [];
+  for (const value of source) {
+    const item = resolveLayoutItem(value);
+    if (isTmuxSession(item) && !items.includes(item)) items.push(item);
+    if (items.length >= mobileSinglePaneTabLimit) break;
+  }
+  return items;
+}
+
+function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  const preferred = resolveLayoutItem(options.focusSession);
+  const tmuxItems = [];
+  for (const item of [preferred, ...mobileRecentTmuxItems(), ...requested]) {
+    if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
+    if (tmuxItems.length >= mobileSinglePaneTabLimit) break;
+  }
+  const supplementary = [];
+  for (const item of [preferred, ...requested]) {
+    if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
+  }
+  const items = [...tmuxItems, ...supplementary];
+  const active = items.includes(preferred) ? preferred : items[0] || null;
+  return layoutSlotsForItems(items, 'single', {active, emptySlot: 'left'});
+}
+
+function normalizeLayoutSlotsForViewport(value, options = {}) {
+  const source = mobileSinglePaneMode
+    ? mobileSinglePaneLayoutSlots(value, {focusSession: options.focusSession})
+    : value;
+  return normalizeLayoutSlots(source, {
+    ...options,
+    preserveMissingFileExplorer: mobileSinglePaneMode || options.preserveMissingFileExplorer === true,
+  });
+}
+
+function availableLayoutModes() {
+  return mobileSinglePaneMode ? ['single'] : layoutModeValues;
+}
+
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
+  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
@@ -864,6 +909,7 @@ function initialLayoutSlots() {
 }
 
 function defaultLayoutSlots() {
+  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
   return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
     preservePlaceholders: false,
@@ -5123,7 +5169,7 @@ function updateSessionList(nextSessions, options = {}) {
   }
   const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
   setSessionOrder(effectiveNext);
-  layoutSlots = normalizeLayoutSlots(layoutSlots, {
+  layoutSlots = normalizeLayoutSlotsForViewport(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
   });
@@ -5138,7 +5184,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
-  layoutSlots = normalizeLayoutSlots(nextSlots, {
+  layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
+    focusSession: options.focusSession,
     preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
   });
   activeSessions = sessionsFromLayout();

@@ -731,7 +731,7 @@ function appMenuTree() {
           menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
+        ...(mobileSinglePaneMode ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),

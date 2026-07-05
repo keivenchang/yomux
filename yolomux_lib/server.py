@@ -1171,6 +1171,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             dangerously_yolo=self.server.app.dangerously_yolo,
             share=self.share_bootstrap_payload(record),
             accept_language=self.headers.get("Accept-Language", ""),
+            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
         ))
         return True
 
@@ -1750,13 +1751,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
+            sessions = self.server.app.sessions
             data = html_page(
-                self.server.app.sessions,
+                sessions,
                 self.auth_identity().role,
                 dev=getattr(self.server, 'dev', False),
                 dangerously_yolo=self.server.app.dangerously_yolo,
                 accept_language=self.headers.get("Accept-Language", ""),
                 auth_username=self.auth_identity().username,
+                recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
             ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")

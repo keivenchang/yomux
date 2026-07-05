@@ -162,7 +162,10 @@ supports_setsid_f() {
 
 shell_command_for() {
   local log_path="$1"
-  printf 'cd %q && exec env TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
+  # A server started from inside a tmux client inherits TMUX and would then operate on
+  # that client socket instead of the user's shared default server. A deliberate custom
+  # socket still travels through YOLOMUX_TMUX_SOCKET below.
+  printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
     printf ' %q' "$item"
   done
@@ -182,6 +185,8 @@ repo_root = sys.argv[1]
 log_path = sys.argv[2]
 separator = sys.argv.index("--")
 env = os.environ.copy()
+env.pop("TMUX", None)
+env.pop("TMUX_PANE", None)
 for item in sys.argv[3:separator]:
     key, _, value = item.partition("=")
     if key:

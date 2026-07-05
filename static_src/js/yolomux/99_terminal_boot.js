@@ -5007,6 +5007,7 @@ function paintInitialAppShell() {
 
 async function boot() {
   installNativeAppViewportOwner();
+  installTouchContextMenuOwner();
   syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();

@@ -450,6 +450,7 @@ def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6", "7"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         verify_share_token=lambda token: {"session": "6", "sessions": ["6", "7"]} if token == "valid-share-token" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -532,6 +533,7 @@ def test_share_short_id_shell_boots_without_login(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6", "7"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -562,6 +564,7 @@ def test_share_short_id_shell_rejects_when_viewer_cap_is_full(monkeypatch, tmp_p
     app = SimpleNamespace(
         sessions=["6"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -616,6 +619,7 @@ def test_plaintext_on_tls_server_serves_http_share_shell(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
         http_allowed_share_is_active=lambda: True,
     )

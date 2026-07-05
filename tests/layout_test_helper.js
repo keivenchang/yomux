@@ -420,8 +420,12 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'viewport'].includes(key)));
   const fireAllTimeouts = options.fireAllTimeouts === true;
+  const coarsePointer = options.coarsePointer === true;
+  const viewport = options.viewport || {};
+  const viewportWidth = Number.isFinite(Number(viewport.width)) ? Number(viewport.width) : 1200;
+  const viewportHeight = Number.isFinite(Number(viewport.height)) ? Number(viewport.height) : 800;
 
   const bootstrapPayload = {
     sessions,
@@ -544,6 +548,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     navigator: {
       platform: navigatorPlatform,
       userAgent: navigatorPlatform,
+      maxTouchPoints: coarsePointer ? 5 : 0,
       clipboard: {
         writeText(text) {
           context.__clipboardText = String(text ?? '');
@@ -575,8 +580,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       clearTimeout: testClearTimeout,
       confirm: () => true,
       EventSource: TestEventSource,
-      innerHeight: 800,
-      innerWidth: 1200,
+      innerHeight: viewportHeight,
+      innerWidth: viewportWidth,
       location,
       localStorage,
       open(url, name, features) {
@@ -610,6 +615,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       removeEventListener(type, listener) {
         const listeners = windowListeners.get(type) || [];
         windowListeners.set(type, listeners.filter(item => item !== listener));
+      },
+      matchMedia(query) {
+        return {matches: coarsePointer && String(query || '').includes('pointer: coarse'), addEventListener() {}, addListener() {}};
       },
       setTimeout: testSetTimeout,
     },
@@ -1146,6 +1154,12 @@ globalThis.__layoutTestApi = {
   layoutSlotKeys,
   largestPaneSlotForFileEditor,
   layoutWithFileExplorerDockedLeft,
+  layoutSlotsForTest() { return cloneLayoutSlots(layoutSlots); },
+  mobileSinglePaneModeForTest() { return mobileSinglePaneMode; },
+  phoneLikeMobileViewportForTest: phoneLikeMobileViewport,
+  mobileRecentTmuxItemsForTest: mobileRecentTmuxItems,
+  mobileSinglePaneLayoutSlotsForTest: mobileSinglePaneLayoutSlots,
+  availableLayoutModesForTest: availableLayoutModes,
   layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
@@ -1165,6 +1179,9 @@ globalThis.__layoutTestApi = {
   conversationClampSelectionToGraphemesForTest: conversationClampSelectionToGraphemes,
   conversationInsertAtSelectionForTest: conversationInsertAtSelection,
   chatNotificationSnippetForTest: chatNotificationSnippet,
+  chatNotificationTimestampForTest: chatNotificationTimestamp,
+  chatMessageNotificationEligibleForTest: chatMessageNotificationEligible,
+  chatNotificationLinesForTest: chatNotificationLines,
   chatMessageTimestampForTest: chatMessageTimestamp,
   chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
@@ -2123,6 +2140,9 @@ globalThis.__layoutTestApi = {
   windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   appRootForTest: appRootElement,
   appViewport,
+  viewportDiagnosticsSnapshotForTest: viewportDiagnosticsSnapshot,
+  viewportDiagnosticsTextForTest: viewportDiagnosticsText,
+  renderViewportDiagnosticsForTest: renderViewportDiagnostics,
   nativeViewport,
   nativeUsableViewportHeightForTest: nativeUsableViewportHeight,
   syncNativeAppViewportForTest: syncNativeAppViewport,

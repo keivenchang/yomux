@@ -26,6 +26,7 @@ const chatMessageMaxBytes = 8 * 1024;
 const chatTypingRefreshMs = 3000;
 const chatRelativeTimeRefreshMs = 5000;
 const chatRelativeTimeLimitSeconds = 4 * 60 * 60;
+const chatNotificationMaxAgeSeconds = 8 * 60 * 60;
 const chatTailThresholdPx = 32;
 const chatAuthorToneCount = 10;
 const chatSelfAuthorTone = 2;
@@ -167,6 +168,18 @@ function chatMessageTimestamp(timestampSeconds, nowSeconds = Date.now() / 1000) 
   if (ageSeconds < chatRelativeTimeLimitSeconds) return relative;
   const exact = localizedExactDateTimeFormat(timestampSeconds).replace(/ ([AP]M)$/u, '$1');
   return `${exact} ${relative}`;
+}
+
+function chatNotificationTimestamp(timestampSeconds, nowSeconds = Date.now() / 1000) {
+  const ageSeconds = Math.max(0, Number(nowSeconds) - Number(timestampSeconds || 0));
+  const exact = localizedExactDateTimeFormat(timestampSeconds).replace(/ ([AP]M)$/u, '$1');
+  return `${exact} ${chatPreciseRelativeTimeFormat(ageSeconds)}`;
+}
+
+function chatMessageNotificationEligible(message, nowSeconds = Date.now() / 1000) {
+  const timestamp = Number(message?.created_at_utc);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
+  return Math.max(0, Number(nowSeconds) - timestamp) <= chatNotificationMaxAgeSeconds;
 }
 
 function chatOrderedMessages() {
@@ -650,7 +663,7 @@ function chatMergeMessages(messages, options = {}) {
       }
       chatState.acknowledgedTone = '';
       chatState.unread.set(id, message);
-      chatState.lastAnnouncement = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+      chatState.lastAnnouncement = chatNotificationBody(message);
       maybeNotifyChatMessage(message);
     }
   }
@@ -737,17 +750,29 @@ function chatNotificationSnippet(body, limit = 80) {
   return `${segments.slice(0, limit).join('')}${segments.length > limit ? '…' : ''}`;
 }
 
+function chatNotificationBody(message) {
+  return t('chat.notification.body', {
+    username: message?.username,
+    snippet: chatNotificationSnippet(message?.body),
+  });
+}
+
+function chatNotificationLines(message, nowSeconds = Date.now() / 1000) {
+  return [chatNotificationBody(message), chatNotificationTimestamp(message?.created_at_utc, nowSeconds)];
+}
+
 function openChatNotification(messageId) {
   selectSession(chatItemId, {userInitiated: true}).then(() => openChatMessageContext(messageId));
 }
 
 function maybeNotifyChatMessage(message) {
   const id = Number(message?.id) || 0;
-  if (!id || chatState.notifiedIds.has(id) || message.sender_instance_id === chatBrowserInstanceId || chatPanelIsEngaged()) return false;
+  if (!id || !chatMessageNotificationEligible(message) || chatState.notifiedIds.has(id) || message.sender_instance_id === chatBrowserInstanceId || chatPanelIsEngaged()) return false;
   chatState.notifiedIds.add(id);
-  const body = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+  const lines = chatNotificationLines(message);
+  const body = lines.join('\n');
   const onClick = () => openChatNotification(id);
-  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), [body], {targetItem: chatItemId, onClick});
+  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), lines, {targetItem: chatItemId, onClick});
   if (notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
     sendBrowserNotification(chatTabLabel(), {body, tag: `yolomux:chat:${id}`, targetItem: chatItemId, onClick});
   }

@@ -288,6 +288,11 @@
   --pane-resizer-hover-line-size: 5px;
   --pane-resizer-hit-inset: 5px;
   --pane-resizer-touch-handle-size: 44px;
+  /* Touch: the grab zone spans the full divider length (see @media pointer:coarse in
+     40_layout_panes_tabs.css); the visible affordance is a small centered grip pill —
+     length runs ALONG the divider, thickness runs ACROSS it — not a big filled disc. */
+  --pane-resizer-touch-grip-length: 30px;
+  --pane-resizer-touch-grip-thickness: 4px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: var(--pane-resizer-bg);
@@ -1160,6 +1165,23 @@ body {
 }
 .app-overlay-root > * {
   pointer-events: auto;
+}
+.viewport-diagnostics {
+  position: fixed;
+  inset-inline-end: var(--space-8);
+  inset-block-end: calc(env(safe-area-inset-bottom) + var(--space-8));
+  z-index: var(--z-share-presence);
+  max-inline-size: min(56ch, calc(100vw - var(--space-8) - var(--space-8)));
+  margin: 0;
+  padding: var(--space-6) var(--space-8);
+  color: var(--text);
+  background: color-mix(in srgb, var(--overlay-surface-strong) 92%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  font: var(--ui-font-size-xs)/1.3 var(--mono-font);
+  pointer-events: none;
+  white-space: pre-wrap;
 }
 @media (pointer: coarse) {
   :root {

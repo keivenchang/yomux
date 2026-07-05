@@ -235,11 +235,13 @@ def html_page(
     share: dict | None = None,
     accept_language: str = "",
     auth_username: str = "",
+    recent_sessions: list[str] | None = None,
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
     bootstrap = {
         "sessions": sessions,
+        "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
         "dev": dev,
         "availableAgents": available_agent_commands(),

@@ -2722,7 +2722,7 @@ async function runShareThemeSuite() {
     assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '488px', 'normal-mode keyboard sizing publishes one shared app-root height');
     api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 768, scale: 1});
     api.syncNativeAppViewportForTest({force: true});
-    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '', 'visual viewport recovery clears the keyboard height override');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '768px', 'visual viewport recovery restores the current measured layout height instead of Safari CSS 100vh');
     api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 488, scale: 1.25});
     api.syncNativeAppViewportForTest({force: true});
     assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'pinch scale does not impersonate a keyboard or change responsive app geometry');
@@ -2730,12 +2730,43 @@ async function runShareThemeSuite() {
     api.syncNativeAppViewportForTest({force: true});
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
-    assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*visualHeight < viewport\.height/.test(coreSource), 'visual viewport contributes only unzoomed usable height');
-    assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'/.test(coreSource), 'one owner listens to visual-viewport resize and scroll transitions');
+    assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*viewport\.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX/.test(coreSource), 'visual viewport contributes only unzoomed usable height (large-reduction threshold)');
+    assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*window\.addEventListener\('pageshow'/.test(coreSource), 'one owner remeasures visual-viewport geometry when a backgrounded tab returns');
+    const diagnosticsApi = loadYolomux('?debug=1', ['1']);
+    diagnosticsApi.setNativeViewportForTest({width: 1366, height: 1024, visualHeight: 944, scale: 1});
+    const diagnostics = diagnosticsApi.viewportDiagnosticsSnapshotForTest();
+    assert.deepEqual(canonical(diagnostics.layout), {width: 1366, height: 1024, w: 1366, h: 1024}, 'viewport diagnostics retain raw layout geometry');
+    assert.deepEqual(canonical(diagnostics.visual), {width: 0, height: 944, top: 0, left: 0, scale: 1}, 'viewport diagnostics retain raw Safari visual geometry');
+    assert.equal(diagnostics.reduction, 80, 'viewport diagnostics expose the toolbar-sized reduction instead of hiding it behind the keyboard classifier');
+    assert.equal(diagnostics.keyboardCandidate, false, 'viewport diagnostics distinguish the toolbar-sized reduction from a keyboard candidate');
+    assert.ok(diagnosticsApi.viewportDiagnosticsTextForTest(diagnostics).includes('delta 80px · keyboard no (>140px)'), 'the temporary iPad overlay states the exact threshold decision');
+    const mobileApi = loadYolomux('', ['old', 'recent', 'newest', 'older'], 'http:', 'iPhone', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 390, height: 844},
+      bootstrapOverrides: {recentSessions: ['newest', 'recent', 'old', 'older']},
+    });
+    assert.equal(mobileApi.mobileSinglePaneModeForTest(), true, 'a coarse-pointer phone viewport enables the mobile single-pane policy');
+    assert.equal(mobileApi.phoneLikeMobileViewportForTest({width: 1366, height: 885}), false, 'the reported iPad Safari viewport stays out of the phone-only policy');
+    assert.deepEqual(canonical(mobileApi.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: 'newest', tabs: ['newest', 'recent']},
+    }, 'fresh mobile boot opens only the two server-ranked recent tmux sessions in one pane, without Finder/Differ/Tabber');
+    assert.deepEqual(mobileApi.availableLayoutModesForTest(), ['single'], 'mobile exposes no multi-pane layout mode');
+    mobileApi.applyLayoutMode('grid');
+    assert.equal(mobileApi.layoutSlotKeys(mobileApi.layoutSlotsForTest()).length, 1, 'direct layout-mode requests cannot recreate a mobile split');
+    assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'right'}), false, 'mobile edge drops cannot create a split');
+    assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'middle'}), true, 'mobile middle drops remain ordinary tab moves');
+    const mobileViewMenu = mobileApi.appMenuTree().find(menu => menu.id === 'view');
+    assert.equal(mobileViewMenu.items.some(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout')), false, 'mobile removes the multi-pane Layout menu');
+    assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
     const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
-    assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*?\.dv-horizontal[\s\S]*?inset-block-start:\s*calc\(50% - \(var\(--pane-resizer-touch-handle-size\) \/ 2\)\)[\s\S]*?block-size:\s*var\(--pane-resizer-touch-handle-size\)[\s\S]*?\.dv-vertical[\s\S]*?inset-inline-start:\s*calc\(50% - \(var\(--pane-resizer-touch-handle-size\) \/ 2\)\)[\s\S]*?inline-size:\s*var\(--pane-resizer-touch-handle-size\)/.test(paneCss), 'coarse pointers resize only through one centered shared sash handle');
+    assert.ok(/--pane-resizer-hit-inset:\s*5px[\s\S]*--pane-resizer-touch-grip-length:\s*30px[\s\S]*--pane-resizer-touch-grip-thickness:\s*4px/.test(baseCss), 'touch resize uses shared hit-zone and centered-grip tokens');
+    assert.ok(/\.dv-horizontal[^\{]*::after,\s*\.resizer-row::after\s*\{[\s\S]*?inset-block:\s*0;[\s\S]*?inset-inline:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?block-size:\s*auto;[\s\S]*?background:\s*transparent/.test(paneCss), 'coarse horizontal dividers use the full-length transparent touch grab zone');
+    assert.ok(/\.dv-vertical[^\{]*::after,\s*\.resizer-column::after\s*\{[\s\S]*?inset-inline:\s*0;[\s\S]*?inset-block:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?inline-size:\s*auto;[\s\S]*?background:\s*transparent/.test(paneCss), 'coarse vertical dividers use the full-length transparent touch grab zone');
+    assert.ok(/\.dv-horizontal[^\{]*::before,\s*\.resizer-row::before\s*\{[\s\S]*?top:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-length\) \/ 2\)\);[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-thickness\) \/ 2\)\)/.test(paneCss), 'coarse horizontal dividers show a centered shared grip');
+    assert.ok(/\.dv-vertical[^\{]*::before,\s*\.resizer-column::before\s*\{[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-length\) \/ 2\)\);[\s\S]*?top:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-thickness\) \/ 2\)\)/.test(paneCss), 'coarse vertical dividers show a centered shared grip');
     assert.deepEqual(canonical(api.setAppViewportOverrideForTest({w: 1440, h: 900})), {width: 1440, height: 900, w: 1440, h: 900}, 'M0: appViewport can be pinned to a host viewport shape');
     assert.equal(api.effectiveViewportWidthForTest({width: 0}), 1200, 'MV-7: missing viewport widths use one shared desktop fallback');
     assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');

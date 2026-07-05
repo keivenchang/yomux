@@ -388,6 +388,7 @@ def get_home(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     sessions = request.share_sessions() if request.share_sessions() else request.server.app.sessions
     share_record = request.share_record()
+    recent_sessions = request.server.app.tmux_recency_ordered_sessions(sessions)
     started = time.perf_counter()
     body = html_page(
         sessions,
@@ -397,6 +398,7 @@ def get_home(request: Any, parsed: Any, route: Route) -> None:
         share=request.share_bootstrap_payload(share_record) if share_record else None,
         accept_language=getattr(request, "headers", {}).get("Accept-Language", ""),
         auth_username=request.auth_identity().username,
+        recent_sessions=recent_sessions,
     )
     compute_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", compute_ms)

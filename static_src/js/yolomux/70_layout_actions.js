@@ -238,7 +238,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(mobileSinglePaneMode ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -388,6 +388,10 @@ function toggleFinderPane() {
 
 async function openFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
+  if (mobileSinglePaneMode) {
+    await moveSessionToSlot(fileExplorerItemId, firstNonFinderPaneSlot() || slotForNewSession(), null, paneTabs(firstNonFinderPaneSlot() || slotForNewSession()).length);
+    return;
+  }
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
     if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
@@ -2884,6 +2888,12 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
+  if (mobileSinglePaneMode) {
+    const slotNode = event.target?.closest?.('.drop-slot');
+    const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
+    const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
+    return {targetSlot, zone: 'middle', previewNode: slotNode || grid, targetRect};
+  }
   if (options.allowBoundary === true) {
     const rootIntent = rootBoundaryDropIntentForEvent(event);
     if (rootIntent) return rootIntent;
@@ -3028,6 +3038,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
+  if (mobileSinglePaneMode) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot)) {

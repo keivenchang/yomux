@@ -840,6 +840,13 @@ const layoutTreeParamPrefix = 'tree:';
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
 const minNonFileExplorerSplitPercent = 30;
+// Phone layout is deliberately a touch-device policy: a resized desktop must preserve its layout.
+// 760px covers portrait phones and narrow iPad split view; 960x520 catches phone landscape without
+// collapsing a full-size tablet.
+const mobileSinglePaneMaxWidthPx = 760;
+const mobileSinglePaneLandscapeMaxWidthPx = 960;
+const mobileSinglePaneLandscapeMaxHeightPx = 520;
+const mobileSinglePaneTabLimit = 2;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -890,6 +897,24 @@ function urlFlagEnabled(name) {
     return false;
   }
 }
+
+function browserUsesCoarsePointer() {
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
+  if (media?.matches === true) return true;
+  const navigatorValue = globalThis.navigator || {};
+  return Number(navigatorValue.maxTouchPoints || 0) > 0
+    && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
+}
+
+function phoneLikeMobileViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width <= mobileSinglePaneMaxWidthPx
+    || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
+}
+
+const mobileSinglePaneMode = phoneLikeMobileViewport();
 const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;
@@ -2570,6 +2595,81 @@ function nativeViewport() {
   return {width, height, w: width, h: height};
 }
 
+// A soft keyboard shrinks the visual viewport by a large amount; the iPad/iOS Safari
+// toolbar (URL/tab bar) shrinks it by a much smaller amount with NO keyboard present.
+// Only a large reduction is real keyboard geometry — treating the toolbar delta as
+// "usable height" pins --app-root-height below 100vh, so the panes stop short of the
+// screen and leave dead space at the bottom. Ignore reductions at/below this threshold
+// (a real soft keyboard is ~250-400px; Safari chrome is well under 140px).
+const KEYBOARD_MIN_REDUCTION_PX = 140;
+const viewportDiagnosticsState = {node: null};
+
+function viewportDiagnosticsFocusedElementText(element = document.activeElement) {
+  if (!element || element === document.body || element === document.documentElement) return 'none';
+  const tag = String(element.tagName || element.localName || 'element').toLowerCase();
+  const label = String(element.getAttribute?.('aria-label') || element.placeholder || element.id || element.className || '').trim();
+  return label ? `${tag}:${label}` : tag;
+}
+
+function viewportDiagnosticsSnapshot() {
+  const native = nativeViewport();
+  const visual = window.visualViewport;
+  const rootRect = appRootElement()?.getBoundingClientRect?.();
+  const visualWidth = Math.max(0, Math.round(Number(visual?.width) || 0));
+  const visualHeight = Math.max(0, Math.round(Number(visual?.height) || 0));
+  const reduction = visualHeight ? native.height - visualHeight : 0;
+  const scale = Number(visual?.scale);
+  return {
+    layout: native,
+    document: {
+      width: Math.max(0, Math.round(Number(document.documentElement?.clientWidth) || 0)),
+      height: Math.max(0, Math.round(Number(document.documentElement?.clientHeight) || 0)),
+    },
+    visual: {
+      width: visualWidth,
+      height: visualHeight,
+      top: Math.round(Number(visual?.offsetTop) || 0),
+      left: Math.round(Number(visual?.offsetLeft) || 0),
+      scale: Number.isFinite(scale) ? Math.round(scale * 100) / 100 : 0,
+    },
+    reduction,
+    keyboardThreshold: KEYBOARD_MIN_REDUCTION_PX,
+    keyboardHeight: nativeAppViewportState.height,
+    keyboardCandidate: Boolean(visualHeight && Math.abs((Number.isFinite(scale) ? scale : 1) - 1) <= 0.01 && reduction > KEYBOARD_MIN_REDUCTION_PX),
+    root: {
+      width: Math.max(0, Math.round(Number(rootRect?.width) || 0)),
+      height: Math.max(0, Math.round(Number(rootRect?.height) || 0)),
+      bottom: Math.max(0, Math.round(Number(rootRect?.bottom) || 0)),
+    },
+    focused: viewportDiagnosticsFocusedElementText(),
+  };
+}
+
+function viewportDiagnosticsText(snapshot = viewportDiagnosticsSnapshot()) {
+  const {layout, document: documentViewport, visual, root} = snapshot;
+  return [
+    `layout ${layout.width}×${layout.height} · doc ${documentViewport.width}×${documentViewport.height}`,
+    `visual ${visual.width}×${visual.height} @${visual.left},${visual.top} · scale ${visual.scale || 'n/a'}`,
+    `delta ${snapshot.reduction}px · keyboard ${snapshot.keyboardCandidate ? `yes (${snapshot.keyboardHeight}px)` : `no (>${snapshot.keyboardThreshold}px)`}`,
+    `root ${root.width}×${root.height} · bottom ${root.bottom} · focus ${snapshot.focused}`,
+  ].join('\n');
+}
+
+function renderViewportDiagnostics() {
+  if (!debugModeExplicitUrlEnabled || shareViewMode) return false;
+  let node = viewportDiagnosticsState.node;
+  if (!node?.isConnected) {
+    node = document.createElement('output');
+    node.id = 'viewportDiagnostics';
+    node.className = 'viewport-diagnostics';
+    node.setAttribute('aria-live', 'off');
+    document.body?.appendChild(node);
+    viewportDiagnosticsState.node = node;
+  }
+  node.textContent = viewportDiagnosticsText();
+  return true;
+}
+
 function nativeUsableViewportHeight(viewport = nativeViewport()) {
   const visualViewport = window.visualViewport;
   if (!visualViewport) return 0;
@@ -2578,7 +2678,7 @@ function nativeUsableViewportHeight(viewport = nativeViewport()) {
   // viewport; only an unzoomed visual-height reduction is usable keyboard geometry.
   if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.01) return 0;
   const visualHeight = Math.max(1, Math.round(Number(visualViewport.height) || 0));
-  return visualHeight < viewport.height ? visualHeight : 0;
+  return viewport.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX ? visualHeight : 0;
 }
 
 function appViewport() {
@@ -2644,14 +2744,12 @@ function cleanupDetachedPopoversWithin(root) {
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;
-  if (!appViewportOverride && !nativeAppViewportState.height) {
-    root.style.removeProperty('--app-root-width');
-    root.style.removeProperty('--app-root-height');
-    return;
-  }
   const viewport = appViewport();
   if (appViewportOverride) root.style.setProperty('--app-root-width', `${viewport.width}px`);
   else root.style.removeProperty('--app-root-width');
+  // Safari's CSS 100vh can be its large viewport while innerHeight is the currently visible
+  // browser viewport. Always publish the measured height so app-root cannot extend below Safari
+  // chrome; keyboard mode merely supplies the smaller visual viewport through appViewport().
   root.style.setProperty('--app-root-height', `${viewport.height}px`);
 }
 
@@ -2675,6 +2773,7 @@ function syncNativeAppViewport(options = {}) {
   if (!changed && options.force !== true) return false;
   applyAppRootViewportSize();
   syncAppViewportBreakpointClasses();
+  renderViewportDiagnostics();
   notifyAppViewportChange();
   return true;
 }
@@ -2706,6 +2805,96 @@ function installNativeAppViewportOwner() {
   window.addEventListener('orientationchange', settle);
   window.visualViewport?.addEventListener?.('resize', resize);
   window.visualViewport?.addEventListener?.('scroll', resize);
+  // Re-fit when the tab returns to the foreground: a viewport change made while
+  // this tab was backgrounded (e.g. Safari showing/hiding its tab bar when a
+  // second tab opens/closes) is missed by the resize listeners, leaving a stale
+  // --app-root-height that clips the toolbar. settle() recomputes immediately and
+  // once more after the geometry settles.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) settle(); });
+  window.addEventListener('pageshow', settle);
+  if (debugModeExplicitUrlEnabled) {
+    document.addEventListener('focusin', renderViewportDiagnostics, true);
+    document.addEventListener('focusout', () => requestAnimationFrame(renderViewportDiagnostics), true);
+  }
+}
+
+// Mobile browsers do not reliably dispatch contextmenu for a long touch (iOS Safari
+// often claims it for selection/callout), while the app's actions already have one
+// contextmenu owner per surface. Bridge a stationary touch into that existing event
+// instead of creating a second menu implementation for Finder, tabs, and terminals.
+const TOUCH_CONTEXT_MENU_DELAY_MS = 550;
+const TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX = 12;
+const touchContextMenuSyntheticEvents = new WeakSet();
+const touchContextMenuState = {
+  installed: false,
+  timer: 0,
+  pointerId: null,
+  target: null,
+  x: 0,
+  y: 0,
+  suppressTarget: null,
+  suppressUntil: 0,
+};
+
+function clearTouchContextMenuTimer() {
+  if (!touchContextMenuState.timer) return;
+  clearTimeout(touchContextMenuState.timer);
+  touchContextMenuState.timer = 0;
+}
+
+function dispatchTouchContextMenu(target, x, y) {
+  if (!target?.dispatchEvent || target.isConnected === false) return false;
+  const event = new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+  });
+  touchContextMenuSyntheticEvents.add(event);
+  return !target.dispatchEvent(event);
+}
+
+function installTouchContextMenuOwner() {
+  if (touchContextMenuState.installed) return;
+  touchContextMenuState.installed = true;
+  const cancel = event => {
+    if (event?.pointerId != null && event.pointerId !== touchContextMenuState.pointerId) return;
+    clearTouchContextMenuTimer();
+    touchContextMenuState.pointerId = null;
+    touchContextMenuState.target = null;
+  };
+  document.addEventListener('pointerdown', event => {
+    if (event.pointerType !== 'touch' || event.isPrimary === false || Number(event.button || 0) !== 0) return;
+    cancel();
+    touchContextMenuState.pointerId = event.pointerId;
+    touchContextMenuState.target = event.target;
+    touchContextMenuState.x = event.clientX;
+    touchContextMenuState.y = event.clientY;
+    touchContextMenuState.timer = setTimeout(() => {
+      touchContextMenuState.timer = 0;
+      const target = touchContextMenuState.target;
+      const handled = dispatchTouchContextMenu(target, touchContextMenuState.x, touchContextMenuState.y);
+      if (handled) {
+        // Block the delayed native event so one long press cannot open both menus.
+        touchContextMenuState.suppressTarget = target;
+        touchContextMenuState.suppressUntil = performance.now() + TOUCH_CONTEXT_MENU_DELAY_MS;
+      }
+      touchContextMenuState.pointerId = null;
+      touchContextMenuState.target = null;
+    }, TOUCH_CONTEXT_MENU_DELAY_MS);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointermove', event => {
+    if (event.pointerId !== touchContextMenuState.pointerId) return;
+    if (Math.hypot(event.clientX - touchContextMenuState.x, event.clientY - touchContextMenuState.y) > TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX) cancel(event);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointerup', cancel, true);
+  document.addEventListener('pointercancel', cancel, true);
+  document.addEventListener('contextmenu', event => {
+    if (touchContextMenuSyntheticEvents.has(event) || performance.now() > touchContextMenuState.suppressUntil) return;
+    if (!touchContextMenuState.suppressTarget?.contains?.(event.target) && event.target !== touchContextMenuState.suppressTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
 }
 
 function appMirrorTransformState() {
@@ -5950,11 +6139,11 @@ function cloneLayoutSlots(slots = layoutSlots) {
 }
 
 function layoutSlotsSignature(slots = layoutSlots) {
-  return JSON.stringify(normalizeLayoutSlots(cloneLayoutSlots(slots)));
+  return JSON.stringify(normalizeLayoutSlotsForViewport(cloneLayoutSlots(slots)));
 }
 
 function compactCurrentLayoutSlots(options = {}) {
-  const normalized = normalizeLayoutSlots(layoutSlots);
+  const normalized = normalizeLayoutSlotsForViewport(layoutSlots);
   if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
   applyLayoutSlots(normalized, {
     focusSession: options.focusSession || focusedPanelItem || undefined,
@@ -6724,12 +6913,57 @@ function shareBootstrapLayoutParams() {
   return layout || tabs || sharedSessions.length ? params : null;
 }
 
+function mobileRecentTmuxItems() {
+  const source = Array.isArray(bootstrap.recentSessions) && bootstrap.recentSessions.length
+    ? bootstrap.recentSessions
+    : visibleSessions;
+  const items = [];
+  for (const value of source) {
+    const item = resolveLayoutItem(value);
+    if (isTmuxSession(item) && !items.includes(item)) items.push(item);
+    if (items.length >= mobileSinglePaneTabLimit) break;
+  }
+  return items;
+}
+
+function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  const preferred = resolveLayoutItem(options.focusSession);
+  const tmuxItems = [];
+  for (const item of [preferred, ...mobileRecentTmuxItems(), ...requested]) {
+    if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
+    if (tmuxItems.length >= mobileSinglePaneTabLimit) break;
+  }
+  const supplementary = [];
+  for (const item of [preferred, ...requested]) {
+    if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
+  }
+  const items = [...tmuxItems, ...supplementary];
+  const active = items.includes(preferred) ? preferred : items[0] || null;
+  return layoutSlotsForItems(items, 'single', {active, emptySlot: 'left'});
+}
+
+function normalizeLayoutSlotsForViewport(value, options = {}) {
+  const source = mobileSinglePaneMode
+    ? mobileSinglePaneLayoutSlots(value, {focusSession: options.focusSession})
+    : value;
+  return normalizeLayoutSlots(source, {
+    ...options,
+    preserveMissingFileExplorer: mobileSinglePaneMode || options.preserveMissingFileExplorer === true,
+  });
+}
+
+function availableLayoutModes() {
+  return mobileSinglePaneMode ? ['single'] : layoutModeValues;
+}
+
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
+  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
@@ -6747,6 +6981,7 @@ function initialLayoutSlots() {
 }
 
 function defaultLayoutSlots() {
+  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
   return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
     preservePlaceholders: false,
@@ -11006,7 +11241,7 @@ function updateSessionList(nextSessions, options = {}) {
   }
   const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
   setSessionOrder(effectiveNext);
-  layoutSlots = normalizeLayoutSlots(layoutSlots, {
+  layoutSlots = normalizeLayoutSlotsForViewport(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
   });
@@ -11021,7 +11256,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
-  layoutSlots = normalizeLayoutSlots(nextSlots, {
+  layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
+    focusSession: options.focusSession,
     preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
   });
   activeSessions = sessionsFromLayout();
@@ -11886,7 +12122,7 @@ function appMenuTree() {
           menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
+        ...(mobileSinglePaneMode ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
@@ -25709,7 +25945,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(mobileSinglePaneMode ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -25859,6 +26095,10 @@ function toggleFinderPane() {
 
 async function openFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
+  if (mobileSinglePaneMode) {
+    await moveSessionToSlot(fileExplorerItemId, firstNonFinderPaneSlot() || slotForNewSession(), null, paneTabs(firstNonFinderPaneSlot() || slotForNewSession()).length);
+    return;
+  }
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
     if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
@@ -28355,6 +28595,12 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
+  if (mobileSinglePaneMode) {
+    const slotNode = event.target?.closest?.('.drop-slot');
+    const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
+    const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
+    return {targetSlot, zone: 'middle', previewNode: slotNode || grid, targetRect};
+  }
   if (options.allowBoundary === true) {
     const rootIntent = rootBoundaryDropIntentForEvent(event);
     if (rootIntent) return rootIntent;
@@ -28499,6 +28745,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
+  if (mobileSinglePaneMode) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot)) {
@@ -28831,6 +29078,7 @@ function dockviewThemeForApp() {
 }
 
 function dockviewRootBoundaryDropIntent(event) {
+  if (mobileSinglePaneMode) return null;
   if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -28874,7 +29122,7 @@ function dockviewContentDropCanUseRootBoundary(event, zone) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const zone = event.position === 'center' ? 'middle' : event.position;
+  const zone = mobileSinglePaneMode ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -28903,6 +29151,8 @@ function dockviewPaneContentDropIntent(event) {
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
   return Boolean(info && (
+    (mobileSinglePaneMode && event.position !== 'center')
+      ||
     dockviewPinnedTabCrossPaneViolation(info.intent)
       || !dropIntentAllowsSession(info.item, info.intent)
   ));
@@ -35281,6 +35531,7 @@ const chatMessageMaxBytes = 8 * 1024;
 const chatTypingRefreshMs = 3000;
 const chatRelativeTimeRefreshMs = 5000;
 const chatRelativeTimeLimitSeconds = 4 * 60 * 60;
+const chatNotificationMaxAgeSeconds = 8 * 60 * 60;
 const chatTailThresholdPx = 32;
 const chatAuthorToneCount = 10;
 const chatSelfAuthorTone = 2;
@@ -35422,6 +35673,18 @@ function chatMessageTimestamp(timestampSeconds, nowSeconds = Date.now() / 1000) 
   if (ageSeconds < chatRelativeTimeLimitSeconds) return relative;
   const exact = localizedExactDateTimeFormat(timestampSeconds).replace(/ ([AP]M)$/u, '$1');
   return `${exact} ${relative}`;
+}
+
+function chatNotificationTimestamp(timestampSeconds, nowSeconds = Date.now() / 1000) {
+  const ageSeconds = Math.max(0, Number(nowSeconds) - Number(timestampSeconds || 0));
+  const exact = localizedExactDateTimeFormat(timestampSeconds).replace(/ ([AP]M)$/u, '$1');
+  return `${exact} ${chatPreciseRelativeTimeFormat(ageSeconds)}`;
+}
+
+function chatMessageNotificationEligible(message, nowSeconds = Date.now() / 1000) {
+  const timestamp = Number(message?.created_at_utc);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
+  return Math.max(0, Number(nowSeconds) - timestamp) <= chatNotificationMaxAgeSeconds;
 }
 
 function chatOrderedMessages() {
@@ -35905,7 +36168,7 @@ function chatMergeMessages(messages, options = {}) {
       }
       chatState.acknowledgedTone = '';
       chatState.unread.set(id, message);
-      chatState.lastAnnouncement = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+      chatState.lastAnnouncement = chatNotificationBody(message);
       maybeNotifyChatMessage(message);
     }
   }
@@ -35992,17 +36255,29 @@ function chatNotificationSnippet(body, limit = 80) {
   return `${segments.slice(0, limit).join('')}${segments.length > limit ? '…' : ''}`;
 }
 
+function chatNotificationBody(message) {
+  return t('chat.notification.body', {
+    username: message?.username,
+    snippet: chatNotificationSnippet(message?.body),
+  });
+}
+
+function chatNotificationLines(message, nowSeconds = Date.now() / 1000) {
+  return [chatNotificationBody(message), chatNotificationTimestamp(message?.created_at_utc, nowSeconds)];
+}
+
 function openChatNotification(messageId) {
   selectSession(chatItemId, {userInitiated: true}).then(() => openChatMessageContext(messageId));
 }
 
 function maybeNotifyChatMessage(message) {
   const id = Number(message?.id) || 0;
-  if (!id || chatState.notifiedIds.has(id) || message.sender_instance_id === chatBrowserInstanceId || chatPanelIsEngaged()) return false;
+  if (!id || !chatMessageNotificationEligible(message) || chatState.notifiedIds.has(id) || message.sender_instance_id === chatBrowserInstanceId || chatPanelIsEngaged()) return false;
   chatState.notifiedIds.add(id);
-  const body = t('chat.notification.body', {username: message.username, snippet: chatNotificationSnippet(message.body)});
+  const lines = chatNotificationLines(message);
+  const body = lines.join('\n');
   const onClick = () => openChatNotification(id);
-  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), [body], {targetItem: chatItemId, onClick});
+  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), lines, {targetItem: chatItemId, onClick});
   if (notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
     sendBrowserNotification(chatTabLabel(), {body, tag: `yolomux:chat:${id}`, targetItem: chatItemId, onClick});
   }
@@ -61279,6 +61554,7 @@ function paintInitialAppShell() {
 
 async function boot() {
   installNativeAppViewportOwner();
+  installTouchContextMenuOwner();
   syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();

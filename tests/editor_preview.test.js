@@ -10000,6 +10000,13 @@ async function runEditorPreviewSuite() {
     assert.equal(api.chatMessageTimestampForTest(nowSeconds - 3661, nowSeconds), '1.1 hours ago', 'ages over sixty minutes switch to rounded-up decimal hours');
     assert.equal(api.chatMessageTimestampForTest(nowSeconds - (1.25 * 24 * 60 * 60), nowSeconds).split(' ').slice(-3).join(' '), '1.3 days ago', 'ages over twenty-four hours switch to rounded-up decimal days');
     assert.match(api.chatMessageTimestampForTest(nowSeconds - (4.89 * 60 * 60), nowSeconds), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[AP]M 4\.9 hours ago$/, 'ages after four hours retain both exact local time and precise relative age');
+    assert.match(api.chatNotificationTimestampForTest(exactTimestamp, exactTimestamp + 5 * 60), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[AP]M 5 min ago$/, 'chat notifications always include exact local time plus relative age, even when the timeline omits the exact time');
+    assert.equal(api.chatMessageNotificationEligibleForTest({created_at_utc: exactTimestamp}, exactTimestamp + (8 * 60 * 60)), true, 'an eight-hour-old chat message remains eligible for one notification');
+    assert.equal(api.chatMessageNotificationEligibleForTest({created_at_utc: exactTimestamp}, exactTimestamp + (8 * 60 * 60) + 1), false, 'a chat message older than eight hours never triggers a stale notification');
+    assert.deepEqual(api.chatNotificationLinesForTest({username: 'keiven', body: 'hello', created_at_utc: exactTimestamp}, exactTimestamp + 5 * 60), [
+      'keiven: hello',
+      api.chatNotificationTimestampForTest(exactTimestamp, exactTimestamp + 5 * 60),
+    ], 'in-app and system chat notifications share the message plus exact-time/relative-age lines');
     const html = api.chatMessageHtmlForTest({
       id: 7,
       created_at_utc: 1700000000,

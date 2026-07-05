@@ -609,6 +609,81 @@ function nativeViewport() {
   return {width, height, w: width, h: height};
 }
 
+// A soft keyboard shrinks the visual viewport by a large amount; the iPad/iOS Safari
+// toolbar (URL/tab bar) shrinks it by a much smaller amount with NO keyboard present.
+// Only a large reduction is real keyboard geometry — treating the toolbar delta as
+// "usable height" pins --app-root-height below 100vh, so the panes stop short of the
+// screen and leave dead space at the bottom. Ignore reductions at/below this threshold
+// (a real soft keyboard is ~250-400px; Safari chrome is well under 140px).
+const KEYBOARD_MIN_REDUCTION_PX = 140;
+const viewportDiagnosticsState = {node: null};
+
+function viewportDiagnosticsFocusedElementText(element = document.activeElement) {
+  if (!element || element === document.body || element === document.documentElement) return 'none';
+  const tag = String(element.tagName || element.localName || 'element').toLowerCase();
+  const label = String(element.getAttribute?.('aria-label') || element.placeholder || element.id || element.className || '').trim();
+  return label ? `${tag}:${label}` : tag;
+}
+
+function viewportDiagnosticsSnapshot() {
+  const native = nativeViewport();
+  const visual = window.visualViewport;
+  const rootRect = appRootElement()?.getBoundingClientRect?.();
+  const visualWidth = Math.max(0, Math.round(Number(visual?.width) || 0));
+  const visualHeight = Math.max(0, Math.round(Number(visual?.height) || 0));
+  const reduction = visualHeight ? native.height - visualHeight : 0;
+  const scale = Number(visual?.scale);
+  return {
+    layout: native,
+    document: {
+      width: Math.max(0, Math.round(Number(document.documentElement?.clientWidth) || 0)),
+      height: Math.max(0, Math.round(Number(document.documentElement?.clientHeight) || 0)),
+    },
+    visual: {
+      width: visualWidth,
+      height: visualHeight,
+      top: Math.round(Number(visual?.offsetTop) || 0),
+      left: Math.round(Number(visual?.offsetLeft) || 0),
+      scale: Number.isFinite(scale) ? Math.round(scale * 100) / 100 : 0,
+    },
+    reduction,
+    keyboardThreshold: KEYBOARD_MIN_REDUCTION_PX,
+    keyboardHeight: nativeAppViewportState.height,
+    keyboardCandidate: Boolean(visualHeight && Math.abs((Number.isFinite(scale) ? scale : 1) - 1) <= 0.01 && reduction > KEYBOARD_MIN_REDUCTION_PX),
+    root: {
+      width: Math.max(0, Math.round(Number(rootRect?.width) || 0)),
+      height: Math.max(0, Math.round(Number(rootRect?.height) || 0)),
+      bottom: Math.max(0, Math.round(Number(rootRect?.bottom) || 0)),
+    },
+    focused: viewportDiagnosticsFocusedElementText(),
+  };
+}
+
+function viewportDiagnosticsText(snapshot = viewportDiagnosticsSnapshot()) {
+  const {layout, document: documentViewport, visual, root} = snapshot;
+  return [
+    `layout ${layout.width}×${layout.height} · doc ${documentViewport.width}×${documentViewport.height}`,
+    `visual ${visual.width}×${visual.height} @${visual.left},${visual.top} · scale ${visual.scale || 'n/a'}`,
+    `delta ${snapshot.reduction}px · keyboard ${snapshot.keyboardCandidate ? `yes (${snapshot.keyboardHeight}px)` : `no (>${snapshot.keyboardThreshold}px)`}`,
+    `root ${root.width}×${root.height} · bottom ${root.bottom} · focus ${snapshot.focused}`,
+  ].join('\n');
+}
+
+function renderViewportDiagnostics() {
+  if (!debugModeExplicitUrlEnabled || shareViewMode) return false;
+  let node = viewportDiagnosticsState.node;
+  if (!node?.isConnected) {
+    node = document.createElement('output');
+    node.id = 'viewportDiagnostics';
+    node.className = 'viewport-diagnostics';
+    node.setAttribute('aria-live', 'off');
+    document.body?.appendChild(node);
+    viewportDiagnosticsState.node = node;
+  }
+  node.textContent = viewportDiagnosticsText();
+  return true;
+}
+
 function nativeUsableViewportHeight(viewport = nativeViewport()) {
   const visualViewport = window.visualViewport;
   if (!visualViewport) return 0;
@@ -617,7 +692,7 @@ function nativeUsableViewportHeight(viewport = nativeViewport()) {
   // viewport; only an unzoomed visual-height reduction is usable keyboard geometry.
   if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.01) return 0;
   const visualHeight = Math.max(1, Math.round(Number(visualViewport.height) || 0));
-  return visualHeight < viewport.height ? visualHeight : 0;
+  return viewport.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX ? visualHeight : 0;
 }
 
 function appViewport() {
@@ -683,14 +758,12 @@ function cleanupDetachedPopoversWithin(root) {
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;
-  if (!appViewportOverride && !nativeAppViewportState.height) {
-    root.style.removeProperty('--app-root-width');
-    root.style.removeProperty('--app-root-height');
-    return;
-  }
   const viewport = appViewport();
   if (appViewportOverride) root.style.setProperty('--app-root-width', `${viewport.width}px`);
   else root.style.removeProperty('--app-root-width');
+  // Safari's CSS 100vh can be its large viewport while innerHeight is the currently visible
+  // browser viewport. Always publish the measured height so app-root cannot extend below Safari
+  // chrome; keyboard mode merely supplies the smaller visual viewport through appViewport().
   root.style.setProperty('--app-root-height', `${viewport.height}px`);
 }
 
@@ -714,6 +787,7 @@ function syncNativeAppViewport(options = {}) {
   if (!changed && options.force !== true) return false;
   applyAppRootViewportSize();
   syncAppViewportBreakpointClasses();
+  renderViewportDiagnostics();
   notifyAppViewportChange();
   return true;
 }
@@ -745,6 +819,96 @@ function installNativeAppViewportOwner() {
   window.addEventListener('orientationchange', settle);
   window.visualViewport?.addEventListener?.('resize', resize);
   window.visualViewport?.addEventListener?.('scroll', resize);
+  // Re-fit when the tab returns to the foreground: a viewport change made while
+  // this tab was backgrounded (e.g. Safari showing/hiding its tab bar when a
+  // second tab opens/closes) is missed by the resize listeners, leaving a stale
+  // --app-root-height that clips the toolbar. settle() recomputes immediately and
+  // once more after the geometry settles.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) settle(); });
+  window.addEventListener('pageshow', settle);
+  if (debugModeExplicitUrlEnabled) {
+    document.addEventListener('focusin', renderViewportDiagnostics, true);
+    document.addEventListener('focusout', () => requestAnimationFrame(renderViewportDiagnostics), true);
+  }
+}
+
+// Mobile browsers do not reliably dispatch contextmenu for a long touch (iOS Safari
+// often claims it for selection/callout), while the app's actions already have one
+// contextmenu owner per surface. Bridge a stationary touch into that existing event
+// instead of creating a second menu implementation for Finder, tabs, and terminals.
+const TOUCH_CONTEXT_MENU_DELAY_MS = 550;
+const TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX = 12;
+const touchContextMenuSyntheticEvents = new WeakSet();
+const touchContextMenuState = {
+  installed: false,
+  timer: 0,
+  pointerId: null,
+  target: null,
+  x: 0,
+  y: 0,
+  suppressTarget: null,
+  suppressUntil: 0,
+};
+
+function clearTouchContextMenuTimer() {
+  if (!touchContextMenuState.timer) return;
+  clearTimeout(touchContextMenuState.timer);
+  touchContextMenuState.timer = 0;
+}
+
+function dispatchTouchContextMenu(target, x, y) {
+  if (!target?.dispatchEvent || target.isConnected === false) return false;
+  const event = new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+  });
+  touchContextMenuSyntheticEvents.add(event);
+  return !target.dispatchEvent(event);
+}
+
+function installTouchContextMenuOwner() {
+  if (touchContextMenuState.installed) return;
+  touchContextMenuState.installed = true;
+  const cancel = event => {
+    if (event?.pointerId != null && event.pointerId !== touchContextMenuState.pointerId) return;
+    clearTouchContextMenuTimer();
+    touchContextMenuState.pointerId = null;
+    touchContextMenuState.target = null;
+  };
+  document.addEventListener('pointerdown', event => {
+    if (event.pointerType !== 'touch' || event.isPrimary === false || Number(event.button || 0) !== 0) return;
+    cancel();
+    touchContextMenuState.pointerId = event.pointerId;
+    touchContextMenuState.target = event.target;
+    touchContextMenuState.x = event.clientX;
+    touchContextMenuState.y = event.clientY;
+    touchContextMenuState.timer = setTimeout(() => {
+      touchContextMenuState.timer = 0;
+      const target = touchContextMenuState.target;
+      const handled = dispatchTouchContextMenu(target, touchContextMenuState.x, touchContextMenuState.y);
+      if (handled) {
+        // Block the delayed native event so one long press cannot open both menus.
+        touchContextMenuState.suppressTarget = target;
+        touchContextMenuState.suppressUntil = performance.now() + TOUCH_CONTEXT_MENU_DELAY_MS;
+      }
+      touchContextMenuState.pointerId = null;
+      touchContextMenuState.target = null;
+    }, TOUCH_CONTEXT_MENU_DELAY_MS);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointermove', event => {
+    if (event.pointerId !== touchContextMenuState.pointerId) return;
+    if (Math.hypot(event.clientX - touchContextMenuState.x, event.clientY - touchContextMenuState.y) > TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX) cancel(event);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointerup', cancel, true);
+  document.addEventListener('pointercancel', cancel, true);
+  document.addEventListener('contextmenu', event => {
+    if (touchContextMenuSyntheticEvents.has(event) || performance.now() > touchContextMenuState.suppressUntil) return;
+    if (!touchContextMenuState.suppressTarget?.contains?.(event.target) && event.target !== touchContextMenuState.suppressTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
 }
 
 function appMirrorTransformState() {

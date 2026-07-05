@@ -34,6 +34,7 @@ def test_boot_print_command_defaults_to_prod_port():
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
+    assert "TMUX= TMUX_PANE=" in command
 
 
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
@@ -68,3 +69,5 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert "stop_port_listener \"$port\"\n\n  printf" in source
     assert "boot.sh launching port" in source
     assert " >> %q 2>&1 < /dev/null" in source
+    assert 'env.pop("TMUX", None)' in source
+    assert 'env.pop("TMUX_PANE", None)' in source
