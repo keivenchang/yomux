@@ -3153,7 +3153,7 @@ async function runEditorPreviewSuite() {
       assert.ok(html.includes(`data-js-debug-series="${series}"`), `YO!stats graph renders the ${series} line`);
       assert.ok(html.includes(`data-js-debug-legend="${series}"`), `YO!stats graph renders the ${series} legend entry`);
     }
-    assert.ok(html.includes('data-js-debug-resolution-seconds="10"'), 'the default fifteen-minute YO!stats graph reports its automatic ten-second display resolution');
+    assert.ok(html.includes('data-js-debug-resolution-seconds="1"'), 'the default fifteen-minute YO!stats graph reports its retained one-second display resolution');
     assert.equal(html.includes('data-js-debug-scale='), false, 'YO!stats does not expose manual aggregation controls');
     for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
       assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph exposes the ${range}s range slider tick`);
@@ -3336,7 +3336,7 @@ async function runEditorPreviewSuite() {
     assert.ok(summary.middleBuckets > 0 && summary.middleBuckets <= 3, 'ninety-minute-old per-second samples compress into ten-second buckets');
     assert.equal(summary.oldBuckets, 1, 'three-hour-old samples compress into one sixty-second bucket');
     assert.deepStrictEqual([...summary.tierBucketCounts].slice(2), [1, 1, 1, 1], 'older samples use the 1m, 2m, 5m, and 10m tiers');
-    assert.equal(summary.resolutionSeconds, 10, 'YO!stats defaults to a bounded ten-second display resolution for the recent 15-minute domain');
+    assert.equal(summary.resolutionSeconds, 1, 'YO!stats keeps the retained one-second resolution for the recent 15-minute domain');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
     assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
@@ -3384,7 +3384,7 @@ async function runEditorPreviewSuite() {
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.rangeSeconds, 7200, 'clickable graph range changes the rendered history window');
-    assert.equal(summary.resolutionSeconds, 60, 'a two-hour range automatically bounds the displayed point count at one-minute resolution');
+    assert.equal(summary.resolutionSeconds, 10, 'a two-hour range uses the retained ten-second resolution');
     assert.equal(summary.displayBuckets, 0, 'changing range does not resurrect history discarded after a server restart');
     api.debugGraphApplyServerHistoryForTest({
       sequence: 18,
@@ -3435,7 +3435,7 @@ async function runEditorPreviewSuite() {
     assert.ok(summary.rawBuckets > 0, 'recent server timing samples stay in one-second buckets');
     api.setDebugGraphRangeForTest(7200);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 60, 'the selected two-hour graph reports its automatic aggregate interval');
+    assert.equal(summary.resolutionSeconds, 10, 'the selected two-hour graph reports its retained aggregate interval');
     const html = api.debugPanelHtmlForTest();
     assert.equal(html.includes('10s buckets | 2h'), false, 'graph omits the redundant bottom scale footer');
     assert.ok(html.includes('data-js-debug-range="28800"') && html.includes('data-js-debug-range="57600"') && html.includes('data-js-debug-range="86400"'), 'graph renders long range slider stops');
@@ -3546,7 +3546,7 @@ async function runEditorPreviewSuite() {
       }],
     });
     const summary = api.debugGraphBucketSummaryForTest(now);
-    assert.deepStrictEqual([...summary.displayBucketSeconds], [120], 'a four-hour domain aggregates every retained source tier to its bounded two-minute display interval');
+    assert.deepStrictEqual([...summary.displayBucketSeconds], [60], 'a four-hour domain aggregates every retained source tier to its one-minute retention interval');
     assert.equal(summary.displayBuckets, 3, 'uniform aggregation retains one displayed bucket per distinct minute instead of mixing persistence-tier resolutions');
   });
 
@@ -3563,14 +3563,20 @@ async function runEditorPreviewSuite() {
     assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="1"'), 'the read-only control reports one second for the one-minute graph');
     api.setDebugGraphRangeForTest(5 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 5, 'a five-minute graph aggregates irregular client events into five-second display buckets');
+    assert.equal(summary.resolutionSeconds, 1, 'a five-minute graph preserves retained one-second client buckets');
     api.setDebugGraphRangeForTest(15 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 10, 'a fifteen-minute graph stays within the shared display point budget');
+    assert.equal(summary.resolutionSeconds, 1, 'a fifteen-minute graph preserves the one-second retention tier');
+    api.setDebugGraphResolutionOverrideForTest(10);
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 10, 'a user may coarsen the retained display resolution');
+    api.setDebugGraphResolutionOverrideForTest(0);
+    summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 1, 'reset restores the retention-tier default resolution');
     api.setDebugGraphRangeForTest(8 * 60 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 300, 'an eight-hour range reports its bounded five-minute display resolution before history finishes loading');
-    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="300"'), 'the read-only control reports the selected eight-hour resolution');
+    assert.equal(summary.resolutionSeconds, 120, 'an eight-hour range reports its retained two-minute display resolution before history finishes loading');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="120"'), 'the read-only control reports the selected eight-hour resolution');
     api.setDebugGraphRangeForTest(16 * 60 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 600, 'a sixteen-hour range reports the ten-minute retained resolution');
@@ -3605,8 +3611,8 @@ async function runEditorPreviewSuite() {
     continuous.debugGraphApplyServerHistoryForTest({sequence: 300, records: historyRecords(continuous.jsDebugStatsClientIdForRequestForTest(), false)});
     const continuousSummary = continuous.debugGraphBucketSummaryForTest(now);
     const continuousChart = latencyChart(continuous);
-    assert.equal(continuousSummary.resolutionSeconds, 5, 'five-minute sparse history uses five-second display buckets');
-    assert.deepStrictEqual([...continuousSummary.displayBucketSeconds], [5], 'every client chart consumes the shared five-second aggregation');
+    assert.equal(continuousSummary.resolutionSeconds, 1, 'five-minute sparse history uses one-second retained buckets');
+    assert.deepStrictEqual([...continuousSummary.displayBucketSeconds], [1], 'every client chart consumes the shared one-second aggregation');
     assert.equal((continuousChart.match(/data-js-debug-series="latency"/g) || []).length, 1, 'three-second event cadence renders as one continuous aggregate line');
     const continuousNoDataRegions = (continuousChart.match(/data-js-debug-no-data-range=/g) || []).length;
     assert.ok(continuousNoDataRegions <= 2, `empty raw seconds produce at most the two partial-domain edge regions, got ${continuousNoDataRegions}`);
@@ -3648,7 +3654,7 @@ async function runEditorPreviewSuite() {
     continuous.setDebugGraphRangeForTest(15 * 60, {render: false});
     continuous.debugGraphApplyServerHistoryForTest({sequence: 90, records: historyRecords(continuous.jsDebugStatsClientIdForRequestForTest(), false)});
     const continuousChart = bandwidthChart(continuous);
-    assert.equal(continuous.debugGraphBucketSummaryForTest(now).resolutionSeconds, 10, 'fifteen-minute client history uses ten-second display buckets');
+    assert.equal(continuous.debugGraphBucketSummaryForTest(now).resolutionSeconds, 1, 'fifteen-minute client history uses one-second retained buckets');
     assert.equal((continuousChart.match(/data-js-debug-series="bandwidth"/g) || []).length, 1, 'twenty-second event cadence remains one line at ten-second display resolution');
     assert.equal((continuousChart.match(/data-js-debug-no-data-range=/g) || []).length, 0, 'single empty ten-second buckets do not produce red no-data stripes');
 
@@ -3897,7 +3903,7 @@ async function runEditorPreviewSuite() {
         'debug.graph.control.timeRange',
       ]) {
         const rendered = key === 'debug.graph.control.resolution'
-          ? catalog[key].replace('{resolution}', '10s')
+          ? catalog[key].replace('{resolution}', '1s')
           : catalog[key];
         assert.ok(html.includes(escaped(rendered)), `${locale} YO!stats renders ${key}`);
       }
@@ -4346,7 +4352,7 @@ async function runEditorPreviewSuite() {
 
     pointerdown({target: range, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'single pointerdown applies the graph time range immediately');
-    assert.equal(api.debugGraphBucketSummaryForTest().resolutionSeconds, 60, 'the range immediately chooses its bounded one-minute display resolution');
+    assert.equal(api.debugGraphBucketSummaryForTest().resolutionSeconds, 10, 'the range immediately chooses its retained ten-second display resolution');
     assert.equal(prevented, 1, 'graph controls claim pointerdown before a refresh can remove the clicked button');
     pointerdown({type: 'pointerdown', target: slider, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 7200, 'range slider pointerdown leaves native dragging to the browser');
@@ -4380,7 +4386,7 @@ async function runEditorPreviewSuite() {
     const html = reloaded.debugPanelHtmlForTest();
     const summary = reloaded.debugGraphBucketSummaryForTest();
     assert.ok(html.includes('data-js-debug-subview="events"') && html.includes('data-js-debug-subview="graph" hidden'), 'the selected YO!stats sub-tab survives reload');
-    assert.equal(summary.resolutionSeconds, 120, 'the graph automatically restores the four-hour bounded display resolution without a saved scale preference');
+    assert.equal(summary.resolutionSeconds, 60, 'the graph automatically restores the four-hour retained display resolution without a saved scale preference');
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
     assert.ok(html.includes('data-js-debug-chart-restore="gpuMemory"'), 'the top restore strip retains a closed chart after reload');
@@ -4400,7 +4406,7 @@ async function runEditorPreviewSuite() {
       }],
     });
     api.setDebugGraphRangeForTest(8 * 60 * 60);
-    assert.equal(api.debugGraphBucketSummaryForTest(now).resolutionSeconds, 300, 'the unzoomed eight-hour domain uses its bounded five-minute display resolution');
+    assert.equal(api.debugGraphBucketSummaryForTest(now).resolutionSeconds, 120, 'the unzoomed eight-hour domain uses its retained two-minute display resolution');
     const panel = new TestElement('debug-panel');
     const graph = new TestElement('graph');
     graph.dataset.jsDebugGraph = '';
@@ -4445,7 +4451,7 @@ async function runEditorPreviewSuite() {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(prevented === 1 && summary.zoomed, 'drag-select claims the pointer and creates a graph zoom domain');
     assert.ok(summary.zoomRangeSeconds > 140 && summary.zoomRangeSeconds < 160, `zoom range follows selected chart ratio, got ${summary.zoomRangeSeconds}`);
-    assert.equal(summary.resolutionSeconds, 2, 'a drag-zoom into a 150-second domain automatically refines to two-second resolution');
+    assert.equal(summary.resolutionSeconds, 1, 'a drag-zoom into a 150-second domain uses the retained one-second resolution');
 
     const reset = new TestElement('graph-reset', 'button');
     reset.dataset.jsDebugZoomReset = '';

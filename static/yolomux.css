@@ -3688,6 +3688,22 @@ body.theme-light .js-debug-graph-view {
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
+.js-debug-resolution-label select {
+  width: 3.25rem;
+  margin-inline-start: var(--space-4);
+  padding: var(--space-1) var(--space-2);
+  color: inherit;
+  font: inherit;
+}
+.js-debug-chart-layout-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+}
+.js-debug-chart-layout-control input {
+  inline-size: 5rem;
+}
 .js-debug-subtab:not(.active):hover,
 .js-debug-subtab:not(.active):focus-visible {
   color: var(--text);
@@ -3850,6 +3866,10 @@ body.theme-light .js-debug-graph-view {
   min-width: 0;
   min-height: 0;
 }
+.js-debug-chart-grid[data-js-debug-chart-layout="1"] { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); --js-debug-chart-min-height: 150px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="2"] { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); --js-debug-chart-min-height: 210px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="3"] { grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); --js-debug-chart-min-height: 270px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="4"] { grid-template-columns: minmax(0, 1fr); --js-debug-chart-min-height: 330px; }
 .js-debug-chart {
   --js-debug-display-label-font-size: var(--ui-font-size-xs);
   --js-debug-legend-font-size: calc(var(--js-debug-display-label-font-size) * 0.85);

@@ -2219,6 +2219,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
     assert metrics["saved"] == {
         "subTab": "events",
         "rangeSeconds": 14400,
+        "resolutionOverrideSeconds": 0,
         "hiddenCharts": ["gpuMemory", "gpuUtil", "memory"],
         "visibleCharts": ["cpu"],
     }, metrics
@@ -2230,7 +2231,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
             const panel = document.querySelector('.js-debug-panel');
             return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
               && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
-                  && document.querySelector('[data-js-debug-resolution]')?.textContent.trim() === 'Resolution: 120s'
+                      && document.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds === '60'
               && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
               && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
             """

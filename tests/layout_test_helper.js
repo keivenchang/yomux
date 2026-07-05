@@ -1070,6 +1070,7 @@ globalThis.__layoutTestApi = {
   bindDebugPanelForTest: bindDebugPanel,
   setDebugSubTabForTest: setDebugSubTab,
   setDebugGraphRangeForTest: setDebugGraphRange,
+  setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,
   setDebugGraphZoomDomainForTest(startMs, endMs) { jsDebugGraphZoomDomain = {startMs, endMs}; },
   setDebugGraphChartVisibleForTest: setDebugGraphChartVisible,
   clearDebugGraphZoomForTest: clearDebugGraphZoom,
