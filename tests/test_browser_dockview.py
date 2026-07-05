@@ -3040,6 +3040,53 @@ def test_dockview_rename_dialog_survives_fresh_roster_then_stale_socket_close(br
     assert "55" not in metrics["inactive"], metrics
 
 
+def test_dockview_rename_dialog_surfaces_canonicalized_name_collision(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=5,6&layout=left&tabs=left:5,6",
+        sessions=["5", "6"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const originalFetch = window.fetch;
+        window.fetch = async (input, init) => {
+          const url = new URL(typeof input === 'string' ? input : input.url, window.location.href);
+          if (url.pathname === '/api/rename-session') {
+            return new Response(JSON.stringify({
+              error: 'session already exists: dynamo-utils_dev',
+              user_message: {key: 'rename.error.exists', params: {name: 'dynamo-utils_dev'}, fallback: 'session already exists: dynamo-utils_dev'},
+            }), {status: 409, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, init);
+        };
+        (async () => {
+          renameTmuxSession('5');
+          await wait(0);
+          const input = document.querySelector('.session-rename-input');
+          const form = document.querySelector('.session-rename-dialog');
+          const error = document.querySelector('.session-rename-error');
+          if (!input || !form || !error) throw new Error('rename dialog did not open');
+          input.value = 'dynamo-utils.dev';
+          form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+          for (let index = 0; index < 50 && error.hidden; index += 1) await wait(10);
+          done({error: error.textContent, hidden: error.hidden, input: input.value, dialogOpen: Boolean(document.querySelector('.session-rename-dialog'))});
+        })().catch(error => done({failure: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("failure") is None, metrics
+    assert metrics == {
+        "error": "session already exists: dynamo-utils_dev",
+        "hidden": False,
+        "input": "dynamo-utils.dev",
+        "dialogOpen": True,
+    }, metrics
+
+
 def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
     path = "/repo/app/src/main.py"
     item = f"filediff:{path}"
