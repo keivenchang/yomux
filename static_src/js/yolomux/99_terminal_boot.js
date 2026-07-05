@@ -5006,6 +5006,8 @@ function paintInitialAppShell() {
 }
 
 async function boot() {
+  installNativeAppViewportOwner();
+  syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();
   if (shareViewMode) {
@@ -5932,10 +5934,10 @@ function handleGlobalShortcutKeydown(event) {
 installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
-window.addEventListener('resize', () => {
-  syncAppViewportBreakpointClasses();
+window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
+  if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();
   applyShareMirrorTransform();
   scheduleShareViewportPublish();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);

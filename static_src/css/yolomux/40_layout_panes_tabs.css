@@ -395,22 +395,46 @@
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
 }
-/* Invisible grab zone extending ~5px past the 1px line on each side (absolute overlay = no layout
-   width), so the divider is easy to grab while the visible seam stays 1px. */
+/* The separator stays skinny. Desktop gets the familiar full-length grab zone; touch gets one centered
+   handle, so a pane-edge tap never ambiguously starts a resize. */
+.yolomux-dockview .dv-sash::after,
 .layout-resizer::after {
   content: "";
   position: absolute;
   z-index: var(--z-stacking-base);
+  pointer-events: auto;
 }
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
 .resizer-row::after {
   inset-block: 0;
-  inset-inline: -5px;
+  inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
   cursor: col-resize;
 }
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
 .resizer-column::after {
   inset-inline: 0;
-  inset-block: -5px;
+  inset-block: calc(-1 * var(--pane-resizer-hit-inset));
   cursor: row-resize;
+}
+@media (pointer: coarse) {
+  .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
+  .resizer-row::after {
+    inset-block: auto;
+    inset-block-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
+    block-size: var(--pane-resizer-touch-handle-size);
+    background: var(--pane-resizer-hover-bg);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--pane-resizer-hover-shadow);
+  }
+  .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
+  .resizer-column::after {
+    inset-inline: auto;
+    inset-inline-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
+    inline-size: var(--pane-resizer-touch-handle-size);
+    background: var(--pane-resizer-hover-bg);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--pane-resizer-hover-shadow);
+  }
 }
 body.layout-resizing-row,
 body.layout-resizing-row * {

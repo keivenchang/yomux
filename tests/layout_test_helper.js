@@ -2123,6 +2123,14 @@ globalThis.__layoutTestApi = {
   windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   appRootForTest: appRootElement,
   appViewport,
+  nativeViewport,
+  nativeUsableViewportHeightForTest: nativeUsableViewportHeight,
+  syncNativeAppViewportForTest: syncNativeAppViewport,
+  setNativeViewportForTest({width, height, visualHeight = null, scale = 1} = {}) {
+    if (Number.isFinite(Number(width))) window.innerWidth = Number(width);
+    if (Number.isFinite(Number(height))) window.innerHeight = Number(height);
+    window.visualViewport = visualHeight == null ? null : {height: Number(visualHeight), scale: Number(scale)};
+  },
   effectiveViewportWidthForTest: effectiveViewportWidth,
   setAppViewportOverrideForTest: setAppViewportOverride,
   appSpaceRect,

@@ -286,6 +286,8 @@
   --pane-resizer-size: 1px;
   --pane-resizer-line-size: 1px;
   --pane-resizer-hover-line-size: 5px;
+  --pane-resizer-hit-inset: 5px;
+  --pane-resizer-touch-handle-size: 44px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: var(--pane-resizer-bg);
@@ -399,6 +401,7 @@
   --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
   --tab-font: var(--control-font);
   --ui-font-size: 13px;
+  --touch-editable-font-size: max(16px, var(--ui-font-size));
   --ui-font-size-3xs: max(8px, calc(var(--ui-font-size) - 5px));
   --ui-font-size-2xs: max(9px, calc(var(--ui-font-size) - 3px));
   --ui-font-size-xs: max(10px, calc(var(--ui-font-size) - 2px));
@@ -1157,6 +1160,14 @@ body {
 }
 .app-overlay-root > * {
   pointer-events: auto;
+}
+@media (pointer: coarse) {
+  :root {
+    --pane-resizer-hit-inset: 20px;
+  }
+  :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable="true"], .xterm .xterm-helper-textarea) {
+    font-size: var(--touch-editable-font-size);
+  }
 }
 ::selection {
   background: var(--text-selection-bg);

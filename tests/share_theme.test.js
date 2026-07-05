@@ -1964,7 +1964,7 @@ async function runShareThemeSuite() {
     // cluster sits centered between the menubar and the right-side actions, not right-aligned.
     assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
     assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*var\(--space-6\) auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
-    assert.ok(/\.resizer-row::after\s*\{[^}]*inset-inline: -5px/.test(preferencesCss), '#34: the resizer has a wide invisible grab zone (~5px past the line) so it is easy to grab');
+    assert.ok(/\.yolomux-dockview \.dv-sash::after,\s*\.layout-resizer::after\s*\{[^}]*pointer-events:\s*auto[\s\S]*?\.resizer-row::after\s*\{[^}]*inset-inline:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\)/.test(preferencesCss), '#34: Dockview and fallback resizers share one transparent, tokenized hit target');
     assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
     // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
     // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
@@ -2715,6 +2715,27 @@ async function runShareThemeSuite() {
     assert.equal(viewportClamp.left, 1092);
     assert.equal(viewportClamp.top, 692);
     assert.deepEqual(canonical(api.appViewport()), {width: 1200, height: 800, w: 1200, h: 800}, 'M0: appViewport is the native browser viewport in normal mode');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 488, scale: 1});
+    assert.equal(api.syncNativeAppViewportForTest({force: true}), true, 'an unzoomed visual viewport reduction updates normal-mode app geometry');
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 488, w: 1024, h: 488}, 'keyboard geometry keeps layout width but adopts usable visual height');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-width'), '', 'normal-mode keyboard sizing never treats visual viewport width as responsive layout width');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '488px', 'normal-mode keyboard sizing publishes one shared app-root height');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 768, scale: 1});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '', 'visual viewport recovery clears the keyboard height override');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 488, scale: 1.25});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'pinch scale does not impersonate a keyboard or change responsive app geometry');
+    api.setNativeViewportForTest({width: 1200, height: 800, visualHeight: null});
+    api.syncNativeAppViewportForTest({force: true});
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
+    assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*visualHeight < viewport\.height/.test(coreSource), 'visual viewport contributes only unzoomed usable height');
+    assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'/.test(coreSource), 'one owner listens to visual-viewport resize and scroll transitions');
+    const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
+    const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*?\.dv-horizontal[\s\S]*?inset-block-start:\s*calc\(50% - \(var\(--pane-resizer-touch-handle-size\) \/ 2\)\)[\s\S]*?block-size:\s*var\(--pane-resizer-touch-handle-size\)[\s\S]*?\.dv-vertical[\s\S]*?inset-inline-start:\s*calc\(50% - \(var\(--pane-resizer-touch-handle-size\) \/ 2\)\)[\s\S]*?inline-size:\s*var\(--pane-resizer-touch-handle-size\)/.test(paneCss), 'coarse pointers resize only through one centered shared sash handle');
     assert.deepEqual(canonical(api.setAppViewportOverrideForTest({w: 1440, h: 900})), {width: 1440, height: 900, w: 1440, h: 900}, 'M0: appViewport can be pinned to a host viewport shape');
     assert.equal(api.effectiveViewportWidthForTest({width: 0}), 1200, 'MV-7: missing viewport widths use one shared desktop fallback');
     assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');
@@ -3126,7 +3147,7 @@ async function runShareThemeSuite() {
       assert.ok(/function scheduleShareViewportPublish\(\)[\s\S]*shareViewMode[\s\S]*sharePublish\('viewport', shareViewportSnapshot\(\)\)[\s\S]*}, 150\)/.test(shareSource), 'M1: host resize publishes a debounced viewport frame');
       assert.ok(/function scheduleShareAppearancePublish\(options = \{\}\)[\s\S]*shareViewMode[\s\S]*sharePublish\('appearance', shareAppearanceSnapshot\(\)\)[\s\S]*scheduleShareTopologySnapshot\(options\.reason \|\| 'appearance'\)/.test(shareSource), 'M1: host settings apply publishes appearance geometry and a full topology snapshot');
       assert.ok(/async function applyLocale\(locale\)[\s\S]*rerenderForLocale\(\{localeChange: true\}\)[\s\S]*scheduleShareAppearancePublish\(\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: host locale switches publish appearance and refreshed popup-layer frames');
-      assert.ok(/window\.addEventListener\('resize', \(\) => \{[\s\S]*scheduleShareViewportPublish\(\)/.test(shareSource), 'M1: the host resize handler schedules viewport publication');
+      assert.ok(/function installNativeAppViewportOwner\(\)[\s\S]*window\.addEventListener\('resize', resize\)[\s\S]*window\.visualViewport\?\.addEventListener\?\.\('resize', resize\)/.test(shareSource) && /window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleShareViewportPublish\(\)/.test(shareSource), 'M1: one viewport owner converts window/visual-viewport changes into downstream viewport publication');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareInfoState\(payload\.info \|\| \{\}\)[\s\S]*applyShareEditorState\(payload\.editor \|\| \{\}\)[\s\S]*applySharePreferencesState\(payload\.preferences \|\| \{\}\)[\s\S]*await applyShareFinderState\(payload\.finder \|\| \{\}\)/.test(shareSource), 'share viewers apply mirrored YO!info, editor, Preferences, and Finder/Differ/Tabber state');
       assert.ok(/function shareReadOnlyFinderStateIsHostOwned\(\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState/.test(shareSource), 'read-only share clients treat Finder root and expansion as host-owned between host frames');
       assert.ok(/function scheduleFileExplorerActiveTabSync\(preferredItem = null, options = \{\}\)[\s\S]*if \(shareReadOnlyFinderStateIsHostOwned\(\)\) return/.test(shareSource), 'read-only share clients ignore local active-tab sync that would jump Finder to the client context');

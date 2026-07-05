@@ -2544,6 +2544,15 @@ installJsDebugEventCapture();
 installClientPerfLongTaskObserver();
 
 let appViewportOverride = null;
+const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change';
+const nativeAppViewportSettleDelayMs = 250;
+const nativeAppViewportState = {
+  height: 0,
+  frame: 0,
+  settleTimer: 0,
+  pendingForce: false,
+  installed: false,
+};
 let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
 
 function normalizeAppViewport(value, fallback = null) {
@@ -2561,8 +2570,23 @@ function nativeViewport() {
   return {width, height, w: width, h: height};
 }
 
+function nativeUsableViewportHeight(viewport = nativeViewport()) {
+  const visualViewport = window.visualViewport;
+  if (!visualViewport) return 0;
+  const scale = Number(visualViewport.scale);
+  // A pinch changes visual viewport width/height too. Responsive layout remains tied to the layout
+  // viewport; only an unzoomed visual-height reduction is usable keyboard geometry.
+  if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.01) return 0;
+  const visualHeight = Math.max(1, Math.round(Number(visualViewport.height) || 0));
+  return visualHeight < viewport.height ? visualHeight : 0;
+}
+
 function appViewport() {
-  return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
+  const native = nativeViewport();
+  if (appViewportOverride) return normalizeAppViewport(appViewportOverride, native);
+  return nativeAppViewportState.height
+    ? normalizeAppViewport({width: native.width, height: nativeAppViewportState.height}, native)
+    : native;
 }
 
 const MIN_VIEWPORT_WIDTH_PX = 320;
@@ -2620,13 +2644,14 @@ function cleanupDetachedPopoversWithin(root) {
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;
-  if (!appViewportOverride) {
+  if (!appViewportOverride && !nativeAppViewportState.height) {
     root.style.removeProperty('--app-root-width');
     root.style.removeProperty('--app-root-height');
     return;
   }
   const viewport = appViewport();
-  root.style.setProperty('--app-root-width', `${viewport.width}px`);
+  if (appViewportOverride) root.style.setProperty('--app-root-width', `${viewport.width}px`);
+  else root.style.removeProperty('--app-root-width');
   root.style.setProperty('--app-root-height', `${viewport.height}px`);
 }
 
@@ -2635,6 +2660,52 @@ function setAppViewportOverride(viewport = null) {
   applyAppRootViewportSize();
   syncAppViewportBreakpointClasses();
   return appViewport();
+}
+
+function notifyAppViewportChange() {
+  if (typeof window.dispatchEvent !== 'function' || typeof Event !== 'function') return;
+  window.dispatchEvent(new Event(APP_VIEWPORT_CHANGE_EVENT));
+}
+
+function syncNativeAppViewport(options = {}) {
+  if (appViewportOverride) return false;
+  const nextHeight = nativeUsableViewportHeight();
+  const changed = nextHeight !== nativeAppViewportState.height;
+  nativeAppViewportState.height = nextHeight;
+  if (!changed && options.force !== true) return false;
+  applyAppRootViewportSize();
+  syncAppViewportBreakpointClasses();
+  notifyAppViewportChange();
+  return true;
+}
+
+function scheduleNativeAppViewportSync(options = {}) {
+  nativeAppViewportState.pendingForce ||= options.force === true;
+  if (nativeAppViewportState.frame) return;
+  nativeAppViewportState.frame = requestAnimationFrame(() => {
+    nativeAppViewportState.frame = 0;
+    const force = nativeAppViewportState.pendingForce;
+    nativeAppViewportState.pendingForce = false;
+    syncNativeAppViewport({force});
+  });
+}
+
+function installNativeAppViewportOwner() {
+  if (nativeAppViewportState.installed) return;
+  nativeAppViewportState.installed = true;
+  const resize = () => scheduleNativeAppViewportSync({force: true});
+  const settle = () => {
+    resize();
+    if (nativeAppViewportState.settleTimer) clearTimeout(nativeAppViewportState.settleTimer);
+    nativeAppViewportState.settleTimer = setTimeout(() => {
+      nativeAppViewportState.settleTimer = 0;
+      resize();
+    }, nativeAppViewportSettleDelayMs);
+  };
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', settle);
+  window.visualViewport?.addEventListener?.('resize', resize);
+  window.visualViewport?.addEventListener?.('scroll', resize);
 }
 
 function appMirrorTransformState() {
@@ -61208,6 +61279,8 @@ function paintInitialAppShell() {
 }
 
 async function boot() {
+  installNativeAppViewportOwner();
+  syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();
   if (shareViewMode) {
@@ -62134,10 +62207,10 @@ function handleGlobalShortcutKeydown(event) {
 installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
-window.addEventListener('resize', () => {
-  syncAppViewportBreakpointClasses();
+window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
+  if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();
   applyShareMirrorTransform();
   scheduleShareViewportPublish();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);

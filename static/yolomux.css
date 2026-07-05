@@ -287,6 +287,8 @@
   --pane-resizer-size: 1px;
   --pane-resizer-line-size: 1px;
   --pane-resizer-hover-line-size: 5px;
+  --pane-resizer-hit-inset: 5px;
+  --pane-resizer-touch-handle-size: 44px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: var(--pane-resizer-bg);
@@ -400,6 +402,7 @@
   --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
   --tab-font: var(--control-font);
   --ui-font-size: 13px;
+  --touch-editable-font-size: max(16px, var(--ui-font-size));
   --ui-font-size-3xs: max(8px, calc(var(--ui-font-size) - 5px));
   --ui-font-size-2xs: max(9px, calc(var(--ui-font-size) - 3px));
   --ui-font-size-xs: max(10px, calc(var(--ui-font-size) - 2px));
@@ -1158,6 +1161,14 @@ body {
 }
 .app-overlay-root > * {
   pointer-events: auto;
+}
+@media (pointer: coarse) {
+  :root {
+    --pane-resizer-hit-inset: 20px;
+  }
+  :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable="true"], .xterm .xterm-helper-textarea) {
+    font-size: var(--touch-editable-font-size);
+  }
 }
 ::selection {
   background: var(--text-selection-bg);
@@ -5915,22 +5926,46 @@ body.theme-light .agent-icon.claude {
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
 }
-/* Invisible grab zone extending ~5px past the 1px line on each side (absolute overlay = no layout
-   width), so the divider is easy to grab while the visible seam stays 1px. */
+/* The separator stays skinny. Desktop gets the familiar full-length grab zone; touch gets one centered
+   handle, so a pane-edge tap never ambiguously starts a resize. */
+.yolomux-dockview .dv-sash::after,
 .layout-resizer::after {
   content: "";
   position: absolute;
   z-index: var(--z-stacking-base);
+  pointer-events: auto;
 }
+.yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
 .resizer-row::after {
   inset-block: 0;
-  inset-inline: -5px;
+  inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
   cursor: col-resize;
 }
+.yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
 .resizer-column::after {
   inset-inline: 0;
-  inset-block: -5px;
+  inset-block: calc(-1 * var(--pane-resizer-hit-inset));
   cursor: row-resize;
+}
+@media (pointer: coarse) {
+  .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
+  .resizer-row::after {
+    inset-block: auto;
+    inset-block-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
+    block-size: var(--pane-resizer-touch-handle-size);
+    background: var(--pane-resizer-hover-bg);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--pane-resizer-hover-shadow);
+  }
+  .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
+  .resizer-column::after {
+    inset-inline: auto;
+    inset-inline-start: calc(50% - (var(--pane-resizer-touch-handle-size) / 2));
+    inline-size: var(--pane-resizer-touch-handle-size);
+    background: var(--pane-resizer-hover-bg);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--pane-resizer-hover-shadow);
+  }
 }
 body.layout-resizing-row,
 body.layout-resizing-row * {

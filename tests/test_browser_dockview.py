@@ -864,6 +864,39 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
         assert hover_metrics["beforeHeight"] <= hover_metrics["hoverLineSize"] + 0.1
 
 
+def test_dockview_touch_sashes_expand_hit_target_without_thickening_separator(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--pane-resizer-hit-inset', '20px');
+        const sashes = Array.from(document.querySelectorAll('.dv-sash')).map(sash => {
+          const rect = sash.getBoundingClientRect();
+          const before = getComputedStyle(sash, '::before');
+          const after = getComputedStyle(sash, '::after');
+          const horizontal = sash.closest('.dv-split-view-container')?.classList.contains('dv-horizontal');
+          return {
+            horizontal,
+            sashSize: horizontal ? rect.width : rect.height,
+            visibleLineSize: horizontal ? parseFloat(before.width) : parseFloat(before.height),
+            hitSize: horizontal ? parseFloat(after.width) : parseFloat(after.height),
+            hitPointerEvents: after.pointerEvents,
+          };
+        });
+        return {
+          sashes,
+          rootHitInset: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hit-inset').trim(),
+        };
+        """
+    )
+    assert metrics["rootHitInset"] == "20px", metrics
+    assert metrics["sashes"], metrics
+    for sash in metrics["sashes"]:
+        assert sash["visibleLineSize"] <= 1.1, sash
+        assert sash["hitSize"] >= sash["sashSize"] + 39, sash
+        assert sash["hitPointerEvents"] == "auto", sash
+
+
 def test_dockview_hidden_inner_header_keeps_terminal_content_full_height(browser, tmp_path):
     encoded_file = "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FDONE.md"
     load_dockview_runtime_boot_fixture(
