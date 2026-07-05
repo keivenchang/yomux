@@ -3109,7 +3109,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(ordered.every(index => index >= 0), 'interleaved YO!agent stream rows all render');
       assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
       assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
-      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
+      assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
     }
 
     {
@@ -3164,7 +3164,7 @@ async function runLayoutAsyncSuite() {
       });
       const html = api.yoagentChatHtml();
       assert.ok(html.includes('thinking (5 words)…'), 'coalesced thinking stream label counts the full merged thinking run');
-      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
+      assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
     }
 
     {
@@ -3212,11 +3212,13 @@ async function runLayoutAsyncSuite() {
       assert.ok(banner, 'server/client patch rollback mismatch shows the existing reload banner');
       assert.equal(banner.dataset.version, '0.4.19', 'reload banner stores the mismatched server version');
       assert.ok(banner.children[0].textContent.includes('Do you want to reload the browser?'), 'reload banner asks the user whether to reload');
-      assert.equal(banner.children[1].textContent, 'Reload', 'reload banner keeps the existing Reload action');
-      assert.equal(banner.children[2].textContent, 'Keep', 'reload banner keeps the existing dismiss action as Keep');
+      const actions = banner.children[1];
+      assert.equal(actions.className, 'toast-control-row server-update-banner-actions', 'reload banner groups actions through the shared toast control row');
+      assert.equal(actions.children[0].textContent, 'Reload', 'reload banner keeps the existing Reload action');
+      assert.equal(actions.children[1].textContent, 'Keep', 'reload banner keeps the existing dismiss action as Keep');
       api.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(api.bodyChildren().filter(node => node.id === 'serverUpdateBanner').length, 1, 'same mismatched version does not spawn repeated banners');
-      banner.children[2].listeners.get('click')[0]();
+      actions.children[1].listeners.get('click')[0]();
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'Keep dismisses the mismatch banner');
       api.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'dismissed same mismatch does not immediately reopen');
@@ -3233,7 +3235,7 @@ async function runLayoutAsyncSuite() {
       });
       reloadApi.maybeHandleServerVersionChangeForTest('0.4.21');
       const reloadBanner = reloadApi.bodyChildren().find(node => node.id === 'serverUpdateBanner');
-      reloadBanner.children[1].listeners.get('click')[0]();
+      reloadBanner.children[1].children[0].listeners.get('click')[0]();
       assert.equal(reloadApi.reloadCountForTest(), 1, 'Reload action reloads the browser');
 
       const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {

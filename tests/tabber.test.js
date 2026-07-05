@@ -1101,8 +1101,7 @@ async function runTabberSuite() {
   // box), are wired to editorNavBack/Forward, and tab-switches record as nav.
   test('t@8681', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("createTopbarNav())"), 'the topbar assembles the nav group');
-    assert.ok(source.indexOf('createTopbarNav())') < source.indexOf('createTopbarSearch())'), 'the nav (back/forward) group is appended before the topbar search box');
+    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(source), 'the shared middle topbar group assembles the nav group before the search box');
     assert.ok(/const back = makeButton\(\{[\s\S]*id: 'topbarNavBack'/.test(source) && /const forward = makeButton\(\{[\s\S]*id: 'topbarNavForward'/.test(source), 'the topbar nav builds #topbarNavBack / #topbarNavForward through the shared button builder');
     assert.ok(/topbarNavBack[\s\S]{0,400}?editorNavBack\(\)/.test(source), 'the back button is wired to editorNavBack()');
     assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
@@ -1111,10 +1110,10 @@ async function runTabberSuite() {
     // keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
     assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
     assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
-    // an auto-focus-driven focus change records nav history (debounced, gated on autoFocusEnabled).
+    // An auto-focus-driven focus change records nav history only where a pointer can follow a cursor.
     assert.ok(source.includes('function recordAutoFocusNav(item, previousItem = null)'), 'auto-focus nav recorder exists');
     assert.ok(source.includes('recordAutoFocusNav(item, previousItem);'), 'setFocusedPanelItem records auto-focus nav with the previous focus');
-    assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusEnabled[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'it is gated on autoFocusEnabled and debounced to the landed focus');
+    assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusCanFollowCursor\(\)[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'it shares the cursor-capability auto-focus gate and debounces to the landed focus');
     assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
   });
 

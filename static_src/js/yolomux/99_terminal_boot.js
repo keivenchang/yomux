@@ -6,7 +6,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const controls = [];
   const includeActions = options.actions ?? isTmuxSession(session);
   const includeDetails = options.details === true;
-  const includeMinimize = options.minimize !== false;
+  const includeMinimize = options.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = options.expand !== false;
   const includePopout = options.popout === true;
   if (includeActions) {
@@ -84,7 +84,14 @@ function panelControlsHtml(session, options = {}) {
       closeTitle: t('finder.close', {name: fileExplorerLabel()}),
       closeLabel: t('finder.close', {name: fileExplorerLabel()}),
     })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
+    : paneFrameControlsHtml(session, {
+      disabled,
+      actions: isTmuxSession(session),
+      details: true,
+      // In a one-column touch layout, X and minus remove only this selected tab. Showing them here
+      // makes the ordinary pane controls useful without offering a blank-the-last-pane action.
+      close: narrowPaneFrameActionTargetsTab(session),
+    });
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${terminalButtonHtml}
           ${frameHtml}
@@ -2365,7 +2372,7 @@ function bindPanelControls(panel, session) {
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose);
+    closePaneFrameItem(button.dataset.paneClose);
   });
   delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
     event.preventDefault();
@@ -4267,7 +4274,10 @@ function showServerUpdateBanner(version) {
     ariaLabel: t('update.dismiss'),
     onClick: () => banner.remove(),
   });
-  banner.append(msg, reload, dismiss);
+  const actions = document.createElement('div');
+  actions.className = 'toast-control-row server-update-banner-actions';
+  actions.append(reload, dismiss);
+  banner.append(msg, actions);
   document.body.appendChild(banner);
 }
 
@@ -5936,6 +5946,10 @@ installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
+  // Safari can publish the new viewport before its topbar flex geometry has settled. The shared
+  // fit check runs on the next frame (and the ResizeObserver covers a later width update), so the
+  // full/compact menu decision is based only on current space, never the previous presentation.
+  scheduleTopbarNavigationFitCheck();
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
   if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();

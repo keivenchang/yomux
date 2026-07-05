@@ -743,7 +743,7 @@
   "login.showPassword": "पासवर्ड दिखाएं",
   "login.signIn": "साइन इन",
   "login.username": "उपयोगकर्ता नाम",
-  "menu.bar.aria": "एप्लिकेशन मेनू",
+  "menu.compact.label": "मेनू",
   "menu.common.adminOnly": "केवल Admin",
   "menu.common.comingSoon": "जल्द आ रहा है",
   "menu.file": "फ़ाइल",

@@ -785,7 +785,7 @@
   "login.showPassword": "Показать пароль",
   "login.signIn": "Войти",
   "login.username": "Имя пользователя",
-  "menu.bar.aria": "Меню приложения",
+  "menu.compact.label": "Меню",
   "menu.common.adminOnly": "Только для администратора",
   "menu.common.comingSoon": "Скоро",
   "menu.file": "Файл",

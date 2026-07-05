@@ -224,23 +224,37 @@ function bindPopoverHover(anchor, popover, handlers) {
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
+  const closeNow = handlers.closeNow;
   const closeIfOutside = event => {
     const next = event?.relatedTarget;
     if (next && (anchor.contains(next) || popover?.contains(next))) return;
     closeSoon(event);
   };
 
-  anchor.addEventListener('pointerenter', queueOpen);
+  anchor.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) queueOpen(event);
+  });
   anchor.addEventListener('pointerleave', closeIfOutside);
-  anchor.addEventListener('focusin', queueOpen);
+  anchor.addEventListener('focusin', event => {
+    // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
+    // should expose a hover-only popover when no cursor is present.
+    if (anchor.matches?.(':focus-visible')) queueOpen(event);
+  });
   anchor.addEventListener('focusout', closeIfOutside);
+  anchor.addEventListener('pointerdown', event => {
+    if (!browserHasCursorHover(event)) closeNow?.(event);
+  });
   if (!popover) return;
-  popover.addEventListener('pointerenter', keepOpen);
+  popover.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) keepOpen(event);
+  });
   popover.addEventListener('pointerleave', closeIfOutside);
   popover.addEventListener('click', stopPopoverEvent);
   popover.addEventListener('dragstart', stopPopoverEvent);
   popover.querySelectorAll('a').forEach(link => {
-    link.addEventListener('pointerenter', keepOpen);
+    link.addEventListener('pointerenter', event => {
+      if (browserHasCursorHover(event)) keepOpen(event);
+    });
     link.addEventListener('click', stopPopoverEvent);
   });
 }
@@ -292,7 +306,7 @@ function createHoverPopover(options) {
     if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
-      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
+      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
       activePopover.dataset.hoverPopoverBound = 'true';
     }
   };
@@ -336,7 +350,7 @@ function createHoverPopover(options) {
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
-  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon});
+  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
   if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
   return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
 }

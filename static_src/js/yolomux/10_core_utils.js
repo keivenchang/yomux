@@ -713,15 +713,24 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
   return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
-const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
+const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720, 600];
+const compactTopbarMenuMaxWidthPx = 600;
+
+// Full top-level menus outrank version, wordmark, top-right actions, and search. Collapse them only
+// at the phone-sized fallback, after those lower-priority controls have already yielded their space.
+function compactTopbarForViewport(viewport = appViewport()) {
+  return browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= compactTopbarMenuMaxWidthPx;
+}
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
+  const touchTopbar = browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= appViewportBreakpointPx[0];
   const targets = [document.body, appRootElement()].filter(Boolean);
   for (const target of targets) {
     for (const breakpoint of appViewportBreakpointPx) {
       target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
     }
+    target.classList?.toggle('app-topbar-touch-compact', touchTopbar);
   }
 }
 
@@ -2086,7 +2095,7 @@ let autoFocusNavTimer = null;
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
 // already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
 function recordAutoFocusNav(item, previousItem = null) {
-  if (!autoFocusEnabled || !item) return;
+  if (!autoFocusCanFollowCursor() || !item) return;
   if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
   autoFocusNavTimer = setTimeout(() => {
     autoFocusNavTimer = null;
@@ -2101,7 +2110,7 @@ function clearPendingFileEditorFocusExcept(item) {
 }
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor()) return;
   focusTerminalDom(session, delay);
 }
 
@@ -2129,9 +2138,9 @@ function terminalPaneIsActive(session) {
   return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
-function selectPanelOnHover(item) {
+function selectPanelOnHover(item, event = null) {
   if (!item) return;
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor(event)) return;
   if (isTmuxSession(item) && terminalPaneIsActive(item)) {
     setFocusedTerminal(item);
     scheduleFit(item);

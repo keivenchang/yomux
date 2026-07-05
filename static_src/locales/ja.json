@@ -743,7 +743,7 @@
   "login.showPassword": "パスワードを表示",
   "login.signIn": "ログイン",
   "login.username": "ユーザー名",
-  "menu.bar.aria": "アプリケーションメニュー",
+  "menu.compact.label": "メニュー",
   "menu.common.adminOnly": "管理者のみ",
   "menu.common.comingSoon": "近日公開",
   "menu.file": "ファイル",

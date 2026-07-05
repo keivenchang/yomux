@@ -541,7 +541,7 @@
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
-  --pane-tab-width: 180px;
+  --pane-tab-width: 172px;
   --three-row-panel-layout: auto auto minmax(0, 1fr);
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
   --pane-tab-top-radius-scale: 0.7;
@@ -1008,6 +1008,8 @@ body.theme-light {
 }
 .brand-cell,
 .topbar-search,
+.topbar-center-tools,
+.topbar-right-tools,
 .app-menu-line,
 .command-palette-title,
 .file-explorer-title,

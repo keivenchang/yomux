@@ -220,7 +220,7 @@ function shareAppearanceSnapshot() {
     editorFontSize,
     previewFontSize: clampEditorPreviewFontSize(editorPreviewFontSize),
     fileExplorerFontSize,
-    tabWidth: numberSetting('appearance.tab_width', 180),
+    tabWidth: numberSetting('appearance.tab_width', 172),
     paneSpacing: Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 3))),
     paneRingOpacity: Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75))),
     inactivePaneOpacity: Math.max(0, Math.min(100, numberSetting('appearance.inactive_pane_opacity', 60))),

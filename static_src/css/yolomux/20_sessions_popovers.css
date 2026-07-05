@@ -524,24 +524,10 @@ body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .se
   background: var(--neutral-surface-subtle-light);
   border-color: #cdd5e0;
 }
-/* The session YO marker no longer rotates to signal "working" — the pulsing green ball beside the
-   agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
-   model work, not session-working. */
+/* The session YO marker is always static; the pulsing green ball beside the agent symbol signals
+   session work, while transient model work uses the shared moving ellipsis. */
 .session-yolo-marker.working {
   transform-origin: center;
-}
-.session-yolo-marker.yoagent-waiting-spinner,
-.session-yolo-marker.yoagent-chat-spinner {
-  transform-origin: center;
-  animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 1.55s);
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-@keyframes yolo-marker-rotate {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .ci-indicator {
   flex: 0 0 auto;

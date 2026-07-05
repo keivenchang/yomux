@@ -743,7 +743,7 @@
   "login.showPassword": "显示密码",
   "login.signIn": "登录",
   "login.username": "用户名",
-  "menu.bar.aria": "应用程序菜单",
+  "menu.compact.label": "菜单",
   "menu.common.adminOnly": "仅限管理员",
   "menu.common.comingSoon": "即将推出",
   "menu.file": "文件",

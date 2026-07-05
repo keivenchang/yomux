@@ -43,7 +43,7 @@ def test_operator_answers_current_setting_without_model(tmp_path):
     assert response is not None
     assert response["backend_used"] == "yolomux"
     assert "`appearance.tab_width`" in response["answer"]
-    assert "current `180`" in response["answer"]
+    assert "current `172`" in response["answer"]
     assert calls == []
 
 

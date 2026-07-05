@@ -847,6 +847,9 @@ const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
+// Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
+// provide two usable columns; wider portrait iPads retain their movable multi-pane workspace.
+const narrowTouchSingleColumnMaxWidthPx = 680;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -906,15 +909,64 @@ function browserUsesCoarsePointer() {
     && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
 }
 
+function fileExplorerUsesNormalTabMovement() {
+  return browserUsesCoarsePointer();
+}
+
+let browserCursorHoverObserved = false;
+
+function browserHasCursorHover(event = null) {
+  const pointerType = String(event?.pointerType || '');
+  if (pointerType === 'mouse' || pointerType === 'pen') {
+    // Some tablet browsers emit the real mouse/trackpad event before `any-hover` updates.
+    // Remembering that capability keeps the follow-on focus work on the same gesture consistent.
+    browserCursorHoverObserved = true;
+    return true;
+  }
+  if (pointerType === 'touch') return false;
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(any-hover: hover)') : null;
+  if (media?.matches === true) return true;
+  if (browserCursorHoverObserved) return true;
+  // Keep desktop/fallback browsers functional when the media feature is unavailable. A touch-first
+  // browser with no hover-capable pointer must not leave a hover popup permanently open.
+  return !browserUsesCoarsePointer();
+}
+
+function autoFocusCanFollowCursor(event = null) {
+  return autoFocusEnabled && browserHasCursorHover(event);
+}
+
+function browserUsesTabletViewport() {
+  const navigatorValue = globalThis.navigator || {};
+  const userAgent = String(navigatorValue.userAgent || '');
+  const platform = String(navigatorValue.platform || '');
+  const touchPoints = Number(navigatorValue.maxTouchPoints || 0);
+  return /iPad|Tablet/i.test(userAgent)
+    || (/Macintosh|MacIntel/i.test(platform) && touchPoints > 1)
+    || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
+}
+
 function phoneLikeMobileViewport(viewport = nativeViewport()) {
-  if (!browserUsesCoarsePointer()) return false;
+  if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
   return width <= mobileSinglePaneMaxWidthPx
     || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
 }
 
-const mobileSinglePaneMode = phoneLikeMobileViewport();
+function mobileSinglePaneMode(viewport = nativeViewport()) {
+  return phoneLikeMobileViewport(viewport);
+}
+
+function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  return phoneLikeMobileViewport(viewport) || width <= narrowTouchSingleColumnMaxWidthPx;
+}
+
+function narrowSingleColumnMode(viewport = nativeViewport()) {
+  return narrowTouchSingleColumnViewport(viewport);
+}
 const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;
@@ -2699,15 +2751,24 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
   return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
-const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
+const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720, 600];
+const compactTopbarMenuMaxWidthPx = 600;
+
+// Full top-level menus outrank version, wordmark, top-right actions, and search. Collapse them only
+// at the phone-sized fallback, after those lower-priority controls have already yielded their space.
+function compactTopbarForViewport(viewport = appViewport()) {
+  return browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= compactTopbarMenuMaxWidthPx;
+}
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
+  const touchTopbar = browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= appViewportBreakpointPx[0];
   const targets = [document.body, appRootElement()].filter(Boolean);
   for (const target of targets) {
     for (const breakpoint of appViewportBreakpointPx) {
       target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
     }
+    target.classList?.toggle('app-topbar-touch-compact', touchTopbar);
   }
 }
 
@@ -4072,7 +4133,7 @@ let autoFocusNavTimer = null;
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
 // already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
 function recordAutoFocusNav(item, previousItem = null) {
-  if (!autoFocusEnabled || !item) return;
+  if (!autoFocusCanFollowCursor() || !item) return;
   if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
   autoFocusNavTimer = setTimeout(() => {
     autoFocusNavTimer = null;
@@ -4087,7 +4148,7 @@ function clearPendingFileEditorFocusExcept(item) {
 }
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor()) return;
   focusTerminalDom(session, delay);
 }
 
@@ -4115,9 +4176,9 @@ function terminalPaneIsActive(session) {
   return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
-function selectPanelOnHover(item) {
+function selectPanelOnHover(item, event = null) {
   if (!item) return;
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor(event)) return;
   if (isTmuxSession(item) && terminalPaneIsActive(item)) {
     setFocusedTerminal(item);
     scheduleFit(item);
@@ -6142,9 +6203,17 @@ function layoutSlotsSignature(slots = layoutSlots) {
   return JSON.stringify(normalizeLayoutSlotsForViewport(cloneLayoutSlots(slots)));
 }
 
+function layoutSlotsExactSignature(slots = layoutSlots) {
+  return JSON.stringify(cloneLayoutSlots(slots));
+}
+
 function compactCurrentLayoutSlots(options = {}) {
   const normalized = normalizeLayoutSlotsForViewport(layoutSlots);
-  if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
+  // layoutSlotsSignature intentionally normalizes both inputs for renderer comparisons. That makes
+  // it unable to detect a newly narrowed viewport: the old multi-pane layout is normalized before
+  // comparison too. Responsive compaction instead compares the actual stored layout to the shared
+  // viewport-normalized result.
+  if (layoutSlotsExactSignature(normalized) === layoutSlotsExactSignature(layoutSlots)) return false;
   applyLayoutSlots(normalized, {
     focusSession: options.focusSession || focusedPanelItem || undefined,
     prune: false,
@@ -6428,10 +6497,12 @@ function layoutHasHorizontalContentBeforeItem(node, item, slots = layoutSlots) {
 }
 
 function fileExplorerNeedsLeftDock(slots = layoutSlots) {
+  if (fileExplorerUsesNormalTabMovement()) return false;
   return layoutHasHorizontalContentBeforeItem(slots?.[layoutTreeKey], fileExplorerItemId, slots);
 }
 
 function normalizeFileExplorerDock(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   let next = slots;
   if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
     next = layoutWithFileExplorerDockedLeft(slots);
@@ -6450,6 +6521,7 @@ function soleFileExplorerSlot(slots) {
 }
 
 function layoutWithFileExplorerPeerPane(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   const finderSlot = soleFileExplorerSlot(slots);
   if (!finderSlot) return slots;
   const next = cloneLayoutSlots(slots);
@@ -6929,13 +7001,17 @@ function mobileRecentTmuxItems() {
 function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
   const preferred = resolveLayoutItem(options.focusSession);
+  // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
+  // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
+  // back on the next one-column normalization.
+  const candidates = requested.length ? [preferred, ...requested] : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
-  for (const item of [preferred, ...mobileRecentTmuxItems(), ...requested]) {
+  for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
     if (tmuxItems.length >= mobileSinglePaneTabLimit) break;
   }
   const supplementary = [];
-  for (const item of [preferred, ...requested]) {
+  for (const item of candidates) {
     if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
   }
   const items = [...tmuxItems, ...supplementary];
@@ -6943,18 +7019,35 @@ function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   return layoutSlotsForItems(items, 'single', {active, emptySlot: 'left'});
 }
 
+function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots(slots, options);
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  const preferred = resolveLayoutItem(options.focusSession);
+  const visibleActive = activePaneItems(slots || layoutSlots);
+  const active = [
+    preferred,
+    ...visibleActive.filter(item => !isFileExplorerItem(item)),
+    ...visibleActive,
+    ...requested,
+  ]
+    .find(item => requested.includes(item)) || requested[0] || null;
+  // Finder is intentionally retained in this tab list. On narrow tablet screens it is a normal
+  // tab in the sole column, rather than a reserved left-hand pane.
+  return layoutSlotsForItems(requested, 'single', {active, emptySlot: 'left'});
+}
+
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const source = mobileSinglePaneMode
-    ? mobileSinglePaneLayoutSlots(value, {focusSession: options.focusSession})
+  const source = narrowSingleColumnMode()
+    ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
   return normalizeLayoutSlots(source, {
     ...options,
-    preserveMissingFileExplorer: mobileSinglePaneMode || options.preserveMissingFileExplorer === true,
+    preserveMissingFileExplorer: narrowSingleColumnMode() || options.preserveMissingFileExplorer === true,
   });
 }
 
 function availableLayoutModes() {
-  return mobileSinglePaneMode ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -6963,11 +7056,11 @@ function initialLayoutSlots() {
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
-  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutFromUrl;
+  if (layoutFromUrl) return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(layoutFromUrl) : layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -6976,16 +7069,25 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutFromSessionList(selected);
+  if (selected.length) {
+    const selectedLayout = layoutFromSessionList(selected);
+    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(selectedLayout) : selectedLayout;
+  }
   return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
-  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
+  if (fileExplorerUsesNormalTabMovement()) {
+    const items = fileExplorerClosedByUser() ? sorted : [fileExplorerItemId, ...sorted];
+    const regular = layoutSlotsForItems(items, configuredDefaultLayoutMode(), {active: sorted[0] || fileExplorerItemId});
+    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(regular) : regular;
+  }
+  const standard = layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
     preservePlaceholders: false,
   });
+  return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(standard) : standard;
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -10610,8 +10712,11 @@ function displayToastContainer(session) {
 
 function notificationTargetIsFocused(item) {
   const target = String(item || '').trim();
-  if (!target || document.visibilityState !== 'visible' || document.hasFocus?.() !== true) return false;
-  return itemIsActivePaneTab(target) && (focusedPanelItem === target || focusedTerminal === target);
+  if (!target || document.visibilityState !== 'visible' || !itemIsActivePaneTab(target)) return false;
+  // A status render can briefly blur xterm even though the user remains on this pane. The shared
+  // logical active item survives that DOM churn, so notifications about the pane being viewed are
+  // already acknowledged and must not appear inside that same pane.
+  return focusedPanelItem === target || focusedTerminal === target || visualActivePaneItem() === target;
 }
 
 function compactNotificationTitle(scope, message, options = {}) {
@@ -11282,7 +11387,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
-  if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
+  if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
     statusEl.textContent = options.message;
@@ -12122,7 +12227,7 @@ function appMenuTree() {
           menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        ...(mobileSinglePaneMode ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
+        ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
@@ -12184,6 +12289,76 @@ function appMenuTree() {
   ];
 }
 
+let topbarNavigationCompact = null;
+let topbarNavigationFitFrame = 0;
+let topbarNavigationFitObserver = null;
+
+// Pure geometry helper retained for responsive test coverage. It deliberately does not choose the
+// rendered menu state: that decision must not depend on the current compact/full DOM shape.
+function topbarFullMenuFitsAvailableSpace(areaWidth, fullMenuWidth, otherWidths = [], gap = 0) {
+  const reservedWidth = otherWidths.reduce((sum, width) => sum + Math.max(0, Number(width) || 0), 0)
+    + (Math.max(0, Number(gap) || 0) * otherWidths.length);
+  return fullMenuWidth > 0 && fullMenuWidth <= Math.max(0, areaWidth - reservedWidth);
+}
+
+function topbarFullNavigationFits() {
+  return null;
+}
+
+function setTopbarNavigationCompactClass(compact) {
+  for (const target of [document.body, appRootElement()].filter(Boolean)) {
+    target.classList?.toggle('app-topbar-menu-compact', compact);
+  }
+}
+
+function topbarNavigationShouldBeCompact() {
+  // A measured row depends on whether it currently renders the five roots or one Menus root.
+  // At the phone fallback that created a compact/full render loop, detaching the button between
+  // pointerdown and click. The breakpoint is already after all lower-priority chrome yields, so it
+  // is the stable single owner of this final compact transition.
+  return compactTopbarForViewport();
+}
+
+function scheduleTopbarNavigationFitCheck() {
+  if (topbarNavigationFitFrame) return;
+  topbarNavigationFitFrame = requestAnimationFrame(() => {
+    topbarNavigationFitFrame = 0;
+    syncTopbarNavigationPresentation();
+  });
+}
+
+function installTopbarNavigationFitObserver() {
+  if (topbarNavigationFitObserver || !sessionButtons || typeof ResizeObserver !== 'function') return;
+  topbarNavigationFitObserver = new ResizeObserver(() => scheduleTopbarNavigationFitCheck());
+  topbarNavigationFitObserver.observe(sessionButtons);
+}
+
+function topbarMenuTree() {
+  const menus = appMenuTree();
+  const compact = topbarNavigationShouldBeCompact();
+  topbarNavigationCompact = compact;
+  setTopbarNavigationCompactClass(compact);
+  if (!compact) return menus;
+  return [{
+    id: 'application-menu',
+    // Translator context: this is a compact application-navigation control (File/View/tmux/Tabs/Help),
+    // never a restaurant/food menu. Keep the local software-UI term short enough for the top bar.
+    label: t('menu.compact.label'),
+    nestedRoot: true,
+    items: menus.map(menu => menuSubmenu(menu.label, menu.items)),
+  }];
+}
+
+function syncTopbarNavigationPresentation() {
+  const compact = topbarNavigationShouldBeCompact();
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === null || topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  closeAppMenus();
+  renderSessionButtons({force: true});
+  return true;
+}
+
 function appMenuIsOpen() {
   return Boolean(sessionButtons?.querySelector('.app-menu.open'));
 }
@@ -12210,7 +12385,11 @@ function renderSessionButtons(options = {}) {
 
 function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
-  if (!options.force && appMenuIsOpen()) {
+  // An SSE/locale/status repaint can otherwise detach a touch target after pointerdown but before
+  // the browser emits click. An open menu is an explicit interaction, so defer every repaint until
+  // it closes; the existing pending render path preserves the newest requested chrome state.
+  if (appMenuIsOpen()) {
+    if (options.force) pendingSessionButtonsRender = true;
     scheduleTopbarMetricsUpdate();
     return;
   }
@@ -12250,17 +12429,16 @@ function renderSessionButtonsMeasured(options = {}) {
   };
   sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
-  sessionButtons.appendChild(createTopbarNav());
-  sessionButtons.appendChild(createTopbarSearch());
+  sessionButtons.appendChild(createTopbarCenterTools());
   updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
-  sessionButtons.appendChild(createTopbarLanguageSwitcher());
-  sessionButtons.appendChild(createTopbarOwnerStatus());
-  sessionButtons.appendChild(createTopbarActivityStatus());
+  sessionButtons.appendChild(createTopbarRightTools());
   updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+  installTopbarNavigationFitObserver();
+  scheduleTopbarNavigationFitCheck();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
@@ -12290,9 +12468,9 @@ function renderTopbarStaticChrome() {
 function createAppMenuBar() {
   const bar = document.createElement('nav');
   bar.className = 'app-menu-bar';
-  bar.setAttribute('aria-label', t('menu.bar.aria'));
+  bar.setAttribute('aria-label', t('app.menusAria'));
   bar.setAttribute('role', 'menubar');
-  for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
+  for (const menu of topbarMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
 }
 
@@ -12351,6 +12529,20 @@ function createTopbarSearch() {
   button.append(icon, label, hint);
   button.addEventListener('click', () => openFileQuickOpen());
   return button;
+}
+
+function createTopbarCenterTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-center-tools';
+  group.append(createTopbarNav(), createTopbarSearch());
+  return group;
+}
+
+function createTopbarRightTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-right-tools';
+  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  return group;
 }
 
 // Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
@@ -12481,7 +12673,7 @@ function fitAppMenuPopover(popover) {
 
 function createAppMenu(menu) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu';
+  wrapper.className = `app-menu${menu.nestedRoot ? ' app-menu--nested-root' : ''}`;
   wrapper.dataset.appMenu = menu.id;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
@@ -12489,25 +12681,42 @@ function createAppMenu(menu) {
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
   fitAppMenuPopover(popover);
+  const activateMenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (wrapper.classList.contains(CLS.open)) {
+      const openMs = Date.now() - openAppMenuOpenedAt;
+      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      return;
+    }
+    openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  };
   const button = makeButton({
     className: 'app-menu-button',
     role: 'menuitem',
     html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
     attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
     onClick: event => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (wrapper.classList.contains(CLS.open)) {
-        const openMs = Date.now() - openAppMenuOpenedAt;
-        if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
-        else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      if (button.dataset.pointerActionHandled === '1') {
+        delete button.dataset.pointerActionHandled;
         return;
       }
-      openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      activateMenu(event);
     },
-    events: {keydown: event => handleAppMenuButtonKeydown(event, wrapper)},
+    events: {
+      keydown: event => handleAppMenuButtonKeydown(event, wrapper),
+      pointerdown: event => {
+        if (event.button !== 0) return;
+        // Open before a browser turns the tap into click, so an async chrome repaint cannot make
+        // the compact Menus target disappear under the user's finger.
+        button.dataset.pointerActionHandled = '1';
+        activateMenu(event);
+      },
+    },
   });
   wrapper.append(button, popover);
+  button.addEventListener('blur', flushPendingSessionButtonsRender);
   if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
@@ -12602,7 +12811,7 @@ function createAppMenuNumberSetting(item) {
 
 function createAppSubmenu(item) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu-submenu-wrap open';
+  wrapper.className = 'app-menu-submenu-wrap';
   const button = createAppMenuCommand({
     label: item.label,
     disabled: item.disabled,
@@ -12631,7 +12840,7 @@ function createAppSubmenu(item) {
     }
   });
   button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-expanded', 'false');
   wrapper.append(button, submenu);
   bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
@@ -12819,7 +13028,7 @@ function bindAppMenuHover(wrapper) {
     anchor: wrapper,
     popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
     stateClass: '',
-    canOpen: () => autoFocusEnabled || appMenuIsOpen(),
+    canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen(),
     showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
     hideDelay: () => menuHoverCloseDelayMs,
     stillActive: () => wrapper.matches?.(':hover'),
@@ -12844,10 +13053,12 @@ function openAppMenu(wrapper, options = {}) {
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
-  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add(CLS.open);
-    submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
-  });
+  if (!wrapper.classList.contains('app-menu--nested-root')) {
+    wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
+      submenu.classList.add(CLS.open);
+      submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
+    });
+  }
   openAppMenuId = wrapper.dataset.appMenu || null;
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
@@ -14640,7 +14851,7 @@ function eventTargetIsFileExplorerSurface(target) {
 // navigation even though xterm may still be the document's active element; text and popup
 // controls always retain their own keys.
 function fileExplorerHasAutoFocusedKeyboardOwnership() {
-  return autoFocusEnabled && isFileExplorerItem(focusedPanelItem);
+  return autoFocusCanFollowCursor() && isFileExplorerItem(focusedPanelItem);
 }
 
 function fileExplorerKeyboardOwnsEvent(event) {
@@ -16834,8 +17045,6 @@ function buildTabberTree() {
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
     };
     topEntries.push(sessionEntry);
-    const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
-    const activeIndexOverlay = activeIndexOverride === tmuxWindowPendingActiveIndex ? null : activeIndexOverride;
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
@@ -16844,9 +17053,7 @@ function buildTabberTree() {
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
       const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
-      const agentCurrent = agentWindowPayloadCurrent(agentStatus);
-      const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
-      const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
@@ -17304,11 +17511,7 @@ function activeTabberRowPath() {
   if (!isTmuxSession(item)) return tabberTabPath(item);
   const session = item;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const override = tmuxWindowDisplayActiveIndex(session);
-  if (override !== undefined) {
-    return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);
-  }
-  const activeWindow = tmuxWindowRecords(info.panes).find(record => record.active === true);
+  const activeWindow = tmuxWindowActiveRecord(session, info);
   return activeWindow ? tabberWindowPath(session, activeWindow.index) : tabberSessionPath(session);
 }
 
@@ -23731,7 +23934,7 @@ function applyCssSettings() {
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
-  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
@@ -24301,23 +24504,37 @@ function bindPopoverHover(anchor, popover, handlers) {
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
+  const closeNow = handlers.closeNow;
   const closeIfOutside = event => {
     const next = event?.relatedTarget;
     if (next && (anchor.contains(next) || popover?.contains(next))) return;
     closeSoon(event);
   };
 
-  anchor.addEventListener('pointerenter', queueOpen);
+  anchor.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) queueOpen(event);
+  });
   anchor.addEventListener('pointerleave', closeIfOutside);
-  anchor.addEventListener('focusin', queueOpen);
+  anchor.addEventListener('focusin', event => {
+    // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
+    // should expose a hover-only popover when no cursor is present.
+    if (anchor.matches?.(':focus-visible')) queueOpen(event);
+  });
   anchor.addEventListener('focusout', closeIfOutside);
+  anchor.addEventListener('pointerdown', event => {
+    if (!browserHasCursorHover(event)) closeNow?.(event);
+  });
   if (!popover) return;
-  popover.addEventListener('pointerenter', keepOpen);
+  popover.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) keepOpen(event);
+  });
   popover.addEventListener('pointerleave', closeIfOutside);
   popover.addEventListener('click', stopPopoverEvent);
   popover.addEventListener('dragstart', stopPopoverEvent);
   popover.querySelectorAll('a').forEach(link => {
-    link.addEventListener('pointerenter', keepOpen);
+    link.addEventListener('pointerenter', event => {
+      if (browserHasCursorHover(event)) keepOpen(event);
+    });
     link.addEventListener('click', stopPopoverEvent);
   });
 }
@@ -24369,7 +24586,7 @@ function createHoverPopover(options) {
     if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
-      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
+      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
       activePopover.dataset.hoverPopoverBound = 'true';
     }
   };
@@ -24413,7 +24630,7 @@ function createHoverPopover(options) {
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
-  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon});
+  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
   if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
   return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
 }
@@ -25748,6 +25965,7 @@ function removeSessionFromLayout(item, options = {}) {
     preservePlaceholders: !isFiles,
   }), {
     message: options.message || hiddenFromLayoutStatusMessage(item),
+    focusSession: options.focusSession,
   });
 }
 
@@ -25760,6 +25978,19 @@ function removePaneFromLayout(item) {
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? t('layout.status.hidden', {items: moved.map(itemLabel).join(', ')}) : '',
   });
+}
+
+function closePaneFrameItem(item) {
+  const resolved = resolveLayoutItem(item);
+  if (isFileExplorerItem(resolved)) {
+    removeSessionFromLayout(resolved);
+    return;
+  }
+  if (narrowPaneFrameActionTargetsTab(resolved)) {
+    removeSessionFromLayout(resolved, {focusSession: nextNarrowPaneFrameItem(resolved)});
+    return;
+  }
+  removePaneFromLayout(resolved);
 }
 
 function shouldPreserveClosedPaneSlot(slot) {
@@ -25826,6 +26057,22 @@ function paneTabsWithoutFinder(slot, slots = layoutSlots) {
   return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
 }
 
+// A narrow touch layout has one shared tab strip, not independent panes. Its frame controls must
+// therefore operate on the selected tab; removing the only pane would make the control appear to
+// do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
+function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
+  if (!narrowSingleColumnMode()) return false;
+  const slot = slotForItem(item, slots);
+  return Boolean(slot && paneTabs(slot, slots).length > 1);
+}
+
+function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
+  const slot = slotForItem(item, slots);
+  if (!slot) return null;
+  const remaining = paneTabs(slot, slots).filter(value => value !== item);
+  return remaining.find(value => !isFileExplorerItem(value)) || remaining[0] || null;
+}
+
 function canPaneExpand(item, slots = layoutSlots) {
   const targetSlot = slotForItem(item, slots);
   if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
@@ -25840,6 +26087,11 @@ function canPaneExpand(item, slots = layoutSlots) {
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
+  if (narrowPaneFrameActionTargetsTab(item)) {
+    removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
+    return;
+  }
+  if (narrowSingleColumnMode()) return;
   if (isFileExplorerItem(activeItemForSide(sourceSlot))) {
     removePaneFromLayout(item);
     return;
@@ -25945,7 +26197,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(mobileSinglePaneMode ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -25989,6 +26241,10 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
 
 function dockFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
+  if (fileExplorerUsesNormalTabMovement()) {
+    void moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null, paneTabs(slotForNewSession()).length);
+    return;
+  }
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
     focusSession: fileExplorerItemId,
     prune: false,
@@ -26095,7 +26351,7 @@ function toggleFinderPane() {
 
 async function openFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
-  if (mobileSinglePaneMode) {
+  if (fileExplorerUsesNormalTabMovement()) {
     await moveSessionToSlot(fileExplorerItemId, firstNonFinderPaneSlot() || slotForNewSession(), null, paneTabs(firstNonFinderPaneSlot() || slotForNewSession()).length);
     return;
   }
@@ -26187,7 +26443,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
-  if (isFileExplorerItem(session)) {
+  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement()) {
     await openFileExplorerPane();
     return;
   }
@@ -26208,7 +26464,7 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
 
 function splitPercentForNewItem(session, zone, pct = null) {
   if (pct !== null && pct !== undefined && pct !== '' && Number.isFinite(Number(pct))) return Number(pct);
-  if (isFileExplorerItem(session) && (zone === 'left' || zone === 'right')) {
+  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement() && (zone === 'left' || zone === 'right')) {
     return zone === 'left' ? fileExplorerSplitPercent : 100 - fileExplorerSplitPercent;
   }
   return defaultSplitPercent;
@@ -27467,7 +27723,7 @@ function focusPanel(session, options = {}) {
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-    if (autoFocusEnabled) {
+    if (autoFocusCanFollowCursor()) {
       requestFileEditorPanelFocus(session);
       focusFileEditorPanelIfReady(panel, session);
     }
@@ -28595,7 +28851,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (mobileSinglePaneMode) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -28617,7 +28873,7 @@ function dropIntentForEvent(event, options = {}) {
 }
 
 function slotIsFileExplorerPane(slot) {
-  return isFileExplorerItem(activeItemForSide(slot));
+  return !fileExplorerUsesNormalTabMovement() && isFileExplorerItem(activeItemForSide(slot));
 }
 
 function dropIntentTargetRect(intent) {
@@ -28636,7 +28892,7 @@ function dropIntentInlineSize(intent) {
 }
 
 function dropItemCanBeDragged(item, options = {}) {
-  if (isLayoutItem(item)) return !isFileExplorerItem(item);
+  if (isLayoutItem(item)) return !isFileExplorerItem(item) || fileExplorerUsesNormalTabMovement();
   return options.allowCandidate === true && isFileEditorItem(item);
 }
 
@@ -28738,14 +28994,14 @@ function dropIntentHasRoomForItem(item, intent) {
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
   if (zone !== 'bottom') return false;
-  if (isFileExplorerItem(item)) return false;
+  if (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement()) return false;
   if (!dropIntentTargetRect(intent)) return false;
   return dropIntentHasRoomForItem(item, intent);
 }
 
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
-  if (mobileSinglePaneMode) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
+  if (narrowSingleColumnMode()) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot)) {
@@ -29078,11 +29334,11 @@ function dockviewThemeForApp() {
 }
 
 function dockviewRootBoundaryDropIntent(event) {
-  if (mobileSinglePaneMode) return null;
+  if (narrowSingleColumnMode()) return null;
   if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
-  if (!isLayoutItem(item) || isFileExplorerItem(item)) return null;
+  if (!isLayoutItem(item) || (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement())) return null;
   const nativeEvent = event.nativeEvent;
   const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!nativeEvent || !rect) return null;
@@ -29122,7 +29378,7 @@ function dockviewContentDropCanUseRootBoundary(event, zone) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const zone = mobileSinglePaneMode ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
+  const zone = narrowSingleColumnMode() ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -29151,7 +29407,7 @@ function dockviewPaneContentDropIntent(event) {
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
   return Boolean(info && (
-    (mobileSinglePaneMode && event.position !== 'center')
+    (narrowSingleColumnMode() && event.position !== 'center')
       ||
     dockviewPinnedTabCrossPaneViolation(info.intent)
       || !dropIntentAllowsSession(info.item, info.intent)
@@ -30029,7 +30285,7 @@ function dockviewInit() {
       dockviewClearRootBoundaryPreview();
       const targetSlot = dockviewSlotForGroupId(event.group?.id || '');
       const targetActive = targetSlot ? activeItemForSide(targetSlot) : '';
-      if (event.position === 'center' && isFileExplorerItem(targetActive)) event.preventDefault();
+      if (event.position === 'center' && isFileExplorerItem(targetActive) && !fileExplorerUsesNormalTabMovement()) event.preventDefault();
     }),
   ];
   return api;
@@ -30545,7 +30801,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (button.dataset.paneClose !== undefined) {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose || item);
+    closePaneFrameItem(button.dataset.paneClose || item);
   }
 }
 
@@ -31211,7 +31467,13 @@ function scheduleResponsiveLayoutPrune() {
 }
 
 function pruneSmallLayoutSlots() {
-  if (layoutResizeState || layoutVisiblePaneCount() <= 1) return;
+  if (layoutResizeState) return;
+  // Viewport policy owns the hard one-column/mobile invariant for both renderers. Dockview has no
+  // legacy .layout-column nodes for the DOM-size candidate loop below, so relying on that loop
+  // left a stale second pane visibly clipped after Safari resized or rotated. Reuse the shared
+  // layout normalizer before the renderer-specific minimum-size cleanup.
+  if (compactCurrentLayoutSlots({focusSession: visualActivePaneItem()})) return;
+  if (layoutVisiblePaneCount() <= 1) return;
   const candidate = smallLayoutSlotCandidate();
   if (!candidate) return;
   const moved = paneTabs(candidate.slot);
@@ -32102,14 +32364,18 @@ function bindPanelShell(panel, session) {
   // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
-  panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
+  panel.addEventListener('pointerenter', event => selectPanelOnHover(session, event));
   panel.addEventListener('pointerdown', event => {
     // Native range dragging must keep the same input node for the whole gesture;
     // focusing YO!stats here would rerender the panel before the browser moves the thumb.
     if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
-      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session], ${repoSelectorControlSelector}`);
+      const autoTarget = event.target?.closest?.('[data-auto-session]');
+      // Toggling YO changes the tab's state and can rebuild its chrome. Do not rebuild on pointerdown
+      // before its shared click dispatcher receives the same control.
+      if (autoTarget) return;
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], ${repoSelectorControlSelector}`);
       if (windowTarget) {
         // Run the original target before polling or focus-side updates can replace it.
         // The marker suppresses the later delegated click if the browser still emits one.
@@ -32228,7 +32494,7 @@ function bindPanelShell(panel, session) {
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
       if (slotIsFileExplorerPane(targetSlot)) return;
-      if (isFileExplorerItem(payload.session)) {
+      if (isFileExplorerItem(payload.session) && !fileExplorerUsesNormalTabMovement()) {
         dockFileExplorerPane();
         return;
       }
@@ -32269,7 +32535,7 @@ function bindPaneFrameControls(panel, session) {
       return;
     }
     if (button.dataset.paneClose !== undefined) {
-      removePaneFromLayout(button.dataset.paneClose || session);
+      closePaneFrameItem(button.dataset.paneClose || session);
     }
   }, true);
 }
@@ -32439,6 +32705,19 @@ function tmuxWindowDisplayActiveIndex(session) {
   const override = tmuxWindowActiveIndexOverride(session);
   if (override !== undefined) return override;
   return tmuxWindowDirectTargetGuard(session)?.index;
+}
+
+function tmuxWindowRecordIsActive(session, record) {
+  const override = tmuxWindowDisplayActiveIndex(session);
+  if (override !== undefined) return override !== tmuxWindowPendingActiveIndex && String(record?.index) === String(override);
+  // `window_active` comes from the tmux snapshot that also selects the visible terminal. Agent
+  // polling can lag it, so it must never independently choose a different highlighted window.
+  return record?.active === true;
+}
+
+function tmuxWindowActiveRecord(session, info) {
+  return tmuxWindowRecords(Array.isArray(info) ? info : info?.panes)
+    .find(record => tmuxWindowRecordIsActive(session, record)) || null;
 }
 
 function tmuxWindowDirectTargetGuard(session) {
@@ -32917,7 +33196,6 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
-  const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
   const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const contextAttr = options.infoBar === true ? ' data-tmux-window-bar-context="info-bar"' : '';
@@ -32926,9 +33204,7 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
-    const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
-    const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
-    const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
+    const active = tmuxWindowRecordIsActive(session, record);
     const title = t('terminal.window.title', {name: visibleName});
     return tmuxWindowButtonHtml({
       session,
@@ -34149,10 +34425,13 @@ function yoagentMessageDetailsHtml(message, key = '') {
   return thinkingDetails;
 }
 
-function yoagentMessageDetailRowsHtml(message) {
+function yoagentMessageDetailRowsHtml(message, key = '') {
   const rows = Array.isArray(message?.detailRows) ? message.detailRows : [];
   if (!rows.length) return '';
-  return `<div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>`;
+  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(`${key}|metadata`)}">
+    <summary><span>${esc(`${t('common.details')}…`)}</span></summary>
+    <div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>
+  </details>`;
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
@@ -34258,7 +34537,7 @@ function yoagentChatMessagesHtml() {
       author: role,
       timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
       bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
-      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
     });
   }).join('');
   return `${messageHtml}${startupInfo}`;
@@ -34427,8 +34706,7 @@ function yoagentPendingWaitsHtml() {
       ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
-      <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
-      <span class="yoagent-waiting-label yoagent-compact-label">${esc(label)}</span>
+      <span class="yoagent-waiting-label yoagent-compact-label">${textWithMovingEllipsisHtml(label, 'yoagent-waiting-dots')}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
     </li>`;
@@ -35038,7 +35316,7 @@ function yoagentChatHtml() {
   const hasConversation = Boolean(yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
@@ -44604,7 +44882,6 @@ function createFileExplorerPanel() {
   if (dateBtn) {
     syncFileExplorerTreeDateButton(dateBtn);
   }
-  const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -44632,14 +44909,6 @@ function createFileExplorerPanel() {
   });
   applyFileExplorerMode(panel);
   renderFileExplorerRootModeControls();
-  if (closeBtn) {
-    closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
-    closeBtn.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeSessionFromLayout(fileExplorerItemId);
-    });
-  }
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
   if (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession()) {
@@ -45318,7 +45587,7 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
 }
 
 function requestFileEditorPanelFocus(item) {
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor()) return;
   if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
 }
 
@@ -45327,7 +45596,7 @@ function scheduleFileEditorPanelViewStateCapture(item, panel) {
 }
 
 function focusFileEditorPanelIfReady(panel, item) {
-  if (!autoFocusEnabled) {
+  if (!autoFocusCanFollowCursor()) {
     pendingFileEditorFocus.delete(item);
     return false;
   }
@@ -51475,7 +51744,7 @@ function shareAppearanceSnapshot() {
     editorFontSize,
     previewFontSize: clampEditorPreviewFontSize(editorPreviewFontSize),
     fileExplorerFontSize,
-    tabWidth: numberSetting('appearance.tab_width', 180),
+    tabWidth: numberSetting('appearance.tab_width', 172),
     paneSpacing: Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 3))),
     paneRingOpacity: Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75))),
     inactivePaneOpacity: Math.max(0, Math.min(100, numberSetting('appearance.inactive_pane_opacity', 60))),
@@ -54220,7 +54489,7 @@ function applyShareAppearanceState(appearance = {}) {
     editorFontSize = applyShareAppearanceNumber(appearance, 'editorFontSize', 'editor_font_size', 6, 28, editorFontSize);
     editorPreviewFontSize = applyShareAppearanceNumber(appearance, 'previewFontSize', 'preview_font_size', 6, 32, editorPreviewFontSize);
     fileExplorerFontSize = applyShareAppearanceNumber(appearance, 'fileExplorerFontSize', 'file_explorer_font_size', 6, 24, fileExplorerFontSize);
-    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 180));
+    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 172));
     applyShareAppearanceNumber(appearance, 'paneSpacing', 'pane_spacing', 0, 20, numberSetting('appearance.pane_spacing', 3));
     applyShareAppearanceNumber(appearance, 'paneRingOpacity', 'pane_ring_opacity', 5, 100, numberSetting('appearance.pane_ring_opacity', 75));
     applyShareAppearanceNumber(appearance, 'inactivePaneOpacity', 'inactive_pane_opacity', 0, 100, numberSetting('appearance.inactive_pane_opacity', 60));
@@ -56593,7 +56862,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const controls = [];
   const includeActions = options.actions ?? isTmuxSession(session);
   const includeDetails = options.details === true;
-  const includeMinimize = options.minimize !== false;
+  const includeMinimize = options.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = options.expand !== false;
   const includePopout = options.popout === true;
   if (includeActions) {
@@ -56671,7 +56940,14 @@ function panelControlsHtml(session, options = {}) {
       closeTitle: t('finder.close', {name: fileExplorerLabel()}),
       closeLabel: t('finder.close', {name: fileExplorerLabel()}),
     })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
+    : paneFrameControlsHtml(session, {
+      disabled,
+      actions: isTmuxSession(session),
+      details: true,
+      // In a one-column touch layout, X and minus remove only this selected tab. Showing them here
+      // makes the ordinary pane controls useful without offering a blank-the-last-pane action.
+      close: narrowPaneFrameActionTargetsTab(session),
+    });
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${terminalButtonHtml}
           ${frameHtml}
@@ -58952,7 +59228,7 @@ function bindPanelControls(panel, session) {
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose);
+    closePaneFrameItem(button.dataset.paneClose);
   });
   delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
     event.preventDefault();
@@ -60854,7 +61130,10 @@ function showServerUpdateBanner(version) {
     ariaLabel: t('update.dismiss'),
     onClick: () => banner.remove(),
   });
-  banner.append(msg, reload, dismiss);
+  const actions = document.createElement('div');
+  actions.className = 'toast-control-row server-update-banner-actions';
+  actions.append(reload, dismiss);
+  banner.append(msg, actions);
   document.body.appendChild(banner);
 }
 
@@ -62523,6 +62802,10 @@ installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
+  // Safari can publish the new viewport before its topbar flex geometry has settled. The shared
+  // fit check runs on the next frame (and the ResizeObserver covers a later width update), so the
+  // full/compact menu decision is based only on current space, never the previous presentation.
+  scheduleTopbarNavigationFitCheck();
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
   if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();

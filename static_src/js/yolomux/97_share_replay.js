@@ -2231,7 +2231,7 @@ function applyShareAppearanceState(appearance = {}) {
     editorFontSize = applyShareAppearanceNumber(appearance, 'editorFontSize', 'editor_font_size', 6, 28, editorFontSize);
     editorPreviewFontSize = applyShareAppearanceNumber(appearance, 'previewFontSize', 'preview_font_size', 6, 32, editorPreviewFontSize);
     fileExplorerFontSize = applyShareAppearanceNumber(appearance, 'fileExplorerFontSize', 'file_explorer_font_size', 6, 24, fileExplorerFontSize);
-    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 180));
+    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 172));
     applyShareAppearanceNumber(appearance, 'paneSpacing', 'pane_spacing', 0, 20, numberSetting('appearance.pane_spacing', 3));
     applyShareAppearanceNumber(appearance, 'paneRingOpacity', 'pane_ring_opacity', 5, 100, numberSetting('appearance.pane_ring_opacity', 75));
     applyShareAppearanceNumber(appearance, 'inactivePaneOpacity', 'inactive_pane_opacity', 0, 100, numberSetting('appearance.inactive_pane_opacity', 60));

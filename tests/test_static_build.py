@@ -619,7 +619,7 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                     duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
 
     assert duplicates == []
-    assert helper_calls == 79
+    assert helper_calls == 83
 
 
 def test_browser_fixtures_use_one_read_only_english_catalog_owner():

@@ -112,6 +112,212 @@ async function runEditorPreviewSuite() {
     assert.equal(Number.isFinite(api.performanceNow()), true);
   });
 
+  test('coarse-pointer tablets retain menus while phones compact the topbar', () => {
+    const tablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 1366, height: 885},
+    });
+    const desktop = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      viewport: {width: 1366, height: 885},
+    });
+    const phone = loadYolomux('', ['1'], 'http:', 'iPhone', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 390, height: 844},
+    });
+    const narrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 744, height: 1024},
+    });
+    const roomyMenuTablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 960, height: 768},
+    });
+    const narrowMenuTablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 600, height: 768},
+    });
+    assert.equal(tablet.compactTopbarForViewportForTest(), false, 'a full-size coarse-pointer iPad retains its five top-level menus');
+    assert.equal(roomyMenuTablet.compactTopbarForViewportForTest(), false, 'a 960px iPad preserves the five menu labels by yielding lower-priority topbar chrome first');
+    assert.equal(narrowMenuTablet.compactTopbarForViewportForTest(), true, 'a phone-sized 600px fallback may compact menus after search and chrome have yielded');
+    assert.equal(phone.compactTopbarForViewportForTest(), true, 'a phone uses the collision-proof Application menu root');
+    assert.equal(desktop.compactTopbarForViewportForTest(), false, 'a desktop at the same width retains its normal topbar');
+    assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
+    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px iPad has room for two shared-minimum columns');
+    assert.equal(narrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), true, 'an iPad with room retains two-column splits');
+    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder/Differ/Tabber use ordinary tab movement on touch tablets');
+    assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
+    assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), true, 'Finder can create a normal two-column split on an iPad that has room');
+    const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 640, height: 1024},
+    });
+    assert.equal(tooNarrowTablet.narrowSingleColumnModeForTest(), true, 'a touch viewport below two shared minimum pane widths collapses to one column');
+    assert.deepEqual(canonical(tooNarrowTablet.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['__files__', '1', '2']},
+    }, 'a too-narrow iPad keeps Finder as an ordinary tab beside its terminal tabs instead of reserving a left column');
+    assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a too-narrow tablet edge drop cannot recreate a split');
+    assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle'}), true, 'a too-narrow tablet keeps ordinary middle tab moves');
+    for (const scenario of [
+      {name: 'small phone portrait', platform: 'iPhone', width: 320, height: 568, mobile: true, singleColumn: true},
+      {name: 'phone portrait', platform: 'Android Mobile', width: 390, height: 844, mobile: true, singleColumn: true},
+      {name: 'phone landscape', platform: 'Android Mobile', width: 960, height: 520, mobile: true, singleColumn: true},
+      {name: 'wide phone landscape', platform: 'Android Mobile', width: 961, height: 520, mobile: false, singleColumn: false},
+      {name: 'narrow iPad portrait', platform: 'iPad', width: 640, height: 1024, mobile: false, singleColumn: true},
+      {name: 'iPad single-column boundary', platform: 'iPad', width: 680, height: 1024, mobile: false, singleColumn: true},
+      {name: 'iPad two-column boundary', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: false},
+      {name: 'full-menu iPad', platform: 'iPad', width: 980, height: 768, mobile: false, singleColumn: false},
+      {name: 'wide iPad', platform: 'iPad', width: 981, height: 768, mobile: false, singleColumn: false},
+    ]) {
+      const scenarioApi = loadYolomux('', ['1', '2', '3'], 'http:', scenario.platform, 'admin', {
+        coarsePointer: true,
+        viewport: {width: scenario.width, height: scenario.height},
+      });
+      assert.equal(scenarioApi.mobileSinglePaneModeForTest(), scenario.mobile, `${scenario.name} applies the correct phone-only recent-tab policy`);
+      assert.equal(scenarioApi.narrowSingleColumnModeForTest(), scenario.singleColumn, `${scenario.name} applies the correct one-column pane policy`);
+    }
+    const resizeApi = loadYolomux('', ['1', '2', '3'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 744, height: 1024},
+    });
+    const resizeSlots = resizeApi.emptyLayoutSlots();
+    resizeSlots[resizeApi.layoutTreeKey] = resizeApi.splitNode('row', resizeApi.leafNode('left'), resizeApi.leafNode('slot1'), 50);
+    resizeSlots.left = resizeApi.paneStateWithTabs(['1'], '1');
+    resizeSlots.slot1 = resizeApi.paneStateWithTabs(['2', '3'], '2');
+    resizeApi.setLayoutSlotsForTest(resizeSlots);
+    resizeApi.setNativeViewportForTest({width: 640, height: 1024});
+    assert.equal(resizeApi.narrowSingleColumnModeForTest(), true, 'a live iPad viewport shrink recomputes the single-column policy instead of keeping the boot-time width');
+    assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad viewport shrink compacts the existing split through the shared layout normalizer');
+    const compactedResize = resizeApi.serialize(resizeApi.layoutSlotsForTest());
+    assert.equal(Object.keys(compactedResize.panes).length, 1, 'a narrow live viewport cannot retain a horizontally clipped second pane');
+    assert.deepEqual(Object.values(compactedResize.panes)[0].tabs, ['1', '2', '3'], 'an iPad viewport shrink preserves all existing tabs in one switchable pane');
+    const compactMenus = phone.topbarMenuTreeForTest();
+    assert.equal(compactMenus.length, 1, 'the compact topbar has one Application menu root');
+    assert.equal(compactMenus[0].label, phone.t('menu.compact.label'), 'the compact root uses the short localized application-navigation label');
+    assert.deepStrictEqual([...compactMenus[0].items.map(item => item.label)], [tablet.t('menu.file'), tablet.t('menu.view'), 'tmux', tablet.t('common.tabsLabel'), tablet.t('menu.help')], 'the compact root reuses every existing top-level menu as a submenu');
+    assert.equal(tablet.topbarMenuTreeForTest().length, 5, 'tablet keeps the five independent top-level menus');
+    assert.equal(roomyMenuTablet.topbarMenuTreeForTest().length, 5, 'a roomy iPad renders the five full menu roots instead of wasting its topbar width');
+    assert.equal(narrowMenuTablet.topbarMenuTreeForTest().length, 1, 'the phone-sized fallback uses the one compact application menu root');
+    assert.equal(desktop.topbarMenuTreeForTest().length, 5, 'desktop keeps the five independent top-level menus');
+    for (const scenario of [
+      {name: 'phone portrait', width: 220, fullMenu: 330, controls: [96], gap: 6, fits: false},
+      {name: 'narrow iPad portrait', width: 470, fullMenu: 330, controls: [96], gap: 6, fits: true},
+      {name: 'iPad split view', width: 620, fullMenu: 330, controls: [96], gap: 6, fits: true},
+      {name: 'wide iPad landscape', width: 980, fullMenu: 330, controls: [96], gap: 6, fits: true},
+    ]) {
+      assert.equal(
+        tablet.topbarFullMenuFitsAvailableSpaceForTest(scenario.width, scenario.fullMenu, scenario.controls, scenario.gap),
+        scenario.fits,
+        `${scenario.name} uses measured menu-plus-control width instead of collapsing menus at an arbitrary viewport threshold`,
+      );
+    }
+    const source = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
+    assert.ok(/function topbarMenuTree\(\)[\s\S]*menus\.map\(menu => menuSubmenu\(menu\.label, menu\.items\)\)/.test(source), 'compact navigation derives from the existing menu tree rather than duplicating commands');
+    assert.ok(/function topbarNavigationShouldBeCompact\(\)[\s\S]*return compactTopbarForViewport\(\)/.test(source), 'the final phone menu transition has one stable viewport owner, avoiding a compact/full measurement render loop while the user taps Menus');
+    assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarNavigationFitCheck\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar full-versus-compact navigation is remeasured after both viewport and rendered-width changes instead of preserving a prior menu state');
+    assert.ok(/nestedRoot: true[\s\S]*function openAppMenu\(wrapper, options = \{\}\)[\s\S]*app-menu--nested-root/.test(source), 'compact Menus exposes File/View/tmux/Tabs/Help first and opens their command layers only on demand');
+    const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
+    assert.ok(/app-topbar-touch-compact[\s\S]*topbar-language[\s\S]*topbar-owner-status/.test(css), 'touch compact mode hides secondary topbar controls before they can collide');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-980 \.topbar-nav,[\s\S]*?#latencyMeter,[\s\S]*?\.topbar-activity/.test(css), 'constrained touch mode hides low-detail navigation and activity indicators instead of crowding the menu');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-980 \.actions > :not\(#refreshMeta\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-touch-compact\.app-vw-lte-980 #refreshMeta\s*\{[\s\S]*?display:\s*inline-grid/.test(css), 'constrained touch mode keeps the existing Refresh action while lower-priority top-right buttons yield before menus');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-1280 \.topbar \.brand-version\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-touch-compact\.app-vw-lte-1100 \.topbar \.brand\s*\{[\s\S]*?min-width:\s*0[\s\S]*?\.brand-title > :not\(\.brand-yolo\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-vw-lte-980 \.actions > :not\(#refreshMeta\)[\s\S]*?app-vw-lte-600 \.topbar-search\s*\{[\s\S]*?display:\s*none/.test(css), 'constrained touch chrome yields version, wordmark, secondary actions, then Search before compacting menus');
+    assert.ok(/app-topbar-touch-compact \.topbar-search\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?\.topbar-search-label\s*\{[\s\S]*?flex:\s*0 1 8ch[\s\S]*?max-inline-size:\s*8ch[\s\S]*?\.topbar-search-hint\s*\{[\s\S]*?display:\s*none/.test(css), 'iPad and phone touch topbars reuse one Cmd-P launcher with no more than eight characters of label space, preserving room for menus and Refresh');
+    assert.ok(/\.actions button\s*\{[\s\S]*?display:\s*inline-grid;[\s\S]*?place-items:\s*center;[\s\S]*?\.actions button::before\s*\{[\s\S]*?display:\s*block;/.test(css), 'topbar action icons use one centered grid shell so the bell and other masked glyphs do not inherit a text baseline offset');
+    const webSource = fs.readFileSync('yolomux_lib/web.py', 'utf8');
+    assert.ok(/id="status" class="sub a11y-only" role="status" aria-live="polite"/.test(webSource), 'the legacy generic status text remains assistive feedback instead of visible text beside Exit');
+  });
+
+  test('one-column pane frame controls remove the selected tab instead of the only pane', () => {
+    const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 640, height: 1024},
+    });
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'a selected tab can be minimized while another tab remains in the one-column pane');
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'a terminal exposes the shared X when narrow mode can safely close its selected tab');
+    api.minimizePaneFromLayout('1');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '2', tabs: ['__files__', '2']},
+    }, 'minus removes only the selected tab and keeps the remaining single-column view visible');
+    api.setLayoutSlotsForTest({
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['__files__', '1', '2']},
+    });
+    api.closePaneFrameItem('1');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '2', tabs: ['__files__', '2']},
+    }, 'X shares the same selected-tab close route in one-column mode');
+    api.setLayoutSlotsForTest({
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1']},
+    });
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'the last remaining tab has no misleading minimize control');
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-close="1"'), false, 'the last remaining tab has no blank-layout close control');
+  });
+
+  test('phone tab hide remains hidden after one-column normalization', () => {
+    const api = loadYolomux('', ['1', '2'], 'http:', 'iPhone', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 390, height: 844},
+    });
+    assert.equal(api.mobileSinglePaneModeForTest(), true, 'the fixture exercises the recent-session phone policy');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1', '2']},
+    }, 'a fresh phone view is seeded from its two most-recent tmux tabs');
+    api.minimizePaneFromLayout('2');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1']},
+    }, 'hiding a phone tab does not let the recent-session seed add it back');
+  });
+
+  test('Finder close hides Finder without closing its whole pane', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 28);
+    slots.left = api.paneStateWithTabs([api.fileExplorerItemId, '1'], api.fileExplorerItemId);
+    slots.slot1 = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    api.closePaneFrameItem(api.fileExplorerItemId);
+    assert.equal(api.itemInLayout(api.fileExplorerItemId), false, 'Finder X removes only Finder from the current layout');
+    assert.equal(api.itemInLayout('1') && api.itemInLayout('2'), true, 'Finder X leaves the current and adjacent terminal panes intact');
+    const shellSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
+    assert.ok(/button\.dataset\.paneClose !== undefined[\s\S]*closePaneFrameItem\(button\.dataset\.paneClose \|\| session\)/.test(shellSource), 'the shared frame-control binding routes Finder X through the Finder-aware closer');
+    const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    assert.ok(/button\.dataset\.paneClose !== undefined[\s\S]*closePaneFrameItem\(button\.dataset\.paneClose \|\| item\)/.test(dockviewSource), 'Dockview header X uses the same Finder-aware close path');
+  });
+
+  test('Tabber uses the terminal tmux selection rather than stale agent-poll current state', () => {
+    const api = loadYolomux('', ['1']);
+    api.setFocusedPanelItem('1');
+    api.setFileExplorerModeForTest('tabber');
+    api.setTranscriptInfoForTest('1', {panes: [
+      {window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex'},
+      {window: '1', pane: '0', window_active: false, active: true, process_label: 'codex', command: 'codex'},
+    ]});
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'idle', window_index: '0', current: false},
+      {kind: 'codex', state: 'idle', window_index: '1', current: true},
+    ]});
+    const rows = api.tabberRenderedRowsForTest();
+    assert.equal(rows.find(row => row.path === '/s_1/w_0')?.classes.includes('tabber-active-window'), true, 'Tabber highlights the same tmux window rendered in the terminal');
+    assert.equal(rows.find(row => row.path === '/s_1/w_1')?.classes.includes('tabber-active-window'), false, 'stale agent-poll current data cannot select a different Tabber window');
+    assert.equal(api.activeTabberRowPathForTest(), '/s_1/w_0', 'Tabber current-row selection follows the same shared window source');
+    const shellSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
+    assert.ok(/function tmuxWindowRecordIsActive\(session, record\)[\s\S]*window_active/.test(shellSource), 'terminal and Tabber share the tmux-authoritative active-window classifier');
+    assert.ok(/const autoTarget = event\.target\?\.closest\?\.\('\[data-auto-session\]'\);[\s\S]*if \(autoTarget\) return;/.test(shellSource), 'YO controls are not rerendered away during panel pointerdown before their click dispatcher runs');
+  });
+
+  test('server-version reload banner groups its actions for narrow layouts', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function showServerUpdateBanner\(version\)[\s\S]*actions\.className = 'toast-control-row server-update-banner-actions'[\s\S]*actions\.append\(reload, dismiss\)[\s\S]*banner\.append\(msg, actions\)/.test(source), 'server-version banner keeps Reload and Keep in one shared actions row');
+    const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/\.server-update-banner-msg\s*\{[\s\S]*flex:\s*1 1 24ch[\s\S]*\.server-update-banner-actions\s*\{[\s\S]*flex-wrap:\s*wrap/.test(css), 'server-version banner gives its message the flexible column and groups wrapping controls');
+    assert.ok(/body\.app-vw-lte-760 \.server-update-banner\s*\{[\s\S]*flex-direction:\s*column[\s\S]*body\.app-vw-lte-760 \.server-update-banner-msg\s*\{[\s\S]*flex:\s*0 1 auto/.test(css), 'phone-width server-version banner stacks without giving its message a tall column flex basis');
+  });
+
   test('YO!agent waiting and queued rows share one compact component style', () => {
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     for (const selector of ['yoagent-section-title', 'yoagent-compact-list', 'yoagent-compact-item', 'yoagent-compact-label', 'yoagent-compact-action']) {
@@ -2455,10 +2661,15 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('return renderBrowserAppIconDataUrl({count, showBadge: true})'), 'the favicon enables the activity-count badge through the shared renderer');
     assert.ok(source.includes('renderBrowserAppIconDataUrl({size: 192, showBadge: false})'), 'OS notifications use a badge-free 192px icon through the shared renderer');
     assert.ok(source.includes("new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions)"), 'the shared OS-notification boundary applies the icon to every notification');
-    assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*focusedPanelItem === target \|\| focusedTerminal === target/.test(source), 'one exact-target focus classifier suppresses chat and session notifications only on the viewed Tab');
+    assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*visualActivePaneItem\(\) === target/.test(source), 'one exact-target focus classifier keeps the logical active pane acknowledged across transient terminal blur');
     assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*toastTargetItem[\s\S]*browserNotificationsByTarget/.test(source), 'focusing a target Tab dismisses both its in-app and system notifications through one owner');
     assert.ok(/function maybeNotifyWorkingAgentTransition\(session, agentKey, tone, options = \{\}\)[\s\S]*notificationTargetIsFocused\(session\)[\s\S]*dismissNotificationsForTarget\(session\)[\s\S]*return false[\s\S]*showToast\(title/.test(source), 'RUN-to-stop/pause notifications are suppressed before either delivery path when their exact Tab is focused');
     const notificationApi = loadYolomux('', ['1']);
+    notificationApi.setDocumentVisibilityForTest('visible');
+    notificationApi.setFocusedTerminal('1');
+    assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'the focused session is acknowledged before a transition notification is delivered');
+    notificationApi.clearFocusedTerminal('1');
+    assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'a transient terminal blur does not notify inside the same logically active session');
     notificationApi.setTranscriptInfoForTest('1', {
       selected_pane: {current_path: '/home/test/yolomux.dev8001'},
       project: {
@@ -2779,10 +2990,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/session-yolo-marker[^"]*inactive/.test(autoOffPromptHtml), 'auto-off prompted tabs offer the inactive YO button');
     assert.ok(/data-auto-session="4"/.test(autoOffPromptHtml), 'auto-off prompted YO button is clickable from the tab');
     const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    // The working YO marker no longer spins — the glowing green ball beside the agent symbol is the
-    // working indicator now. Loading/thinking spinners use the shared status pulse duration instead.
+    // The working green ball carries the activity cue; no YO glyph rotates anywhere.
     assert.equal(/\.session-yolo-marker\.working\s*\{[^}]*yolo-marker-rotate/.test(yoloMarkerCss), false, '#23: working YO marker is static (no rotation animation)');
-    assert.ok(/\.session-yolo-marker\.yoagent-waiting-spinner[\s\S]*?animation-name:\s*yolo-marker-rotate[\s\S]*?animation-duration:\s*var\(--pulse-duration/.test(yoloMarkerCss), '#23: loading/thinking spinners still spin from the shared status pulse duration');
+    assert.equal(/yoagent-(?:waiting|chat)-spinner|yolo-marker-rotate/.test(yoloMarkerCss), false, '#23: YO!agent never renders or rotates a YO spinner');
     assert.equal(yoloMarkerCss.includes('--yolo-working-duration'), false, '#23: the dead --yolo-working-duration token is removed');
     assert.equal(/yolo_rotate_ms|yoloRotationDelay|--yolo-rotation-duration|--yolo-rotate-delay/.test(fs.readFileSync('static/yolomux.js', 'utf8') + yoloMarkerCss), false, '#23: the old Active YO rotation setting and delay variables are removed');
     assert.equal(/\.session-yolo-marker:not\(\.inactive\):not\(\.locked\):not\(\.working\)/.test(yoloMarkerCss), false, '#23: the ambient idle-rotation rule is deleted (idle markers are static)');
@@ -6689,12 +6899,11 @@ async function runEditorPreviewSuite() {
     assert.equal(openDetail.open, true, 'YO!agent restores the matching Details block after repaint');
     assert.equal(closedDetail.open, false, 'YO!agent does not expand unrelated Details blocks after repaint');
     api.setYoagentBusyForTest(true);
-    assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
     // The "thinking" label keeps its word but the trailing dots are CSS-animated, so the text updates
     // without rebuilding the busy-state DOM.
     assert.ok(api.yoagentChatHtml().includes('thinking'), 'YO!agent busy state keeps the concise thinking label');
     assert.ok(api.yoagentChatHtml().includes('yoagent-thinking-dots'), 'YO!agent thinking dots are CSS animated, not hardcoded static text');
-    assert.ok(api.yoagentChatHtml().includes('session-yolo-marker active working'), 'YO!agent busy spinner reuses the YO tab working marker');
+    assert.equal(/session-yolo-marker|yoagent-chat-spinner/.test(api.yoagentChatHtml()), false, 'YO!agent busy state has plain text and shared moving dots, not a YO spinner');
     api.setYoagentMessagesForTest([
       {
         role: 'assistant',
@@ -6733,7 +6942,7 @@ async function runEditorPreviewSuite() {
     assert.ok(thinkingPreviewHtml.includes('<summary><span>thinking (3 words)…</span></summary>'), 'completed structured thinking items collapse to a count-only summary');
     assert.equal(thinkingPreviewHtml.includes('yoagent-details-preview'), false, 'completed YO!agent thinking details do not keep preview words in the collapsed summary');
     assert.ok(thinkingPreviewHtml.includes('<pre class="yoagent-auxiliary-stream">reading activity context</pre>'), 'expanded structured thinking items keep the real thinking text without an English classifier prefix');
-    assert.ok(thinkingPreviewHtml.includes('response time:') && thinkingPreviewHtml.includes('1.000s') && thinkingPreviewHtml.includes('1000.0ms'), 'structured timing detailRows remain visible beside thinking stream items');
+    assert.ok(/data-yoagent-message-details-key="[^"]*\|metadata"[\s\S]*response time:[\s\S]*1\.000s[\s\S]*1000\.0ms/.test(thinkingPreviewHtml), 'structured timing detailRows stay collapsed in their own Details disclosure beside thinking stream items');
     api.setYoagentBusyForTest(false);
     api.setYoagentDraftForTest('half typed question');
     assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');
@@ -8417,6 +8626,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function applyYoagentConversationPayload\(payload = \{\}, options = \{\}\)[\s\S]*yoagentConversationState\.pendingWaits = Array\.isArray\(payload\.pending_waits\)/.test(src), 'YO!agent conversation payload carries pending background waits');
     assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*tPlural\('yoagent\.waiting\.count'[\s\S]*yoagent-waiting-queue/.test(src), 'YO!agent renders a waiting queue for one or more background result waits');
     assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*sourceRegarding[\s\S]*targetRegarding[\s\S]*yoagent\.waiting\.handoff[\s\S]*yoagent\.waiting\.session/.test(src), 'YO!agent waiting rows distinguish handoff waits from direct session waits and include both regarding summaries');
+    assert.ok(/function yoagentPendingWaitsHtml\(\)[\s\S]*textWithMovingEllipsisHtml\(label, 'yoagent-waiting-dots'\)/.test(src), 'YO!agent pending waits reuse the shared moving-ellipsis helper');
     assert.ok(/data-yoagent-wait-clear/.test(src) && /async function clearYoagentPendingWait/.test(src), 'YO!agent pending waits expose a clear affordance through the existing wait store');
     assert.ok(/function applyYoagentJobsPayload\(payload = \{\}, options = \{\}\)[\s\S]*setYoagentJobs\(payload\.jobs/.test(src), 'YO!agent keeps server-reported jobs in one guarded job-state owner');
     assert.ok(/function yoagentJobsHtml\(\)[\s\S]*yoagent-jobs-list/.test(src), 'YO!agent renders queued jobs as a visible list');
@@ -8449,7 +8659,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function yoagentTimestampText[\s\S]*second:\s*'2-digit'/.test(src), 'YO!agent chat timestamps include seconds');
     assert.ok(/function yoagentMessageLatencyHtml[\s\S]*yoagent-message-latency[\s\S]*yoagent\.responseLatency/.test(src), 'YO!agent assistant timestamps include a localized response-latency suffix');
     assert.ok(/function yoagentStreamAuxiliaryItemHtml[\s\S]*data-yoagent-message-details-key/.test(src), 'structured YO!agent stream diagnostics render as expandable items with stable keys');
-    assert.ok(/function yoagentMessageDetailRowsHtml\(message\)[\s\S]*messageDescriptorText\(row\)/.test(src), 'structured YO!agent detailRows resolve descriptors only when rendered');
+    assert.ok(/function yoagentMessageDetailRowsHtml\(message, key = ''\)[\s\S]*yoagent-message-details[\s\S]*common\.details[\s\S]*messageDescriptorText\(row\)/.test(src), 'structured YO!agent detailRows resolve descriptors only when rendered and remain inside one collapsed Details disclosure');
     assert.ok(/function yoagentMessageStreamItemsHtml[\s\S]*item\.kind === 'assistant'[\s\S]*yoagentStreamAuxiliaryItemHtml/.test(src), 'structured streamItems select assistant versus auxiliary renderers from stable kinds');
     assert.ok(/function yoagentToolItemBodyHtml[\s\S]*yoagent-tc-command/.test(src), 'structured tool items wrap executed commands in the shared command span');
     assert.ok(/const descriptorLabel = messageDescriptorText\(item\.label\)/.test(src), 'stream-item labels render the canonical descriptor instead of rebuilding a parallel schema');
@@ -8875,7 +9085,7 @@ async function runEditorPreviewSuite() {
     assert.equal(choices.find(c => c.value === 'zh-Hant').label, '繁體中文', 'Phase 1: Traditional Chinese is labeled with its endonym');
     assert.equal(choices.find(c => c.value === 'zh-Hans').label, '简体中文', 'Phase 1: Simplified Chinese is labeled with its endonym');
     const src = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher');
+    assert.ok(/function createTopbarRightTools\(\)[\s\S]*?createTopbarLanguageSwitcher\(\)/.test(src) && /sessionButtons\.appendChild\(createTopbarRightTools\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher through its shared right-side group');
     assert.ok(/function createTopbarLanguageSwitcher[\s\S]*?applyLocale\(resolveLocalePref\(value\)\)[\s\S]*?saveSettingsPatch\(settingPatch\('general\.language', value\)\)/.test(src), 'Phase 1: the switcher applies the locale optimistically AND saves general.language (same setting as Preferences)');
     assert.ok(/const localeGlobalSurfaceHooks[\s\S]*renderSessionButtons\(\{force: true\}\)/.test(i18nRegistrySource), 'Phase 1: the topbar registers its forced locale repaint with the shared global-surface hooks');
     assert.ok(src.includes("active.matches?.('select, input, .topbar-language, .app-menu-button')") && /function renderSessionButtons[\s\S]*?topbarControlIsActive\(\)/.test(src), 'the topbar does not rebuild while a topbar control is focused/open');
@@ -8890,7 +9100,7 @@ async function runEditorPreviewSuite() {
     // #256: topbar theme switcher (auto/dark/light) mirrors the language switcher and sits right of it;
     // order ends Language, Theme, Activity (activity pinned far-right).
     // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, Ownership, then Activity (far right).
-    assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\);\s*sessionButtons\.appendChild\(createTopbarOwnerStatus\(\)\);\s*sessionButtons\.appendChild\(createTopbarActivityStatus\(\)\)/.test(src), '#257: topbar order is Language, Ownership, then Activity (no theme switcher between them)');
+    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarOwnerStatus\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/search group, which precedes Language, Ownership, and Activity');
     assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input, \.topbar-language, \.app-menu-button'\)/.test(src), '#62: topbar detects focused controls before passive rebuilds');
     assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused');
     assert.ok(/button\.addEventListener\('blur', flushPendingSessionButtonsRender\)/.test(src), '#62: language button blur flushes a deferred topbar render');
@@ -9523,6 +9733,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.yolomux-dockview \.dv-groupview::after\s*\{[\s\S]*?border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity\), transparent\)/.test(css), 'Dockview groups draw the active surround as a pane-spacing-width pseudo-ring without thickening the sash');
     assert.ok(/\.yolomux-dockview \.dv-groupview:has\(\.file-explorer-panel\)\s*\{[\s\S]*?min-width:\s*var\(--file-pane-min-inline-size\)/.test(css), 'Dockview gives the docked Finder/Differ group a real min-width floor');
     assert.ok(/\.yolomux-dockview \.dv-groupview:has\(\.panel\.active-pane\),[\s\S]*?\.dv-groupview:has\(\.panel\.typing-ready-pane\)\s*\{[\s\S]*?--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(css), 'Dockview active/typing panes feed the same active ring color into the group pseudo-ring');
+    assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?border-radius:\s*var\(--pane-ring-radius, var\(--pane-tile-radius\)\)[\s\S]*?\.yolomux-dockview \.dv-groupview::after\s*\{[\s\S]*?border-radius:\s*inherit[\s\S]*?\.dv-groupview:has\(\.panel\.active-pane\),[\s\S]*?--pane-ring-radius:\s*var\(--pane-tab-top-radius\)/.test(css), 'Dockview active-pane outlines inherit the shared tab radius instead of ending in square corners');
     assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\s*\{[\s\S]*?border-width:\s*0;/.test(css), 'Dockview-mounted panes do not keep the legacy pane-spacing border');
     assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto minmax\(0,\s*1fr\)/.test(css), 'Dockview-mounted panes switch from header/detail/content rows to detail/content rows when the inner header is hidden');
     assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel > \.panel-head\.dockview-inner-head-hidden,[\s\S]*?\.panel-head\[hidden\]\s*\{[\s\S]*?display:\s*none;/.test(css), 'Dockview hidden inner pane headers really stop rendering instead of leaving a green band');
@@ -10199,6 +10410,48 @@ async function runEditorPreviewSuite() {
     assert.deepStrictEqual([...state.messageIds], [7]);
     assert.equal(state.requestGeneration, 1);
     assert.equal(state.olderGeneration, 1);
+  });
+
+  await testAsync('cursorless touch suppresses hover popovers and passive auto-focus without disabling iPad trackpads', async () => {
+    const touchApi = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      hoverCapable: false,
+      fireAllTimeouts: true,
+    });
+    touchApi.setAutoFocusEnabledForTest(true);
+    assert.equal(touchApi.browserHasCursorHoverForTest(), false, 'a touch-only iPad has no cursor-hover capability');
+    assert.equal(touchApi.autoFocusCanFollowCursorForTest(), false, 'the saved preference cannot passively move focus on a touch-only device');
+
+    const anchor = new TestElement('touch-hover-anchor');
+    const popover = new TestElement('touch-hover-popover');
+    anchor.appendChild(popover);
+    let opens = 0;
+    const controller = touchApi.createHoverPopoverForTest({
+      anchor,
+      popover,
+      showDelay: 0,
+      hideDelay: 0,
+      onOpen: () => { opens += 1; },
+    });
+    for (const listener of anchor.listeners.get('pointerenter') || []) listener({pointerType: 'touch', target: anchor});
+    await flushAsyncWork();
+    assert.equal(opens, 0, 'touch pointerenter cannot queue a sticky hover popover');
+
+    anchor.hovered = true;
+    controller.openNow();
+    assert.equal(anchor.classList.contains('popover-open'), true, 'the controller can represent an already-open legacy popover');
+    for (const listener of anchor.listeners.get('pointerdown') || []) listener({pointerType: 'touch', target: anchor});
+    assert.equal(anchor.classList.contains('popover-open'), false, 'touching the tab clears an existing hover popover');
+
+    for (const listener of anchor.listeners.get('pointerenter') || []) listener({pointerType: 'mouse', target: anchor});
+    await flushAsyncWork();
+    assert.equal(opens, 2, 'a mouse pointer still opens the same popover controller');
+    assert.equal(touchApi.autoFocusCanFollowCursorForTest(), true, 'a newly observed mouse pointer enables follow-on passive focus even before a tablet updates its media query');
+
+    const trackpadApi = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {coarsePointer: true, hoverCapable: true});
+    trackpadApi.setAutoFocusEnabledForTest(true);
+    assert.equal(trackpadApi.browserHasCursorHoverForTest(), true, 'an iPad with a trackpad or mouse exposes hover capability');
+    assert.equal(trackpadApi.autoFocusCanFollowCursorForTest(), true, 'cursor-capable iPads retain passive auto-focus');
   });
 }
 

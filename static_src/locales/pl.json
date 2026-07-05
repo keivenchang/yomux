@@ -785,7 +785,7 @@
   "login.showPassword": "Pokaż hasło",
   "login.signIn": "Zaloguj",
   "login.username": "Nazwa użytkownika",
-  "menu.bar.aria": "Menu aplikacji",
+  "menu.compact.label": "Menu",
   "menu.common.adminOnly": "Tylko admin",
   "menu.common.comingSoon": "Wkrótce",
   "menu.file": "Plik",

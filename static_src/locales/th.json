@@ -743,7 +743,7 @@
   "login.showPassword": "แสดงรหัสผ่าน",
   "login.signIn": "เข้าสู่ระบบ",
   "login.username": "ชื่อผู้ใช้",
-  "menu.bar.aria": "เมนูแอปพลิเคชัน",
+  "menu.compact.label": "เมนู",
   "menu.common.adminOnly": "เฉพาะ admin",
   "menu.common.comingSoon": "เร็วๆ นี้",
   "menu.file": "ไฟล์",

@@ -864,37 +864,72 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
         assert hover_metrics["beforeHeight"] <= hover_metrics["hoverLineSize"] + 0.1
 
 
-def test_dockview_touch_sashes_expand_hit_target_without_thickening_separator(browser, tmp_path):
-    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
-    wait_for_dockview(browser, min_tabs=2)
-    metrics = browser.execute_script(
-        """
-        document.documentElement.style.setProperty('--pane-resizer-hit-inset', '20px');
-        const sashes = Array.from(document.querySelectorAll('.dv-sash')).map(sash => {
-          const rect = sash.getBoundingClientRect();
-          const before = getComputedStyle(sash, '::before');
-          const after = getComputedStyle(sash, '::after');
-          const horizontal = sash.closest('.dv-split-view-container')?.classList.contains('dv-horizontal');
-          return {
-            horizontal,
-            sashSize: horizontal ? rect.width : rect.height,
-            visibleLineSize: horizontal ? parseFloat(before.width) : parseFloat(before.height),
-            hitSize: horizontal ? parseFloat(after.width) : parseFloat(after.height),
-            hitPointerEvents: after.pointerEvents,
-          };
-        });
-        return {
-          sashes,
-          rootHitInset: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hit-inset').trim(),
-        };
-        """
-    )
-    assert metrics["rootHitInset"] == "20px", metrics
-    assert metrics["sashes"], metrics
-    for sash in metrics["sashes"]:
-        assert sash["visibleLineSize"] <= 1.1, sash
-        assert sash["hitSize"] >= sash["sashSize"] + 39, sash
-        assert sash["hitPointerEvents"] == "auto", sash
+def test_dockview_touch_sashes_use_centered_handle_and_small_grip(browser, tmp_path):
+    browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True})
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    try:
+        load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
+        wait_for_dockview(browser, min_tabs=2)
+        metrics = browser.execute_script(
+            """
+            document.documentElement.style.setProperty('--pane-resizer-hit-inset', '20px');
+            const sashes = Array.from(document.querySelectorAll('.dv-sash')).map(sash => {
+              const rect = sash.getBoundingClientRect();
+              const before = getComputedStyle(sash, '::before');
+              const after = getComputedStyle(sash, '::after');
+              const horizontal = sash.closest('.dv-split-view-container')?.classList.contains('dv-horizontal');
+              return {
+                horizontal,
+                sashSize: horizontal ? rect.width : rect.height,
+                visibleLineSize: horizontal ? parseFloat(before.width) : parseFloat(before.height),
+                hitSize: horizontal ? parseFloat(after.height) : parseFloat(after.width),
+                hitPointerEvents: after.pointerEvents,
+              };
+            });
+            return {
+              sashes,
+              rootHitInset: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hit-inset').trim(),
+            };
+            """
+        )
+        assert metrics["rootHitInset"] == "20px", metrics
+        assert metrics["sashes"], metrics
+        for sash in metrics["sashes"]:
+            assert 3 <= sash["visibleLineSize"] <= 5, sash
+            assert 43 <= sash["hitSize"] <= 45, sash
+            assert sash["hitPointerEvents"] == "auto", sash
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+
+
+def test_dockview_touch_finder_close_is_outside_splitter_hit_target(browser, tmp_path):
+    browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True})
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    try:
+        load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=files,1&layout=row@30(left,right)&tabs=left:files;right:1", sessions=["1"])
+        wait_for_dockview(browser, min_tabs=2)
+        result = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const close = document.querySelector('.file-explorer-panel-close');
+            if (!close) return done({error: 'Finder close control missing'});
+            const rect = close.getBoundingClientRect();
+            const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            const pointTargetsClose = point === close || point?.closest?.('.file-explorer-panel-close') === close;
+            close.click();
+            requestAnimationFrame(() => requestAnimationFrame(() => done({
+              pointTargetsClose,
+              finderOpen: itemInLayout(fileExplorerItemId),
+            })));
+            """
+        )
+        assert result.get("error") is None, result
+        assert result["pointTargetsClose"] is True, result
+        assert result["finderOpen"] is False, result
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
 
 
 def test_dockview_hidden_inner_header_keeps_terminal_content_full_height(browser, tmp_path):
@@ -3346,8 +3381,8 @@ def test_dockview_many_tabs_wrap_above_content(browser, tmp_path):
     assert metrics["rejections"] == []
     assert metrics["groups"][0]["tabs"] == sessions
     assert len(tab_tops) >= 2
-    assert max(tab_widths) <= 181
-    assert min(tab_widths) >= 170
+    assert max(tab_widths) <= 173
+    assert min(tab_widths) >= 162
     assert metrics["header"]["height"] >= (tab_height * 2) - 2
     assert metrics["header"]["tabsOverflowX"] == "visible"
     assert metrics["header"]["tabsScrollWidth"] <= metrics["header"]["tabsClientWidth"] + 1

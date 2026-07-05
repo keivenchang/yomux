@@ -420,9 +420,10 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'viewport'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'hoverCapable', 'viewport'].includes(key)));
   const fireAllTimeouts = options.fireAllTimeouts === true;
   const coarsePointer = options.coarsePointer === true;
+  const hoverCapable = options.hoverCapable === undefined ? !coarsePointer : options.hoverCapable === true;
   const viewport = options.viewport || {};
   const viewportWidth = Number.isFinite(Number(viewport.width)) ? Number(viewport.width) : 1200;
   const viewportHeight = Number.isFinite(Number(viewport.height)) ? Number(viewport.height) : 800;
@@ -617,7 +618,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         windowListeners.set(type, listeners.filter(item => item !== listener));
       },
       matchMedia(query) {
-        return {matches: coarsePointer && String(query || '').includes('pointer: coarse'), addEventListener() {}, addListener() {}};
+        const mediaQuery = String(query || '');
+        return {matches: (coarsePointer && mediaQuery.includes('pointer: coarse')) || (hoverCapable && mediaQuery.includes('any-hover: hover')), addEventListener() {}, addListener() {}};
       },
       setTimeout: testSetTimeout,
     },
@@ -645,6 +647,11 @@ globalThis.__layoutTestApi = {
   agentErrorIsBlocking,
   appModifier,
   appMenuTree,
+  topbarMenuTreeForTest: topbarMenuTree,
+  topbarFullNavigationFitsForTest: topbarFullNavigationFits,
+  topbarFullMenuFitsAvailableSpaceForTest: topbarFullMenuFitsAvailableSpace,
+  topbarNavigationShouldBeCompactForTest: topbarNavigationShouldBeCompact,
+  compactTopbarForViewportForTest: compactTopbarForViewport,
   appShortcutText,
   aboutBrandHtml,
   showAboutModal,
@@ -1156,10 +1163,14 @@ globalThis.__layoutTestApi = {
   largestPaneSlotForFileEditor,
   layoutWithFileExplorerDockedLeft,
   layoutSlotsForTest() { return cloneLayoutSlots(layoutSlots); },
-  mobileSinglePaneModeForTest() { return mobileSinglePaneMode; },
+  mobileSinglePaneModeForTest: mobileSinglePaneMode,
+  narrowSingleColumnModeForTest: narrowSingleColumnMode,
+  fileExplorerUsesNormalTabMovementForTest: fileExplorerUsesNormalTabMovement,
   phoneLikeMobileViewportForTest: phoneLikeMobileViewport,
+  narrowTouchSingleColumnViewportForTest: narrowTouchSingleColumnViewport,
   mobileRecentTmuxItemsForTest: mobileRecentTmuxItems,
   mobileSinglePaneLayoutSlotsForTest: mobileSinglePaneLayoutSlots,
+  compactCurrentLayoutSlotsForTest: compactCurrentLayoutSlots,
   availableLayoutModesForTest: availableLayoutModes,
   layoutWithReplacedItem,
   layoutWithoutItem,
@@ -1256,6 +1267,9 @@ globalThis.__layoutTestApi = {
   focusedPanelItemForTest() { return focusedPanelItem; },
   setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
   autoFocusEnabledForTest() { return autoFocusEnabled; },
+  browserHasCursorHoverForTest: browserHasCursorHover,
+  autoFocusCanFollowCursorForTest: autoFocusCanFollowCursor,
+  notificationTargetIsFocusedForTest: notificationTargetIsFocused,
   selectSession,
   selectPanelOnHover,
   claimVisibleTerminalResizeAuthorityForTest: claimVisibleTerminalResizeAuthority,
@@ -1664,7 +1678,16 @@ globalThis.__layoutTestApi = {
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
   resolvedGlobalThemeModeForTest: resolvedGlobalThemeMode,
-  setSystemPrefersDarkForTest(value) { window.matchMedia = () => ({matches: value === true, addEventListener() {}, addListener() {}}); },
+  setSystemPrefersDarkForTest(value) {
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = query => {
+      const mediaQuery = String(query || '');
+      const matches = mediaQuery.includes('prefers-color-scheme')
+        ? value === true
+        : previousMatchMedia?.(query)?.matches === true;
+      return {matches, addEventListener() {}, addListener() {}};
+    };
+  },
   shareResolvedGlobalThemeModeForTest() { return shareResolvedGlobalThemeMode; },
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
@@ -1871,6 +1894,7 @@ globalThis.__layoutTestApi = {
   minimizePaneFromLayout,
   removePaneFromLayout,
   removeSessionFromLayout,
+  closePaneFrameItem,
   runtimeIntervalDelay,
   resetRuntimeIntervalForTest: resetRuntimeInterval,
   clearRuntimeIntervalForTest: clearRuntimeInterval,
@@ -2066,6 +2090,7 @@ globalThis.__layoutTestApi = {
   markdownTextWithTaskLineToggled,
   markdownPreviewBlockedTagsForTest() { return Array.from(MARKDOWN_PREVIEW_BLOCKED_TAGS); },
   moveSessionToSlot,
+  dropItemCanBeDraggedForTest: dropItemCanBeDragged,
   openFileEditorPane,
   onFileTreeRowClick,
   pathRelativeToDirectory,

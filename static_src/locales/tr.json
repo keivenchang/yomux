@@ -743,7 +743,7 @@
   "login.showPassword": "Parolayı göster",
   "login.signIn": "Oturum aç",
   "login.username": "Kullanıcı adı",
-  "menu.bar.aria": "Uygulama menüsü",
+  "menu.compact.label": "Menüler",
   "menu.common.adminOnly": "Yalnızca admin",
   "menu.common.comingSoon": "Yakında geliyor",
   "menu.file": "Dosya",

@@ -1844,7 +1844,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         }
         if (lower.includes('tab width')) {
           applyFixtureSettingsPatch({appearance: {tab_width: 220}});
-          return fixtureSettingAnswer('appearance.tab_width', '180', '220');
+          return fixtureSettingAnswer('appearance.tab_width', '172', '220');
         }
         if (lower.includes('font size')) {
           applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});

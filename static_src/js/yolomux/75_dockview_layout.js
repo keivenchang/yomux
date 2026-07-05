@@ -88,11 +88,11 @@ function dockviewThemeForApp() {
 }
 
 function dockviewRootBoundaryDropIntent(event) {
-  if (mobileSinglePaneMode) return null;
+  if (narrowSingleColumnMode()) return null;
   if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
-  if (!isLayoutItem(item) || isFileExplorerItem(item)) return null;
+  if (!isLayoutItem(item) || (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement())) return null;
   const nativeEvent = event.nativeEvent;
   const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!nativeEvent || !rect) return null;
@@ -132,7 +132,7 @@ function dockviewContentDropCanUseRootBoundary(event, zone) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const zone = mobileSinglePaneMode ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
+  const zone = narrowSingleColumnMode() ? 'middle' : (event.position === 'center' ? 'middle' : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -161,7 +161,7 @@ function dockviewPaneContentDropIntent(event) {
 function dockviewShouldSuppressPaneContentDrop(event) {
   const info = dockviewPaneContentDropInfo(event);
   return Boolean(info && (
-    (mobileSinglePaneMode && event.position !== 'center')
+    (narrowSingleColumnMode() && event.position !== 'center')
       ||
     dockviewPinnedTabCrossPaneViolation(info.intent)
       || !dropIntentAllowsSession(info.item, info.intent)
@@ -1039,7 +1039,7 @@ function dockviewInit() {
       dockviewClearRootBoundaryPreview();
       const targetSlot = dockviewSlotForGroupId(event.group?.id || '');
       const targetActive = targetSlot ? activeItemForSide(targetSlot) : '';
-      if (event.position === 'center' && isFileExplorerItem(targetActive)) event.preventDefault();
+      if (event.position === 'center' && isFileExplorerItem(targetActive) && !fileExplorerUsesNormalTabMovement()) event.preventDefault();
     }),
   ];
   return api;
@@ -1555,7 +1555,7 @@ function handleDockviewHeaderActionClick(event, fallbackItem = '') {
   if (button.dataset.paneClose !== undefined) {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose || item);
+    closePaneFrameItem(button.dataset.paneClose || item);
   }
 }
 

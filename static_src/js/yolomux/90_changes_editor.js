@@ -2721,7 +2721,6 @@ function createFileExplorerPanel() {
   if (dateBtn) {
     syncFileExplorerTreeDateButton(dateBtn);
   }
-  const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -2749,14 +2748,6 @@ function createFileExplorerPanel() {
   });
   applyFileExplorerMode(panel);
   renderFileExplorerRootModeControls();
-  if (closeBtn) {
-    closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
-    closeBtn.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeSessionFromLayout(fileExplorerItemId);
-    });
-  }
   refreshFileExplorerPanelTree(panel);
   renderFileExplorerChangesPanel(panel);
   if (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession()) {
@@ -3435,7 +3426,7 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
 }
 
 function requestFileEditorPanelFocus(item) {
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor()) return;
   if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
 }
 
@@ -3444,7 +3435,7 @@ function scheduleFileEditorPanelViewStateCapture(item, panel) {
 }
 
 function focusFileEditorPanelIfReady(panel, item) {
-  if (!autoFocusEnabled) {
+  if (!autoFocusCanFollowCursor()) {
     pendingFileEditorFocus.delete(item);
     return false;
   }

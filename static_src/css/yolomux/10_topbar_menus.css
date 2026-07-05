@@ -112,13 +112,15 @@
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
   height: var(--compact-icon-button-size);
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   padding: 0;
   overflow: hidden;
   font-size: 0;
 }
 .actions button::before {
   content: "";
+  display: block;
   width: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   height: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   background: currentColor;
@@ -444,6 +446,7 @@ button.topbar-status-surface:focus-visible {
   text-align: end;
 }
 .app-menu-area {
+  position: relative;
   width: 100%;
   min-width: 0;
   display: flex;
@@ -452,6 +455,21 @@ button.topbar-status-surface:focus-visible {
   gap: var(--space-8);
   min-height: var(--compact-control-height);
   overflow: visible;
+}
+/* Keep menu roots, editor navigation, search, and right-side controls in one real flex sequence.
+   An absolutely centered launcher could cover Help while there was still spare space at the right.
+   This order makes Help visible first and puts Search directly between it and the right controls. */
+.topbar-center-tools {
+  flex: 0 1 auto;
+}
+.topbar-center-tools .topbar-nav {
+  margin-inline-start: 0;
+}
+.topbar-center-tools .topbar-search {
+  margin-inline: 0;
+}
+.topbar-right-tools {
+  margin-inline-start: auto;
 }
 /* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
@@ -627,7 +645,70 @@ body.app-vw-lte-1100 .topbar-search {
 body.app-vw-lte-1100 .topbar-activity-idle {
   display: none;
 }
-body.app-vw-lte-760 .topbar-search {
+/* Coarse-pointer tablets keep their normal menu bar, but lower-priority controls yield before any
+   topbar group can overlap. Every hidden action remains available from the same File/View menus. */
+body.app-topbar-touch-compact .topbar-language,
+body.app-topbar-touch-compact .topbar-owner-status {
+  display: none;
+}
+body.app-topbar-touch-compact .topbar {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact .app-menu-area {
+  gap: var(--space-6);
+}
+/* The compact Menus root is the only route to File/View/tmux/Tabs/Help on a phone. Give that
+   real button a reliable touch target instead of relying on its short desktop menu-row height. */
+body.app-topbar-touch-compact .app-menu-button {
+  min-height: 36px;
+  touch-action: manipulation;
+}
+body.app-topbar-touch-compact .topbar-center-tools,
+body.app-topbar-touch-compact .topbar-right-tools {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact.app-vw-lte-980 .topbar-nav,
+body.app-topbar-touch-compact.app-vw-lte-980 #latencyMeter,
+body.app-topbar-touch-compact.app-vw-lte-980 .topbar-activity,
+body.app-topbar-touch-compact.app-vw-lte-980 #status {
+  display: none;
+}
+/* Preserve the five menu roots by yielding chrome in one ordered sequence: version, wordmark,
+   secondary actions, then the Cmd-P launcher. Each tier only removes the next lower-priority
+   detail, so a wider tablet immediately restores it without relying on prior layout state. */
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar .brand-version {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand {
+  min-width: 0;
+}
+body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand-title > :not(.brand-yolo) {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta) {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta {
+  display: inline-grid;
+}
+/* Every touch layout uses the same Cmd-P launcher, but it receives only a short localized label
+   area. This preserves menus and Refresh on iPad/phone widths without creating a second search
+   control for mobile. The shared ellipsis owner truncates the longer label safely. */
+body.app-topbar-touch-compact .topbar-search {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  margin-inline: var(--space-6) 0;
+}
+body.app-topbar-touch-compact .topbar-search-label {
+  display: inline-flex;
+  flex: 0 1 8ch;
+  max-inline-size: 8ch;
+}
+body.app-topbar-touch-compact .topbar-search-hint {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
   display: none;
 }
 .app-menu-area.drag-over {

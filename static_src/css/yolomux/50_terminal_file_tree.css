@@ -1165,13 +1165,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   gap: var(--space-7);
   min-width: 0;
 }
-.yoagent-waiting-spinner {
-  width: 16px;
-  min-width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  font-size: 9px;
-}
 .yoagent-compact-label {
   flex: 1 1 auto;
 }
@@ -1278,11 +1271,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-color: var(--line);
   background: var(--panel);
   color: var(--muted);
-}
-.yoagent-chat-spinner {
-  min-width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
 }
 /* "thinking" with a blinking, moving ellipsis so it reads as live agent work, not static text. */
 .yoagent-thinking {
@@ -2675,6 +2663,8 @@ button.info-tree-tab-token.active:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--space-10);
+  box-sizing: border-box;
+  width: min(56ch, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12);
   border: 1px solid var(--accent-gold, #f0b85d);
@@ -2683,6 +2673,15 @@ button.info-tree-tab-token.active:focus-visible {
   color: #e8edf4;
   box-shadow: 0 6px 20px var(--paint-shadow-45);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
+}
+.server-update-banner-msg {
+  min-width: 0;
+  flex: 1 1 24ch;
+  overflow-wrap: anywhere;
+}
+.server-update-banner-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .server-update-banner-reload {
   cursor: pointer;
@@ -2714,6 +2713,19 @@ button.info-tree-tab-token.active:focus-visible {
 .server-update-banner-dismiss:focus-visible {
   border-color: color-mix(in srgb, var(--pr-status-closed) 60%, transparent);
   background: color-mix(in srgb, var(--pr-status-closed) 12%, transparent);
+}
+body.app-vw-lte-760 .server-update-banner {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-6);
+}
+/* The desktop message reserves horizontal room for actions. In a stacked banner that same
+   flex basis becomes a vertical minimum, producing an empty, screen-filling notification. */
+body.app-vw-lte-760 .server-update-banner-msg {
+  flex: 0 1 auto;
+}
+body.app-vw-lte-760 .server-update-banner-actions {
+  justify-content: flex-end;
 }
 .modal {
   display: none;

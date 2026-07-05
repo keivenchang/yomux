@@ -150,7 +150,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_cursor_style": "block",
         "editor_cursor_color": DEFAULT_CURSOR_COLOR,
         "file_explorer_font_size": 13,
-        "tab_width": 180,
+        "tab_width": 172,
         "pane_spacing": 3,
         "pane_ring_opacity": 75,
         "inactive_pane_opacity": 60,

@@ -542,7 +542,7 @@
   --lt-code-invalid: #82071e;
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
-  --pane-tab-width: 180px;
+  --pane-tab-width: 172px;
   --three-row-panel-layout: auto auto minmax(0, 1fr);
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
   --pane-tab-top-radius-scale: 0.7;
@@ -1009,6 +1009,8 @@ body.theme-light {
 }
 .brand-cell,
 .topbar-search,
+.topbar-center-tools,
+.topbar-right-tools,
 .app-menu-line,
 .command-palette-title,
 .file-explorer-title,
@@ -1313,13 +1315,15 @@ body {
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
   height: var(--compact-icon-button-size);
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   padding: 0;
   overflow: hidden;
   font-size: 0;
 }
 .actions button::before {
   content: "";
+  display: block;
   width: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   height: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   background: currentColor;
@@ -1645,6 +1649,7 @@ button.topbar-status-surface:focus-visible {
   text-align: end;
 }
 .app-menu-area {
+  position: relative;
   width: 100%;
   min-width: 0;
   display: flex;
@@ -1653,6 +1658,21 @@ button.topbar-status-surface:focus-visible {
   gap: var(--space-8);
   min-height: var(--compact-control-height);
   overflow: visible;
+}
+/* Keep menu roots, editor navigation, search, and right-side controls in one real flex sequence.
+   An absolutely centered launcher could cover Help while there was still spare space at the right.
+   This order makes Help visible first and puts Search directly between it and the right controls. */
+.topbar-center-tools {
+  flex: 0 1 auto;
+}
+.topbar-center-tools .topbar-nav {
+  margin-inline-start: 0;
+}
+.topbar-center-tools .topbar-search {
+  margin-inline: 0;
+}
+.topbar-right-tools {
+  margin-inline-start: auto;
 }
 /* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
@@ -1828,7 +1848,70 @@ body.app-vw-lte-1100 .topbar-search {
 body.app-vw-lte-1100 .topbar-activity-idle {
   display: none;
 }
-body.app-vw-lte-760 .topbar-search {
+/* Coarse-pointer tablets keep their normal menu bar, but lower-priority controls yield before any
+   topbar group can overlap. Every hidden action remains available from the same File/View menus. */
+body.app-topbar-touch-compact .topbar-language,
+body.app-topbar-touch-compact .topbar-owner-status {
+  display: none;
+}
+body.app-topbar-touch-compact .topbar {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact .app-menu-area {
+  gap: var(--space-6);
+}
+/* The compact Menus root is the only route to File/View/tmux/Tabs/Help on a phone. Give that
+   real button a reliable touch target instead of relying on its short desktop menu-row height. */
+body.app-topbar-touch-compact .app-menu-button {
+  min-height: 36px;
+  touch-action: manipulation;
+}
+body.app-topbar-touch-compact .topbar-center-tools,
+body.app-topbar-touch-compact .topbar-right-tools {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact.app-vw-lte-980 .topbar-nav,
+body.app-topbar-touch-compact.app-vw-lte-980 #latencyMeter,
+body.app-topbar-touch-compact.app-vw-lte-980 .topbar-activity,
+body.app-topbar-touch-compact.app-vw-lte-980 #status {
+  display: none;
+}
+/* Preserve the five menu roots by yielding chrome in one ordered sequence: version, wordmark,
+   secondary actions, then the Cmd-P launcher. Each tier only removes the next lower-priority
+   detail, so a wider tablet immediately restores it without relying on prior layout state. */
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar .brand-version {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand {
+  min-width: 0;
+}
+body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand-title > :not(.brand-yolo) {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta) {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta {
+  display: inline-grid;
+}
+/* Every touch layout uses the same Cmd-P launcher, but it receives only a short localized label
+   area. This preserves menus and Refresh on iPad/phone widths without creating a second search
+   control for mobile. The shared ellipsis owner truncates the longer label safely. */
+body.app-topbar-touch-compact .topbar-search {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  margin-inline: var(--space-6) 0;
+}
+body.app-topbar-touch-compact .topbar-search-label {
+  display: inline-flex;
+  flex: 0 1 8ch;
+  max-inline-size: 8ch;
+}
+body.app-topbar-touch-compact .topbar-search-hint {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
   display: none;
 }
 .app-menu-area.drag-over {
@@ -2870,24 +2953,10 @@ body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .se
   background: var(--neutral-surface-subtle-light);
   border-color: #cdd5e0;
 }
-/* The session YO marker no longer rotates to signal "working" — the pulsing green ball beside the
-   agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
-   model work, not session-working. */
+/* The session YO marker is always static; the pulsing green ball beside the agent symbol signals
+   session work, while transient model work uses the shared moving ellipsis. */
 .session-yolo-marker.working {
   transform-origin: center;
-}
-.session-yolo-marker.yoagent-waiting-spinner,
-.session-yolo-marker.yoagent-chat-spinner {
-  transform-origin: center;
-  animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 1.55s);
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-@keyframes yolo-marker-rotate {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .ci-indicator {
   flex: 0 0 auto;
@@ -5744,7 +5813,7 @@ body.theme-light .agent-icon.claude {
   position: relative;
   box-sizing: border-box;
   border: 0;
-  border-radius: var(--pane-tile-radius);
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
   padding: var(--pane-split-gap);
   background: var(--panel-inactive);
   overflow: hidden;
@@ -5756,6 +5825,7 @@ body.theme-light .agent-icon.claude {
   z-index: var(--z-pane-overlay);
   box-sizing: border-box;
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity), transparent);
+  border-radius: inherit;
   pointer-events: none;
 }
 .yolomux-dockview .dv-groupview:has(.panel.active-pane),
@@ -5763,6 +5833,7 @@ body.theme-light .agent-icon.claude {
   --pane-bar-bg: var(--pane-tab-strip-bg);
   --panel-ring-color: var(--pane-tab-panel-ring);
   --panel-ring-opacity: var(--pane-active-ring-opacity);
+  --pane-ring-radius: var(--pane-tab-top-radius);
   background: var(--panel);
 }
 .yolomux-dockview .dv-groupview:has(.panel.needs-input-pane),
@@ -5999,24 +6070,26 @@ body.theme-light .agent-icon.claude {
   cursor: row-resize;
 }
 @media (pointer: coarse) {
-  /* Touch: the ENTIRE divider length is a transparent grab zone, so a finger landing
-     anywhere near the line (not just on a dot) starts the resize — "close enough" — and
-     setPointerCapture in bindLayoutResizer keeps the drag alive as the finger drifts off.
-     The visible affordance is a small centered grip pill (::before), not a big filled disc. */
+  /* Touch owns only the centered 44px grip. A full-length transparent hit target captures nearby
+     tabs and Finder controls, making ordinary tab moves and the close button behave like resizing. */
   .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
   .resizer-row::after {
-    inset-block: 0;
+    top: 50%;
+    bottom: auto;
     inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
-    block-size: auto;
+    block-size: var(--pane-resizer-touch-handle-size);
+    transform: translateY(-50%);
     background: transparent;
     border-radius: 0;
     box-shadow: none;
   }
   .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
   .resizer-column::after {
-    inset-inline: 0;
+    left: 50%;
+    right: auto;
     inset-block: calc(-1 * var(--pane-resizer-hit-inset));
-    inline-size: auto;
+    inline-size: var(--pane-resizer-touch-handle-size);
+    transform: translateX(-50%);
     background: transparent;
     border-radius: 0;
     box-shadow: none;
@@ -6179,7 +6252,7 @@ body.theme-light .drop-slot.drag-over {
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
      's content-edge overlay made adjacent rings sit a gutter apart. */
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
-  border-radius: var(--pane-tile-radius);
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
   background: var(--panel-inactive);
   overflow: hidden;
 }
@@ -6512,6 +6585,9 @@ body.theme-light .drop-slot.drag-over {
      bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
      separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
+  /* The focused outline uses the tab-radius token too, so its four outer corners visually
+     belong to the active tab instead of ending as a separate square frame. */
+  --pane-ring-radius: var(--pane-tab-top-radius);
 }
 .panel.file-explorer-panel > .file-explorer-head:hover,
 .panel.file-explorer-panel > .file-explorer-head:focus-within,
@@ -7079,6 +7155,15 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
 .pane-tab.active .pane-tab-close:hover {
   opacity: 0.92;
   background: var(--paint-dark-green-16);
+}
+/* Keep the compact minus glyph, but make its actual target reliable on touch. Narrow tab strips
+   are where an 18px desktop hit box is easiest to miss; this remains one shared tab-close owner. */
+body.app-topbar-touch-compact .pane-tab-close {
+  flex-basis: 36px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  touch-action: manipulation;
 }
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
 .file-explorer-close.pc-window-control,
@@ -8885,13 +8970,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   gap: var(--space-7);
   min-width: 0;
 }
-.yoagent-waiting-spinner {
-  width: 16px;
-  min-width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  font-size: 9px;
-}
 .yoagent-compact-label {
   flex: 1 1 auto;
 }
@@ -8998,11 +9076,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-color: var(--line);
   background: var(--panel);
   color: var(--muted);
-}
-.yoagent-chat-spinner {
-  min-width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
 }
 /* "thinking" with a blinking, moving ellipsis so it reads as live agent work, not static text. */
 .yoagent-thinking {
@@ -10395,6 +10468,8 @@ button.info-tree-tab-token.active:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--space-10);
+  box-sizing: border-box;
+  width: min(56ch, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12);
   border: 1px solid var(--accent-gold, #f0b85d);
@@ -10403,6 +10478,15 @@ button.info-tree-tab-token.active:focus-visible {
   color: #e8edf4;
   box-shadow: 0 6px 20px var(--paint-shadow-45);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
+}
+.server-update-banner-msg {
+  min-width: 0;
+  flex: 1 1 24ch;
+  overflow-wrap: anywhere;
+}
+.server-update-banner-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .server-update-banner-reload {
   cursor: pointer;
@@ -10434,6 +10518,19 @@ button.info-tree-tab-token.active:focus-visible {
 .server-update-banner-dismiss:focus-visible {
   border-color: color-mix(in srgb, var(--pr-status-closed) 60%, transparent);
   background: color-mix(in srgb, var(--pr-status-closed) 12%, transparent);
+}
+body.app-vw-lte-760 .server-update-banner {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-6);
+}
+/* The desktop message reserves horizontal room for actions. In a stacked banner that same
+   flex basis becomes a vertical minimum, producing an empty, screen-filling notification. */
+body.app-vw-lte-760 .server-update-banner-msg {
+  flex: 0 1 auto;
+}
+body.app-vw-lte-760 .server-update-banner-actions {
+  justify-content: flex-end;
 }
 .modal {
   display: none;

@@ -924,7 +924,7 @@ function applyCssSettings() {
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
-  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width

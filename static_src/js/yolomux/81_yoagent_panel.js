@@ -263,10 +263,13 @@ function yoagentMessageDetailsHtml(message, key = '') {
   return thinkingDetails;
 }
 
-function yoagentMessageDetailRowsHtml(message) {
+function yoagentMessageDetailRowsHtml(message, key = '') {
   const rows = Array.isArray(message?.detailRows) ? message.detailRows : [];
   if (!rows.length) return '';
-  return `<div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>`;
+  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(`${key}|metadata`)}">
+    <summary><span>${esc(`${t('common.details')}…`)}</span></summary>
+    <div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>
+  </details>`;
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
@@ -372,7 +375,7 @@ function yoagentChatMessagesHtml() {
       author: role,
       timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
       bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
-      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
     });
   }).join('');
   return `${messageHtml}${startupInfo}`;
@@ -541,8 +544,7 @@ function yoagentPendingWaitsHtml() {
       ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
-      <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
-      <span class="yoagent-waiting-label yoagent-compact-label">${esc(label)}</span>
+      <span class="yoagent-waiting-label yoagent-compact-label">${textWithMovingEllipsisHtml(label, 'yoagent-waiting-dots')}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
     </li>`;
@@ -1152,7 +1154,7 @@ function yoagentChatHtml() {
   const hasConversation = Boolean(yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`

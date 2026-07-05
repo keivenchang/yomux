@@ -162,7 +162,7 @@
   position: relative;
   box-sizing: border-box;
   border: 0;
-  border-radius: var(--pane-tile-radius);
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
   padding: var(--pane-split-gap);
   background: var(--panel-inactive);
   overflow: hidden;
@@ -174,6 +174,7 @@
   z-index: var(--z-pane-overlay);
   box-sizing: border-box;
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity), transparent);
+  border-radius: inherit;
   pointer-events: none;
 }
 .yolomux-dockview .dv-groupview:has(.panel.active-pane),
@@ -181,6 +182,7 @@
   --pane-bar-bg: var(--pane-tab-strip-bg);
   --panel-ring-color: var(--pane-tab-panel-ring);
   --panel-ring-opacity: var(--pane-active-ring-opacity);
+  --pane-ring-radius: var(--pane-tab-top-radius);
   background: var(--panel);
 }
 .yolomux-dockview .dv-groupview:has(.panel.needs-input-pane),
@@ -417,24 +419,26 @@
   cursor: row-resize;
 }
 @media (pointer: coarse) {
-  /* Touch: the ENTIRE divider length is a transparent grab zone, so a finger landing
-     anywhere near the line (not just on a dot) starts the resize — "close enough" — and
-     setPointerCapture in bindLayoutResizer keeps the drag alive as the finger drifts off.
-     The visible affordance is a small centered grip pill (::before), not a big filled disc. */
+  /* Touch owns only the centered 44px grip. A full-length transparent hit target captures nearby
+     tabs and Finder controls, making ordinary tab moves and the close button behave like resizing. */
   .yolomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
   .resizer-row::after {
-    inset-block: 0;
+    top: 50%;
+    bottom: auto;
     inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
-    block-size: auto;
+    block-size: var(--pane-resizer-touch-handle-size);
+    transform: translateY(-50%);
     background: transparent;
     border-radius: 0;
     box-shadow: none;
   }
   .yolomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
   .resizer-column::after {
-    inset-inline: 0;
+    left: 50%;
+    right: auto;
     inset-block: calc(-1 * var(--pane-resizer-hit-inset));
-    inline-size: auto;
+    inline-size: var(--pane-resizer-touch-handle-size);
+    transform: translateX(-50%);
     background: transparent;
     border-radius: 0;
     box-shadow: none;
@@ -597,7 +601,7 @@ body.theme-light .drop-slot.drag-over {
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
      's content-edge overlay made adjacent rings sit a gutter apart. */
   border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
-  border-radius: var(--pane-tile-radius);
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
   background: var(--panel-inactive);
   overflow: hidden;
 }
@@ -930,6 +934,9 @@ body.theme-light .drop-slot.drag-over {
      bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
      separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
+  /* The focused outline uses the tab-radius token too, so its four outer corners visually
+     belong to the active tab instead of ending as a separate square frame. */
+  --pane-ring-radius: var(--pane-tab-top-radius);
 }
 .panel.file-explorer-panel > .file-explorer-head:hover,
 .panel.file-explorer-panel > .file-explorer-head:focus-within,
@@ -1497,6 +1504,15 @@ body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
 .pane-tab.active .pane-tab-close:hover {
   opacity: 0.92;
   background: var(--paint-dark-green-16);
+}
+/* Keep the compact minus glyph, but make its actual target reliable on touch. Narrow tab strips
+   are where an 18px desktop hit box is easiest to miss; this remains one shared tab-close owner. */
+body.app-topbar-touch-compact .pane-tab-close {
+  flex-basis: 36px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  touch-action: manipulation;
 }
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
 .file-explorer-close.pc-window-control,

@@ -6328,6 +6328,246 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
     assert hidden_display == "none"
 
 
+def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp_path):
+    page = tmp_path / "touch-compact-topbar.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="touch-topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title">YOLOmux</div></div>
+        <div id="sessionButtons" class="app-menu-area">
+          <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Application menu</button></div></nav>
+          <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
+          <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label">Search files, commands</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
+          <button id="touch-language" class="topbar-language">English</button>
+          <button id="touch-owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
+          <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count"><span class="topbar-activity-count-number">1</span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-idle">3 idle</span></button>
+        </div>
+        <div id="touch-actions" class="actions"><div id="latencyMeter" class="latency-meter">12 ms</div><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button><span id="status">connected</span></div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #touch-topbar { width: 390px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-760', 'app-vw-lte-980');
+        const box = node => {
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, display: style.display};
+        };
+        const overlaps = (left, right) => left.right > right.left + 0.5 && right.right > left.left + 0.5 && left.bottom > right.top + 0.5 && right.bottom > left.top + 0.5;
+        const header = document.getElementById('touch-topbar');
+        const menu = document.getElementById('touch-menu');
+        const activity = document.getElementById('touch-activity');
+        const sessionButtons = document.getElementById('sessionButtons');
+        return {
+          header: box(header),
+          menu: box(menu),
+          menuButton: box(menu.querySelector('.app-menu-button')),
+          menuTouchAction: getComputedStyle(menu.querySelector('.app-menu-button')).touchAction,
+          activity: box(activity),
+          sessionButtons: box(sessionButtons),
+          actions: box(document.getElementById('touch-actions')),
+          search: box(document.getElementById('touch-search')),
+          searchLabel: box(document.getElementById('touch-search-label')),
+          language: box(document.getElementById('touch-language')),
+          owner: box(document.getElementById('touch-owner')),
+          nav: box(document.getElementById('touch-nav')),
+          refresh: box(document.getElementById('refreshMeta')),
+          notify: box(document.getElementById('notifyToggle')),
+          logout: box(document.getElementById('logoutButton')),
+          menuActivityOverlap: overlaps(box(menu), box(activity)),
+        };
+        """
+    )
+    assert metrics["actions"]["display"] == "flex", metrics
+    # A flex child blockifies inline-grid to computed grid while retaining the shared centered grid shell.
+    assert metrics["refresh"]["display"] == "grid", metrics
+    assert metrics["notify"]["display"] == "none", metrics
+    assert metrics["logout"]["display"] == "none", metrics
+    assert metrics["search"]["display"] == "flex", metrics
+    assert metrics["searchLabel"]["width"] <= 72, metrics
+    assert metrics["language"]["display"] == "none", metrics
+    assert metrics["owner"]["display"] == "none", metrics
+    assert metrics["nav"]["display"] == "none", metrics
+    assert metrics["activity"]["display"] == "none", metrics
+    assert metrics["menu"]["left"] >= metrics["sessionButtons"]["left"] - 0.5, metrics
+    assert metrics["menuButton"]["height"] >= 36, metrics
+    assert metrics["menuTouchAction"] == "manipulation", metrics
+    assert metrics["search"]["right"] <= metrics["actions"]["left"] + 0.5, metrics
+    assert metrics["activity"]["right"] <= metrics["sessionButtons"]["right"] + 0.5, metrics
+    assert metrics["header"]["height"] < 50, metrics
+
+
+def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
+    """Keep Help visible: the launcher may never be an overlay on top of the menu row."""
+    page = tmp_path / "topbar-priority-matrix.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="matrix-topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span class="brand-lo">LO</span><span>mux</span><span class="brand-version"> 0.5.23</span></div></div>
+        <div id="matrix-session-buttons" class="app-menu-area">
+          <nav class="app-menu-bar">
+            <div class="app-menu"><button id="matrix-file" class="app-menu-button">File</button></div>
+            <div class="app-menu"><button id="matrix-view" class="app-menu-button">View</button></div>
+            <div class="app-menu"><button id="matrix-tmux" class="app-menu-button">tmux</button></div>
+            <div class="app-menu"><button id="matrix-tabs" class="app-menu-button">Tabs</button></div>
+            <div class="app-menu"><button id="matrix-help" class="app-menu-button">Help</button></div>
+          </nav>
+          <div id="matrix-center" class="topbar-center-tools">
+            <div class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
+            <button id="matrix-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span class="topbar-search-label">Search files</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
+          </div>
+          <div id="matrix-right" class="topbar-right-tools"><button class="topbar-language">English</button><button class="topbar-owner-status">IDX: leader</button><button class="topbar-activity">1 running</button></div>
+        </div>
+        <div id="matrix-actions" class="actions"><button id="matrix-notify">Notify</button><button id="refreshMeta">Refresh</button><button id="matrix-logout">Log out</button></div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #matrix-topbar { width: var(--matrix-width); }
+    """),
+    )
+
+    scenarios = [
+        ("narrow-phone", 320, 14, True),
+        ("phone", 390, 18, True),
+        ("large-phone", 600, 22, True),
+        ("small-tablet", 640, 14, False),
+        ("portrait-tablet", 680, 18, False),
+        ("iPad", 744, 18, False),
+        ("wide-iPad", 960, 22, False),
+        ("laptop", 1239, 18, False),
+        ("desktop", 1440, 18, False),
+    ]
+    for label, width, font_size, compact in scenarios:
+        metrics = browser.execute_script(
+            """
+            const [width, fontSize, compact] = arguments;
+            const body = document.body;
+            body.className = 'app-topbar-touch-compact';
+            for (const breakpoint of [1280, 1100, 980, 760, 720, 600]) {
+              if (width <= breakpoint) body.classList.add(`app-vw-lte-${breakpoint}`);
+            }
+            if (compact) body.classList.add('app-topbar-menu-compact');
+            document.documentElement.style.setProperty('--matrix-width', `${width}px`);
+            document.documentElement.style.setProperty('--ui-font-size', `${fontSize}px`);
+            const topbar = document.getElementById('matrix-topbar');
+            const menuBar = topbar.querySelector('.app-menu-bar');
+            if (compact) {
+              menuBar.innerHTML = '<div class="app-menu"><button id="matrix-menus" class="app-menu-button">Menus</button></div>';
+            } else {
+              menuBar.innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help'].map(name => `<div class="app-menu"><button id="matrix-${name.toLowerCase()}" class="app-menu-button">${name}</button></div>`).join('');
+            }
+            const rect = node => {
+              const box = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height, display: style.display};
+            };
+            const visible = node => node && getComputedStyle(node).display !== 'none';
+            const menuNames = compact ? ['menus'] : ['file', 'view', 'tmux', 'tabs', 'help'];
+            const menus = menuNames.map(name => rect(document.getElementById(`matrix-${name}`)));
+            const search = rect(document.getElementById('matrix-search'));
+            const actions = rect(document.getElementById('matrix-actions'));
+            const center = rect(document.getElementById('matrix-center'));
+            return {
+              header: rect(topbar),
+              menuArea: rect(document.getElementById('matrix-session-buttons')),
+              menus,
+              search,
+              center,
+              actions,
+              refresh: rect(document.getElementById('refreshMeta')),
+              notifyVisible: visible(document.getElementById('matrix-notify')),
+              searchVisible: visible(document.getElementById('matrix-search')),
+            };
+            """,
+            width,
+            font_size,
+            compact,
+        )
+        assert metrics["header"]["height"] < 60, (label, metrics)
+        assert metrics["menus"][0]["left"] >= metrics["menuArea"]["left"] - 1, (label, metrics)
+        assert metrics["menus"][-1]["right"] <= metrics["header"]["right"] + 1, (label, metrics)
+        for left, right in zip(metrics["menus"], metrics["menus"][1:]):
+            assert left["right"] <= right["left"] + 1, (label, metrics)
+        if compact:
+            assert metrics["searchVisible"] is False, (label, metrics)
+        else:
+            assert metrics["menus"][-1]["right"] <= metrics["center"]["left"] + 1, (label, metrics)
+            assert metrics["search"]["right"] <= metrics["actions"]["left"] + 1, (label, metrics)
+            assert metrics["refresh"]["display"] == "grid", (label, metrics)
+        if width <= 980:
+            assert metrics["notifyVisible"] is False, (label, metrics)
+
+
+def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
+    page = tmp_path / "touch-pane-tab-close.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="pane-tab"><button id="touch-tab-close" class="pane-tab-close pc-window-control pc-minimize" type="button"></button></div>
+    """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.add('app-topbar-touch-compact');
+        const control = document.getElementById('touch-tab-close');
+        const style = getComputedStyle(control);
+        let clicks = 0;
+        control.addEventListener('click', () => { clicks += 1; });
+        control.click();
+        return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, touchAction: style.touchAction, clicks};
+        """
+    )
+    assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
+    assert metrics["touchAction"] == "manipulation", metrics
+    assert metrics["clicks"] == 1, metrics
+
+
+def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_path):
+    page = tmp_path / "narrow-server-update-banner.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="serverUpdateBanner" class="server-update-banner">
+        <span class="server-update-banner-msg">The YOLOmux server version changed since this browser tab loaded. Do you want to reload the browser?</span>
+        <div class="toast-control-row server-update-banner-actions"><button class="server-update-banner-reload">Reload</button><button class="server-update-banner-dismiss">Keep</button></div>
+      </div>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.add('app-vw-lte-760');
+        const rect = selector => {
+          const box = document.querySelector(selector).getBoundingClientRect();
+          return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height};
+        };
+        const message = rect('.server-update-banner-msg');
+        const actions = rect('.server-update-banner-actions');
+        const reload = rect('.server-update-banner-reload');
+        const keep = rect('.server-update-banner-dismiss');
+        return {message, actions, reload, keep, banner: rect('#serverUpdateBanner')};
+        """
+    )
+    assert metrics["message"]["bottom"] <= metrics["actions"]["top"] + 0.5, metrics
+    assert metrics["actions"]["top"] - metrics["message"]["bottom"] <= 16, metrics
+    assert metrics["reload"]["right"] <= metrics["keep"]["left"] + 0.5, metrics
+    assert metrics["actions"]["right"] <= metrics["banner"]["right"] + 0.5, metrics
+    assert metrics["banner"]["height"] <= metrics["message"]["height"] + metrics["actions"]["height"] + 48, metrics
+
+
 def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     background_status = {
         "owner": False,
@@ -9314,6 +9554,56 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         lambda _driver: (state if not (state := menu_metrics("view"))["open"] else False)
     )
     assert closed["openIds"] == [], closed
+
+
+def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
+    )
+    browser.execute_script(
+        """
+        compactTopbarForViewport = () => true;
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600');
+        renderSessionButtons({force: true});
+        """
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+    button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    )
+    button.click()
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setTimeout(() => {
+          const root = document.querySelector('.app-menu--nested-root');
+          const button = root?.querySelector(':scope > .app-menu-button');
+          const popover = root?.querySelector(':scope > .app-menu-popover');
+          const style = popover ? getComputedStyle(popover) : null;
+          const rect = popover?.getBoundingClientRect?.();
+          done({
+            open: root?.classList.contains('open') || false,
+            expanded: button?.getAttribute('aria-expanded') || '',
+            visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.9 && rect.width > 20 && rect.height > 20),
+            labels: Array.from(popover?.querySelectorAll(':scope > .app-menu-submenu-wrap > .app-menu-command') || []).map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
+            errors: window.__bootErrors || [],
+            rejections: window.__bootRejections || [],
+          });
+        }, 300);
+        """
+    )
+    assert metrics["open"] is True, metrics
+    assert metrics["expanded"] == "true", metrics
+    assert metrics["visible"] is True, metrics
+    assert metrics["labels"] == ["File>", "View>", "tmux>", "Tabs>", "Help>"], metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
 
 
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):

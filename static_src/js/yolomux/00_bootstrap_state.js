@@ -846,6 +846,9 @@ const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
+// Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
+// provide two usable columns; wider portrait iPads retain their movable multi-pane workspace.
+const narrowTouchSingleColumnMaxWidthPx = 680;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -905,15 +908,64 @@ function browserUsesCoarsePointer() {
     && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
 }
 
+function fileExplorerUsesNormalTabMovement() {
+  return browserUsesCoarsePointer();
+}
+
+let browserCursorHoverObserved = false;
+
+function browserHasCursorHover(event = null) {
+  const pointerType = String(event?.pointerType || '');
+  if (pointerType === 'mouse' || pointerType === 'pen') {
+    // Some tablet browsers emit the real mouse/trackpad event before `any-hover` updates.
+    // Remembering that capability keeps the follow-on focus work on the same gesture consistent.
+    browserCursorHoverObserved = true;
+    return true;
+  }
+  if (pointerType === 'touch') return false;
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(any-hover: hover)') : null;
+  if (media?.matches === true) return true;
+  if (browserCursorHoverObserved) return true;
+  // Keep desktop/fallback browsers functional when the media feature is unavailable. A touch-first
+  // browser with no hover-capable pointer must not leave a hover popup permanently open.
+  return !browserUsesCoarsePointer();
+}
+
+function autoFocusCanFollowCursor(event = null) {
+  return autoFocusEnabled && browserHasCursorHover(event);
+}
+
+function browserUsesTabletViewport() {
+  const navigatorValue = globalThis.navigator || {};
+  const userAgent = String(navigatorValue.userAgent || '');
+  const platform = String(navigatorValue.platform || '');
+  const touchPoints = Number(navigatorValue.maxTouchPoints || 0);
+  return /iPad|Tablet/i.test(userAgent)
+    || (/Macintosh|MacIntel/i.test(platform) && touchPoints > 1)
+    || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
+}
+
 function phoneLikeMobileViewport(viewport = nativeViewport()) {
-  if (!browserUsesCoarsePointer()) return false;
+  if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
   return width <= mobileSinglePaneMaxWidthPx
     || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
 }
 
-const mobileSinglePaneMode = phoneLikeMobileViewport();
+function mobileSinglePaneMode(viewport = nativeViewport()) {
+  return phoneLikeMobileViewport(viewport);
+}
+
+function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  return phoneLikeMobileViewport(viewport) || width <= narrowTouchSingleColumnMaxWidthPx;
+}
+
+function narrowSingleColumnMode(viewport = nativeViewport()) {
+  return narrowTouchSingleColumnViewport(viewport);
+}
 const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;

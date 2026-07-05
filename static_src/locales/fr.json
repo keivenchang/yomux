@@ -764,7 +764,7 @@
   "login.showPassword": "Afficher le mot de passe",
   "login.signIn": "Se connecter",
   "login.username": "Nom d'utilisateur",
-  "menu.bar.aria": "Menu de l'application",
+  "menu.compact.label": "Menu",
   "menu.common.adminOnly": "Administrateur uniquement",
   "menu.common.comingSoon": "Bientôt disponible",
   "menu.file": "Fichier",

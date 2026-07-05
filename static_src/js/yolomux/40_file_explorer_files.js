@@ -1759,7 +1759,7 @@ function eventTargetIsFileExplorerSurface(target) {
 // navigation even though xterm may still be the document's active element; text and popup
 // controls always retain their own keys.
 function fileExplorerHasAutoFocusedKeyboardOwnership() {
-  return autoFocusEnabled && isFileExplorerItem(focusedPanelItem);
+  return autoFocusCanFollowCursor() && isFileExplorerItem(focusedPanelItem);
 }
 
 function fileExplorerKeyboardOwnsEvent(event) {
@@ -3953,8 +3953,6 @@ function buildTabberTree() {
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
     };
     topEntries.push(sessionEntry);
-    const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
-    const activeIndexOverlay = activeIndexOverride === tmuxWindowPendingActiveIndex ? null : activeIndexOverride;
     const windowEntries = tmuxWindowRecords(info.panes).map(record => {
       const windowName = `w_${tabberPathToken(record.index)}`;
       const windowPath = `${sessionPath}/${windowName}`;
@@ -3963,9 +3961,7 @@ function buildTabberTree() {
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
       const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
-      const agentCurrent = agentWindowPayloadCurrent(agentStatus);
-      const recordActive = agentCurrent === null ? record.active === true : agentCurrent === true;
-      const active = activeIndexOverride === undefined ? recordActive : (activeIndexOverlay !== null && String(record.index) === activeIndexOverlay);
+      const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
@@ -4423,11 +4419,7 @@ function activeTabberRowPath() {
   if (!isTmuxSession(item)) return tabberTabPath(item);
   const session = item;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const override = tmuxWindowDisplayActiveIndex(session);
-  if (override !== undefined) {
-    return override === tmuxWindowPendingActiveIndex ? tabberSessionPath(session) : tabberWindowPath(session, override);
-  }
-  const activeWindow = tmuxWindowRecords(info.panes).find(record => record.active === true);
+  const activeWindow = tmuxWindowActiveRecord(session, info);
   return activeWindow ? tabberWindowPath(session, activeWindow.index) : tabberSessionPath(session);
 }
 

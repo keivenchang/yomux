@@ -70,9 +70,17 @@ function layoutSlotsSignature(slots = layoutSlots) {
   return JSON.stringify(normalizeLayoutSlotsForViewport(cloneLayoutSlots(slots)));
 }
 
+function layoutSlotsExactSignature(slots = layoutSlots) {
+  return JSON.stringify(cloneLayoutSlots(slots));
+}
+
 function compactCurrentLayoutSlots(options = {}) {
   const normalized = normalizeLayoutSlotsForViewport(layoutSlots);
-  if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
+  // layoutSlotsSignature intentionally normalizes both inputs for renderer comparisons. That makes
+  // it unable to detect a newly narrowed viewport: the old multi-pane layout is normalized before
+  // comparison too. Responsive compaction instead compares the actual stored layout to the shared
+  // viewport-normalized result.
+  if (layoutSlotsExactSignature(normalized) === layoutSlotsExactSignature(layoutSlots)) return false;
   applyLayoutSlots(normalized, {
     focusSession: options.focusSession || focusedPanelItem || undefined,
     prune: false,
@@ -356,10 +364,12 @@ function layoutHasHorizontalContentBeforeItem(node, item, slots = layoutSlots) {
 }
 
 function fileExplorerNeedsLeftDock(slots = layoutSlots) {
+  if (fileExplorerUsesNormalTabMovement()) return false;
   return layoutHasHorizontalContentBeforeItem(slots?.[layoutTreeKey], fileExplorerItemId, slots);
 }
 
 function normalizeFileExplorerDock(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   let next = slots;
   if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
     next = layoutWithFileExplorerDockedLeft(slots);
@@ -378,6 +388,7 @@ function soleFileExplorerSlot(slots) {
 }
 
 function layoutWithFileExplorerPeerPane(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   const finderSlot = soleFileExplorerSlot(slots);
   if (!finderSlot) return slots;
   const next = cloneLayoutSlots(slots);
@@ -857,13 +868,17 @@ function mobileRecentTmuxItems() {
 function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
   const preferred = resolveLayoutItem(options.focusSession);
+  // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
+  // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
+  // back on the next one-column normalization.
+  const candidates = requested.length ? [preferred, ...requested] : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
-  for (const item of [preferred, ...mobileRecentTmuxItems(), ...requested]) {
+  for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
     if (tmuxItems.length >= mobileSinglePaneTabLimit) break;
   }
   const supplementary = [];
-  for (const item of [preferred, ...requested]) {
+  for (const item of candidates) {
     if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
   }
   const items = [...tmuxItems, ...supplementary];
@@ -871,18 +886,35 @@ function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   return layoutSlotsForItems(items, 'single', {active, emptySlot: 'left'});
 }
 
+function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots(slots, options);
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  const preferred = resolveLayoutItem(options.focusSession);
+  const visibleActive = activePaneItems(slots || layoutSlots);
+  const active = [
+    preferred,
+    ...visibleActive.filter(item => !isFileExplorerItem(item)),
+    ...visibleActive,
+    ...requested,
+  ]
+    .find(item => requested.includes(item)) || requested[0] || null;
+  // Finder is intentionally retained in this tab list. On narrow tablet screens it is a normal
+  // tab in the sole column, rather than a reserved left-hand pane.
+  return layoutSlotsForItems(requested, 'single', {active, emptySlot: 'left'});
+}
+
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const source = mobileSinglePaneMode
-    ? mobileSinglePaneLayoutSlots(value, {focusSession: options.focusSession})
+  const source = narrowSingleColumnMode()
+    ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
   return normalizeLayoutSlots(source, {
     ...options,
-    preserveMissingFileExplorer: mobileSinglePaneMode || options.preserveMissingFileExplorer === true,
+    preserveMissingFileExplorer: narrowSingleColumnMode() || options.preserveMissingFileExplorer === true,
   });
 }
 
 function availableLayoutModes() {
-  return mobileSinglePaneMode ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -891,11 +923,11 @@ function initialLayoutSlots() {
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
-  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutFromUrl;
+  if (layoutFromUrl) return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(layoutFromUrl) : layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -904,16 +936,25 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutFromSessionList(selected);
+  if (selected.length) {
+    const selectedLayout = layoutFromSessionList(selected);
+    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(selectedLayout) : selectedLayout;
+  }
   return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
-  if (mobileSinglePaneMode) return mobileSinglePaneLayoutSlots();
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
+  if (fileExplorerUsesNormalTabMovement()) {
+    const items = fileExplorerClosedByUser() ? sorted : [fileExplorerItemId, ...sorted];
+    const regular = layoutSlotsForItems(items, configuredDefaultLayoutMode(), {active: sorted[0] || fileExplorerItemId});
+    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(regular) : regular;
+  }
+  const standard = layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
     preservePlaceholders: false,
   });
+  return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(standard) : standard;
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -4538,8 +4579,11 @@ function displayToastContainer(session) {
 
 function notificationTargetIsFocused(item) {
   const target = String(item || '').trim();
-  if (!target || document.visibilityState !== 'visible' || document.hasFocus?.() !== true) return false;
-  return itemIsActivePaneTab(target) && (focusedPanelItem === target || focusedTerminal === target);
+  if (!target || document.visibilityState !== 'visible' || !itemIsActivePaneTab(target)) return false;
+  // A status render can briefly blur xterm even though the user remains on this pane. The shared
+  // logical active item survives that DOM churn, so notifications about the pane being viewed are
+  // already acknowledged and must not appear inside that same pane.
+  return focusedPanelItem === target || focusedTerminal === target || visualActivePaneItem() === target;
 }
 
 function compactNotificationTitle(scope, message, options = {}) {
@@ -5210,7 +5254,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
-  if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
+  if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
     statusEl.textContent = options.message;

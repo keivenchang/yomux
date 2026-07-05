@@ -252,7 +252,13 @@ function scheduleResponsiveLayoutPrune() {
 }
 
 function pruneSmallLayoutSlots() {
-  if (layoutResizeState || layoutVisiblePaneCount() <= 1) return;
+  if (layoutResizeState) return;
+  // Viewport policy owns the hard one-column/mobile invariant for both renderers. Dockview has no
+  // legacy .layout-column nodes for the DOM-size candidate loop below, so relying on that loop
+  // left a stale second pane visibly clipped after Safari resized or rotated. Reuse the shared
+  // layout normalizer before the renderer-specific minimum-size cleanup.
+  if (compactCurrentLayoutSlots({focusSession: visualActivePaneItem()})) return;
+  if (layoutVisiblePaneCount() <= 1) return;
   const candidate = smallLayoutSlotCandidate();
   if (!candidate) return;
   const moved = paneTabs(candidate.slot);
@@ -1143,14 +1149,18 @@ function bindPanelShell(panel, session) {
   // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
-  panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
+  panel.addEventListener('pointerenter', event => selectPanelOnHover(session, event));
   panel.addEventListener('pointerdown', event => {
     // Native range dragging must keep the same input node for the whole gesture;
     // focusing YO!stats here would rerender the panel before the browser moves the thumb.
     if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
-      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session], ${repoSelectorControlSelector}`);
+      const autoTarget = event.target?.closest?.('[data-auto-session]');
+      // Toggling YO changes the tab's state and can rebuild its chrome. Do not rebuild on pointerdown
+      // before its shared click dispatcher receives the same control.
+      if (autoTarget) return;
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], ${repoSelectorControlSelector}`);
       if (windowTarget) {
         // Run the original target before polling or focus-side updates can replace it.
         // The marker suppresses the later delegated click if the browser still emits one.
@@ -1269,7 +1279,7 @@ function bindPanelShell(panel, session) {
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
       if (slotIsFileExplorerPane(targetSlot)) return;
-      if (isFileExplorerItem(payload.session)) {
+      if (isFileExplorerItem(payload.session) && !fileExplorerUsesNormalTabMovement()) {
         dockFileExplorerPane();
         return;
       }
@@ -1310,7 +1320,7 @@ function bindPaneFrameControls(panel, session) {
       return;
     }
     if (button.dataset.paneClose !== undefined) {
-      removePaneFromLayout(button.dataset.paneClose || session);
+      closePaneFrameItem(button.dataset.paneClose || session);
     }
   }, true);
 }
@@ -1480,6 +1490,19 @@ function tmuxWindowDisplayActiveIndex(session) {
   const override = tmuxWindowActiveIndexOverride(session);
   if (override !== undefined) return override;
   return tmuxWindowDirectTargetGuard(session)?.index;
+}
+
+function tmuxWindowRecordIsActive(session, record) {
+  const override = tmuxWindowDisplayActiveIndex(session);
+  if (override !== undefined) return override !== tmuxWindowPendingActiveIndex && String(record?.index) === String(override);
+  // `window_active` comes from the tmux snapshot that also selects the visible terminal. Agent
+  // polling can lag it, so it must never independently choose a different highlighted window.
+  return record?.active === true;
+}
+
+function tmuxWindowActiveRecord(session, info) {
+  return tmuxWindowRecords(Array.isArray(info) ? info : info?.panes)
+    .find(record => tmuxWindowRecordIsActive(session, record)) || null;
 }
 
 function tmuxWindowDirectTargetGuard(session) {
@@ -1958,7 +1981,6 @@ function tmuxWindowBarHtml(session, info, options = {}) {
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
-  const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
   const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const contextAttr = options.infoBar === true ? ' data-tmux-window-bar-context="info-bar"' : '';
@@ -1967,9 +1989,7 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
-    const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
-    const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
-    const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
+    const active = tmuxWindowRecordIsActive(session, record);
     const title = t('terminal.window.title', {name: visibleName});
     return tmuxWindowButtonHtml({
       session,

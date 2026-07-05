@@ -731,7 +731,7 @@ function appMenuTree() {
           menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        ...(mobileSinglePaneMode ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
+        ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
@@ -793,6 +793,76 @@ function appMenuTree() {
   ];
 }
 
+let topbarNavigationCompact = null;
+let topbarNavigationFitFrame = 0;
+let topbarNavigationFitObserver = null;
+
+// Pure geometry helper retained for responsive test coverage. It deliberately does not choose the
+// rendered menu state: that decision must not depend on the current compact/full DOM shape.
+function topbarFullMenuFitsAvailableSpace(areaWidth, fullMenuWidth, otherWidths = [], gap = 0) {
+  const reservedWidth = otherWidths.reduce((sum, width) => sum + Math.max(0, Number(width) || 0), 0)
+    + (Math.max(0, Number(gap) || 0) * otherWidths.length);
+  return fullMenuWidth > 0 && fullMenuWidth <= Math.max(0, areaWidth - reservedWidth);
+}
+
+function topbarFullNavigationFits() {
+  return null;
+}
+
+function setTopbarNavigationCompactClass(compact) {
+  for (const target of [document.body, appRootElement()].filter(Boolean)) {
+    target.classList?.toggle('app-topbar-menu-compact', compact);
+  }
+}
+
+function topbarNavigationShouldBeCompact() {
+  // A measured row depends on whether it currently renders the five roots or one Menus root.
+  // At the phone fallback that created a compact/full render loop, detaching the button between
+  // pointerdown and click. The breakpoint is already after all lower-priority chrome yields, so it
+  // is the stable single owner of this final compact transition.
+  return compactTopbarForViewport();
+}
+
+function scheduleTopbarNavigationFitCheck() {
+  if (topbarNavigationFitFrame) return;
+  topbarNavigationFitFrame = requestAnimationFrame(() => {
+    topbarNavigationFitFrame = 0;
+    syncTopbarNavigationPresentation();
+  });
+}
+
+function installTopbarNavigationFitObserver() {
+  if (topbarNavigationFitObserver || !sessionButtons || typeof ResizeObserver !== 'function') return;
+  topbarNavigationFitObserver = new ResizeObserver(() => scheduleTopbarNavigationFitCheck());
+  topbarNavigationFitObserver.observe(sessionButtons);
+}
+
+function topbarMenuTree() {
+  const menus = appMenuTree();
+  const compact = topbarNavigationShouldBeCompact();
+  topbarNavigationCompact = compact;
+  setTopbarNavigationCompactClass(compact);
+  if (!compact) return menus;
+  return [{
+    id: 'application-menu',
+    // Translator context: this is a compact application-navigation control (File/View/tmux/Tabs/Help),
+    // never a restaurant/food menu. Keep the local software-UI term short enough for the top bar.
+    label: t('menu.compact.label'),
+    nestedRoot: true,
+    items: menus.map(menu => menuSubmenu(menu.label, menu.items)),
+  }];
+}
+
+function syncTopbarNavigationPresentation() {
+  const compact = topbarNavigationShouldBeCompact();
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === null || topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  closeAppMenus();
+  renderSessionButtons({force: true});
+  return true;
+}
+
 function appMenuIsOpen() {
   return Boolean(sessionButtons?.querySelector('.app-menu.open'));
 }
@@ -819,7 +889,11 @@ function renderSessionButtons(options = {}) {
 
 function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
-  if (!options.force && appMenuIsOpen()) {
+  // An SSE/locale/status repaint can otherwise detach a touch target after pointerdown but before
+  // the browser emits click. An open menu is an explicit interaction, so defer every repaint until
+  // it closes; the existing pending render path preserves the newest requested chrome state.
+  if (appMenuIsOpen()) {
+    if (options.force) pendingSessionButtonsRender = true;
     scheduleTopbarMetricsUpdate();
     return;
   }
@@ -859,17 +933,16 @@ function renderSessionButtonsMeasured(options = {}) {
   };
   sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
-  sessionButtons.appendChild(createTopbarNav());
-  sessionButtons.appendChild(createTopbarSearch());
+  sessionButtons.appendChild(createTopbarCenterTools());
   updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
-  sessionButtons.appendChild(createTopbarLanguageSwitcher());
-  sessionButtons.appendChild(createTopbarOwnerStatus());
-  sessionButtons.appendChild(createTopbarActivityStatus());
+  sessionButtons.appendChild(createTopbarRightTools());
   updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+  installTopbarNavigationFitObserver();
+  scheduleTopbarNavigationFitCheck();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
@@ -899,9 +972,9 @@ function renderTopbarStaticChrome() {
 function createAppMenuBar() {
   const bar = document.createElement('nav');
   bar.className = 'app-menu-bar';
-  bar.setAttribute('aria-label', t('menu.bar.aria'));
+  bar.setAttribute('aria-label', t('app.menusAria'));
   bar.setAttribute('role', 'menubar');
-  for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
+  for (const menu of topbarMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
 }
 
@@ -960,6 +1033,20 @@ function createTopbarSearch() {
   button.append(icon, label, hint);
   button.addEventListener('click', () => openFileQuickOpen());
   return button;
+}
+
+function createTopbarCenterTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-center-tools';
+  group.append(createTopbarNav(), createTopbarSearch());
+  return group;
+}
+
+function createTopbarRightTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-right-tools';
+  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  return group;
 }
 
 // Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
@@ -1090,7 +1177,7 @@ function fitAppMenuPopover(popover) {
 
 function createAppMenu(menu) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu';
+  wrapper.className = `app-menu${menu.nestedRoot ? ' app-menu--nested-root' : ''}`;
   wrapper.dataset.appMenu = menu.id;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
@@ -1098,25 +1185,42 @@ function createAppMenu(menu) {
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
   fitAppMenuPopover(popover);
+  const activateMenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (wrapper.classList.contains(CLS.open)) {
+      const openMs = Date.now() - openAppMenuOpenedAt;
+      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      return;
+    }
+    openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  };
   const button = makeButton({
     className: 'app-menu-button',
     role: 'menuitem',
     html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
     attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
     onClick: event => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (wrapper.classList.contains(CLS.open)) {
-        const openMs = Date.now() - openAppMenuOpenedAt;
-        if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
-        else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      if (button.dataset.pointerActionHandled === '1') {
+        delete button.dataset.pointerActionHandled;
         return;
       }
-      openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      activateMenu(event);
     },
-    events: {keydown: event => handleAppMenuButtonKeydown(event, wrapper)},
+    events: {
+      keydown: event => handleAppMenuButtonKeydown(event, wrapper),
+      pointerdown: event => {
+        if (event.button !== 0) return;
+        // Open before a browser turns the tap into click, so an async chrome repaint cannot make
+        // the compact Menus target disappear under the user's finger.
+        button.dataset.pointerActionHandled = '1';
+        activateMenu(event);
+      },
+    },
   });
   wrapper.append(button, popover);
+  button.addEventListener('blur', flushPendingSessionButtonsRender);
   if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
@@ -1211,7 +1315,7 @@ function createAppMenuNumberSetting(item) {
 
 function createAppSubmenu(item) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu-submenu-wrap open';
+  wrapper.className = 'app-menu-submenu-wrap';
   const button = createAppMenuCommand({
     label: item.label,
     disabled: item.disabled,
@@ -1240,7 +1344,7 @@ function createAppSubmenu(item) {
     }
   });
   button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-expanded', 'false');
   wrapper.append(button, submenu);
   bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
@@ -1428,7 +1532,7 @@ function bindAppMenuHover(wrapper) {
     anchor: wrapper,
     popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
     stateClass: '',
-    canOpen: () => autoFocusEnabled || appMenuIsOpen(),
+    canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen(),
     showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
     hideDelay: () => menuHoverCloseDelayMs,
     stillActive: () => wrapper.matches?.(':hover'),
@@ -1453,10 +1557,12 @@ function openAppMenu(wrapper, options = {}) {
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
-  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add(CLS.open);
-    submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
-  });
+  if (!wrapper.classList.contains('app-menu--nested-root')) {
+    wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
+      submenu.classList.add(CLS.open);
+      submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
+    });
+  }
   openAppMenuId = wrapper.dataset.appMenu || null;
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();

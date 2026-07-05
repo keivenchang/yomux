@@ -743,7 +743,7 @@
   "login.showPassword": "Passwort anzeigen",
   "login.signIn": "Anmelden",
   "login.username": "Benutzername",
-  "menu.bar.aria": "Anwendungsmenü",
+  "menu.compact.label": "Menüs",
   "menu.common.adminOnly": "Nur Administrator",
   "menu.common.comingSoon": "Demnächst",
   "menu.file": "Datei",

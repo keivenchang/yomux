@@ -322,7 +322,7 @@ def html_page(
     <button id="notifyToggle" class="notify-toggle" title="{html.escape(server_string(locale, "notify.toggleTitle", state=server_string(locale, "state.off")), quote=True)}">{html.escape(server_string(locale, "pref.section.notifications"))}</button>
     <button id="refreshMeta">{html.escape(server_string(locale, "common.refresh"))}</button>
     <button id="logoutButton" title="{html.escape(server_string(locale, "menu.file.logout"), quote=True)}" aria-label="{html.escape(server_string(locale, "menu.file.logout"), quote=True)}">{html.escape(server_string(locale, "menu.file.logout"))}</button>
-    <span id="status" class="sub">{html.escape(server_string(locale, "state.starting"))}</span>
+    <span id="status" class="sub a11y-only" role="status" aria-live="polite" aria-atomic="true">{html.escape(server_string(locale, "state.starting"))}</span>
   </div>
 </header>
 <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>

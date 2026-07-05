@@ -827,7 +827,7 @@
   "login.showPassword": "إظهار كلمة المرور",
   "login.signIn": "تسجيل الدخول",
   "login.username": "اسم المستخدم",
-  "menu.bar.aria": "قائمة التطبيق",
+  "menu.compact.label": "القوائم",
   "menu.common.adminOnly": "للمسؤولين فقط",
   "menu.common.comingSoon": "قريباً",
   "menu.file": "ملف",

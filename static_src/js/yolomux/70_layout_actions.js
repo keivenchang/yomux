@@ -41,6 +41,7 @@ function removeSessionFromLayout(item, options = {}) {
     preservePlaceholders: !isFiles,
   }), {
     message: options.message || hiddenFromLayoutStatusMessage(item),
+    focusSession: options.focusSession,
   });
 }
 
@@ -53,6 +54,19 @@ function removePaneFromLayout(item) {
   applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? t('layout.status.hidden', {items: moved.map(itemLabel).join(', ')}) : '',
   });
+}
+
+function closePaneFrameItem(item) {
+  const resolved = resolveLayoutItem(item);
+  if (isFileExplorerItem(resolved)) {
+    removeSessionFromLayout(resolved);
+    return;
+  }
+  if (narrowPaneFrameActionTargetsTab(resolved)) {
+    removeSessionFromLayout(resolved, {focusSession: nextNarrowPaneFrameItem(resolved)});
+    return;
+  }
+  removePaneFromLayout(resolved);
 }
 
 function shouldPreserveClosedPaneSlot(slot) {
@@ -119,6 +133,22 @@ function paneTabsWithoutFinder(slot, slots = layoutSlots) {
   return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
 }
 
+// A narrow touch layout has one shared tab strip, not independent panes. Its frame controls must
+// therefore operate on the selected tab; removing the only pane would make the control appear to
+// do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
+function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
+  if (!narrowSingleColumnMode()) return false;
+  const slot = slotForItem(item, slots);
+  return Boolean(slot && paneTabs(slot, slots).length > 1);
+}
+
+function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
+  const slot = slotForItem(item, slots);
+  if (!slot) return null;
+  const remaining = paneTabs(slot, slots).filter(value => value !== item);
+  return remaining.find(value => !isFileExplorerItem(value)) || remaining[0] || null;
+}
+
 function canPaneExpand(item, slots = layoutSlots) {
   const targetSlot = slotForItem(item, slots);
   if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
@@ -133,6 +163,11 @@ function canPaneExpand(item, slots = layoutSlots) {
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
+  if (narrowPaneFrameActionTargetsTab(item)) {
+    removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
+    return;
+  }
+  if (narrowSingleColumnMode()) return;
   if (isFileExplorerItem(activeItemForSide(sourceSlot))) {
     removePaneFromLayout(item);
     return;
@@ -238,7 +273,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(mobileSinglePaneMode ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -282,6 +317,10 @@ function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
 
 function dockFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
+  if (fileExplorerUsesNormalTabMovement()) {
+    void moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null, paneTabs(slotForNewSession()).length);
+    return;
+  }
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
     focusSession: fileExplorerItemId,
     prune: false,
@@ -388,7 +427,7 @@ function toggleFinderPane() {
 
 async function openFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
-  if (mobileSinglePaneMode) {
+  if (fileExplorerUsesNormalTabMovement()) {
     await moveSessionToSlot(fileExplorerItemId, firstNonFinderPaneSlot() || slotForNewSession(), null, paneTabs(firstNonFinderPaneSlot() || slotForNewSession()).length);
     return;
   }
@@ -480,7 +519,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
-  if (isFileExplorerItem(session)) {
+  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement()) {
     await openFileExplorerPane();
     return;
   }
@@ -501,7 +540,7 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
 
 function splitPercentForNewItem(session, zone, pct = null) {
   if (pct !== null && pct !== undefined && pct !== '' && Number.isFinite(Number(pct))) return Number(pct);
-  if (isFileExplorerItem(session) && (zone === 'left' || zone === 'right')) {
+  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement() && (zone === 'left' || zone === 'right')) {
     return zone === 'left' ? fileExplorerSplitPercent : 100 - fileExplorerSplitPercent;
   }
   return defaultSplitPercent;
@@ -1760,7 +1799,7 @@ function focusPanel(session, options = {}) {
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-    if (autoFocusEnabled) {
+    if (autoFocusCanFollowCursor()) {
       requestFileEditorPanelFocus(session);
       focusFileEditorPanelIfReady(panel, session);
     }
@@ -2888,7 +2927,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (mobileSinglePaneMode) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -2910,7 +2949,7 @@ function dropIntentForEvent(event, options = {}) {
 }
 
 function slotIsFileExplorerPane(slot) {
-  return isFileExplorerItem(activeItemForSide(slot));
+  return !fileExplorerUsesNormalTabMovement() && isFileExplorerItem(activeItemForSide(slot));
 }
 
 function dropIntentTargetRect(intent) {
@@ -2929,7 +2968,7 @@ function dropIntentInlineSize(intent) {
 }
 
 function dropItemCanBeDragged(item, options = {}) {
-  if (isLayoutItem(item)) return !isFileExplorerItem(item);
+  if (isLayoutItem(item)) return !isFileExplorerItem(item) || fileExplorerUsesNormalTabMovement();
   return options.allowCandidate === true && isFileEditorItem(item);
 }
 
@@ -3031,14 +3070,14 @@ function dropIntentHasRoomForItem(item, intent) {
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
   if (zone !== 'bottom') return false;
-  if (isFileExplorerItem(item)) return false;
+  if (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement()) return false;
   if (!dropIntentTargetRect(intent)) return false;
   return dropIntentHasRoomForItem(item, intent);
 }
 
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
-  if (mobileSinglePaneMode) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
+  if (narrowSingleColumnMode()) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot)) {

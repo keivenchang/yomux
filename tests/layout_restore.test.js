@@ -1557,7 +1557,7 @@ async function runLayoutRestoreSuite() {
     const menuEnd = source.indexOf('function openAppMenu(', menuStart);
     assert.ok(menuStart > 0 && menuEnd > menuStart, 'could not locate bindAppMenuHover body');
     const menuBody = source.slice(menuStart, menuEnd);
-    assert.ok(menuBody.includes('canOpen: () => autoFocusEnabled || appMenuIsOpen()'), 'menu hover-open is cold-disabled by auto-focus but still switches while a menu is manually open');
+    assert.ok(menuBody.includes('canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen()'), 'menu hover-open shares the cursor-capability gate but still switches while a menu is manually open');
     assert.ok(menuBody.includes('openAppMenuId === menuId'), 'old menu hover-close timers must not close a newer open menu');
     const activePreferenceStart = source.indexOf('function activePreferenceControl(');
     const activePreferenceEnd = source.indexOf('function clampPreferenceNumber(', activePreferenceStart);
@@ -1732,7 +1732,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/transcript-head">\$\{esc\(t\('menu\.tmux\.aiTranscript'/.test(source), 'the YO!summary panel head names the session via the localized aiTranscript key');
     assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the YO!summary stream renders accumulated text through the markdown pipeline');
     assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
-    assert.ok(/renderSessionButtons[\s\S]*appendChild\(createTopbarSearch\(\)\)/.test(source), 'the topbar search is mounted in the menubar middle area');
+    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*createTopbarSearch\(\)/.test(source) && /renderSessionButtons[\s\S]*appendChild\(createTopbarCenterTools\(\)\)/.test(source), 'the topbar search is mounted in the shared menubar middle group');
     assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
     assert.ok(source.includes("=== 'building' ? '…' : 'I'"), '#31: the indexed badge is compact when the date column is off');
     assert.ok(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), '#31: Date/Ago rows hide the indexed status badge so it cannot overlap the date');

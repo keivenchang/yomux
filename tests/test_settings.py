@@ -239,7 +239,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["general"]["auto_focus"] is False
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
-    assert payload["settings"]["appearance"]["tab_width"] == 180
+    assert payload["settings"]["appearance"]["tab_width"] == 172
     assert payload["settings"]["general"]["default_layout"] == "split"
     assert payload["choices"]["general.default_layout"] == ["single", "split", "grid"]
     assert payload["catalog"]["general.default_layout"]["choices"] == ["single", "split", "grid"]
@@ -460,7 +460,7 @@ def test_yoagent_deterministic_preference_alias_write_fixtures():
     cases = [
         ("change background to white", "appearance.theme", "light"),
         ("change background to black", "appearance.theme", "dark"),
-        ("make tabs wider", "appearance.tab_width", 200),
+        ("make tabs wider", "appearance.tab_width", 192),
         ("tab width 220", "appearance.tab_width", 220),
         ("make UI smaller", "appearance.ui_font_size", 12),
         ("terminal font bigger", "appearance.terminal_font_size", 14),

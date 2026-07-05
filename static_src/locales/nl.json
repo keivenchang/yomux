@@ -743,7 +743,7 @@
   "login.showPassword": "Wachtwoord tonen",
   "login.signIn": "Inloggen",
   "login.username": "Gebruikersnaam",
-  "menu.bar.aria": "Applicatiemenu",
+  "menu.compact.label": "Menu's",
   "menu.common.adminOnly": "Alleen admin",
   "menu.common.comingSoon": "Binnenkort",
   "menu.file": "Bestand",
