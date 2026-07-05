@@ -1078,6 +1078,7 @@ body.theme-light {
 .file-explorer-root-mode-toggle.active,
 .file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active,
+.js-debug-chart-layout-control button[aria-pressed="true"],
 .file-editor-preview-zoom-toolbar button[aria-pressed="true"],
 .file-editor-codemirror .cm-search label:has(input:checked),
 .file-editor-codemirror-panel .cm-search label:has(input:checked) {

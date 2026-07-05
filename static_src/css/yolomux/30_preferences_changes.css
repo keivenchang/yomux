@@ -243,9 +243,17 @@ body.theme-light .js-debug-graph-view {
   align-items: center;
   gap: var(--space-3);
   color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
-.js-debug-chart-layout-control input {
-  inline-size: 5rem;
+.js-debug-chart-layout-control button {
+  min-inline-size: 2.5rem;
+  min-block-size: 1.65rem;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: var(--panel2);
+  font: inherit;
 }
 .js-debug-subtab:not(.active):hover,
 .js-debug-subtab:not(.active):focus-visible {

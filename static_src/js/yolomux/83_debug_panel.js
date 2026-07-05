@@ -84,6 +84,8 @@ const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 24 * 60 * 60, label: '24h'},
 ]);
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
+const jsDebugGraphMaxDisplayPoints = 120;
+const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -1653,12 +1655,20 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
 
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  const domainSpanMs = Number.isFinite(domainStartMs) && Number.isFinite(domainEndMs)
+    ? Math.max(jsDebugGraphRawBucketMs, domainEndMs - domainStartMs)
+    : jsDebugGraphDefaultRangeSeconds * 1000;
+  const targetMs = domainSpanMs / jsDebugGraphMaxDisplayPoints;
+  const displayMs = jsDebugGraphDisplayBucketMs.find(bucketMs => bucketMs >= targetMs)
+    || jsDebugGraphDisplayBucketMs.at(-1);
   const retainedMs = Number.isFinite(domainStartMs)
     ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
     : jsDebugGraphRawBucketMs;
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
   const overrideMs = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0) * 1000;
-  return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+  if (overrideMs > 0) return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+  return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
 function debugGraphSourceBuckets(domain) {
@@ -2304,7 +2314,8 @@ function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const defaultSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const choices = [1, 2, 5, 10, 30, 60, 120, 300, 600];
-  const availableChoices = choices.filter(value => value >= defaultSeconds);
+  const retainedSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
+  const availableChoices = choices.filter(value => value >= retainedSeconds && value * 10 <= domain.rangeSeconds);
   const overrideSeconds = availableChoices.includes(Number(jsDebugGraphResolutionOverrideSeconds)) ? Number(jsDebugGraphResolutionOverrideSeconds) : 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
@@ -2340,7 +2351,7 @@ function debugGraphControlsHtml(nowMs = Date.now()) {
     ${debugGraphRangeControlsHtml(nowMs)}
     <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${debugGraphResolutionLabelHtml(nowMs)}
-    <label class="js-debug-chart-layout-control" title="${esc(t('debug.graph.control.charts'))}"><span aria-hidden="true">▦</span><input type="range" min="0" max="4" step="1" value="${esc(jsDebugGraphChartLayout)}" list="js-debug-chart-layout-options" data-js-debug-chart-layout aria-label="${esc(t('debug.graph.control.charts'))}"><datalist id="js-debug-chart-layout-options"><option value="0" label="AUTO"></option><option value="1" label="S"></option><option value="2" label="M"></option><option value="3" label="L"></option><option value="4" label="MAX"></option></datalist></label>
+    <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}"><span>${esc(t('debug.graph.control.charts'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
     ${debugGraphHiddenChartsHtml()}
   </div>`;
 }
@@ -3896,9 +3907,10 @@ function handleDebugGraphControlEvent(event, panel) {
     setDebugGraphResolutionOverride(resolutionOverride.value);
     return true;
   }
-  const chartLayout = event.target.closest('[data-js-debug-chart-layout]');
-  if (chartLayout && panel.contains(chartLayout) && (event.type === 'input' || event.type === 'change')) {
-    setDebugGraphChartLayout(chartLayout.value);
+  const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
+  if (chartLayout && panel.contains(chartLayout) && event.type === 'pointerdown') {
+    event.preventDefault();
+    setDebugGraphChartLayout(chartLayout.dataset.jsDebugChartLayout);
     return true;
   }
   const slider = event.target.closest('[data-js-debug-range-slider]');
