@@ -63474,10 +63474,10 @@ document.addEventListener('keydown', event => {
   if (!['Enter', ' '].includes(event.key)) return;
   handlePromptAttentionClearEvent(event);
 });
-document.addEventListener('click', event => {
+document.addEventListener('pointerdown', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();
-});
+}, true);
 topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();

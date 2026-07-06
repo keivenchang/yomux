@@ -9727,6 +9727,14 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     )
     assert closed["openIds"] == [], closed
 
+    browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
+    assert WebDriverWait(browser, 5).until(lambda _driver: menu_metrics("file")["open"])
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".xterm")).click().perform()
+    terminal_closed = WebDriverWait(browser, 5).until(
+        lambda _driver: (state if not (state := menu_metrics("file"))["open"] else False)
+    )
+    assert terminal_closed["openIds"] == [], terminal_closed
+
 
 def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     def touch_tap(element):

@@ -175,6 +175,7 @@ async function runEditorPreviewSuite() {
       viewport: {width: 640, height: 1024},
     });
     assert.equal(tooNarrowTablet.narrowSingleColumnModeForTest(), true, 'a touch viewport below two shared minimum pane widths collapses to one column');
+    assert.equal(tooNarrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'a one-column touch viewport keeps Finder as an ordinary tab');
     assert.deepEqual(canonical(tooNarrowTablet.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
       left: {active: '1', tabs: ['__files__', '1', '2']},
