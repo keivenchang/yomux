@@ -557,7 +557,7 @@ function openMarkdownPreviewPathLink(container, resolved) {
   return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
     viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
     ownerSession: owner,
-  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
+  })).catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(container?.dataset?.mdPath || ''), title: t('preview.openFailed', {path: resolved}), className: 'attention-alert toast'}));
 }
 
 // in the file-editor markdown preview, route link clicks: in-page #anchors keep default;

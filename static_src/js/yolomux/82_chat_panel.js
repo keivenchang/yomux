@@ -772,10 +772,10 @@ function maybeNotifyChatMessage(message) {
   const lines = chatNotificationLines(message);
   const body = lines.join('\n');
   const onClick = () => openChatNotification(id);
-  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), lines, {targetItem: chatItemId, onClick});
-  if (notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
-    sendBrowserNotification(chatTabLabel(), {body, tag: `yolomux:chat:${id}`, targetItem: chatItemId, onClick});
-  }
+  emitNotification('chatMessage', {
+    title: chatTabLabel(), lines, body, systemBody: body, onClick,
+    coalesceKey: `chat:${id}`, systemTag: `yolomux:chat:${id}`,
+  });
   return true;
 }
 

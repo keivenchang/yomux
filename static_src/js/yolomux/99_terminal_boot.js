@@ -3252,7 +3252,7 @@ async function uploadFiles(session, fileList, options = {}) {
           ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
           : insertUploadPaths(session, paths, {silent: true}))
       : false;
-    const uploadResult = showUploadResult(session, payload, inserted);
+    const uploadResult = emitNotification('uploadResult', {session, uploadPayload: payload, inserted}).inApp;
     if (paths.length && boolSetting('uploads.show_suggestions', true)) {
       const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
       const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
@@ -3836,7 +3836,7 @@ function moveUploadResultRecord(oldSession, newSession) {
   return true;
 }
 
-function showUploadResult(session, payload, inserted) {
+function deliverUploadResultNotification(session, payload = {}, inserted = false) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return null;
   const files = payload.files || [];
@@ -4740,9 +4740,11 @@ function selfUpdateReloadDeferredReason() {
 function showSelfUpdateReloadDeferredToast() {
   if (selfUpdateReloadState.deferredToastShown) return;
   selfUpdateReloadState.deferredToastShown = true;
-  showToast(t('update.softwareTitle'), [
-    t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
-  ], {className: 'attention-alert toast toast-update'});
+  emitNotification('update', {
+    title: t('update.softwareTitle'),
+    lines: [t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()})],
+    className: 'attention-alert toast toast-update', coalesceKey: 'self-update-reload-deferred',
+  });
 }
 
 function maybeReloadAfterSelfUpdate() {
@@ -4776,7 +4778,7 @@ async function pollSelfUpdateReload() {
   }
   if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
     selfUpdateReloadState.pending = false;
-    showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
+    emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.restartTimeout')], coalesceKey: 'self-update-timeout'});
     return false;
   }
   scheduleSelfUpdateReloadPoll();
@@ -5720,12 +5722,12 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
   try {
     const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
     const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
-    showToast(title, [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))]);
+    emitNotification('update', {title, lines: [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
     if (data.ok && data.restarting) {
       startSelfUpdateReloadPolling(data.target || data.version || target);
     }
   } catch (error) {
-    showToast(t('update.failed'), [userMessageText(error, t('update.seeServerLogs'))]);
+    emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
   }
 }
 
@@ -5743,13 +5745,14 @@ function applyUpdateAvailable(status) {
     else delete badge.dataset.updateTarget;
     renderUpdateBadgeChrome();
   }
-  const node = showToast(t('update.availableTitle'), [
-    t('update.availableBody', {target: status.target ? ` (${status.target})` : ''}),
-  ], {
+  const node = emitNotification('update', {
+    title: t('update.availableTitle'),
+    lines: [t('update.availableBody', {target: status.target ? ` (${status.target})` : ''})],
     actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
-  });
+    coalesceKey: 'update-available',
+  }).inApp;
   if (node && target) node.dataset.updateTarget = target;
 }
 
@@ -5774,14 +5777,10 @@ function maybeNotifyYoagentJob(notification = {}) {
   if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
-  if (notificationDeliveryEnabled('inApp')) showToast(title, [body], {session});
-  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(hostNotificationTitle(title), {
-      body,
-      tag,
-      renotify: true,
-      session,
+    emitNotification('yoagentJob', {
+      session, title, body, systemTitle: hostNotificationTitle(title),
+      systemTag: tag, renotify: true, coalesceKey: tag,
     });
   } catch (error) {
     postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});

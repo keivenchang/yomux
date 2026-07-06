@@ -350,7 +350,7 @@ async function reloadYoloRules() {
     statusEl.innerHTML = payload.error
       ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('brand.yoloRules'), errorText || yoloRuleStatusDetail(), {level});
+    emitNotification('yoloRules', {title: t('brand.yoloRules'), lines: errorText || yoloRuleStatusDetail(), className: level ? 'attention-alert toast' : ''});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }

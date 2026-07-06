@@ -3083,6 +3083,7 @@ async function runShareThemeSuite() {
     }
     {
       const shareSource = fs.readFileSync('static/yolomux.js', 'utf8');
+      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
       const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
       const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
       const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
@@ -3257,7 +3258,7 @@ async function runShareThemeSuite() {
       assert.ok(/function sharePointFromPointerPayload\(payload = \{\}\)[\s\S]*if \(payload\.scope && payload\.scope !== 'viewport'\) return null[\s\S]*visualPointFromAppSpace\(x, y\)/.test(shareSource), 'M7: share pointer rendering maps app-space viewport coordinates through the local mirror transform');
       assert.equal(shareSource.includes('shareSemanticPointerPayload'), false, 'M7: semantic pointer fallbacks are removed after mirror-frame geometry');
       assert.equal(shareSource.includes('shareTerminalCellPointerPayload'), false, 'M7: terminal cell pointer fallback is removed after mirror-frame geometry');
-      assert.equal(shareSource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
+      assert.equal(shareReplaySource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
       assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
       assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
       assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');

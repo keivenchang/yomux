@@ -2703,8 +2703,8 @@ async function runEditorPreviewSuite() {
     const end = source.indexOf('function dismissAttentionAlertsForSession(', start);
     assert.ok(start > 0 && end > start, 'could not locate showAttentionAlert body');
     const body = source.slice(start, end);
-    assert.ok(body.includes('container: displayToastContainer(session)'), 'attention notifications use the target pane-local toast stack');
-    assert.equal(body.includes('container: attentionAlerts'), false, 'attention notifications do not use the global fixed stack');
+    assert.ok(body.includes("emitNotification('sessionAttention'"), 'attention notifications route through the shared event emitter');
+    assert.ok(source.includes("sessionAttention: Object.freeze({scope: 'global'"), 'attention notifications use the global rail policy');
     assert.ok(source.includes('function compactNotificationTitle('), 'notification/toast titles use one compact title helper');
     assert.ok(body.includes('attentionToastTitle(session, state)'), 'attention toasts name the exact session and tmux window through one title helper');
     assert.ok(body.includes('attentionToastLine(session, state)'), 'attention toasts route their body through the shared agent-status message renderer');
@@ -2723,16 +2723,28 @@ async function runEditorPreviewSuite() {
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
     assert.equal(source.includes('YOLOmux - ${serverHostname}: ${message}'), false, 'watched-PR browser notifications drop verbose host-prefixed titles');
     assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true})"), 'terminal connection toasts use the shared localized in-app title path without redundant external app context');
-    assert.ok(source.includes("showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true})"), 'the in-page notification test uses the shared context-free toast title path');
-    assert.ok(source.includes("sendBrowserNotification(t('notify.testTitle', {host: serverHostname})"), 'the browser-to-OS notification test keeps the branded host title');
+    assert.ok(source.includes("emitNotification('notificationTest'"), 'the notification test uses the shared event emitter');
+    assert.ok(source.includes("systemTitle: t('notify.testTitle', {host: serverHostname})"), 'the browser-to-OS notification test keeps the branded host title');
     assert.ok(source.includes('function renderBrowserAppIconDataUrl(options = {})'), 'favicon and OS notifications share one app-icon renderer');
     assert.ok(source.includes('return renderBrowserAppIconDataUrl({count, showBadge: true})'), 'the favicon enables the activity-count badge through the shared renderer');
     assert.ok(source.includes('renderBrowserAppIconDataUrl({size: 192, showBadge: false})'), 'OS notifications use a badge-free 192px icon through the shared renderer');
     assert.ok(source.includes("new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions)"), 'the shared OS-notification boundary applies the icon to every notification');
     assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*focusedPanelItem === target \|\| focusedTerminal === target/.test(source), 'one exact-target focus classifier acknowledges only the pane the user is actually focused in');
     assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*toastTargetItem[\s\S]*browserNotificationsByTarget/.test(source), 'focusing a target Tab dismisses both its in-app and system notifications through one owner');
-    assert.ok(/function maybeNotifyWorkingAgentTransition\(session, agentKey, tone, options = \{\}\)[\s\S]*notificationTargetIsFocused\(session\)[\s\S]*dismissNotificationsForTarget\(session\)[\s\S]*return false[\s\S]*showToast\(title/.test(source), 'RUN-to-stop/pause notifications are suppressed before either delivery path when their exact Tab is focused');
+    assert.ok(/function maybeNotifyWorkingAgentTransition\(session, agentKey, tone, options = \{\}\)[\s\S]*notificationTargetIsFocused\(session\)[\s\S]*dismissNotificationsForTarget\(session\)[\s\S]*return false[\s\S]*emitNotification\(tone === 'attention' \? 'agentAttention' : 'agentDone'/.test(source), 'RUN-to-stop/pause notifications are suppressed before either delivery path when their exact Tab is focused');
     const notificationApi = loadYolomux('', ['1']);
+    const definitions = notificationApi.notificationEventDefinitionsForTest();
+    const expectedNotificationPolicies = {
+      sessionAttention: ['global', 'session'], agentAttention: ['global', 'session'], agentDone: ['global', 'session'], terminalConnection: ['global', 'session'],
+      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
+      uploadResult: ['pane', 'session'], fileTransfer: ['pane', 'operation'], fileOpen: ['pane', 'finder'], yoloRules: ['pane', 'preferences'], previewOpen: ['pane', 'operation'],
+    };
+    for (const [event, [scope, target]] of Object.entries(expectedNotificationPolicies)) {
+      assert.equal(definitions[event]?.scope, scope, `${event} has one declared scope`);
+      assert.equal(definitions[event]?.target, target, `${event} has one declared target owner`);
+    }
+    assert.equal(typeof definitions.uploadResult?.deliver, 'function', 'the specialized upload renderer is dispatched through its registry row rather than a parallel producer path');
+    assert.equal(Object.keys(definitions).length, Object.keys(expectedNotificationPolicies).length, 'the policy matrix has no undocumented notification event');
     notificationApi.setDocumentVisibilityForTest('visible');
     notificationApi.setFocusedTerminal('1');
     assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'the focused session is acknowledged before a transition notification is delivered');
@@ -8052,7 +8064,7 @@ async function runEditorPreviewSuite() {
     });
     assert.ok(/workingAgentTransitionNotificationDescriptors\s*=\s*Object\.freeze\([\s\S]*notify_working_attention[\s\S]*notify_working_done/.test(notificationSource), 'one notification descriptor owns both working-agent transition toggles');
     assert.ok(/cooldown:\s*Object\.freeze\(\{settingPath:\s*'notifications\.notify_working_done',[\s\S]*copyKey:\s*'done'\}\)[\s\S]*notify\.working\.\$\{descriptor\.copyKey\}\.title/.test(notificationSource), 'the internal cooldown tone maps through the shared descriptor to human-readable done notification copy');
-    assert.ok(/function agentToastTargetLine\(session, agent, options = \{\}\)[\s\S]*function workingAgentTransitionNotificationTarget[\s\S]*showToast\(title, agentToastTargetLine\(session, target, \{reason: body\}\),[\s\S]*focusAgentToastTarget\(session, target\)/.test(notificationSource), 'finished-AI notifications reuse the shared Tab and window target controls and focus path');
+    assert.ok(/function agentToastTargetLine\(session, agent, options = \{\}\)[\s\S]*function workingAgentTransitionNotificationTarget[\s\S]*emitNotification\(tone === 'attention' \? 'agentAttention' : 'agentDone'[\s\S]*focusAgentToastTarget\(session, target\)/.test(notificationSource), 'finished-AI notifications reuse the shared Tab and window target controls and focus path');
     assert.ok(notificationSource.includes("node.dataset.toastKind = 'working-agent-transition'"), 'working transition popups are tagged for shared session acknowledgement');
     assert.ok(notificationSource.includes('dismissSessionToasts(session);\n        void focusAgentToastTarget(session, target);'), 'clicking a working transition popup dismisses it before opening the target');
     const layoutActionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
@@ -9760,7 +9772,8 @@ async function runEditorPreviewSuite() {
     assert.ok(src.includes("showStartupHelperTip({manual: true})"), 'Next tip action shows the next helper');
     assert.ok(src.includes("saveSettingsPatch(settingPatch('general.startup_tips', false))"), 'Turn off forever persists the General setting');
     assert.ok(src.includes('startupHelperPromptTitle(index, tips.length, tip)'), 'startup helper title includes tip number, total, and action prompt');
-    assert.ok(src.includes('container: displayToastContainer(focusedPanelItem)'), 'startup helper renders in the focused pane toast stack, below pane tabs');
+    assert.ok(src.includes("emitNotification('startupTip'"), 'startup helper uses the shared event emitter');
+    assert.ok(src.includes("startupTip: Object.freeze({scope: 'global'"), 'startup helper uses the global notification rail');
     assert.equal(src.includes("common.hide"), false, 'startup helper relies on the toast X instead of a duplicate Hide action');
     assert.ok(src.includes('actions: [navAction, offAction]'), 'startup helper actions are nav plus Turn off Tips forever');
     assert.ok(/makeButton\(\{[\s\S]*?label: '<',[\s\S]*?showRelativeTip\(-1\)/.test(src), 'startup helper has a previous-tip arrow control through the shared button builder');
@@ -9771,7 +9784,6 @@ async function runEditorPreviewSuite() {
     assert.ok(helperStart >= 0 && helperEnd > helperStart, 'startup helper function block is present');
     assert.equal(src.slice(helperStart, helperEnd).includes('.focus('), false, 'startup helper code does not steal focus');
     const helperCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(/\.panel-toast-stack \.startup-helper-toast\s*\{[\s\S]*?align-self:\s*flex-end/.test(helperCss), 'startup helper toast is pane-local and right-aligned below the pane tab strip');
     assert.ok(/\.startup-helper-nav\s*\{[\s\S]*?display:\s*inline-flex/.test(helperCss), 'startup helper navigation is a compact arrow group');
     const bootSrc = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(/installRuntimeIntervals\(\);\s*scheduleStartupHelperTip\(\);/.test(bootSrc), 'startup helper is scheduled after initial boot intervals');

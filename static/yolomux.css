@@ -8553,7 +8553,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   width: 100%;
   pointer-events: auto;
 }
-.panel-toast-stack .startup-helper-toast {
+.attention-alerts .startup-helper-toast {
   width: min(720px, 100%);
   align-self: flex-end;
 }

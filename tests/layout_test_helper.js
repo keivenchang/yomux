@@ -1313,6 +1313,10 @@ globalThis.__layoutTestApi = {
   setSaveBlobDownloadForTest(fn) { saveBlobDownload = fn; },
   setConfirmForTest(fn) { window.confirm = fn; },
   setShowToastForTest(fn) { showToast = fn; },
+  notificationEventDefinitionsForTest() {
+    return Object.fromEntries(Object.entries(notificationEventDefinitions).map(([key, value]) => [key, {...value}]));
+  },
+  emitNotificationForTest: emitNotification,
   copyImageFileToClipboardForTest: copyImageFileToClipboard,
   triggerFileDownloadForTest: triggerFileDownload,
   triggerFolderZipDownloadForTest: triggerFolderZipDownload,
@@ -1472,7 +1476,9 @@ globalThis.__layoutTestApi = {
     uploadResultRecords.set(session, {entries: [{text: 'uploaded'}], cleanupTimer: 123});
     return closed;
   },
-  showUploadResultForTest: showUploadResult,
+  showUploadResultForTest(session, payload, inserted) {
+    return emitNotification('uploadResult', {session, uploadPayload: payload, inserted}).inApp;
+  },
   renderUploadResultForTest: renderUploadResult,
   keepUploadResultForTest: keepUploadResult,
   hideUploadResultForTest: hideUploadResult,

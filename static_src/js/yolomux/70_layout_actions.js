@@ -2721,15 +2721,14 @@ function dismissTerminalConnectionToasts(session) {
 
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
-  const node = showToast(
-    compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
-    text,
-    {
-      container: displayToastContainer(session),
-      countdownMs,
-      onClick: () => selectSession(session, {userInitiated: true}),
-    },
-  );
+  const node = emitNotification('terminalConnection', {
+    session,
+    title: compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
+    body: text,
+    countdownMs,
+    coalesceKey: `terminal-connection:${session}`,
+    onClick: () => selectSession(session, {userInitiated: true}),
+  }).inApp;
   if (node) {
     node.dataset.toastSession = session;
     node.dataset.toastKind = 'terminal-connection';

@@ -2531,14 +2531,14 @@ function showUploadRsyncRecommendation(options = {}) {
     },
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
-  return showToast(t('common.rsyncLargeFiles'), [
-    t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
-    command,
-  ], {
-    container: fileTransferToastContainer(options),
+  return emitNotification('fileTransfer', {
+    session: options.session, item: options.item || focusedPanelItem || fileExplorerItemId,
+    title: t('common.rsyncLargeFiles'), lines: [
+      t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}), command,
+    ],
     actions: [action],
     countdownMs: 20000,
-  });
+  }).inApp;
 }
 
 function savePreferenceControl(control) {

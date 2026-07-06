@@ -176,17 +176,13 @@ function saveBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function fileTransferToastContainer(options = {}) {
-  return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
-}
-
 function showFileTransferError(error, options = {}) {
   const primitiveFallback = typeof error === 'string' || typeof error === 'number' ? String(error) : '';
   const text = userMessageText(error, primitiveFallback || options.fallback || t('fileTransfer.failed')).trim();
   statusErr(esc(text));
-  showToast(t('fileTransfer.failedTitle'), [text], {
-    container: fileTransferToastContainer(options),
-    countdownMs: 20000,
+  emitNotification('fileTransfer', {
+    session: options.session, item: options.item || focusedPanelItem || fileExplorerItemId,
+    title: t('fileTransfer.failedTitle'), lines: [text], countdownMs: 20000,
   });
 }
 
@@ -1220,10 +1216,7 @@ function syncFileLayoutItems() {
 }
 
 function showFileOpenError(path, message) {
-  showToast(t('editor.fileOpenFailedTitle'), `${path}\n${message}`, {
-    container: displayToastContainer(fileExplorerItemId),
-    className: 'attention-alert toast',
-  });
+  emitNotification('fileOpen', {title: t('editor.fileOpenFailedTitle'), lines: `${path}\n${message}`, className: 'attention-alert toast'});
 }
 
 function formatFileSize(bytes) {

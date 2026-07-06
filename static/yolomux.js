@@ -10479,6 +10479,102 @@ function setToastCountdown(node, durationMs) {
   node.style.setProperty('--toast-countdown-duration', `${Math.max(1, durationMs)}ms`);
 }
 
+// This is the sole product-policy owner for transient notifications.  Producers supply content
+// and an optional target/action; they do not decide whether an event is pane-local, global, OS
+// deliverable, suppressible, or coalesced.  That separation keeps a new notification from quietly
+// becoming a third routing model.
+const notificationEventDefinitions = Object.freeze({
+  sessionAttention: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'attention', coalesce: true}),
+  agentAttention: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'attention', coalesce: true, persistent: true}),
+  agentDone: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'done', coalesce: true}),
+  terminalConnection: Object.freeze({scope: 'global', target: 'session', system: false, suppressFocused: true, priority: 'connection', coalesce: true}),
+  chatMessage: Object.freeze({scope: 'global', target: 'chat', system: true, suppressFocused: true, priority: 'message', coalesce: true}),
+  yoagentJob: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'job', coalesce: true}),
+  watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
+  update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
+  startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
+  notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
+  // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
+  // through this policy row so its pane scope cannot become a second routing decision.
+  uploadResult: Object.freeze({scope: 'pane', target: 'session', system: false, priority: 'operation', deliver: ({target, payload}) => deliverUploadResultNotification(target, payload.uploadPayload, payload.inserted === true)}),
+  fileTransfer: Object.freeze({scope: 'pane', target: 'operation', system: false, priority: 'operation'}),
+  fileOpen: Object.freeze({scope: 'pane', target: 'finder', system: false, priority: 'operation'}),
+  yoloRules: Object.freeze({scope: 'pane', target: 'preferences', system: false, priority: 'operation'}),
+  previewOpen: Object.freeze({scope: 'pane', target: 'operation', system: false, priority: 'operation'}),
+});
+
+function notificationEventDefinition(type) {
+  return notificationEventDefinitions[type] || null;
+}
+
+function notificationEventTarget(definition, payload = {}) {
+  if (definition?.target === 'chat') return chatItemId;
+  if (definition?.target === 'finder') return fileExplorerItemId;
+  if (definition?.target === 'preferences') return prefsItemId;
+  return String(payload.targetItem || payload.session || payload.item || '').trim();
+}
+
+function notificationEventContainer(definition, target) {
+  return definition?.scope === 'pane' ? displayToastContainer(target) : attentionAlerts;
+}
+
+function notificationEventKey(type, definition, target, payload = {}) {
+  if (payload.coalesceKey) return String(payload.coalesceKey);
+  if (definition?.coalesce !== true) return '';
+  return `${type}:${target || String(payload.key || '')}`;
+}
+
+function dismissCoalescedToast(key) {
+  if (!key) return;
+  for (const [id, record] of toastRecords.entries()) {
+    if (record.node?.dataset?.toastCoalesceKey === key) removeAttentionAlert(id);
+  }
+}
+
+function emitNotification(type, payload = {}) {
+  const definition = notificationEventDefinition(type);
+  if (!definition) throw new Error(`unknown notification event: ${type}`);
+  const target = notificationEventTarget(definition, payload);
+  const key = notificationEventKey(type, definition, target, payload);
+  if (definition.deliver) return {inApp: definition.deliver({target, payload}), system: null, suppressed: false};
+  const targetItem = definition.suppressFocused === true ? target : '';
+  if (targetItem && notificationTargetIsFocused(targetItem)) {
+    dismissNotificationsForTarget(targetItem);
+    return {inApp: null, system: null, suppressed: true};
+  }
+  let inApp = null;
+  if (payload.inApp !== false && notificationDeliveryEnabled('inApp')) {
+    dismissCoalescedToast(key);
+    inApp = showToast(payload.title || '', payload.lines || payload.body || '', {
+      container: notificationEventContainer(definition, target),
+      targetItem,
+      onClick: payload.onClick,
+      actions: payload.actions,
+      className: payload.className,
+      countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
+    });
+    if (inApp) {
+      inApp.dataset.toastEvent = type;
+      inApp.dataset.toastPriority = definition.priority;
+      if (target) inApp.dataset.toastTargetItem = target;
+      if (key) inApp.dataset.toastCoalesceKey = key;
+    }
+  }
+  let system = null;
+  if (definition.system === true && payload.system !== false && notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
+    system = sendBrowserNotification(payload.systemTitle || payload.title || '', {
+      body: payload.systemBody || payload.body || toastTextLines(payload.lines || '').join('\n'),
+      tag: payload.systemTag || key || `${type}:${Date.now()}`,
+      renotify: payload.renotify === true,
+      targetItem,
+      session: payload.session,
+      onClick: payload.onClick,
+      url: payload.url,
+    });
+  }
+  return {inApp, system, suppressed: false};
+}
+
 // Upload and attention/status messages share this renderer. Keep visual differences out of call sites.
 function ensureToastShell(node, options = {}) {
   let bodyNode = node.querySelector('.toast-body');
@@ -10771,12 +10867,13 @@ function showStartupHelperTip(options = {}) {
         .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
     },
   });
-  node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
+  node = emitNotification('startupTip', {
+    title: startupHelperPromptTitle(index, tips.length, tip), lines: tip.lines,
     className: 'attention-alert toast startup-helper-toast',
-    container: displayToastContainer(focusedPanelItem),
     actions: [navAction, offAction],
     countdownMs: 45000,
-  });
+    coalesceKey: 'startup-tip',
+  }).inApp;
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;
 }
@@ -10937,18 +11034,20 @@ function workingAgentTransitionNotificationTarget(agentKey, tone, options = {}) 
 }
 
 function showAttentionAlert(session, state) {
-  const node = showToast(
-    attentionToastTitle(session, state),
-    attentionToastLine(session, state),
-    {
-      container: displayToastContainer(session),
-      targetItem: session,
-      onClick: () => {
-        dismissSessionToasts(session);
-        void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent);
-      },
+  const node = emitNotification('sessionAttention', {
+    session,
+    title: attentionToastTitle(session, state),
+    lines: attentionToastLine(session, state),
+    body: state.reason || state.label || '',
+    systemTitle: sessionNotificationTitle(session, state),
+    systemTag: `yolomux:session:${session}:state:${stateSignature(state)}`,
+    coalesceKey: `session-attention:${session}`,
+    system: false,
+    onClick: () => {
+      dismissSessionToasts(session);
+      void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent);
     },
-  );
+  }).inApp;
   if (node) {
     node.dataset.toastSession = session;
     node.dataset.toastKind = 'attention';
@@ -10993,12 +11092,11 @@ function removeAttentionAlert(id) {
 function sendTestNotification(options = {}) {
   const inApp = options.inApp === true || (options.inApp === undefined && notificationDeliveryEnabled('inApp'));
   const system = options.system === true || (options.system === undefined && notificationDeliveryEnabled('system'));
-  if (inApp) showToast(hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}), t('notify.testBody'), {container: displayToastContainer(focusedPanelItem)});
-  if (!system || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(t('notify.testTitle', {host: serverHostname}), {
-      body: t('notify.browserTestBody'),
-      tag: `yolomux:test:${Date.now()}`,
+    emitNotification('notificationTest', {
+      title: hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}),
+      body: t('notify.testBody'), systemTitle: t('notify.testTitle', {host: serverHostname}),
+      systemBody: t('notify.browserTestBody'), coalesceKey: 'notification-test', inApp, system,
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
@@ -11070,20 +11168,10 @@ function maybeNotifyState(session, state, options = {}) {
   });
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(sessionNotificationTitle(session, state), {
-      body,
-      tag: `yolomux:session:${session}:${key}`,
-      renotify: true,
-      session,
-    });
-    postEvent(session, 'notification_sent', eventMessageForState(session, state), {
-      state: state.key,
-      reason: state.reason,
-    });
+    emitNotification('sessionAttention', {session, title: attentionToastTitle(session, state), body, systemTitle: sessionNotificationTitle(session, state), systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
+    postEvent(session, 'notification_sent', eventMessageForState(session, state), {state: state.key, reason: state.reason});
   } catch (error) {
-    postEvent(session, 'notification_error', `notification failed: ${error}`, {
-      state: state.key,
-    });
+    postEvent(session, 'notification_error', `notification failed: ${error}`, {state: state.key});
   }
 }
 
@@ -11185,14 +11273,16 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   const title = t(`notify.working.${descriptor.copyKey}.title`);
   const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
   if (notificationDeliveryEnabled('inApp')) {
-    const node = showToast(title, agentToastTargetLine(session, target, {reason: body}), {
-      container: displayToastContainer(session),
-      targetItem: session,
+    const node = emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
+      session, title, lines: agentToastTargetLine(session, target, {reason: body}), body,
+      systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true,
+      coalesceKey: `agent-${tone}:${session}:${targetKey}`,
       onClick: () => {
         dismissSessionToasts(session);
         void focusAgentToastTarget(session, target);
       },
-    });
+      system: false,
+    }).inApp;
     if (node) {
       node.dataset.toastSession = session;
       node.dataset.toastKind = 'working-agent-transition';
@@ -11201,7 +11291,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    sendBrowserNotification(title, {body, tag: `yolomux:session:${session}:${key}`, renotify: true, session});
+    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {session, title, body, systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
     postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
@@ -11344,16 +11434,11 @@ function maybeNotifyWatchedPr(ref, key, message, url) {
   const lastSent = watchedPrNotificationLastSent.get(signature) || 0;
   if (now - lastSent < throttleMs) return;
   setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);
-  if (notificationDeliveryEnabled('inApp')) showToast(message, [ref], {onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }});
+  if (notificationDeliveryEnabled('inApp')) emitNotification('watchedPullRequest', {title: message, lines: [ref], body: ref, url, coalesceKey: signature, onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }, system: false});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(hostNotificationTitle(message), {
-      body: ref,
-      tag: signature,
-      renotify: true,
-      url,
-    });
+    emitNotification('watchedPullRequest', {title: message, body: ref, systemTitle: hostNotificationTitle(message), systemTag: signature, renotify: true, url, inApp: false});
     postEvent(null, 'watched_pr_notification', message, {ref, transition: key});
   } catch (error) {
     postEvent(null, 'watched_pr_notification_error', `notification failed: ${error}`, {ref, transition: key});
@@ -11936,7 +12021,7 @@ async function reloadYoloRules() {
     statusEl.innerHTML = payload.error
       ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('brand.yoloRules'), errorText || yoloRuleStatusDetail(), {level});
+    emitNotification('yoloRules', {title: t('brand.yoloRules'), lines: errorText || yoloRuleStatusDetail(), className: level ? 'attention-alert toast' : ''});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
@@ -19232,17 +19317,13 @@ function saveBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function fileTransferToastContainer(options = {}) {
-  return displayToastContainer(options.session || options.item || focusedPanelItem || fileExplorerItemId);
-}
-
 function showFileTransferError(error, options = {}) {
   const primitiveFallback = typeof error === 'string' || typeof error === 'number' ? String(error) : '';
   const text = userMessageText(error, primitiveFallback || options.fallback || t('fileTransfer.failed')).trim();
   statusErr(esc(text));
-  showToast(t('fileTransfer.failedTitle'), [text], {
-    container: fileTransferToastContainer(options),
-    countdownMs: 20000,
+  emitNotification('fileTransfer', {
+    session: options.session, item: options.item || focusedPanelItem || fileExplorerItemId,
+    title: t('fileTransfer.failedTitle'), lines: [text], countdownMs: 20000,
   });
 }
 
@@ -20276,10 +20357,7 @@ function syncFileLayoutItems() {
 }
 
 function showFileOpenError(path, message) {
-  showToast(t('editor.fileOpenFailedTitle'), `${path}\n${message}`, {
-    container: displayToastContainer(fileExplorerItemId),
-    className: 'attention-alert toast',
-  });
+  emitNotification('fileOpen', {title: t('editor.fileOpenFailedTitle'), lines: `${path}\n${message}`, className: 'attention-alert toast'});
 }
 
 function formatFileSize(bytes) {
@@ -28781,15 +28859,14 @@ function dismissTerminalConnectionToasts(session) {
 
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
-  const node = showToast(
-    compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
-    text,
-    {
-      container: displayToastContainer(session),
-      countdownMs,
-      onClick: () => selectSession(session, {userInitiated: true}),
-    },
-  );
+  const node = emitNotification('terminalConnection', {
+    session,
+    title: compactNotificationTitle(sessionLabel(session), t('tab.terminal.short'), {inApp: true}),
+    body: text,
+    countdownMs,
+    coalesceKey: `terminal-connection:${session}`,
+    onClick: () => selectSession(session, {userInitiated: true}),
+  }).inApp;
   if (node) {
     node.dataset.toastSession = session;
     node.dataset.toastKind = 'terminal-connection';
@@ -36736,10 +36813,10 @@ function maybeNotifyChatMessage(message) {
   const lines = chatNotificationLines(message);
   const body = lines.join('\n');
   const onClick = () => openChatNotification(id);
-  if (notificationDeliveryEnabled('inApp')) showToast(chatTabLabel(), lines, {targetItem: chatItemId, onClick});
-  if (notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
-    sendBrowserNotification(chatTabLabel(), {body, tag: `yolomux:chat:${id}`, targetItem: chatItemId, onClick});
-  }
+  emitNotification('chatMessage', {
+    title: chatTabLabel(), lines, body, systemBody: body, onClick,
+    coalesceKey: `chat:${id}`, systemTag: `yolomux:chat:${id}`,
+  });
   return true;
 }
 
@@ -44872,14 +44949,14 @@ function showUploadRsyncRecommendation(options = {}) {
     },
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
-  return showToast(t('common.rsyncLargeFiles'), [
-    t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
-    command,
-  ], {
-    container: fileTransferToastContainer(options),
+  return emitNotification('fileTransfer', {
+    session: options.session, item: options.item || focusedPanelItem || fileExplorerItemId,
+    title: t('common.rsyncLargeFiles'), lines: [
+      t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}), command,
+    ],
     actions: [action],
     countdownMs: 20000,
-  });
+  }).inApp;
 }
 
 function savePreferenceControl(control) {
@@ -47754,7 +47831,7 @@ function openMarkdownPreviewPathLink(container, resolved) {
   return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
     viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
     ownerSession: owner,
-  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
+  })).catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(container?.dataset?.mdPath || ''), title: t('preview.openFailed', {path: resolved}), className: 'attention-alert toast'}));
 }
 
 // in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
@@ -60288,7 +60365,7 @@ async function uploadFiles(session, fileList, options = {}) {
           ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
           : insertUploadPaths(session, paths, {silent: true}))
       : false;
-    const uploadResult = showUploadResult(session, payload, inserted);
+    const uploadResult = emitNotification('uploadResult', {session, uploadPayload: payload, inserted}).inApp;
     if (paths.length && boolSetting('uploads.show_suggestions', true)) {
       const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
       const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
@@ -60872,7 +60949,7 @@ function moveUploadResultRecord(oldSession, newSession) {
   return true;
 }
 
-function showUploadResult(session, payload, inserted) {
+function deliverUploadResultNotification(session, payload = {}, inserted = false) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return null;
   const files = payload.files || [];
@@ -61776,9 +61853,11 @@ function selfUpdateReloadDeferredReason() {
 function showSelfUpdateReloadDeferredToast() {
   if (selfUpdateReloadState.deferredToastShown) return;
   selfUpdateReloadState.deferredToastShown = true;
-  showToast(t('update.softwareTitle'), [
-    t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()}),
-  ], {className: 'attention-alert toast toast-update'});
+  emitNotification('update', {
+    title: t('update.softwareTitle'),
+    lines: [t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()})],
+    className: 'attention-alert toast toast-update', coalesceKey: 'self-update-reload-deferred',
+  });
 }
 
 function maybeReloadAfterSelfUpdate() {
@@ -61812,7 +61891,7 @@ async function pollSelfUpdateReload() {
   }
   if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
     selfUpdateReloadState.pending = false;
-    showToast(t('update.softwareTitle'), [t('update.restartTimeout')]);
+    emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.restartTimeout')], coalesceKey: 'self-update-timeout'});
     return false;
   }
   scheduleSelfUpdateReloadPoll();
@@ -62756,12 +62835,12 @@ async function triggerSelfUpdate(_event = null, ownerToast = null) {
   try {
     const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
     const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
-    showToast(title, [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))]);
+    emitNotification('update', {title, lines: [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
     if (data.ok && data.restarting) {
       startSelfUpdateReloadPolling(data.target || data.version || target);
     }
   } catch (error) {
-    showToast(t('update.failed'), [userMessageText(error, t('update.seeServerLogs'))]);
+    emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
   }
 }
 
@@ -62779,13 +62858,14 @@ function applyUpdateAvailable(status) {
     else delete badge.dataset.updateTarget;
     renderUpdateBadgeChrome();
   }
-  const node = showToast(t('update.availableTitle'), [
-    t('update.availableBody', {target: status.target ? ` (${status.target})` : ''}),
-  ], {
+  const node = emitNotification('update', {
+    title: t('update.availableTitle'),
+    lines: [t('update.availableBody', {target: status.target ? ` (${status.target})` : ''})],
     actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
-  });
+    coalesceKey: 'update-available',
+  }).inApp;
   if (node && target) node.dataset.updateTarget = target;
 }
 
@@ -62810,14 +62890,10 @@ function maybeNotifyYoagentJob(notification = {}) {
   if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
-  if (notificationDeliveryEnabled('inApp')) showToast(title, [body], {session});
-  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(hostNotificationTitle(title), {
-      body,
-      tag,
-      renotify: true,
-      session,
+    emitNotification('yoagentJob', {
+      session, title, body, systemTitle: hostNotificationTitle(title),
+      systemTag: tag, renotify: true, coalesceKey: tag,
     });
   } catch (error) {
     postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
