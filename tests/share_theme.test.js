@@ -865,6 +865,37 @@ async function runShareThemeSuite() {
     assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
     assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
     assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the Info Bar');
+    const transcriptPrGit = {
+      root: '/home/test/dynamo/dynamo3',
+      cwd: '/home/test/dynamo/dynamo3',
+      branch: 'keivenchang/DIS-2322__reasoning-force-nonempty-content',
+      github_repo: {url: 'https://github.com/ai-dynamo/dynamo'},
+      other_branches: {branches: [{name: 'keivenchang/DIS-2322__reasoning-force-nonempty-content', current: true, pull_request: {number: 11251, title: 'reasoning: force nonempty content'}}]},
+    };
+    const staleWindowGit = {
+      root: '/home/test/dynamo/frontend-crates3',
+      cwd: '/home/test/dynamo/frontend-crates3',
+      branch: 'keivenchang/DIS-2323__cleanup-llm-tests',
+      github_repo: {url: 'https://github.com/ai-dynamo/dynamo'},
+      other_branches: {branches: [{name: 'keivenchang/DIS-2323__cleanup-llm-tests', current: true}]},
+    };
+    const transcriptPrInfo = {
+      agents: [{kind: 'claude', pane_target: '3:0.0'}],
+      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: staleWindowGit.root},
+      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: staleWindowGit.root}],
+      project: {
+        git: transcriptPrGit,
+        pull_request: {number: 11251, title: 'reasoning: force nonempty content', url: 'https://github.com/ai-dynamo/dynamo/pull/11251'},
+        linear: [],
+        repos: [{...transcriptPrGit, primary: true}, staleWindowGit],
+      },
+    };
+    api.setAutoApproveStateForTest('transcript-pr', {
+      agent_windows: [{kind: 'claude', window: '0', window_index: 0, current: true, window_active: true, path_entries: [{path: staleWindowGit.root, git: staleWindowGit}], git: staleWindowGit}],
+    });
+    const transcriptPrHtml = api.paneInfoBarMetaHtml('transcript-pr', transcriptPrInfo);
+    assert.ok(transcriptPrHtml.includes('#11251') && transcriptPrHtml.includes('reasoning: force nonempty content'), 'Info Bar preserves the canonical transcript-selected PR when a stale active-window path has no PR');
+    assert.equal(transcriptPrHtml.includes('DIS-2323__cleanup-llm-tests'), false, 'Info Bar does not let a stale Tabber/window path replace the transcript PR context');
     const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
     const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');

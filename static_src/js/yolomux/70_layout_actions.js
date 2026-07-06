@@ -1214,10 +1214,25 @@ function projectMetaPathFromWindowMetadata(meta) {
   return String(meta?.git?.root || '').trim();
 }
 
+function projectMetaContextOverridesPrimaryPullRequest(info, contextGit) {
+  const projectGit = info?.project?.git;
+  const primaryPullRequest = displayPullRequest(info);
+  if (!primaryPullRequest?.number) return true;
+  const primaryRoot = repoRootKey(projectGit?.root);
+  const contextRoot = repoRootKey(contextGit?.root);
+  // The selected project is transcript-derived and carries an open PR. A raw pane cwd or a
+  // Tabber activity-cache path is weaker evidence, so it must not hide that PR. A different
+  // active window with its own resolved PR remains an equally strong, more local context.
+  if (!primaryRoot || !contextRoot || primaryRoot === contextRoot) return contextRoot === primaryRoot;
+  return Boolean(displayPullRequestForGit(info, contextGit)?.number);
+}
+
 function projectMetaSelection(session, info) {
   const project = info?.project || {};
   const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
+  const primaryRoot = repoRootKey(project.git?.root);
+  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   const activePane = activeWindowPaneForProjectMeta(session, info);
   const activePath = normalizeDirectoryPath(activePane?.current_path || '');
   const activeAgent = activePane ? agentForPane(info, activePane) : null;
@@ -1230,7 +1245,11 @@ function projectMetaSelection(session, info) {
   let repoIndex = selectedSessionRepoIndex(session, info);
   if (!explicitRoot && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
-    if (activeRepoIndex >= 0) repoIndex = activeRepoIndex;
+    const activeRepoGit = activeRepoIndex >= 0 ? repoSummaryAsGit(repos[activeRepoIndex]) : null;
+    if (activeRepoIndex >= 0 && projectMetaContextOverridesPrimaryPullRequest(info, activeRepoGit)) repoIndex = activeRepoIndex;
+  }
+  if (!explicitRoot && primaryRepoIndex >= 0 && !projectMetaContextOverridesPrimaryPullRequest(info, repoSummaryAsGit(repos[repoIndex]))) {
+    repoIndex = primaryRepoIndex;
   }
   let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
@@ -1243,13 +1262,16 @@ function projectMetaSelection(session, info) {
       : activeWindowMetaPath
         ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
         : -1;
-    if (activeMetaRepoIndex >= 0) {
-      repoIndex = activeMetaRepoIndex;
-      selectedRepo = repos[repoIndex];
+    const activeMetaGit = activeWindowMeta.git || (activeMetaRepoIndex >= 0 ? repoSummaryAsGit(repos[activeMetaRepoIndex]) : null);
+    if (projectMetaContextOverridesPrimaryPullRequest(info, activeMetaGit)) {
+      if (activeMetaRepoIndex >= 0) {
+        repoIndex = activeMetaRepoIndex;
+        selectedRepo = repos[repoIndex];
+      }
+      if (activeWindowMeta.git) git = activeWindowMeta.git;
+      else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
+      if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
     }
-    if (activeWindowMeta.git) git = activeWindowMeta.git;
-    else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
-    if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
   }
   if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
     git = null;
