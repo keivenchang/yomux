@@ -510,7 +510,7 @@ def test_transient_surface_capacities_reuse_the_viewport_clamp():
     topbar = css_by_part["static_src/css/yolomux/10_topbar_menus.css"]
     popovers = css_by_part["static_src/css/yolomux/20_sessions_popovers.css"]
     file_tree = css_by_part["static_src/css/yolomux/50_terminal_file_tree.css"]
-    assert re.search(r"\.topbar-search\s*\{[^}]*flex:\s*1 1 36ch[^}]*max-inline-size:\s*min\(50%, 64ch\)", topbar, re.DOTALL)
+    assert re.search(r"\.topbar-search\s*\{[^}]*flex:\s*1 1 42ch[^}]*max-inline-size:\s*min\(100%, 64ch\)", topbar, re.DOTALL)
     assert re.search(r"\.drag-timing-overlay\s*\{[^}]*max-inline-size:\s*min\(88ch, var\(--popover-max-inline-size\)\)", popovers, re.DOTALL)
     assert re.search(r"\.file-tree-repo-popover\s*\{[^}]*max-inline-size:\s*min\(72ch, var\(--popover-max-inline-size\)\)", file_tree, re.DOTALL)
     assert re.search(r"\.terminal-drop-suggestions\s*\{[^}]*inline-size:\s*min\(64ch, var\(--popover-max-inline-size\)\)[^}]*max-inline-size:\s*var\(--popover-max-inline-size\)", file_tree, re.DOTALL)
@@ -619,7 +619,7 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                     duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
 
     assert duplicates == []
-    assert helper_calls == 83
+    assert helper_calls == 85
 
 
 def test_browser_fixtures_use_one_read_only_english_catalog_owner():

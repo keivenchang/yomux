@@ -1054,6 +1054,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     }
     app = SimpleNamespace(
         sessions=["6"],
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         dangerously_yolo=False,
         verify_share_token=verify_share_token,
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
@@ -1203,6 +1204,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
 
     app = SimpleNamespace(
         sessions=["6"],
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         dangerously_yolo=False,
         verify_share_token=verify_share_token,
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
@@ -1258,8 +1260,8 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
                 rootReplayFlag: root?.dataset?.shareReplayRoot || '',
                 rootInertFlag: root?.dataset?.shareReplayInert || '',
                 rootStatus: root?.dataset?.shareReplayStatus || '',
-                mirroredHandlerCount: root ? root.querySelectorAll('[data-tab], [data-pane-actions], [data-pane-minimize], .app-menu, .panel, .terminal, .xterm').length : -1,
-                rootChildCount: root?.children?.length ?? -1,
+                    mirroredHandlerCount: root ? root.querySelectorAll('[data-tab], [data-pane-actions], [data-pane-minimize], .app-menu, .panel, .terminal, .xterm').length : -1,
+                    rootChildCount: root?.children?.length ?? -1,
                 bannerExists: Boolean(banner),
                 bannerOutsideRoot: Boolean(banner && root && !root.contains(banner)),
                 bannerParentIsBody: banner?.parentElement === document.body,
@@ -2106,7 +2108,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     node = document.createElement('section');
                     node.id = 'shareMatrixMarker';
                     node.dataset.shareVolatile = 'true';
-                    node.style.cssText = 'position:absolute;left:8px;top:48px;z-index:20;max-width:760px;padding:4px 6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font:12px/1.3 var(--ui-font);';
+                        node.style.cssText = 'position:absolute;left:8px;top:48px;z-index:20;max-width:760px;padding:4px 6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font:12px/1.3 var(--ui-font);pointer-events:none;';
                     appRootElement().appendChild(node);
                   }
                   return node;

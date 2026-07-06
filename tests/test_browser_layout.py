@@ -823,9 +823,8 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     load_static_html_fixture(browser, tmp_path, "debug-graph-header-geometry.html", page_html("""
       <div class="js-debug-graph-controls" style="width:720px">
         <div class="js-debug-range-slider-control" data-js-debug-range-control>
-          <input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-end" class="js-debug-range-end-label">24h</span>
+          <span id="range-prefix" class="js-debug-range-prefix">Range:</span><input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-label" class="js-debug-range-label">15m</span>
         </div>
-        <span id="range-start" class="js-debug-range-label">15m</span>
         <span id="resolution" class="js-debug-resolution-label">Resolution: 1s</span>
       </div>
       <section id="chart" class="js-debug-chart" style="width:420px">
@@ -838,7 +837,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
         const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width, height:value.height}; };
         const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot'); const svg = rect('svg');
         const chart = rect('chart'); const range = document.querySelector('[data-js-debug-range-control]').getBoundingClientRect();
-        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, resolution: rect('resolution'), rangeStart: rect('range-start'), rangeSlider: rect('range-slider'), rangeEnd: rect('range-end'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
+        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, resolution: rect('resolution'), rangePrefix: rect('range-prefix'), rangeSlider: rect('range-slider'), rangeLabel: rect('range-label'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
         """
     )
     assert metrics["close"]["right"] <= metrics["heading"]["right"] + 0.5, metrics
@@ -849,12 +848,11 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     assert abs(((metrics["axisMax"]["top"] + metrics["axisMax"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 8 / 120))) <= 0.75, metrics
     assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - metrics["svg"]["bottom"]) <= 0.75, metrics
     assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5, metrics
-    assert metrics["rangeStart"]["left"] >= metrics["range"]["right"] + 4, metrics
-    assert metrics["resolution"]["left"] >= metrics["rangeStart"]["right"] + 4, metrics
-    assert abs(((metrics["rangeStart"]["left"] + metrics["rangeStart"]["right"]) / 2) - ((metrics["range"]["right"] + metrics["resolution"]["left"]) / 2)) <= 1.5, metrics
-    assert metrics["rangeEnd"]["right"] <= metrics["range"]["right"] + 0.5, metrics
+    assert metrics["rangePrefix"]["right"] <= metrics["rangeSlider"]["left"] + 0.5, metrics
+    assert metrics["rangeLabel"]["left"] >= metrics["rangeSlider"]["right"] + 4, metrics
+    assert metrics["rangeLabel"]["right"] <= metrics["range"]["right"] + 0.5, metrics
+    assert metrics["resolution"]["left"] >= metrics["range"]["right"] + 4, metrics
     assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
-    assert metrics["rangeSlider"]["right"] <= metrics["rangeEnd"]["left"] - 4, metrics
 
 
 def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
@@ -2220,6 +2218,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
         "subTab": "events",
         "rangeSeconds": 14400,
         "resolutionOverrideSeconds": 0,
+        "chartLayout": 0,
         "hiddenCharts": ["gpuMemory", "gpuUtil", "memory"],
         "visibleCharts": ["cpu"],
     }, metrics
@@ -2231,7 +2230,7 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
             const panel = document.querySelector('.js-debug-panel');
             return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
               && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
-                      && document.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds === '60'
+              && Number(document.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds || 0) >= 60
               && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
               && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
             """
@@ -6336,14 +6335,14 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
         page.name,
         page_html("""
       <header id="touch-topbar" class="topbar">
-        <div class="brand-cell"><div class="brand title">YOLOmux</div></div>
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LO</span><span>mux</span><span class="brand-version"> 0.5.24</span></div></div>
         <div id="sessionButtons" class="app-menu-area">
-          <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Application menu</button></div></nav>
+          <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Menus</button></div></nav>
           <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
           <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label">Search files, commands</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
           <button id="touch-language" class="topbar-language">English</button>
           <button id="touch-owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
-          <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count"><span class="topbar-activity-count-number">1</span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-idle">3 idle</span></button>
+          <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count topbar-activity-working active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--working topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-ask active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--attention topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-blocked active"><span class="topbar-activity-count-number">3</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--cooldown topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--cooldown">●</span></span></span><span class="topbar-activity-idle">3 idle</span></button>
         </div>
         <div id="touch-actions" class="actions"><div id="latencyMeter" class="latency-meter">12 ms</div><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button><span id="status">connected</span></div>
       </header>
@@ -6354,7 +6353,10 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     )
     metrics = browser.execute_script(
         """
-        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-760', 'app-vw-lte-980');
+        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100');
+        const actions = document.getElementById('touch-actions');
+        const activityNode = document.getElementById('touch-activity');
+        actions.insertBefore(activityNode, document.getElementById('refreshMeta'));
         const box = node => {
           const rect = node.getBoundingClientRect();
           const style = getComputedStyle(node);
@@ -6372,7 +6374,7 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
           menuTouchAction: getComputedStyle(menu.querySelector('.app-menu-button')).touchAction,
           activity: box(activity),
           sessionButtons: box(sessionButtons),
-          actions: box(document.getElementById('touch-actions')),
+          actions: box(actions),
           search: box(document.getElementById('touch-search')),
           searchLabel: box(document.getElementById('touch-search-label')),
           language: box(document.getElementById('touch-language')),
@@ -6382,6 +6384,9 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
           notify: box(document.getElementById('notifyToggle')),
           logout: box(document.getElementById('logoutButton')),
           menuActivityOverlap: overlaps(box(menu), box(activity)),
+          searchActivityOverlap: overlaps(box(document.getElementById('touch-search')), box(activity)),
+          activityCounts: [...activity.querySelectorAll('.topbar-activity-count.active')].map(node => ({box: box(node), text: node.querySelector('.topbar-activity-count-number')?.textContent || '', numberDisplay: getComputedStyle(node.querySelector('.topbar-activity-count-number')).display})),
+          idleDisplay: getComputedStyle(activity.querySelector('.topbar-activity-idle')).display,
         };
         """
     )
@@ -6391,17 +6396,152 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     assert metrics["notify"]["display"] == "none", metrics
     assert metrics["logout"]["display"] == "none", metrics
     assert metrics["search"]["display"] == "flex", metrics
-    assert metrics["searchLabel"]["width"] <= 72, metrics
+    # A phone still exposes a short, useful Cmd-P label rather than an unexplained magnifying
+    # glass or a mostly empty full-width search field.
+    assert metrics["search"]["width"] > metrics["search"]["height"] + 1, metrics
+    assert metrics["searchLabel"]["display"] == "flex", metrics
     assert metrics["language"]["display"] == "none", metrics
     assert metrics["owner"]["display"] == "none", metrics
     assert metrics["nav"]["display"] == "none", metrics
-    assert metrics["activity"]["display"] == "none", metrics
+    assert metrics["activity"]["display"] == "flex", metrics
+    assert [item["text"] for item in metrics["activityCounts"]] == ["2", "1", "3"], metrics
+    assert all(item["box"]["width"] >= 20 and item["numberDisplay"] == "grid" for item in metrics["activityCounts"]), metrics
+    assert metrics["idleDisplay"] == "none", metrics
     assert metrics["menu"]["left"] >= metrics["sessionButtons"]["left"] - 0.5, metrics
     assert metrics["menuButton"]["height"] >= 36, metrics
     assert metrics["menuTouchAction"] == "manipulation", metrics
-    assert metrics["search"]["right"] <= metrics["actions"]["left"] + 0.5, metrics
-    assert metrics["activity"]["right"] <= metrics["sessionButtons"]["right"] + 0.5, metrics
+    assert metrics["menu"]["right"] <= metrics["search"]["left"] + 0.5, metrics
+    assert metrics["search"]["right"] <= metrics["actions"]["left"] + 2, metrics
+    assert metrics["activity"]["right"] <= metrics["refresh"]["left"] + 0.5, metrics
+    assert metrics["refresh"]["left"] - metrics["activity"]["right"] <= 8, metrics
     assert metrics["header"]["height"] < 50, metrics
+
+
+def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targets(browser, tmp_path):
+    page = tmp_path / "touch-terminal-smart-keys.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="terminal-pane" class="tab-pane active panel-overlay-root">
+        <div id="terminal" class="terminal"><div class="xterm"></div></div>
+        <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
+          <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
+            <button class="mobile-terminal-key-drag">⠿</button>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
+            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+          </div>
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #terminal-pane { width: 320px; height: 240px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const box = node => { const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, width: rect.width, height: rect.height, top: rect.top, bottom: rect.bottom}; };
+        const pane = document.getElementById('terminal-pane');
+        const terminal = document.getElementById('terminal');
+        const bar = document.getElementById('smart-keys');
+        const row = document.getElementById('smart-key-row');
+        const key = row.querySelector('.mobile-terminal-key');
+        const hidden = bar.hidden;
+        bar.hidden = false;
+        bar.style.insetInlineStart = '12px';
+        bar.style.insetInlineEnd = 'auto';
+        bar.style.insetBlockStart = '12px';
+        bar.style.insetBlockEnd = 'auto';
+        const dpad = document.getElementById('smart-key-dpad');
+        const shell = document.getElementById('smart-key-shell');
+        const moreRow = document.getElementById('smart-key-more-row');
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        bar.classList.add('mobile-terminal-keybar--more');
+        moreRow.hidden = false;
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display};
+        return {
+          pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
+          paneDisplay: getComputedStyle(pane).display,
+          overflowX: getComputedStyle(row).overflowX,
+          activeBackground: getComputedStyle(row.querySelector('.active')).backgroundColor,
+          interruptColor: getComputedStyle(row.querySelector('.mobile-terminal-key--interrupt')).color,
+          primaryColumns: getComputedStyle(row).gridTemplateColumns,
+          primaryLabels: [...row.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent),
+          more: normal.more,
+          shell: normal.shell,
+          movedInsetEnd: bar.style.insetBlockEnd,
+          initiallyHidden: hidden,
+              up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
+          normal, overflow,
+        };
+        """
+    )
+    assert metrics["paneDisplay"] == "block", metrics
+    assert metrics["initiallyHidden"] is True, metrics
+    assert abs(metrics["terminal"]["height"] - metrics["pane"]["height"]) <= 1, metrics
+    assert metrics["launcher"]["width"] >= 40 and metrics["launcher"]["height"] >= 40, metrics
+    assert metrics["key"]["height"] >= 36, metrics
+    assert metrics["overflowX"] == "visible", metrics
+    assert metrics["primaryColumns"].startswith("repeat(5,"), metrics
+    assert all(label in metrics["primaryLabels"] for label in ["Tab", "^B"]), metrics
+    assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
+    assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
+    assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
+    assert metrics["movedInsetEnd"] == "auto", metrics
+    assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
+    assert metrics["normal"]["shellDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
+    assert metrics["overflow"]["rowDisplay"] == "grid", metrics
+    assert metrics["overflow"]["shellDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
+    assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
+    assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
+    assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
+    assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
+    assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
+    assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
+    assert metrics["copy"]["left"] < metrics["up"]["left"] and metrics["paste"]["left"] < metrics["down"]["left"], metrics
+    assert metrics["copy"]["top"] < metrics["left"]["top"] < metrics["paste"]["top"], metrics
+    assert metrics["pgUp"]["left"] > metrics["up"]["left"] and metrics["pgDown"]["left"] > metrics["down"]["left"], metrics
+    assert metrics["pgUp"]["top"] < metrics["right"]["top"] < metrics["pgDown"]["top"], metrics
+
+
+def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(browser, tmp_path):
+    page = tmp_path / "phone-single-pane-ring.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="yolomux-dockview" id="dockview">
+        <div class="dv-groupview" id="group"><article class="panel active-pane" id="panel"></article></div>
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #dockview, #group { width: 320px; height: 240px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--pane-split-gap', '7px');
+        const group = document.getElementById('group');
+        const panel = document.getElementById('panel');
+        const values = () => ({
+          groupGap: getComputedStyle(group).getPropertyValue('--pane-split-gap').trim(),
+          panelGap: getComputedStyle(panel).getPropertyValue('--pane-split-gap').trim(),
+          groupPadding: getComputedStyle(group).paddingTop,
+          panelBorder: getComputedStyle(panel).borderTopWidth,
+        });
+        document.body.classList.add('app-phone-single-pane');
+        const phone = values();
+        document.body.classList.remove('app-phone-single-pane');
+        return {phone, regular: values()};
+        """
+    )
+    assert metrics["phone"] == {"groupGap": "1px", "panelGap": "1px", "groupPadding": "1px", "panelBorder": "1px"}, metrics
+    assert metrics["regular"] == {"groupGap": "7px", "panelGap": "7px", "groupPadding": "7px", "panelBorder": "7px"}, metrics
 
 
 def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
@@ -6499,13 +6639,45 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
         for left, right in zip(metrics["menus"], metrics["menus"][1:]):
             assert left["right"] <= right["left"] + 1, (label, metrics)
         if compact:
-            assert metrics["searchVisible"] is False, (label, metrics)
+            assert metrics["searchVisible"] is True, (label, metrics)
+            assert metrics["menus"][0]["right"] <= metrics["search"]["left"] + 1, (label, metrics)
+            assert metrics["search"]["right"] <= metrics["actions"]["left"] + 1, (label, metrics)
         else:
             assert metrics["menus"][-1]["right"] <= metrics["center"]["left"] + 1, (label, metrics)
             assert metrics["search"]["right"] <= metrics["actions"]["left"] + 1, (label, metrics)
             assert metrics["refresh"]["display"] == "grid", (label, metrics)
         if width <= 980:
             assert metrics["notifyVisible"] is False, (label, metrics)
+
+    # On a pointer desktop the center wrapper owns the actual space between Help and the right
+    # chrome.  Search therefore grows beyond its label-sized shell and the nav/search pair is
+    # centered in that free region without covering either neighbor.
+    desktop = browser.execute_script(
+        """
+        document.body.className = '';
+        document.documentElement.style.setProperty('--matrix-width', '1440px');
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        document.querySelector('.app-menu-bar').innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help']
+          .map(name => `<div class="app-menu"><button class="app-menu-button">${name}</button></div>`).join('');
+        const rect = node => {
+          const box = node.getBoundingClientRect();
+          return {left: box.left, right: box.right, width: box.width, center: (box.left + box.right) / 2};
+        };
+        const menu = document.querySelector('.app-menu-bar');
+        const center = document.getElementById('matrix-center');
+        const nav = center.querySelector('.topbar-nav');
+        const search = document.getElementById('matrix-search');
+        const right = document.getElementById('matrix-right');
+        const actions = document.getElementById('matrix-actions');
+        return {menu: rect(menu), center: rect(center), nav: rect(nav), search: rect(search), right: rect(right), actions: rect(actions)};
+        """
+    )
+    assert desktop["menu"]["right"] <= desktop["center"]["left"] + 1, desktop
+    assert desktop["search"]["right"] <= desktop["right"]["left"] + 1, desktop
+    assert desktop["right"]["right"] <= desktop["actions"]["left"] + 1, desktop
+    assert desktop["search"]["width"] >= 360, desktop
+    pair_center = (desktop["nav"]["left"] + desktop["search"]["right"]) / 2
+    assert abs(pair_center - desktop["center"]["center"]) <= 1, desktop
 
 
 def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
@@ -9557,6 +9729,23 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
 
 
 def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
+    def touch_tap(element):
+        browser.execute_script(
+            """
+            const tap = node => {
+              node.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, cancelable: true, button: 0, pointerType: 'touch', isPrimary: true,
+              }));
+              node.dispatchEvent(new PointerEvent('pointerup', {
+                bubbles: true, cancelable: true, button: 0, pointerType: 'touch', isPrimary: true,
+              }));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0}));
+            };
+            tap(arguments[0]);
+            """,
+            element,
+        )
+
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
@@ -9564,6 +9753,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     browser.execute_script(
         """
         compactTopbarForViewport = () => true;
+        topbarActivityUsesPhoneActionsRail = () => true;
         document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600');
         renderSessionButtons({force: true});
         """
@@ -9574,6 +9764,29 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         requestAnimationFrame(() => requestAnimationFrame(done));
         """
     )
+    activity_metrics = browser.execute_script(
+        """
+        renderSessionButtons({force: true});
+        renderSessionButtons({force: true});
+        renderSessionButtons({force: true});
+        const actions = document.querySelector('.actions');
+        const activities = Array.from(document.querySelectorAll('#topbarActivity'));
+            const activity = activities[0];
+            const refresh = document.getElementById('refreshMeta');
+            const rect = node => node?.getBoundingClientRect?.() || {left: 0, right: 0};
+        return {
+          count: activities.length,
+          inActions: activity?.parentElement === actions,
+          actionChildren: Array.from(actions?.children || []).filter(node => node.id === 'topbarActivity').length,
+          activityRight: rect(activity).right,
+          refreshLeft: rect(refresh).left,
+        };
+        """
+    )
+    assert activity_metrics["count"] == 1, activity_metrics
+    assert activity_metrics["inActions"] is True, activity_metrics
+    assert activity_metrics["actionChildren"] == 1, activity_metrics
+    assert activity_metrics["activityRight"] <= activity_metrics["refreshLeft"] + 1, activity_metrics
     button = WebDriverWait(browser, 5).until(
         lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
     )
@@ -9604,6 +9817,80 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     assert metrics["labels"] == ["File>", "View>", "tmux>", "Tabs>", "Help>"], metrics
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
+
+    # A second phone tap is a disclosure toggle, not a grace-period reopen. This keeps the compact
+    # root usable as a one-tap close affordance without changing full desktop menu hover behavior.
+    browser.execute_script("arguments[0].click()", button)
+    closed = WebDriverWait(browser, 5).until(
+        lambda driver: (state if not (state := driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const button = root?.querySelector(':scope > .app-menu-button');
+            const popover = root?.querySelector(':scope > .app-menu-popover');
+            const style = popover ? getComputedStyle(popover) : null;
+            return {
+              open: root?.classList.contains('open') || false,
+              expanded: button?.getAttribute('aria-expanded') || '',
+              visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.1),
+            };
+            """
+        ))["open"] and state["visible"] is False else False)
+    )
+    assert closed == {"open": False, "expanded": "false", "visible": False}, closed
+
+    # Checked navigation is still navigation: File -> Finder must close the compact root instead of
+    # inheriting keep-open behavior merely because Finder is currently visible/checked.
+    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    button.click()
+    file_button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            return Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap > .app-menu-command') || [])
+              .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('File')) || null;
+            """
+        )
+    )
+    # Use the same pointerdown + synthetic click sequence as a touch browser. A compact category
+    # must be an accordion disclosure even while Safari keeps the tapped button focused/hovered.
+    touch_tap(file_button)
+    file_commands = browser.execute_script(
+        """
+        return Array.from(document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command'))
+          .map(button => button.textContent.replace(/\\s+/g, ' ').trim());
+        """
+    )
+    assert len(file_commands) >= 2, file_commands
+    assert file_commands[1].startswith(("Finder", "Explorer", "File Explorer")), file_commands
+    touch_tap(file_button)
+    file_collapsed = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const file = Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap') || [])
+              .find(node => node.querySelector(':scope > .app-menu-command')?.textContent.replace(/\\s+/g, ' ').trim().startsWith('File'));
+            const popover = file?.querySelector(':scope > .app-submenu-popover');
+            return root?.classList.contains('open') && file && !file.classList.contains('open')
+              && file.querySelector(':scope > .app-menu-command')?.getAttribute('aria-expanded') === 'false'
+              && getComputedStyle(popover).display === 'none';
+            """
+        )
+    )
+    assert file_collapsed is True
+    browser.execute_script("arguments[0].click()", file_button)
+    finder_button = browser.execute_script(
+        "return document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command')[1]"
+    )
+    browser.execute_script("arguments[0].click()", finder_button)
+    finder_closed = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            return root && !root.classList.contains('open') && root.querySelector(':scope > .app-menu-button')?.getAttribute('aria-expanded') === 'false';
+            """
+        )
+    )
+    assert finder_closed is True
 
 
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):

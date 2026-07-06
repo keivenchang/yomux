@@ -847,8 +847,9 @@ const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
 // Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
-// provide two usable columns; wider portrait iPads retain their movable multi-pane workspace.
+// provide two usable columns.
 const narrowTouchSingleColumnMaxWidthPx = 680;
+const tabletDesktopLayoutMinWidthPx = 900;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -908,10 +909,6 @@ function browserUsesCoarsePointer() {
     && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
 }
 
-function fileExplorerUsesNormalTabMovement() {
-  return browserUsesCoarsePointer();
-}
-
 let browserCursorHoverObserved = false;
 
 function browserHasCursorHover(event = null) {
@@ -945,6 +942,19 @@ function browserUsesTabletViewport() {
     || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
 }
 
+function tabletUsesDesktopLayout(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+}
+
+function fileExplorerUsesNormalTabMovement() {
+  // A wide landscape tablet has desktop-scale horizontal room, so it uses the same reserved
+  // Finder pane as a laptop. Phone and portrait/narrow-tablet layouts keep Finder movable as a tab.
+  return browserUsesCoarsePointer() && !tabletUsesDesktopLayout();
+}
+
 function phoneLikeMobileViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
@@ -960,7 +970,9 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  return phoneLikeMobileViewport(viewport) || width <= narrowTouchSingleColumnMaxWidthPx;
+  return phoneLikeMobileViewport(viewport)
+    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
+    || width <= narrowTouchSingleColumnMaxWidthPx;
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {

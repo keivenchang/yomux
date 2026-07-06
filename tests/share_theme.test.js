@@ -1447,8 +1447,8 @@ async function runShareThemeSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(terminalContainerBindingBody.includes("container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal keydown commits the Finder Modified-files target');
-    assert.ok(terminalContainerBindingBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal keydown both dismisses the touch key palette and commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal paste both dismisses the touch key palette and commits the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -2720,6 +2720,10 @@ async function runShareThemeSuite() {
     assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 488, w: 1024, h: 488}, 'keyboard geometry keeps layout width but adopts usable visual height');
     assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-width'), '', 'normal-mode keyboard sizing never treats visual viewport width as responsive layout width');
     assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '488px', 'normal-mode keyboard sizing publishes one shared app-root height');
+    api.setNativeViewportForTest({width: 1024, height: 740, visualHeight: 768, scale: 1});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'an unzoomed taller visual viewport repairs stale-short iPad Safari innerHeight so the app reaches the visible bottom edge');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '768px', 'the repaired Safari height remains the one published to the app root');
     api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 768, scale: 1});
     api.syncNativeAppViewportForTest({force: true});
     assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '768px', 'visual viewport recovery restores the current measured layout height instead of Safari CSS 100vh');
@@ -3338,7 +3342,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
       assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
       const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-      assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(header\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting uses app-space widths under the mirror transform');
+      assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(tabsContainer\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting measures the shared tab surface in app-space under the mirror transform');
       const shareCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(/body\.app-vw-lte-1500 \.app-menu-button/.test(shareCss), 'M0/M2: responsive topbar chrome is keyed by appViewport classes, not native media width');
       assert.equal(/@media \(max-width: (1500|1280|1100|1080|980|760|720)px\)/.test(shareCss), false, 'M0/M2: mirror-sensitive breakpoints do not use native viewport media queries');

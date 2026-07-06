@@ -605,7 +605,16 @@ function normalizeAppViewport(value, fallback = null) {
 function nativeViewport() {
   const doc = document.documentElement || {};
   const width = Math.max(1, Math.round(Number(window.innerWidth) || Number(doc.clientWidth) || 1)); // static-build-allow-window-viewport
-  const height = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const layoutHeight = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const visualViewport = window.visualViewport;
+  const visualHeight = Math.max(0, Math.round(Number(visualViewport?.height) || 0));
+  const visualScale = Number(visualViewport?.scale);
+  // iPad Safari can retain a short innerHeight after its browser chrome changes while the current
+  // unzoomed visual viewport is taller. Never accept a *smaller* visual height here (that remains
+  // browser chrome or keyboard territory), but accept a larger one so the app reaches the screen.
+  const height = Math.max(1, Number.isFinite(visualScale) && Math.abs(visualScale - 1) <= 0.01 && visualHeight > layoutHeight
+    ? visualHeight
+    : layoutHeight);
   return {width, height, w: width, h: height};
 }
 
@@ -713,25 +722,42 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
   return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
-const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720, 600];
-const compactTopbarMenuMaxWidthPx = 600;
+const appViewportBreakpointPx = [1500, 1280, 1200, 1100, 1080, 980, 760, 720, 600, 560];
+const compactTopbarMenuMaxWidthPx = 480;
+const compactTopbarChromeMaxWidthPx = 1500;
 
-// Full top-level menus outrank version, wordmark, top-right actions, and search. Collapse them only
-// at the phone-sized fallback, after those lower-priority controls have already yielded their space.
+// Full top-level menus outrank version, wordmark, top-right actions, and search. At the final
+// narrow fallback, every pointer type uses the same one-root hierarchy; desktop pane layouts stay intact.
 function compactTopbarForViewport(viewport = appViewport()) {
-  return browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= compactTopbarMenuMaxWidthPx;
+  // Browser zoom or a stale visual viewport can report a narrower app coordinate space than the
+  // actual topbar has. Prefer the native layout viewport width for chrome packing, while pane
+  // layout continues to use appViewport's safe geometry.
+  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarMenuMaxWidthPx;
+}
+
+function compactTopbarChromeForViewport(viewport = appViewport()) {
+  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarChromeMaxWidthPx;
 }
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
-  const touchTopbar = browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= appViewportBreakpointPx[0];
+  // A narrow desktop reuses the proven compact-touch topbar presentation. This is chrome only:
+  // the separate mobile layout classifier still keeps desktop pane and split behavior unchanged.
+  const touchTopbar = compactTopbarChromeForViewport(viewport);
+  // This mirrors the shared phone-only one-pane policy (not the broader narrow-iPad rule), so
+  // phone chrome can reduce a redundant focus surround without changing tablet split geometry.
+  const phoneSinglePane = mobileSinglePaneMode();
+  const coarsePointer = browserUsesCoarsePointer();
   const targets = [document.body, appRootElement()].filter(Boolean);
   for (const target of targets) {
     for (const breakpoint of appViewportBreakpointPx) {
       target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
     }
     target.classList?.toggle('app-topbar-touch-compact', touchTopbar);
+    target.classList?.toggle('app-topbar-coarse-pointer', coarsePointer);
+    target.classList?.toggle('app-phone-single-pane', phoneSinglePane);
   }
+  if (typeof syncTopbarActivityPlacement === 'function') syncTopbarActivityPlacement();
 }
 
 function appRootElement() {
@@ -739,6 +765,9 @@ function appRootElement() {
 }
 
 function appOverlayRootElement() {
+  // A replay root is deliberately inert until the host publishes its first frame. Local overlays
+  // (for example an async file-browser popover) belong beside that root, never inside it.
+  if (shareReplayShellActive) return document.body;
   const root = appRootElement();
   if (!root || root === document.body) return document.body;
   let overlay = document.getElementById?.('appOverlayRoot');
@@ -4020,6 +4049,11 @@ async function showTerminalContextMenu(session, term, x, y, container = null, pr
   if (hasUrlReference) {
     appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
+  // Long-press starts this probe while Safari still grants user activation.  Do not offer a
+  // dead Paste action when that probe found no text/image, and reuse the one paste transport.
+  if ((!readOnlyMode || shareWriteMode) && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
+    appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
+  }
   terminalContextMenu.open(menu, x, y);
 }
 
@@ -4029,6 +4063,9 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  container.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
+  }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);

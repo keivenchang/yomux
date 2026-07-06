@@ -132,6 +132,480 @@ function panelActiveTabName(session) {
 
 const tmuxStatusModes = new Map();
 
+// Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
+// movable smart-key palette. Keep its state per session and pass every byte through the normal
+// xterm transport so shares, tmux-window tracking, attention acknowledgement, and metrics stay unified.
+const terminalMobileAccessoryStates = new Map();
+const terminalMobileAccessoryKeyPresses = new Map();
+const terminalMobileAccessorySuppressedClicks = new Map();
+let terminalMobileAccessoryDismissalInstalled = false;
+let terminalMobileAccessoryResizeInstalled = false;
+// Clipboard reads must start while a touch still has browser user activation.  The shared
+// terminal context menu opens after the long-press delay, when Safari may reject a new read.
+// Keep only availability (never clipboard contents) so that menu can truthfully offer Paste.
+const terminalClipboardProbeTtlMs = 10_000;
+let terminalClipboardProbe = {available: false, expiresAt: 0, promise: null};
+
+function terminalClipboardPasteAvailable() {
+  return terminalClipboardProbe.available === true && Date.now() < terminalClipboardProbe.expiresAt;
+}
+
+function primeTerminalClipboardAvailability() {
+  if (terminalClipboardProbe.promise) return terminalClipboardProbe.promise;
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) return Promise.resolve(false);
+  const probe = (async () => {
+    if (typeof clipboard.read === 'function') {
+      try {
+        const items = await clipboard.read();
+        return (items || []).some(item => (item.types || []).some(type => String(type).startsWith('image/') || type === 'text/plain'));
+      } catch (_) {
+        // Some Safari builds expose read() but grant text-only readText() permission instead.
+      }
+    }
+    if (typeof clipboard.readText === 'function') {
+      try {
+        return Boolean(await clipboard.readText());
+      } catch (_) {
+        // A denied probe simply omits Paste from this long-press menu.
+      }
+    }
+    return false;
+  })()
+    .then(available => {
+      terminalClipboardProbe = {available, expiresAt: Date.now() + terminalClipboardProbeTtlMs, promise: null};
+      return available;
+    });
+  terminalClipboardProbe = {...terminalClipboardProbe, promise: probe};
+  return probe;
+}
+
+const terminalMobileAccessoryKeyDefs = Object.freeze([
+  {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
+  {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
+  {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
+  {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
+  {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
+  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
+  {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
+  {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
+  {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
+  {action: 'arrow-left', label: '←', ariaLabel: 'Left arrow'},
+  {action: 'arrow-down', label: '↓', ariaLabel: 'Down arrow'},
+  {action: 'arrow-up', label: '↑', ariaLabel: 'Up arrow'},
+  {action: 'arrow-right', label: '→', ariaLabel: 'Right arrow'},
+  {action: 'enter', label: '↵', ariaLabel: 'Enter', data: '\r'},
+  {action: 'more', label: '⋯', ariaLabel: 'More terminal keys', more: true},
+]);
+const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
+  // These mirror browser/app actions that a phone has no physical Command key for. They are
+  // actions rather than terminal bytes: Cmd-P opens quick-open; Paste stays visible in the first row.
+  {action: 'command-p', label: '⌘P', ariaLabel: 'Command-P'},
+  {action: 'home', label: 'Home', ariaLabel: 'Home'},
+  {action: 'end', label: 'End', ariaLabel: 'End'},
+  {action: 'delete', label: 'Del', ariaLabel: 'Delete', data: '\x1b[3~'},
+  {action: 'shift-tab', label: '⇧↹', ariaLabel: 'Shift-Tab', data: '\x1b[Z'},
+  {action: 'ctrl-d', label: '^D', ariaLabel: 'Ctrl-D', data: '\x04'},
+  {action: 'ctrl-z', label: '^Z', ariaLabel: 'Ctrl-Z', data: '\x1a'},
+  {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
+  {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
+]);
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+// The surrounding command keys form one compact five-column navigation pad: clipboard controls
+// live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
+
+function terminalMobileAccessoryState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalMobileAccessoryStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    terminalMobileAccessoryStates.set(key, state);
+  }
+  return state;
+}
+
+function terminalMobileAccessoryEnabled() {
+  return browserUsesCoarsePointer();
+}
+
+function terminalMobileAccessoryCursorData(session, action) {
+  const suffix = {home: 'H', end: 'F', 'arrow-up': 'A', 'arrow-down': 'B', 'arrow-right': 'C', 'arrow-left': 'D'}[action];
+  if (!suffix) return '';
+  // xterm exposes the active cursor-key mode. Respect it so a TUI receives the same sequence as a
+  // physical arrow key instead of assuming shell/readline's normal CSI mode.
+  return terminals.get(session)?.term?.modes?.applicationCursorKeys === true ? `\x1bO${suffix}` : `\x1b[${suffix}`;
+}
+
+function terminalMobileAccessoryData(session, action) {
+  const definition = terminalMobileAccessoryDefinition(action);
+  if (!definition) return '';
+  return definition.data || terminalMobileAccessoryCursorData(session, action);
+}
+
+function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
+  const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  // Copy reads local terminal selection only, so it stays available to read-only share viewers;
+  // every other palette key can change the terminal and keeps the existing write gate.
+  const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
+  const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
+  const label = definition.labelKey ? t(definition.labelKey) : definition.label;
+  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+}
+
+function terminalMobileAccessoryDefinition(action) {
+  return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
+  const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
+  if (x === null && y === null) return '';
+  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
+  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
+  // empty box and preventing a useful upward move.
+  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+}
+
+function terminalMobileAccessoryHtml(session) {
+  if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
+  const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  // The overflow button remains the rightmost control in both palette states. Keeping the return
+  // target in one physical corner avoids a touch user hunting for it after the content switches.
+  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
+      <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
+      <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
+      <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
+    </div>`;
+}
+
+function syncTerminalMobileAccessoryState(session) {
+  const state = terminalMobileAccessoryState(session);
+  const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+  const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!state || !bar) return false;
+  for (const modifier of ['ctrl', 'alt']) {
+    const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
+    if (!button) continue;
+    const active = state[modifier] === true;
+    button.classList.toggle(CLS.active, active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  const more = bar.querySelector('.mobile-terminal-keyrow--more');
+  const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
+  bar.hidden = state.open !== true;
+  bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  const positionedInline = Number.isFinite(state.x);
+  const positionedBlock = Number.isFinite(state.y);
+  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+  bar.style.transform = positionedBlock ? 'none' : '';
+  if (more) more.hidden = state.more !== true;
+  for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
+  scheduleFit(session);
+  return true;
+}
+
+function toggleTerminalMobileAccessoryState(session, key) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  state[key] = !state[key];
+  syncTerminalMobileAccessoryState(session);
+  return state[key];
+}
+
+function dismissTerminalMobileAccessory(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state || state.open !== true) return false;
+  state.open = false;
+  state.more = false;
+  state.ctrl = false;
+  state.alt = false;
+  state.drag = null;
+  syncTerminalMobileAccessoryState(session);
+  return true;
+}
+
+function dismissTerminalMobileAccessories(exceptSession = '') {
+  let dismissed = false;
+  for (const session of terminalMobileAccessoryStates.keys()) {
+    if (session === String(exceptSession || '')) continue;
+    dismissed = dismissTerminalMobileAccessory(session) || dismissed;
+  }
+  return dismissed;
+}
+
+function installTerminalMobileAccessoryDismissal() {
+  if (terminalMobileAccessoryDismissalInstalled) return;
+  terminalMobileAccessoryDismissalInstalled = true;
+  // The key palette is an on-demand aid, not persistent pane chrome. A touch outside its own
+  // launcher/palette means the user has resumed another terminal or app action, so close it.
+  document.addEventListener('pointerdown', event => {
+    const target = event.target;
+    if (target?.closest?.('[data-terminal-mobile-keybar], [data-terminal-mobile-toggle]')) return;
+    dismissTerminalMobileAccessories();
+  }, {capture: true, passive: true});
+}
+
+function installTerminalMobileAccessoryResizeSync() {
+  if (terminalMobileAccessoryResizeInstalled) return;
+  terminalMobileAccessoryResizeInstalled = true;
+  window.addEventListener('resize', () => {
+    for (const [session, state] of terminalMobileAccessoryStates) {
+      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
+      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+      const pane = bar?.closest?.('.tab-pane');
+      if (!bar || !pane) continue;
+      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
+      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+      syncTerminalMobileAccessoryState(session);
+    }
+  }, {passive: true});
+}
+
+const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
+const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
+
+function terminalMobileAccessoryRepeats(action) {
+  return ['arrow-up', 'arrow-down', 'arrow-left', 'arrow-right', 'tmux-scroll-up', 'tmux-scroll-down'].includes(action);
+}
+
+function beginTerminalMobileAccessoryKeyPress(session, action, event, button) {
+  if (!terminalMobileAccessoryRepeats(action) || event.button > 0) return false;
+  const key = String(session || '');
+  const existing = terminalMobileAccessoryKeyPresses.get(key);
+  if (existing) endTerminalMobileAccessoryKeyPress(key, event, button);
+  const press = {action, pointerId: event.pointerId, delayTimer: null, repeatTimer: null};
+  terminalMobileAccessoryKeyPresses.set(key, press);
+  button?.setPointerCapture?.(event.pointerId);
+  // Send the first key on touch-down, then keep repeating it while held, as a hardware arrow key
+  // does. Preventing default keeps xterm's hidden input focused and the palette open.
+  sendTerminalMobileAccessoryInput(key, action);
+  press.delayTimer = window.setTimeout(() => {
+    if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+    const repeat = () => {
+      if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+      sendTerminalMobileAccessoryInput(key, action);
+      press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+    };
+    press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+  }, terminalMobileAccessoryRepeatDelayMs);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryKeyPress(session, event, button) {
+  const key = String(session || '');
+  const press = terminalMobileAccessoryKeyPresses.get(key);
+  if (!press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.delayTimer);
+  window.clearTimeout(press.repeatTimer);
+  terminalMobileAccessoryKeyPresses.delete(key);
+  terminalMobileAccessorySuppressedClicks.set(key, press.action);
+  button?.releasePointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryKeyClick(session, action) {
+  const key = String(session || '');
+  if (terminalMobileAccessorySuppressedClicks.get(key) !== action) return false;
+  terminalMobileAccessorySuppressedClicks.delete(key);
+  return true;
+}
+
+function beginTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  dismissTerminalMobileAccessories(session);
+  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  state.launcherPress = press;
+  press.timer = window.setTimeout(() => {
+    if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
+    press.longPressed = true;
+    state.open = true;
+    state.more = true;
+    syncTerminalMobileAccessoryState(session);
+  }, terminalMobileAccessoryLongPressMs);
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.timer);
+  state.launcherPress = null;
+  if (!press.longPressed) return false;
+  state.suppressLauncherClick = true;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryLauncherClick(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.suppressLauncherClick) return false;
+  state.suppressLauncherClick = false;
+  return true;
+}
+
+function beginTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  if (!state || !bar || event.button > 0) return false;
+  const rect = bar.getBoundingClientRect();
+  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
+  handle.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function moveTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  const drag = state?.drag;
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  const pane = bar?.closest?.('.tab-pane');
+  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
+  const paneRect = pane.getBoundingClientRect();
+  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
+  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  return true;
+}
+
+function endTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
+  handle.releasePointerCapture?.(event.pointerId);
+  state.drag = null;
+  event.preventDefault();
+  return true;
+}
+
+function terminalDataWithMobileAccessoryModifiers(session, data) {
+  const state = terminalMobileAccessoryState(session);
+  const text = String(data || '');
+  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  const ctrl = state.ctrl === true;
+  const alt = state.alt === true;
+  state.ctrl = false;
+  state.alt = false;
+  syncTerminalMobileAccessoryState(session);
+  let value = text;
+  if (ctrl && text.length === 1) {
+    const code = text.charCodeAt(0);
+    if (code === 32) value = '\x00';
+    else if (code === 63) value = '\x7f';
+    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
+    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
+  }
+  return alt ? `\x1b${value}` : value;
+}
+
+async function pasteTerminalMobileAccessoryClipboard(session) {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) {
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+  try {
+    let text = '';
+    if (typeof clipboard.read === 'function') {
+      const items = await clipboard.read();
+      const imageFiles = [];
+      for (const item of items || []) {
+        for (const type of item.types || []) {
+          const blob = await item.getType(type);
+          if (String(type).startsWith('image/')) imageFiles.push(new File([blob], pastedImageFilename('', type), {type}));
+          else if (type === 'text/plain' && !text) text = await blob.text();
+        }
+      }
+      if (imageFiles.length) {
+        if (!beginPasteUpload(session)) return false;
+        uploadFiles(session, imageFiles, {source: 'paste'}).finally(() => {
+          pasteUploadInFlight = false;
+        });
+        return true;
+      }
+    }
+    if (!text && typeof clipboard.readText === 'function') text = await clipboard.readText();
+    if (!text) return false;
+    noteTerminalExplicitInput(session);
+    const sent = handleTerminalData(session, text, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+    // Palette keys already travel over the terminal socket; asking xterm to focus here summons
+    // iPadOS's software keyboard after every arrow press.
+    if (!sent) statusErr(terminalNotConnectedHtml(session));
+    return sent;
+  } catch (_error) {
+    // Safari can reject a clipboard read after user activation expires; explain the failure instead
+    // of pretending the terminal received text.
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+}
+
+function sendTerminalMobileAccessoryInput(session, action) {
+  if (action === 'copy') {
+    const term = terminals.get(session)?.term || null;
+    const container = document.getElementById(terminalDomId(session));
+    void copyTerminalSelection(session, term, {}, container);
+    return true;
+  }
+  if (action === 'command-p') {
+    openFileQuickOpen();
+    return true;
+  }
+  if (action === 'command-v') {
+    void pasteTerminalMobileAccessoryClipboard(session);
+    return true;
+  }
+  if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
+    const item = terminals.get(session);
+    const term = item?.term;
+    const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+    const signedLines = action === 'tmux-scroll-up' ? -pageLines : pageLines;
+    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+      queueTmuxScroll(item, signedLines);
+      return true;
+    }
+    if (term) {
+      queueLocalTerminalScroll(term, signedLines);
+      return true;
+    }
+    statusErr(terminalNotConnectedHtml(session));
+    return false;
+  }
+  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+    toggleTerminalMobileAccessoryState(session, action);
+    return true;
+  }
+  const data = terminalMobileAccessoryData(session, action);
+  if (!data) return false;
+  noteTerminalExplicitInput(session);
+  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  if (!sent) statusErr(terminalNotConnectedHtml(session));
+  return sent;
+}
+
 function tmuxStatusModeForSession(session) {
   return tmuxStatusModes.get(String(session || '')) || 'none';
 }
@@ -182,6 +656,7 @@ function createPanel(session) {
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>
+        ${terminalMobileAccessoryHtml(session)}
         <div id="panel-toasts-${session}" class="panel-toast-stack">
           <div id="upload-${session}" class="upload-result toast" hidden></div>
         </div>
@@ -2352,6 +2827,57 @@ function applyShareInfoState(info = {}) {
 }
 
 function bindPanelControls(panel, session) {
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
+    event.preventDefault();
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
+    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
+    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileToggle || session;
+    if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
+    sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
+    // Do not blur xterm/close the software keyboard before the click sends its byte.
+    if (beginTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, button.dataset.terminalMobileKey, event, button)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-key]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileSession || session;
+    const action = button.dataset.terminalMobileKey;
+    if (consumeTerminalMobileAccessoryKeyClick(targetSession, action)) return;
+    sendTerminalMobileAccessoryInput(targetSession, action);
+  });
   delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -3244,7 +3770,9 @@ function handleTerminalData(session, data, options = {}) {
 
 function handleTerminalDataMeasured(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
-  const filtered = stripTerminalQueryResponses(data);
+  const filtered = options.bypassMobileAccessoryModifiers === true
+    ? stripTerminalQueryResponses(data)
+    : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
@@ -3668,6 +4196,8 @@ function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
   if (container.dataset?.terminalHandlersBound === session) return;
   if (container.dataset) container.dataset.terminalHandlersBound = session;
+  installTerminalMobileAccessoryDismissal();
+  installTerminalMobileAccessoryResizeSync();
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -3682,9 +4212,18 @@ function bindTerminalContainerForSession(session, term, container) {
   container.addEventListener('copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('keydown', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('paste', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('beforeinput', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
 }
 
 function terminalUnicode11AddonCtor() {

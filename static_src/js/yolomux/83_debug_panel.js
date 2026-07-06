@@ -2327,10 +2327,12 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const sliderId = 'js-debug-range-options';
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
+  const rangeLabel = zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
+    <span class="js-debug-range-prefix" aria-hidden="true">${esc(t('debug.graph.control.timeRange'))}</span>
     <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
-    <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('common.reset'))}</button>` : ''}
   </div>`;
 }
@@ -2345,11 +2347,8 @@ function debugGraphHiddenChartsHtml() {
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
-  const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
-  const rangeLabel = debugGraphZoomDomainValid() ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-graph-controls">
     ${debugGraphRangeControlsHtml(nowMs)}
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${debugGraphResolutionLabelHtml(nowMs)}
     <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}"><span>${esc(t('debug.graph.control.charts'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
     ${debugGraphHiddenChartsHtml()}

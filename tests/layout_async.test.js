@@ -3196,6 +3196,34 @@ async function runLayoutAsyncSuite() {
       assert.ok(html.includes('Result from tmux session') && html.includes('done'), 'clearing a stale wait preserves recorded result messages');
     }
 
+    {
+      const frames = [];
+      const api = loadYolomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
+      api.registerTerminalForTest('1', {focus() {}}, {
+        readyState: WebSocket.OPEN,
+        send(frame) { frames.push(JSON.parse(frame)); },
+      });
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'escape'), '\x1b', 'mobile accessory maps Esc to the terminal escape byte');
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'arrow-up'), '\x1b[A', 'mobile accessory uses the normal cursor sequence outside application-cursor mode');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('arrow-up'), true, 'holding an arrow is repeatable like a hardware cursor key');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('tmux-scroll-down'), true, 'holding PgDown repeats tmux scrolling without closing the palette');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('tab'), false, 'Tab remains a one-shot key');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher opens the palette without sending terminal bytes');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'palette visibility belongs to the same per-session accessory record');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher toggles the existing palette closed');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}], 'mobile Ctrl-C preserves the terminal interrupt byte');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
+      assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
+      assert.ok(api.terminalMobileAccessoryHtmlForTest('1').includes('⌘P') && api.terminalMobileAccessoryHtmlForTest('1').includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
+    }
+
     test('server/client version mismatch asks whether to reload the browser', async () => {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {

@@ -1556,6 +1556,7 @@ function rekeyMap(map, oldKey, newKey) {
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
+  terminalMobileAccessoryStates.delete(session);
   altScreenWheelRemainder.delete(session);
   clearAgentWindowActivityRecordsForSession(session);
   clearSessionAttentionAcknowledgementRecords(session);

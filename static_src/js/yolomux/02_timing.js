@@ -14,6 +14,8 @@ const uiDelayMs = Object.freeze({
   clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
+  mobileTerminalKeyRepeatDelay: 360,
+  mobileTerminalKeyRepeatInterval: 68,
 });
 
 const yolomuxTiming = Object.freeze({
@@ -33,6 +35,8 @@ const yolomuxTiming = Object.freeze({
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
+  mobileTerminalKeyRepeatDelayMs: uiDelayMs.mobileTerminalKeyRepeatDelay,
+  mobileTerminalKeyRepeatIntervalMs: uiDelayMs.mobileTerminalKeyRepeatInterval,
   yolomuxFontReadyTimeoutMs: 2500,
   shareReplayKeyframeRequestInitialBackoffMs: 5000,
   shareReplayKeyframeRequestMinIntervalMs: 5000,
@@ -58,6 +62,8 @@ const {
   clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
+  mobileTerminalKeyRepeatDelayMs,
+  mobileTerminalKeyRepeatIntervalMs,
   yolomuxFontReadyTimeoutMs,
   shareReplayKeyframeRequestInitialBackoffMs,
   shareReplayKeyframeRequestMinIntervalMs,

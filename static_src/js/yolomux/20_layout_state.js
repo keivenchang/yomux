@@ -371,7 +371,13 @@ function fileExplorerNeedsLeftDock(slots = layoutSlots) {
 function normalizeFileExplorerDock(slots) {
   if (fileExplorerUsesNormalTabMovement()) return slots;
   let next = slots;
-  if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
+  const finderSlot = slotForItem(fileExplorerItemId, slots);
+  const finderSharesPane = Boolean(finderSlot && paneTabs(finderSlot, slots).some(item => item !== fileExplorerItemId));
+  if (tabletUsesDesktopLayout() && finderSharesPane) {
+    // Rotating a compact tablet back to wide landscape restores the same dedicated Finder pane
+    // that a laptop uses; otherwise its portrait tab would remain mixed into terminal tabs.
+    next = layoutWithFileExplorerDockedLeft(slots);
+  } else if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
     next = layoutWithFileExplorerDockedLeft(slots);
   } else if (fileExplorerNeedsLeftDock(slots)) {
     next = layoutWithFileExplorerDockedLeft(slots);
@@ -2374,6 +2380,32 @@ function globalActivityStatusLineHtml() {
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
+function topbarActivityUsesMobileCountBalls() {
+  return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
+}
+
+function topbarActivityUsesPhoneActionsRail() {
+  return compactTopbarForViewport();
+}
+
+function syncTopbarActivityPlacement() {
+  const activity = document.getElementById('topbarActivity');
+  const normalHost = document.querySelector('.topbar-right-tools');
+  const actions = document.querySelector('.actions');
+  if (!activity || !normalHost || !actions) return false;
+  if (topbarActivityUsesPhoneActionsRail()) {
+    const refresh = actions.querySelector('#refreshMeta');
+    if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    return true;
+  }
+  if (activity.parentElement !== normalHost) normalHost.append(activity);
+  return true;
+}
+
+function topbarActivityVisibleCount(counts = {}) {
+  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+}
+
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
   const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
   const dotHtml = agentWindowStatusDotHtmlForTone(tone, {surface: 'topbar', pulse: false});
@@ -2403,8 +2435,11 @@ function updateTopbarActivityStatus() {
   const counts = globalActivityCounts();
   const html = globalActivityStatusLineHtml();
   node.innerHTML = html;
-  node.hidden = !html;
+  const mobileCountBalls = topbarActivityUsesMobileCountBalls();
+  node.hidden = !html || (mobileCountBalls && !topbarActivityVisibleCount(counts));
+  node.classList.toggle('topbar-activity--mobile-count-balls', mobileCountBalls);
   node.classList.toggle('has-attention', counts.attention > 0);
+  syncTopbarActivityPlacement();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
@@ -4583,7 +4618,7 @@ function notificationTargetIsFocused(item) {
   // A status render can briefly blur xterm even though the user remains on this pane. The shared
   // logical active item survives that DOM churn, so notifications about the pane being viewed are
   // already acknowledged and must not appear inside that same pane.
-  return focusedPanelItem === target || focusedTerminal === target || visualActivePaneItem() === target;
+  return focusedPanelItem === target || focusedTerminal === target;
 }
 
 function compactNotificationTitle(scope, message, options = {}) {

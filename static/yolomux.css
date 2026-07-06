@@ -1663,7 +1663,11 @@ button.topbar-status-surface:focus-visible {
    An absolutely centered launcher could cover Help while there was still spare space at the right.
    This order makes Help visible first and puts Search directly between it and the right controls. */
 .topbar-center-tools {
-  flex: 0 1 auto;
+  /* This is the free middle region between Help and the right-side chrome.  It must own that
+     region so its navigation/search pair can be centered and grow on a wide screen instead of
+     shrink-wrapping immediately after Help. */
+  flex: 1 1 42ch;
+  justify-content: center;
 }
 .topbar-center-tools .topbar-nav {
   margin-inline-start: 0;
@@ -1672,7 +1676,9 @@ button.topbar-status-surface:focus-visible {
   margin-inline: 0;
 }
 .topbar-right-tools {
-  margin-inline-start: auto;
+  /* The growing center sibling now consumes the free space and pins this group to the right.
+     An auto margin here would claim that space first and leave Search label-sized. */
+  margin-inline-start: 0;
 }
 /* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
@@ -1712,8 +1718,8 @@ body.theme-light .topbar-nav-button {
 .topbar-search {
   margin-block: 0;
   margin-inline: var(--space-6) auto;
-  flex: 1 1 36ch;
-  max-inline-size: min(50%, 64ch);
+  flex: 1 1 42ch;
+  max-inline-size: min(100%, 64ch);
   height: var(--compact-control-height);
   padding: 0 var(--space-8);
   border: 1px solid var(--line);
@@ -1779,11 +1785,11 @@ body.theme-light .topbar-language {
   color: var(--muted);
   background: transparent;
 }
-body.app-vw-lte-1100 .topbar-search-label,
-body.app-vw-lte-1100 .topbar-search-hint {
+body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search-label,
+body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search-hint {
   display: none;
 }
-body.app-vw-lte-1100 .topbar-search {
+body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search {
   flex: 0 1 auto;
   max-inline-size: none;
   padding: 0 var(--space-6);
@@ -1870,48 +1876,139 @@ body.app-topbar-touch-compact .topbar-center-tools,
 body.app-topbar-touch-compact .topbar-right-tools {
   gap: var(--space-6);
 }
-body.app-topbar-touch-compact.app-vw-lte-980 .topbar-nav,
-body.app-topbar-touch-compact.app-vw-lte-980 #latencyMeter,
-body.app-topbar-touch-compact.app-vw-lte-980 .topbar-activity,
+body.app-topbar-touch-compact.app-vw-lte-1200 #latencyMeter,
+body.app-topbar-touch-compact.app-vw-lte-1100 .topbar-nav,
 body.app-topbar-touch-compact.app-vw-lte-980 #status {
   display: none;
+}
+/* Compact touch chrome keeps only active AI tones. The existing status-dot renderer remains the
+   color owner; this changes only the count geometry so green/red/yellow stay visible at phone and
+   portrait-tablet widths without consuming a separate number-plus-ball column. */
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity,
+body.app-topbar-menu-compact .topbar-activity {
+  display: inline-flex;
+  gap: var(--space-3);
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count:not(.active),
+body.app-topbar-menu-compact .topbar-activity-count:not(.active),
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-idle,
+body.app-topbar-menu-compact .topbar-activity-idle,
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-sep,
+body.app-topbar-menu-compact .topbar-activity-sep {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count.active,
+body.app-topbar-menu-compact .topbar-activity-count.active {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 20px;
+  block-size: 20px;
+}
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-ball.agent-window-activity,
+body.app-topbar-menu-compact .topbar-activity-ball.agent-window-activity {
+  --agent-status-ball-size-base: 20px;
+  position: absolute;
+  inset: 0;
+  inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+}
+body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count-number,
+body.app-topbar-menu-compact .topbar-activity-count-number {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: var(--z-inline-control);
+  min-inline-size: 0;
+  color: var(--paint-black);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
+  font-variant-numeric: tabular-nums;
+  /* Grid centers the line box, not the glyph's optical center. Keep the count horizontally exact
+     and move Safari's high-rendering mono digits down by one physical pixel. */
+  transform: translateY(1px);
+  pointer-events: none;
 }
 /* Preserve the five menu roots by yielding chrome in one ordered sequence: version, wordmark,
    secondary actions, then the Cmd-P launcher. Each tier only removes the next lower-priority
    detail, so a wider tablet immediately restores it without relying on prior layout state. */
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar .brand-version {
+body.app-topbar-touch-compact.app-vw-lte-760 .topbar .brand-version {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand {
+body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand {
   min-width: 0;
 }
-body.app-topbar-touch-compact.app-vw-lte-1100 .topbar .brand-title > :not(.brand-yolo) {
+body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand-title > :not(.brand-yolo) {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta) {
+body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta),
+body.app-topbar-menu-compact .actions > :not(#refreshMeta) {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta {
+body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta,
+body.app-topbar-menu-compact #refreshMeta {
   display: inline-grid;
 }
 /* Every touch layout uses the same Cmd-P launcher, but it receives only a short localized label
    area. This preserves menus and Refresh on iPad/phone widths without creating a second search
    control for mobile. The shared ellipsis owner truncates the longer label safely. */
-body.app-topbar-touch-compact .topbar-search {
+body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search {
   display: inline-flex;
   flex: 0 1 auto;
   min-inline-size: 0;
   margin-inline: var(--space-6) 0;
 }
-body.app-topbar-touch-compact .topbar-search-label {
+body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search-label {
   display: inline-flex;
   flex: 0 1 8ch;
   max-inline-size: 8ch;
 }
-body.app-topbar-touch-compact .topbar-search-hint {
+body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search-hint {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
+/* On a phone, the searchable launcher is a compact icon instead of a mostly-empty text field.
+   This leaves the scarce topbar width for the nonzero green/red/yellow activity counts before Refresh. */
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-center-tools {
+  flex: 0 0 auto;
+}
+body.app-topbar-touch-compact.app-vw-lte-600 .app-menu-area {
+  width: auto;
+}
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
+  display: inline-flex;
+  flex: 0 1 8ch;
+  inline-size: auto;
+  min-inline-size: 0;
+  padding: 0 var(--space-6);
+}
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label {
+  display: inline-flex;
+}
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-hint {
+  display: none;
+}
+/* Phone activity belongs immediately before Refresh in the real actions rail. The empty desktop
+   host must not reserve a flex gap between search and the right-side controls. */
+body.app-topbar-touch-compact.app-vw-lte-600 .topbar-right-tools,
+body.app-topbar-menu-compact .topbar-right-tools {
+  display: none;
+}
+body.app-topbar-touch-compact.app-vw-lte-600 .actions > .topbar-activity:not(#refreshMeta),
+body.app-topbar-menu-compact .actions > .topbar-activity:not(#refreshMeta) {
+  display: inline-flex;
+  inline-size: auto;
+  min-inline-size: 0;
+  max-inline-size: none;
+  block-size: var(--compact-icon-button-size);
+  padding: 0;
+  overflow: visible;
+  font-size: inherit;
+}
+body.app-topbar-touch-compact.app-vw-lte-600 .actions > #topbarActivity::before,
+body.app-topbar-menu-compact .actions > #topbarActivity::before {
   display: none;
 }
 .app-menu-area.drag-over {
@@ -2031,8 +2128,8 @@ body.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
   transform: translate(var(--app-menu-fit-offset, 0), 0);
   transition-delay: 0s;
 }
-.app-menu-submenu-wrap:hover > .app-submenu-popover,
-.app-menu-submenu-wrap:focus-within > .app-submenu-popover,
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:hover > .app-submenu-popover,
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:focus-within > .app-submenu-popover,
 .app-menu-submenu-wrap.open > .app-submenu-popover {
   display: block;
 }
@@ -3745,7 +3842,7 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-graph-controls {
   display: grid;
-  grid-template-columns: minmax(88px, 2fr) minmax(34px, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: var(--space-6);
   justify-self: stretch;
@@ -3836,20 +3933,20 @@ body.theme-light .js-debug-graph-view {
 .js-debug-range-slider-control datalist {
   display: none;
 }
-.js-debug-range-label,
-.js-debug-range-end-label {
+.js-debug-range-prefix,
+.js-debug-range-label {
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
 }
-.js-debug-range-label {
-  min-width: 34px;
-  color: var(--text);
-  justify-self: center;
-  text-align: center;
-}
-.js-debug-range-end-label {
+.js-debug-range-prefix {
   flex: 0 0 auto;
+}
+.js-debug-range-label {
+  flex: 0 0 auto;
+  min-width: 2.5rem;
+  color: var(--text);
+  text-align: center;
 }
 .js-debug-zoom-reset {
   flex: 0 0 auto;
@@ -5720,7 +5817,7 @@ body.theme-light .agent-icon.claude {
 }
 .yolomux-dockview .dv-tabs-container {
   box-sizing: border-box;
-  flex: 1 1 auto;
+  flex: 0 0 100%;
   flex-wrap: wrap;
   align-content: flex-start;
   inline-size: 100%;
@@ -5840,6 +5937,13 @@ body.theme-light .agent-icon.claude {
 .yolomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
   --panel-ring-color: var(--pane-ring-attention);
+}
+/* A phone's policy permits exactly one pane, so a wide pane-spacing ring cannot convey which sibling
+   is active. Keep the same shared ring mechanism but reserve only one pixel for it. Tablets retain
+   the user-selected spacing because they can still show more than one pane. */
+body.app-phone-single-pane .yolomux-dockview .dv-groupview,
+body.app-phone-single-pane .panel {
+  --pane-split-gap: 1px;
 }
 .yolomux-dockview .dv-content-container {
   background: transparent;
@@ -7832,6 +7936,164 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: hidden;
   border: 0;
   border-radius: 0;
+}
+.mobile-terminal-key-launcher {
+  position: absolute;
+  z-index: var(--z-terminal-popover);
+  inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
+  inset-block-end: max(var(--space-8), env(safe-area-inset-bottom));
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-control);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  box-shadow: var(--shadow-elevated);
+  font: 700 var(--ui-font-size)/1 var(--ui-font);
+  touch-action: manipulation;
+}
+/* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
+   not a permanent row, so an idle terminal keeps its full visible height. */
+.mobile-terminal-keybar {
+  position: absolute;
+  z-index: var(--z-terminal-popover);
+  inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: var(--space-4);
+  width: min(18rem, calc(100vw - var(--space-12)));
+  max-height: calc(100% - var(--space-12));
+  padding: var(--space-5);
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-md);
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+}
+.mobile-terminal-keybar[hidden] {
+  display: none;
+}
+.mobile-terminal-key-drag {
+  grid-row: 1 / -1;
+  align-self: stretch;
+  width: 18px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
+  cursor: grab;
+  touch-action: none;
+}
+.mobile-terminal-key-drag:active {
+  cursor: grabbing;
+}
+.mobile-terminal-keyrow {
+  display: flex;
+  min-width: 0;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+.mobile-terminal-keyrow--primary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  overflow: visible;
+}
+.mobile-terminal-keyrow-shell {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+}
+.mobile-terminal-keyrow-shell > .mobile-terminal-key--more {
+  align-self: start;
+  min-width: 36px;
+  padding-inline: var(--space-6);
+}
+.mobile-terminal-keyrow--primary .mobile-terminal-key {
+  min-width: 36px;
+  padding-inline: var(--space-5);
+  font-size: clamp(11px, var(--ui-font-size-xs), 15px);
+}
+.mobile-terminal-keyrow::-webkit-scrollbar {
+  display: none;
+}
+.mobile-terminal-keyrow[hidden] {
+  display: none;
+}
+.mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more .mobile-terminal-key-dpad {
+  display: none;
+}
+.mobile-terminal-keybar--more .mobile-terminal-keyrow--more {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  overflow: auto;
+}
+.mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key {
+  min-width: 0;
+  padding-inline: var(--space-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key--more {
+  grid-column: 4;
+  grid-row: 1;
+}
+.mobile-terminal-key-dpad {
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: repeat(5, 36px);
+  grid-template-rows: repeat(3, 36px);
+  justify-content: center;
+  gap: var(--space-3);
+}
+.mobile-terminal-key {
+  flex: 0 0 auto;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0 var(--space-7);
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-control);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
+  white-space: nowrap;
+  touch-action: manipulation;
+}
+.mobile-terminal-key-dpad .mobile-terminal-key--copy { grid-column: 1; grid-row: 1; }
+.mobile-terminal-key-dpad .mobile-terminal-key--command-v { grid-column: 1; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-up { grid-column: 5; grid-row: 1; }
+.mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-down { grid-column: 5; grid-row: 3; }
+.mobile-terminal-key--arrow-up { grid-column: 3; grid-row: 1; }
+.mobile-terminal-key--arrow-left { grid-column: 2; grid-row: 2; }
+.mobile-terminal-key--enter { grid-column: 3; grid-row: 2; }
+.mobile-terminal-key--arrow-right { grid-column: 4; grid-row: 2; }
+.mobile-terminal-key--arrow-down { grid-column: 3; grid-row: 3; }
+.mobile-terminal-key--interrupt {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+}
+.mobile-terminal-key:disabled {
+  opacity: 0.48;
 }
 .terminal[data-terminal-theme="light"] {
   --terminal-file-link-underline: rgb(3 105 161 / 0.48);
@@ -13883,6 +14145,8 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .tabs .tab.active:not(.auto-toggle),
 .tabs .tab[aria-pressed="true"]:not(.auto-toggle),
 .attention-toast-agent-button,
+.mobile-terminal-key.active,
+.mobile-terminal-key:active,
 .file-editor-mode-control button.active,
 .file-editor-blame-panel[aria-pressed="true"],
 .file-editor-diff-expand-panel[aria-pressed="true"],

@@ -69,7 +69,7 @@
 }
 .yolomux-dockview .dv-tabs-container {
   box-sizing: border-box;
-  flex: 1 1 auto;
+  flex: 0 0 100%;
   flex-wrap: wrap;
   align-content: flex-start;
   inline-size: 100%;
@@ -189,6 +189,13 @@
 .yolomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
 .yolomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
   --panel-ring-color: var(--pane-ring-attention);
+}
+/* A phone's policy permits exactly one pane, so a wide pane-spacing ring cannot convey which sibling
+   is active. Keep the same shared ring mechanism but reserve only one pixel for it. Tablets retain
+   the user-selected spacing because they can still show more than one pane. */
+body.app-phone-single-pane .yolomux-dockview .dv-groupview,
+body.app-phone-single-pane .panel {
+  --pane-split-gap: 1px;
 }
 .yolomux-dockview .dv-content-container {
   background: transparent;

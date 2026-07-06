@@ -2079,6 +2079,8 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .tabs .tab.active:not(.auto-toggle),
 .tabs .tab[aria-pressed="true"]:not(.auto-toggle),
 .attention-toast-agent-button,
+.mobile-terminal-key.active,
+.mobile-terminal-key:active,
 .file-editor-mode-control button.active,
 .file-editor-blame-panel[aria-pressed="true"],
 .file-editor-diff-expand-panel[aria-pressed="true"],

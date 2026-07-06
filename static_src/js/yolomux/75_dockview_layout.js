@@ -882,37 +882,59 @@ function dockviewSyncHeaderActionReservations() {
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
-    const headerWidth = Math.floor(appSpaceRect(header).width || header.clientWidth || 0);
+    // The reservation is a child of the tab container, which may be wider than Dockview's header
+    // content box when actions are absolutely positioned. Measure that shared flex surface.
+    const headerWidth = Math.floor(appSpaceRect(tabsContainer).width || tabsContainer.clientWidth || 0);
     const rootStyle = getComputedStyle(document.documentElement);
     const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
     const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
     const availableWidth = headerWidth > reservedWidth ? headerWidth - reservedWidth : headerWidth;
-    const tabWidth = availableWidth > 0
-      ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth))
-      : Math.max(minTabWidth, preferredTabWidth);
+    // Keep the first row clear of its absolutely positioned actions, while allowing later rows to
+    // use the whole header. The normal tab width is retained without actions. With actions, fit
+    // the next whole-tab count across the full header so later rows do not inherit a dead gutter.
+    const sampleTab = tabsContainer.querySelector('.dv-tab');
+    const sampleTabStyle = sampleTab ? getComputedStyle(sampleTab) : null;
+    const tabMargin = sampleTabStyle
+      ? Number.parseFloat(sampleTabStyle.marginInlineStart || '0') + Number.parseFloat(sampleTabStyle.marginInlineEnd || '0')
+      : 0;
+    const tabs = Array.from(tabsContainer.querySelectorAll(':scope > .dv-tab'));
+    const preferredTabFootprint = preferredTabWidth + tabMargin;
+    const firstRowPreferredCount = availableWidth > 0 ? Math.max(1, Math.floor(availableWidth / preferredTabFootprint)) : 1;
+    const tabsNeedWrap = tabs.length > firstRowPreferredCount;
+    const fullRowTabCount = headerWidth > 0 ? Math.max(1, Math.ceil(headerWidth / preferredTabWidth)) : 1;
+    const laterRowTabWidth = headerWidth > 0 ? Math.floor((headerWidth - tabMargin * fullRowTabCount) / fullRowTabCount) : preferredTabWidth;
+    const tabWidth = reservedWidth > 0 && tabsNeedWrap
+      ? Math.max(minTabWidth, Math.min(preferredTabWidth, laterRowTabWidth))
+      : (availableWidth > 0 ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth)) : Math.max(minTabWidth, preferredTabWidth));
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
     if (!reservedWidth || !headerWidth) return;
     const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
-    const tabs = Array.from(tabsContainer.querySelectorAll(':scope > .dv-tab'));
     let usedWidth = 0;
+    let usedActualWidth = 0;
     let firstExcludedTab = null;
     for (const tab of tabs) {
       const style = getComputedStyle(tab);
-      const tabWidth = Math.ceil(appSpaceRect(tab).width || tab.offsetWidth || 0)
+      const measuredTabWidth = Math.ceil(appSpaceRect(tab).width || tab.offsetWidth || 0)
         + Number.parseFloat(style.marginInlineStart || '0')
         + Number.parseFloat(style.marginInlineEnd || '0');
-      if (usedWidth > 0 && usedWidth + tabWidth > firstRowWidth) {
+      // The first row keeps the preferred-width capacity even when later rows shrink slightly to
+      // reclaim the action gutter. That gives the rows below enough tabs to use the full header.
+      const firstRowTabWidth = reservedWidth > 0
+        ? preferredTabWidth + Number.parseFloat(style.marginInlineStart || '0') + Number.parseFloat(style.marginInlineEnd || '0')
+        : measuredTabWidth;
+      if (usedWidth > 0 && usedWidth + firstRowTabWidth > firstRowWidth) {
         firstExcludedTab = tab;
         break;
       }
-      usedWidth += tabWidth;
+      usedWidth += firstRowTabWidth;
+      usedActualWidth += measuredTabWidth;
     }
-    if (!tabs.length || !usedWidth) return;
+    if (!tabs.length || !usedActualWidth) return;
     const reservation = document.createElement('span');
     reservation.className = 'dockview-tab-first-row-reservation';
     reservation.setAttribute('aria-hidden', 'true');
-    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedWidth))}px`);
+    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedActualWidth))}px`);
     tabsContainer.insertBefore(reservation, firstExcludedTab);
   });
 }

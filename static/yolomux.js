@@ -848,8 +848,9 @@ const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
 // Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
-// provide two usable columns; wider portrait iPads retain their movable multi-pane workspace.
+// provide two usable columns.
 const narrowTouchSingleColumnMaxWidthPx = 680;
+const tabletDesktopLayoutMinWidthPx = 900;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
@@ -909,10 +910,6 @@ function browserUsesCoarsePointer() {
     && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
 }
 
-function fileExplorerUsesNormalTabMovement() {
-  return browserUsesCoarsePointer();
-}
-
 let browserCursorHoverObserved = false;
 
 function browserHasCursorHover(event = null) {
@@ -946,6 +943,19 @@ function browserUsesTabletViewport() {
     || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
 }
 
+function tabletUsesDesktopLayout(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+}
+
+function fileExplorerUsesNormalTabMovement() {
+  // A wide landscape tablet has desktop-scale horizontal room, so it uses the same reserved
+  // Finder pane as a laptop. Phone and portrait/narrow-tablet layouts keep Finder movable as a tab.
+  return browserUsesCoarsePointer() && !tabletUsesDesktopLayout();
+}
+
 function phoneLikeMobileViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
@@ -961,7 +971,9 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  return phoneLikeMobileViewport(viewport) || width <= narrowTouchSingleColumnMaxWidthPx;
+  return phoneLikeMobileViewport(viewport)
+    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
+    || width <= narrowTouchSingleColumnMaxWidthPx;
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {
@@ -1690,6 +1702,8 @@ const uiDelayMs = Object.freeze({
   clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
   shareGeometryDigestPublish: 2001,
+  mobileTerminalKeyRepeatDelay: 360,
+  mobileTerminalKeyRepeatInterval: 68,
 });
 
 const yolomuxTiming = Object.freeze({
@@ -1709,6 +1723,8 @@ const yolomuxTiming = Object.freeze({
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
   shareGeometryDigestPublishMs: uiDelayMs.shareGeometryDigestPublish,
+  mobileTerminalKeyRepeatDelayMs: uiDelayMs.mobileTerminalKeyRepeatDelay,
+  mobileTerminalKeyRepeatIntervalMs: uiDelayMs.mobileTerminalKeyRepeatInterval,
   yolomuxFontReadyTimeoutMs: 2500,
   shareReplayKeyframeRequestInitialBackoffMs: 5000,
   shareReplayKeyframeRequestMinIntervalMs: 5000,
@@ -1734,6 +1750,8 @@ const {
   clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
   shareGeometryDigestPublishMs,
+  mobileTerminalKeyRepeatDelayMs,
+  mobileTerminalKeyRepeatIntervalMs,
   yolomuxFontReadyTimeoutMs,
   shareReplayKeyframeRequestInitialBackoffMs,
   shareReplayKeyframeRequestMinIntervalMs,
@@ -2643,7 +2661,16 @@ function normalizeAppViewport(value, fallback = null) {
 function nativeViewport() {
   const doc = document.documentElement || {};
   const width = Math.max(1, Math.round(Number(window.innerWidth) || Number(doc.clientWidth) || 1)); // static-build-allow-window-viewport
-  const height = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const layoutHeight = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const visualViewport = window.visualViewport;
+  const visualHeight = Math.max(0, Math.round(Number(visualViewport?.height) || 0));
+  const visualScale = Number(visualViewport?.scale);
+  // iPad Safari can retain a short innerHeight after its browser chrome changes while the current
+  // unzoomed visual viewport is taller. Never accept a *smaller* visual height here (that remains
+  // browser chrome or keyboard territory), but accept a larger one so the app reaches the screen.
+  const height = Math.max(1, Number.isFinite(visualScale) && Math.abs(visualScale - 1) <= 0.01 && visualHeight > layoutHeight
+    ? visualHeight
+    : layoutHeight);
   return {width, height, w: width, h: height};
 }
 
@@ -2751,25 +2778,42 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
   return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
-const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720, 600];
-const compactTopbarMenuMaxWidthPx = 600;
+const appViewportBreakpointPx = [1500, 1280, 1200, 1100, 1080, 980, 760, 720, 600, 560];
+const compactTopbarMenuMaxWidthPx = 480;
+const compactTopbarChromeMaxWidthPx = 1500;
 
-// Full top-level menus outrank version, wordmark, top-right actions, and search. Collapse them only
-// at the phone-sized fallback, after those lower-priority controls have already yielded their space.
+// Full top-level menus outrank version, wordmark, top-right actions, and search. At the final
+// narrow fallback, every pointer type uses the same one-root hierarchy; desktop pane layouts stay intact.
 function compactTopbarForViewport(viewport = appViewport()) {
-  return browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= compactTopbarMenuMaxWidthPx;
+  // Browser zoom or a stale visual viewport can report a narrower app coordinate space than the
+  // actual topbar has. Prefer the native layout viewport width for chrome packing, while pane
+  // layout continues to use appViewport's safe geometry.
+  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarMenuMaxWidthPx;
+}
+
+function compactTopbarChromeForViewport(viewport = appViewport()) {
+  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarChromeMaxWidthPx;
 }
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
-  const touchTopbar = browserUsesCoarsePointer() && effectiveViewportWidth(viewport) <= appViewportBreakpointPx[0];
+  // A narrow desktop reuses the proven compact-touch topbar presentation. This is chrome only:
+  // the separate mobile layout classifier still keeps desktop pane and split behavior unchanged.
+  const touchTopbar = compactTopbarChromeForViewport(viewport);
+  // This mirrors the shared phone-only one-pane policy (not the broader narrow-iPad rule), so
+  // phone chrome can reduce a redundant focus surround without changing tablet split geometry.
+  const phoneSinglePane = mobileSinglePaneMode();
+  const coarsePointer = browserUsesCoarsePointer();
   const targets = [document.body, appRootElement()].filter(Boolean);
   for (const target of targets) {
     for (const breakpoint of appViewportBreakpointPx) {
       target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
     }
     target.classList?.toggle('app-topbar-touch-compact', touchTopbar);
+    target.classList?.toggle('app-topbar-coarse-pointer', coarsePointer);
+    target.classList?.toggle('app-phone-single-pane', phoneSinglePane);
   }
+  if (typeof syncTopbarActivityPlacement === 'function') syncTopbarActivityPlacement();
 }
 
 function appRootElement() {
@@ -2777,6 +2821,9 @@ function appRootElement() {
 }
 
 function appOverlayRootElement() {
+  // A replay root is deliberately inert until the host publishes its first frame. Local overlays
+  // (for example an async file-browser popover) belong beside that root, never inside it.
+  if (shareReplayShellActive) return document.body;
   const root = appRootElement();
   if (!root || root === document.body) return document.body;
   let overlay = document.getElementById?.('appOverlayRoot');
@@ -6058,6 +6105,11 @@ async function showTerminalContextMenu(session, term, x, y, container = null, pr
   if (hasUrlReference) {
     appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
+  // Long-press starts this probe while Safari still grants user activation.  Do not offer a
+  // dead Paste action when that probe found no text/image, and reuse the one paste transport.
+  if ((!readOnlyMode || shareWriteMode) && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
+    appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
+  }
   terminalContextMenu.open(menu, x, y);
 }
 
@@ -6067,6 +6119,9 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  container.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
+  }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
@@ -6504,7 +6559,13 @@ function fileExplorerNeedsLeftDock(slots = layoutSlots) {
 function normalizeFileExplorerDock(slots) {
   if (fileExplorerUsesNormalTabMovement()) return slots;
   let next = slots;
-  if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
+  const finderSlot = slotForItem(fileExplorerItemId, slots);
+  const finderSharesPane = Boolean(finderSlot && paneTabs(finderSlot, slots).some(item => item !== fileExplorerItemId));
+  if (tabletUsesDesktopLayout() && finderSharesPane) {
+    // Rotating a compact tablet back to wide landscape restores the same dedicated Finder pane
+    // that a laptop uses; otherwise its portrait tab would remain mixed into terminal tabs.
+    next = layoutWithFileExplorerDockedLeft(slots);
+  } else if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
     next = layoutWithFileExplorerDockedLeft(slots);
   } else if (fileExplorerNeedsLeftDock(slots)) {
     next = layoutWithFileExplorerDockedLeft(slots);
@@ -8507,6 +8568,32 @@ function globalActivityStatusLineHtml() {
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
 
+function topbarActivityUsesMobileCountBalls() {
+  return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
+}
+
+function topbarActivityUsesPhoneActionsRail() {
+  return compactTopbarForViewport();
+}
+
+function syncTopbarActivityPlacement() {
+  const activity = document.getElementById('topbarActivity');
+  const normalHost = document.querySelector('.topbar-right-tools');
+  const actions = document.querySelector('.actions');
+  if (!activity || !normalHost || !actions) return false;
+  if (topbarActivityUsesPhoneActionsRail()) {
+    const refresh = actions.querySelector('#refreshMeta');
+    if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    return true;
+  }
+  if (activity.parentElement !== normalHost) normalHost.append(activity);
+  return true;
+}
+
+function topbarActivityVisibleCount(counts = {}) {
+  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+}
+
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
   const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
   const dotHtml = agentWindowStatusDotHtmlForTone(tone, {surface: 'topbar', pulse: false});
@@ -8536,8 +8623,11 @@ function updateTopbarActivityStatus() {
   const counts = globalActivityCounts();
   const html = globalActivityStatusLineHtml();
   node.innerHTML = html;
-  node.hidden = !html;
+  const mobileCountBalls = topbarActivityUsesMobileCountBalls();
+  node.hidden = !html || (mobileCountBalls && !topbarActivityVisibleCount(counts));
+  node.classList.toggle('topbar-activity--mobile-count-balls', mobileCountBalls);
   node.classList.toggle('has-attention', counts.attention > 0);
+  syncTopbarActivityPlacement();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
@@ -10716,7 +10806,7 @@ function notificationTargetIsFocused(item) {
   // A status render can briefly blur xterm even though the user remains on this pane. The shared
   // logical active item survives that DOM churn, so notifications about the pane being viewed are
   // already acknowledged and must not appear inside that same pane.
-  return focusedPanelItem === target || focusedTerminal === target || visualActivePaneItem() === target;
+  return focusedPanelItem === target || focusedTerminal === target;
 }
 
 function compactNotificationTitle(scope, message, options = {}) {
@@ -11495,11 +11585,10 @@ function syncInitialLayoutUrl() {
   updateActiveSessionParam();
 }
 function menuCommand(label, action, options = {}) {
-  const command = {type: 'command', label, action, ...options};
-  if (command.keepOpen === undefined && Object.prototype.hasOwnProperty.call(options, 'checked')) {
-    command.keepOpen = true;
-  }
-  return command;
+  // Checked is presentation state, not a request to keep a menu mounted. Navigation commands such
+  // as File -> Finder may be checked yet must still dismiss the menu after they act; real repeated
+  // toggles opt into keepOpen explicitly at their definition.
+  return {type: 'command', label, action, ...options};
 }
 
 function menuSubmenu(label, items, options = {}) {
@@ -11532,7 +11621,7 @@ function layoutMenuCommand(mode) {
     : normalized === 'split'
       ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
       : '';
-  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail, keepOpen: true});
 }
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
@@ -12212,6 +12301,7 @@ function appMenuTree() {
       items: [
         menuCommand(tabMetaVisible ? t('menu.view.tabMeta.hide') : t('menu.view.tabMeta.show'), toggleTabMetadata, {
           checked: tabMetaVisible,
+          keepOpen: true,
           detail: t('menu.view.tabMeta.detail'),
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
@@ -12223,15 +12313,15 @@ function appMenuTree() {
           iconHtml: appMenuUiIcon('refresh'),
         }),
         menuSubmenu(t('menu.view.theme'), [
-          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
-          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
-          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', keepOpen: true, detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
+          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark', keepOpen: true}),
+          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light', keepOpen: true}),
         ]),
         ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
-          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
-          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
-          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name'}),
+          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', keepOpen: true, detail: t('menu.view.sortTabs.default.detail')}),
+          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', keepOpen: true, detail: t('menu.view.sortTabs.attention.detail')}),
+          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name', keepOpen: true}),
         ]),
       ],
     },
@@ -12407,6 +12497,10 @@ function renderSessionButtonsMeasured(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
+  // In phone mode the activity control is temporarily reparented beside Refresh. Remove that
+  // prior rendered instance before replacing the menu subtree, or each chrome refresh leaves a
+  // duplicate button in the actions rail.
+  document.querySelectorAll('.actions > #topbarActivity').forEach(activity => activity.remove());
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -12686,7 +12780,10 @@ function createAppMenu(menu) {
     event.stopPropagation();
     if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
-      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      // The phone's single Menus root is a disclosure: its next tap must collapse the currently
+      // open menu immediately. Full desktop roots keep the short grace period that prevents one
+      // physical pointer interaction from being interpreted as open then close.
+      if (wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
       return;
     }
@@ -12824,18 +12921,57 @@ function createAppSubmenu(item) {
   submenu.setAttribute('aria-label', item.label);
   for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
   fitAppMenuPopover(submenu);
+  const setOpen = open => {
+    wrapper.classList.toggle(CLS.open, open);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const compactRoot = () => {
+    const root = wrapper.closest('.app-menu--nested-root');
+    return root?.querySelector(':scope > .app-menu-popover') === wrapper.parentElement ? root : null;
+  };
+  const open = () => {
+    const root = compactRoot();
+    // File/View/tmux/Tabs/Help share one phone Menus layer: switch categories or collapse the
+    // current category without forcing the user to close and reopen the Menus root.
+    root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap.open').forEach(sibling => {
+      if (sibling !== wrapper) {
+        sibling.classList.remove(CLS.open);
+        sibling.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
+      }
+    });
+    setOpen(true);
+  };
+  const toggle = () => {
+    if (button.disabled) return false;
+    if (compactRoot() && wrapper.classList.contains(CLS.open)) {
+      setOpen(false);
+      return true;
+    }
+    open();
+    return true;
+  };
+  button.addEventListener('pointerdown', event => {
+    // Touch browsers can retain the synthetic click after the nested popover has reflowed. Toggle
+    // on the original physical press so File/View/tmux/Tabs/Help always collapse on their next tap.
+    if (event.button !== 0 || !compactRoot()) return;
+    button.dataset.pointerActionHandled = '1';
+    event.preventDefault();
+    event.stopPropagation();
+    toggle();
+  });
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (button.disabled) return;
-    wrapper.classList.add(CLS.open);
-    button.setAttribute('aria-expanded', 'true');
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
+    toggle();
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add(CLS.open);
-      button.setAttribute('aria-expanded', 'true');
+      open();
       focusFirstAppMenuCommand(submenu);
     }
   });
@@ -27480,6 +27616,7 @@ function rekeyMap(map, oldKey, newKey) {
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
+  terminalMobileAccessoryStates.delete(session);
   altScreenWheelRemainder.delete(session);
   clearAgentWindowActivityRecordsForSession(session);
   clearSessionAttentionAcknowledgementRecords(session);
@@ -30128,37 +30265,59 @@ function dockviewSyncHeaderActionReservations() {
     const actions = group.querySelector('.dockview-pane-header-actions:not([hidden])');
     const width = actions ? Math.ceil(appSpaceRect(actions).width || actions.offsetWidth || 0) : 0;
     const reservedWidth = width > 0 ? width + 8 : 0;
-    const headerWidth = Math.floor(appSpaceRect(header).width || header.clientWidth || 0);
+    // The reservation is a child of the tab container, which may be wider than Dockview's header
+    // content box when actions are absolutely positioned. Measure that shared flex surface.
+    const headerWidth = Math.floor(appSpaceRect(tabsContainer).width || tabsContainer.clientWidth || 0);
     const rootStyle = getComputedStyle(document.documentElement);
     const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
     const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
     const availableWidth = headerWidth > reservedWidth ? headerWidth - reservedWidth : headerWidth;
-    const tabWidth = availableWidth > 0
-      ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth))
-      : Math.max(minTabWidth, preferredTabWidth);
+    // Keep the first row clear of its absolutely positioned actions, while allowing later rows to
+    // use the whole header. The normal tab width is retained without actions. With actions, fit
+    // the next whole-tab count across the full header so later rows do not inherit a dead gutter.
+    const sampleTab = tabsContainer.querySelector('.dv-tab');
+    const sampleTabStyle = sampleTab ? getComputedStyle(sampleTab) : null;
+    const tabMargin = sampleTabStyle
+      ? Number.parseFloat(sampleTabStyle.marginInlineStart || '0') + Number.parseFloat(sampleTabStyle.marginInlineEnd || '0')
+      : 0;
+    const tabs = Array.from(tabsContainer.querySelectorAll(':scope > .dv-tab'));
+    const preferredTabFootprint = preferredTabWidth + tabMargin;
+    const firstRowPreferredCount = availableWidth > 0 ? Math.max(1, Math.floor(availableWidth / preferredTabFootprint)) : 1;
+    const tabsNeedWrap = tabs.length > firstRowPreferredCount;
+    const fullRowTabCount = headerWidth > 0 ? Math.max(1, Math.ceil(headerWidth / preferredTabWidth)) : 1;
+    const laterRowTabWidth = headerWidth > 0 ? Math.floor((headerWidth - tabMargin * fullRowTabCount) / fullRowTabCount) : preferredTabWidth;
+    const tabWidth = reservedWidth > 0 && tabsNeedWrap
+      ? Math.max(minTabWidth, Math.min(preferredTabWidth, laterRowTabWidth))
+      : (availableWidth > 0 ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth)) : Math.max(minTabWidth, preferredTabWidth));
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
     if (!reservedWidth || !headerWidth) return;
     const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
-    const tabs = Array.from(tabsContainer.querySelectorAll(':scope > .dv-tab'));
     let usedWidth = 0;
+    let usedActualWidth = 0;
     let firstExcludedTab = null;
     for (const tab of tabs) {
       const style = getComputedStyle(tab);
-      const tabWidth = Math.ceil(appSpaceRect(tab).width || tab.offsetWidth || 0)
+      const measuredTabWidth = Math.ceil(appSpaceRect(tab).width || tab.offsetWidth || 0)
         + Number.parseFloat(style.marginInlineStart || '0')
         + Number.parseFloat(style.marginInlineEnd || '0');
-      if (usedWidth > 0 && usedWidth + tabWidth > firstRowWidth) {
+      // The first row keeps the preferred-width capacity even when later rows shrink slightly to
+      // reclaim the action gutter. That gives the rows below enough tabs to use the full header.
+      const firstRowTabWidth = reservedWidth > 0
+        ? preferredTabWidth + Number.parseFloat(style.marginInlineStart || '0') + Number.parseFloat(style.marginInlineEnd || '0')
+        : measuredTabWidth;
+      if (usedWidth > 0 && usedWidth + firstRowTabWidth > firstRowWidth) {
         firstExcludedTab = tab;
         break;
       }
-      usedWidth += tabWidth;
+      usedWidth += firstRowTabWidth;
+      usedActualWidth += measuredTabWidth;
     }
-    if (!tabs.length || !usedWidth) return;
+    if (!tabs.length || !usedActualWidth) return;
     const reservation = document.createElement('span');
     reservation.className = 'dockview-tab-first-row-reservation';
     reservation.setAttribute('aria-hidden', 'true');
-    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedWidth))}px`);
+    reservation.style.setProperty('--dockview-first-row-reservation-inline-size', `${Math.max(0, Math.floor(headerWidth - usedActualWidth))}px`);
     tabsContainer.insertBefore(reservation, firstExcludedTab);
   });
 }
@@ -40489,10 +40648,12 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const sliderId = 'js-debug-range-options';
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
+  const rangeLabel = zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
+    <span class="js-debug-range-prefix" aria-hidden="true">${esc(t('debug.graph.control.timeRange'))}</span>
     <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
-    <span class="js-debug-range-end-label" aria-hidden="true">${esc(options.at(-1)?.label || '')}</span>
+    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('common.reset'))}</button>` : ''}
   </div>`;
 }
@@ -40507,11 +40668,8 @@ function debugGraphHiddenChartsHtml() {
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
-  const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
-  const rangeLabel = debugGraphZoomDomainValid() ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
   return `<div class="js-debug-graph-controls">
     ${debugGraphRangeControlsHtml(nowMs)}
-    <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
     ${debugGraphResolutionLabelHtml(nowMs)}
     <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}"><span>${esc(t('debug.graph.control.charts'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
     ${debugGraphHiddenChartsHtml()}
@@ -56988,6 +57146,480 @@ function panelActiveTabName(session) {
 
 const tmuxStatusModes = new Map();
 
+// Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
+// movable smart-key palette. Keep its state per session and pass every byte through the normal
+// xterm transport so shares, tmux-window tracking, attention acknowledgement, and metrics stay unified.
+const terminalMobileAccessoryStates = new Map();
+const terminalMobileAccessoryKeyPresses = new Map();
+const terminalMobileAccessorySuppressedClicks = new Map();
+let terminalMobileAccessoryDismissalInstalled = false;
+let terminalMobileAccessoryResizeInstalled = false;
+// Clipboard reads must start while a touch still has browser user activation.  The shared
+// terminal context menu opens after the long-press delay, when Safari may reject a new read.
+// Keep only availability (never clipboard contents) so that menu can truthfully offer Paste.
+const terminalClipboardProbeTtlMs = 10_000;
+let terminalClipboardProbe = {available: false, expiresAt: 0, promise: null};
+
+function terminalClipboardPasteAvailable() {
+  return terminalClipboardProbe.available === true && Date.now() < terminalClipboardProbe.expiresAt;
+}
+
+function primeTerminalClipboardAvailability() {
+  if (terminalClipboardProbe.promise) return terminalClipboardProbe.promise;
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) return Promise.resolve(false);
+  const probe = (async () => {
+    if (typeof clipboard.read === 'function') {
+      try {
+        const items = await clipboard.read();
+        return (items || []).some(item => (item.types || []).some(type => String(type).startsWith('image/') || type === 'text/plain'));
+      } catch (_) {
+        // Some Safari builds expose read() but grant text-only readText() permission instead.
+      }
+    }
+    if (typeof clipboard.readText === 'function') {
+      try {
+        return Boolean(await clipboard.readText());
+      } catch (_) {
+        // A denied probe simply omits Paste from this long-press menu.
+      }
+    }
+    return false;
+  })()
+    .then(available => {
+      terminalClipboardProbe = {available, expiresAt: Date.now() + terminalClipboardProbeTtlMs, promise: null};
+      return available;
+    });
+  terminalClipboardProbe = {...terminalClipboardProbe, promise: probe};
+  return probe;
+}
+
+const terminalMobileAccessoryKeyDefs = Object.freeze([
+  {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
+  {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
+  {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
+  {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
+  {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
+  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
+  {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
+  {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
+  {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
+  {action: 'arrow-left', label: '←', ariaLabel: 'Left arrow'},
+  {action: 'arrow-down', label: '↓', ariaLabel: 'Down arrow'},
+  {action: 'arrow-up', label: '↑', ariaLabel: 'Up arrow'},
+  {action: 'arrow-right', label: '→', ariaLabel: 'Right arrow'},
+  {action: 'enter', label: '↵', ariaLabel: 'Enter', data: '\r'},
+  {action: 'more', label: '⋯', ariaLabel: 'More terminal keys', more: true},
+]);
+const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
+  // These mirror browser/app actions that a phone has no physical Command key for. They are
+  // actions rather than terminal bytes: Cmd-P opens quick-open; Paste stays visible in the first row.
+  {action: 'command-p', label: '⌘P', ariaLabel: 'Command-P'},
+  {action: 'home', label: 'Home', ariaLabel: 'Home'},
+  {action: 'end', label: 'End', ariaLabel: 'End'},
+  {action: 'delete', label: 'Del', ariaLabel: 'Delete', data: '\x1b[3~'},
+  {action: 'shift-tab', label: '⇧↹', ariaLabel: 'Shift-Tab', data: '\x1b[Z'},
+  {action: 'ctrl-d', label: '^D', ariaLabel: 'Ctrl-D', data: '\x04'},
+  {action: 'ctrl-z', label: '^Z', ariaLabel: 'Ctrl-Z', data: '\x1a'},
+  {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
+  {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
+]);
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+// The surrounding command keys form one compact five-column navigation pad: clipboard controls
+// live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
+
+function terminalMobileAccessoryState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalMobileAccessoryStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    terminalMobileAccessoryStates.set(key, state);
+  }
+  return state;
+}
+
+function terminalMobileAccessoryEnabled() {
+  return browserUsesCoarsePointer();
+}
+
+function terminalMobileAccessoryCursorData(session, action) {
+  const suffix = {home: 'H', end: 'F', 'arrow-up': 'A', 'arrow-down': 'B', 'arrow-right': 'C', 'arrow-left': 'D'}[action];
+  if (!suffix) return '';
+  // xterm exposes the active cursor-key mode. Respect it so a TUI receives the same sequence as a
+  // physical arrow key instead of assuming shell/readline's normal CSI mode.
+  return terminals.get(session)?.term?.modes?.applicationCursorKeys === true ? `\x1bO${suffix}` : `\x1b[${suffix}`;
+}
+
+function terminalMobileAccessoryData(session, action) {
+  const definition = terminalMobileAccessoryDefinition(action);
+  if (!definition) return '';
+  return definition.data || terminalMobileAccessoryCursorData(session, action);
+}
+
+function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
+  const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  // Copy reads local terminal selection only, so it stays available to read-only share viewers;
+  // every other palette key can change the terminal and keeps the existing write gate.
+  const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
+  const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
+  const label = definition.labelKey ? t(definition.labelKey) : definition.label;
+  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+}
+
+function terminalMobileAccessoryDefinition(action) {
+  return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
+  const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
+  if (x === null && y === null) return '';
+  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
+  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
+  // empty box and preventing a useful upward move.
+  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+}
+
+function terminalMobileAccessoryHtml(session) {
+  if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
+  const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  // The overflow button remains the rightmost control in both palette states. Keeping the return
+  // target in one physical corner avoids a touch user hunting for it after the content switches.
+  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
+      <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
+      <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
+      <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
+    </div>`;
+}
+
+function syncTerminalMobileAccessoryState(session) {
+  const state = terminalMobileAccessoryState(session);
+  const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+  const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!state || !bar) return false;
+  for (const modifier of ['ctrl', 'alt']) {
+    const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
+    if (!button) continue;
+    const active = state[modifier] === true;
+    button.classList.toggle(CLS.active, active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  const more = bar.querySelector('.mobile-terminal-keyrow--more');
+  const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
+  bar.hidden = state.open !== true;
+  bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  const positionedInline = Number.isFinite(state.x);
+  const positionedBlock = Number.isFinite(state.y);
+  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+  bar.style.transform = positionedBlock ? 'none' : '';
+  if (more) more.hidden = state.more !== true;
+  for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
+  scheduleFit(session);
+  return true;
+}
+
+function toggleTerminalMobileAccessoryState(session, key) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  state[key] = !state[key];
+  syncTerminalMobileAccessoryState(session);
+  return state[key];
+}
+
+function dismissTerminalMobileAccessory(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state || state.open !== true) return false;
+  state.open = false;
+  state.more = false;
+  state.ctrl = false;
+  state.alt = false;
+  state.drag = null;
+  syncTerminalMobileAccessoryState(session);
+  return true;
+}
+
+function dismissTerminalMobileAccessories(exceptSession = '') {
+  let dismissed = false;
+  for (const session of terminalMobileAccessoryStates.keys()) {
+    if (session === String(exceptSession || '')) continue;
+    dismissed = dismissTerminalMobileAccessory(session) || dismissed;
+  }
+  return dismissed;
+}
+
+function installTerminalMobileAccessoryDismissal() {
+  if (terminalMobileAccessoryDismissalInstalled) return;
+  terminalMobileAccessoryDismissalInstalled = true;
+  // The key palette is an on-demand aid, not persistent pane chrome. A touch outside its own
+  // launcher/palette means the user has resumed another terminal or app action, so close it.
+  document.addEventListener('pointerdown', event => {
+    const target = event.target;
+    if (target?.closest?.('[data-terminal-mobile-keybar], [data-terminal-mobile-toggle]')) return;
+    dismissTerminalMobileAccessories();
+  }, {capture: true, passive: true});
+}
+
+function installTerminalMobileAccessoryResizeSync() {
+  if (terminalMobileAccessoryResizeInstalled) return;
+  terminalMobileAccessoryResizeInstalled = true;
+  window.addEventListener('resize', () => {
+    for (const [session, state] of terminalMobileAccessoryStates) {
+      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
+      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+      const pane = bar?.closest?.('.tab-pane');
+      if (!bar || !pane) continue;
+      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
+      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+      syncTerminalMobileAccessoryState(session);
+    }
+  }, {passive: true});
+}
+
+const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
+const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
+
+function terminalMobileAccessoryRepeats(action) {
+  return ['arrow-up', 'arrow-down', 'arrow-left', 'arrow-right', 'tmux-scroll-up', 'tmux-scroll-down'].includes(action);
+}
+
+function beginTerminalMobileAccessoryKeyPress(session, action, event, button) {
+  if (!terminalMobileAccessoryRepeats(action) || event.button > 0) return false;
+  const key = String(session || '');
+  const existing = terminalMobileAccessoryKeyPresses.get(key);
+  if (existing) endTerminalMobileAccessoryKeyPress(key, event, button);
+  const press = {action, pointerId: event.pointerId, delayTimer: null, repeatTimer: null};
+  terminalMobileAccessoryKeyPresses.set(key, press);
+  button?.setPointerCapture?.(event.pointerId);
+  // Send the first key on touch-down, then keep repeating it while held, as a hardware arrow key
+  // does. Preventing default keeps xterm's hidden input focused and the palette open.
+  sendTerminalMobileAccessoryInput(key, action);
+  press.delayTimer = window.setTimeout(() => {
+    if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+    const repeat = () => {
+      if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+      sendTerminalMobileAccessoryInput(key, action);
+      press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+    };
+    press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+  }, terminalMobileAccessoryRepeatDelayMs);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryKeyPress(session, event, button) {
+  const key = String(session || '');
+  const press = terminalMobileAccessoryKeyPresses.get(key);
+  if (!press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.delayTimer);
+  window.clearTimeout(press.repeatTimer);
+  terminalMobileAccessoryKeyPresses.delete(key);
+  terminalMobileAccessorySuppressedClicks.set(key, press.action);
+  button?.releasePointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryKeyClick(session, action) {
+  const key = String(session || '');
+  if (terminalMobileAccessorySuppressedClicks.get(key) !== action) return false;
+  terminalMobileAccessorySuppressedClicks.delete(key);
+  return true;
+}
+
+function beginTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  dismissTerminalMobileAccessories(session);
+  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  state.launcherPress = press;
+  press.timer = window.setTimeout(() => {
+    if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
+    press.longPressed = true;
+    state.open = true;
+    state.more = true;
+    syncTerminalMobileAccessoryState(session);
+  }, terminalMobileAccessoryLongPressMs);
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.timer);
+  state.launcherPress = null;
+  if (!press.longPressed) return false;
+  state.suppressLauncherClick = true;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryLauncherClick(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.suppressLauncherClick) return false;
+  state.suppressLauncherClick = false;
+  return true;
+}
+
+function beginTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  if (!state || !bar || event.button > 0) return false;
+  const rect = bar.getBoundingClientRect();
+  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
+  handle.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function moveTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  const drag = state?.drag;
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  const pane = bar?.closest?.('.tab-pane');
+  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
+  const paneRect = pane.getBoundingClientRect();
+  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
+  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  return true;
+}
+
+function endTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
+  handle.releasePointerCapture?.(event.pointerId);
+  state.drag = null;
+  event.preventDefault();
+  return true;
+}
+
+function terminalDataWithMobileAccessoryModifiers(session, data) {
+  const state = terminalMobileAccessoryState(session);
+  const text = String(data || '');
+  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  const ctrl = state.ctrl === true;
+  const alt = state.alt === true;
+  state.ctrl = false;
+  state.alt = false;
+  syncTerminalMobileAccessoryState(session);
+  let value = text;
+  if (ctrl && text.length === 1) {
+    const code = text.charCodeAt(0);
+    if (code === 32) value = '\x00';
+    else if (code === 63) value = '\x7f';
+    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
+    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
+  }
+  return alt ? `\x1b${value}` : value;
+}
+
+async function pasteTerminalMobileAccessoryClipboard(session) {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) {
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+  try {
+    let text = '';
+    if (typeof clipboard.read === 'function') {
+      const items = await clipboard.read();
+      const imageFiles = [];
+      for (const item of items || []) {
+        for (const type of item.types || []) {
+          const blob = await item.getType(type);
+          if (String(type).startsWith('image/')) imageFiles.push(new File([blob], pastedImageFilename('', type), {type}));
+          else if (type === 'text/plain' && !text) text = await blob.text();
+        }
+      }
+      if (imageFiles.length) {
+        if (!beginPasteUpload(session)) return false;
+        uploadFiles(session, imageFiles, {source: 'paste'}).finally(() => {
+          pasteUploadInFlight = false;
+        });
+        return true;
+      }
+    }
+    if (!text && typeof clipboard.readText === 'function') text = await clipboard.readText();
+    if (!text) return false;
+    noteTerminalExplicitInput(session);
+    const sent = handleTerminalData(session, text, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+    // Palette keys already travel over the terminal socket; asking xterm to focus here summons
+    // iPadOS's software keyboard after every arrow press.
+    if (!sent) statusErr(terminalNotConnectedHtml(session));
+    return sent;
+  } catch (_error) {
+    // Safari can reject a clipboard read after user activation expires; explain the failure instead
+    // of pretending the terminal received text.
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+}
+
+function sendTerminalMobileAccessoryInput(session, action) {
+  if (action === 'copy') {
+    const term = terminals.get(session)?.term || null;
+    const container = document.getElementById(terminalDomId(session));
+    void copyTerminalSelection(session, term, {}, container);
+    return true;
+  }
+  if (action === 'command-p') {
+    openFileQuickOpen();
+    return true;
+  }
+  if (action === 'command-v') {
+    void pasteTerminalMobileAccessoryClipboard(session);
+    return true;
+  }
+  if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
+    const item = terminals.get(session);
+    const term = item?.term;
+    const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+    const signedLines = action === 'tmux-scroll-up' ? -pageLines : pageLines;
+    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+      queueTmuxScroll(item, signedLines);
+      return true;
+    }
+    if (term) {
+      queueLocalTerminalScroll(term, signedLines);
+      return true;
+    }
+    statusErr(terminalNotConnectedHtml(session));
+    return false;
+  }
+  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+    toggleTerminalMobileAccessoryState(session, action);
+    return true;
+  }
+  const data = terminalMobileAccessoryData(session, action);
+  if (!data) return false;
+  noteTerminalExplicitInput(session);
+  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  if (!sent) statusErr(terminalNotConnectedHtml(session));
+  return sent;
+}
+
 function tmuxStatusModeForSession(session) {
   return tmuxStatusModes.get(String(session || '')) || 'none';
 }
@@ -57038,6 +57670,7 @@ function createPanel(session) {
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>
+        ${terminalMobileAccessoryHtml(session)}
         <div id="panel-toasts-${session}" class="panel-toast-stack">
           <div id="upload-${session}" class="upload-result toast" hidden></div>
         </div>
@@ -59208,6 +59841,57 @@ function applyShareInfoState(info = {}) {
 }
 
 function bindPanelControls(panel, session) {
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
+    event.preventDefault();
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
+    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
+    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileToggle || session;
+    if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
+    sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
+    // Do not blur xterm/close the software keyboard before the click sends its byte.
+    if (beginTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, button.dataset.terminalMobileKey, event, button)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-key]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileSession || session;
+    const action = button.dataset.terminalMobileKey;
+    if (consumeTerminalMobileAccessoryKeyClick(targetSession, action)) return;
+    sendTerminalMobileAccessoryInput(targetSession, action);
+  });
   delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -60100,7 +60784,9 @@ function handleTerminalData(session, data, options = {}) {
 
 function handleTerminalDataMeasured(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
-  const filtered = stripTerminalQueryResponses(data);
+  const filtered = options.bypassMobileAccessoryModifiers === true
+    ? stripTerminalQueryResponses(data)
+    : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
@@ -60524,6 +61210,8 @@ function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
   if (container.dataset?.terminalHandlersBound === session) return;
   if (container.dataset) container.dataset.terminalHandlersBound = session;
+  installTerminalMobileAccessoryDismissal();
+  installTerminalMobileAccessoryResizeSync();
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -60538,9 +61226,18 @@ function bindTerminalContainerForSession(session, term, container) {
   container.addEventListener('copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('keydown', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('paste', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('beforeinput', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
 }
 
 function terminalUnicode11AddonCtor() {

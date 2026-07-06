@@ -136,17 +136,40 @@ async function runEditorPreviewSuite() {
       coarsePointer: true,
       viewport: {width: 600, height: 768},
     });
+    const narrowDesktop = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      viewport: {width: 600, height: 768},
+    });
+    const compactDesktop = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      viewport: {width: 1200, height: 768},
+    });
     assert.equal(tablet.compactTopbarForViewportForTest(), false, 'a full-size coarse-pointer iPad retains its five top-level menus');
-    assert.equal(roomyMenuTablet.compactTopbarForViewportForTest(), false, 'a 960px iPad preserves the five menu labels by yielding lower-priority topbar chrome first');
-    assert.equal(narrowMenuTablet.compactTopbarForViewportForTest(), true, 'a phone-sized 600px fallback may compact menus after search and chrome have yielded');
+    assert.equal(roomyMenuTablet.compactTopbarForViewportForTest(), false, 'a 960px iPad keeps the full menu while lower-priority chrome yields first');
+    assert.equal(narrowMenuTablet.compactTopbarForViewportForTest(), false, 'a 600px topbar keeps full menus after search and chrome have yielded');
     assert.equal(phone.compactTopbarForViewportForTest(), true, 'a phone uses the collision-proof Application menu root');
-    assert.equal(desktop.compactTopbarForViewportForTest(), false, 'a desktop at the same width retains its normal topbar');
+    assert.equal(desktop.compactTopbarForViewportForTest(), false, 'a roomy desktop retains its five top-level menus');
+    assert.equal(narrowDesktop.compactTopbarForViewportForTest(), false, 'a 600px desktop keeps full menus while lower-priority chrome yields');
+    narrowDesktop.syncAppViewportBreakpointClassesForTest();
+    assert.equal(narrowDesktop.bodyClassListForTest().contains('app-topbar-touch-compact'), true, 'a squished desktop reuses the compact mobile topbar presentation as well as its Menus hierarchy');
+    assert.equal(compactDesktop.compactTopbarForViewportForTest(), false, 'a 1200px desktop keeps the full menu while lower-priority chrome yields first');
+    assert.equal(tablet.tabletUsesDesktopLayoutForTest(), true, 'a wide landscape iPad adopts the desktop-layout policy');
+    assert.equal(tablet.fileExplorerUsesNormalTabMovementForTest(), false, 'a wide landscape iPad keeps Finder as its own desktop-style pane');
+    assert.equal(tablet.narrowSingleColumnModeForTest(), false, 'a wide landscape iPad retains its multi-pane layout');
+    assert.deepEqual(
+      canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes('__files__'))),
+      {active: '__files__', tabs: ['__files__']},
+      'the wide landscape iPad gives Finder a dedicated pane instead of mixing it into terminal tabs',
+    );
     assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
-    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px iPad has room for two shared-minimum columns');
-    assert.equal(narrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), true, 'an iPad with room retains two-column splits');
-    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder/Differ/Tabber use ordinary tab movement on touch tablets');
+    assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'an iPad portrait does not claim laptop-style horizontal room');
+    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), true, 'a 744px portrait iPad uses the one-column touch layout');
+    assert.equal(narrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a portrait iPad cannot create a clipped two-column split');
+    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder/Differ/Tabber remain ordinary tabs in the compact tablet layout');
     assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
-    assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), true, 'Finder can create a normal two-column split on an iPad that has room');
+    assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), false, 'Finder cannot recreate a split in compact tablet portrait');
+    assert.deepEqual(canonical(narrowTablet.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['__files__', '1', '2']},
+    }, 'a portrait iPad keeps Finder as a switchable tab beside all current terminals');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 640, height: 1024},
@@ -165,8 +188,8 @@ async function runEditorPreviewSuite() {
       {name: 'wide phone landscape', platform: 'Android Mobile', width: 961, height: 520, mobile: false, singleColumn: false},
       {name: 'narrow iPad portrait', platform: 'iPad', width: 640, height: 1024, mobile: false, singleColumn: true},
       {name: 'iPad single-column boundary', platform: 'iPad', width: 680, height: 1024, mobile: false, singleColumn: true},
-      {name: 'iPad two-column boundary', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: false},
-      {name: 'full-menu iPad', platform: 'iPad', width: 980, height: 768, mobile: false, singleColumn: false},
+      {name: 'iPad portrait', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: true},
+      {name: 'full-menu iPad landscape', platform: 'iPad', width: 980, height: 768, mobile: false, singleColumn: false},
       {name: 'wide iPad', platform: 'iPad', width: 981, height: 768, mobile: false, singleColumn: false},
     ]) {
       const scenarioApi = loadYolomux('', ['1', '2', '3'], 'http:', scenario.platform, 'admin', {
@@ -178,7 +201,7 @@ async function runEditorPreviewSuite() {
     }
     const resizeApi = loadYolomux('', ['1', '2', '3'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
-      viewport: {width: 744, height: 1024},
+      viewport: {width: 1024, height: 768},
     });
     const resizeSlots = resizeApi.emptyLayoutSlots();
     resizeSlots[resizeApi.layoutTreeKey] = resizeApi.splitNode('row', resizeApi.leafNode('left'), resizeApi.leafNode('slot1'), 50);
@@ -186,18 +209,30 @@ async function runEditorPreviewSuite() {
     resizeSlots.slot1 = resizeApi.paneStateWithTabs(['2', '3'], '2');
     resizeApi.setLayoutSlotsForTest(resizeSlots);
     resizeApi.setNativeViewportForTest({width: 640, height: 1024});
-    assert.equal(resizeApi.narrowSingleColumnModeForTest(), true, 'a live iPad viewport shrink recomputes the single-column policy instead of keeping the boot-time width');
-    assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad viewport shrink compacts the existing split through the shared layout normalizer');
+    assert.equal(resizeApi.narrowSingleColumnModeForTest(), true, 'a live iPad rotation to portrait recomputes the one-column policy instead of keeping landscape split geometry');
+    assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad portrait rotation compacts the existing split through the shared layout normalizer');
     const compactedResize = resizeApi.serialize(resizeApi.layoutSlotsForTest());
     assert.equal(Object.keys(compactedResize.panes).length, 1, 'a narrow live viewport cannot retain a horizontally clipped second pane');
-    assert.deepEqual(Object.values(compactedResize.panes)[0].tabs, ['1', '2', '3'], 'an iPad viewport shrink preserves all existing tabs in one switchable pane');
+    assert.deepEqual(Object.values(compactedResize.panes)[0].tabs, ['__files__', '1', '2', '3'], 'an iPad portrait rotation preserves the desktop Finder and all terminals as switchable one-column tabs');
+    const rotationApi = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 744, height: 1024},
+    });
+    rotationApi.setNativeViewportForTest({width: 1024, height: 768});
+    assert.equal(rotationApi.tabletUsesDesktopLayoutForTest(), true, 'rotating to wide landscape enables the tablet desktop-layout policy');
+    assert.equal(rotationApi.compactCurrentLayoutSlotsForTest(), true, 'rotating to wide landscape restores a dedicated Finder pane from compact portrait tabs');
+    assert.deepEqual(
+      canonical(Object.values(rotationApi.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes('__files__'))),
+      {active: '__files__', tabs: ['__files__']},
+      'the restored landscape Finder pane does not retain terminal tabs',
+    );
     const compactMenus = phone.topbarMenuTreeForTest();
     assert.equal(compactMenus.length, 1, 'the compact topbar has one Application menu root');
     assert.equal(compactMenus[0].label, phone.t('menu.compact.label'), 'the compact root uses the short localized application-navigation label');
     assert.deepStrictEqual([...compactMenus[0].items.map(item => item.label)], [tablet.t('menu.file'), tablet.t('menu.view'), 'tmux', tablet.t('common.tabsLabel'), tablet.t('menu.help')], 'the compact root reuses every existing top-level menu as a submenu');
     assert.equal(tablet.topbarMenuTreeForTest().length, 5, 'tablet keeps the five independent top-level menus');
-    assert.equal(roomyMenuTablet.topbarMenuTreeForTest().length, 5, 'a roomy iPad renders the five full menu roots instead of wasting its topbar width');
-    assert.equal(narrowMenuTablet.topbarMenuTreeForTest().length, 1, 'the phone-sized fallback uses the one compact application menu root');
+    assert.equal(roomyMenuTablet.topbarMenuTreeForTest().length, 5, 'a 960px iPad keeps five full menu roots while lower-priority chrome yields');
+    assert.equal(narrowMenuTablet.topbarMenuTreeForTest().length, 5, 'a 600px topbar keeps five full menu roots after lower-priority chrome yields');
     assert.equal(desktop.topbarMenuTreeForTest().length, 5, 'desktop keeps the five independent top-level menus');
     for (const scenario of [
       {name: 'phone portrait', width: 220, fullMenu: 330, controls: [96], gap: 6, fits: false},
@@ -214,14 +249,22 @@ async function runEditorPreviewSuite() {
     const source = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
     assert.ok(/function topbarMenuTree\(\)[\s\S]*menus\.map\(menu => menuSubmenu\(menu\.label, menu\.items\)\)/.test(source), 'compact navigation derives from the existing menu tree rather than duplicating commands');
     assert.ok(/function topbarNavigationShouldBeCompact\(\)[\s\S]*return compactTopbarForViewport\(\)/.test(source), 'the final phone menu transition has one stable viewport owner, avoiding a compact/full measurement render loop while the user taps Menus');
+    assert.ok(/function createAppMenu\(menu\)[\s\S]*wrapper\.classList\.contains\('app-menu--nested-root'\)[\s\S]*closeAppMenus\(\)/.test(source), 'the compact phone Menus root is an immediate open/close disclosure, not a delayed reopen');
+    assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
+    assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /menuCommand\(fileExplorerLabel\(\), \(\) => toggleFinderPane\(\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
     assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarNavigationFitCheck\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar full-versus-compact navigation is remeasured after both viewport and rendered-width changes instead of preserving a prior menu state');
     assert.ok(/nestedRoot: true[\s\S]*function openAppMenu\(wrapper, options = \{\}\)[\s\S]*app-menu--nested-root/.test(source), 'compact Menus exposes File/View/tmux/Tabs/Help first and opens their command layers only on demand');
+    assert.ok(/function createAppSubmenu\(item\)[\s\S]*const compactRoot[\s\S]*app-menu--nested-root[\s\S]*app-menu-submenu-wrap\.open[\s\S]*if \(compactRoot\(\) && wrapper\.classList\.contains\(CLS\.open\)\)[\s\S]*setOpen\(false\)/.test(source), 'first-level File/View/tmux/Tabs/Help entries in compact Menus are collapsible disclosures rather than one-way popovers');
     const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
     assert.ok(/app-topbar-touch-compact[\s\S]*topbar-language[\s\S]*topbar-owner-status/.test(css), 'touch compact mode hides secondary topbar controls before they can collide');
-    assert.ok(/app-topbar-touch-compact\.app-vw-lte-980 \.topbar-nav,[\s\S]*?#latencyMeter,[\s\S]*?\.topbar-activity/.test(css), 'constrained touch mode hides low-detail navigation and activity indicators instead of crowding the menu');
-    assert.ok(/app-topbar-touch-compact\.app-vw-lte-980 \.actions > :not\(#refreshMeta\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-touch-compact\.app-vw-lte-980 #refreshMeta\s*\{[\s\S]*?display:\s*inline-grid/.test(css), 'constrained touch mode keeps the existing Refresh action while lower-priority top-right buttons yield before menus');
-    assert.ok(/app-topbar-touch-compact\.app-vw-lte-1280 \.topbar \.brand-version\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-touch-compact\.app-vw-lte-1100 \.topbar \.brand\s*\{[\s\S]*?min-width:\s*0[\s\S]*?\.brand-title > :not\(\.brand-yolo\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-vw-lte-980 \.actions > :not\(#refreshMeta\)[\s\S]*?app-vw-lte-600 \.topbar-search\s*\{[\s\S]*?display:\s*none/.test(css), 'constrained touch chrome yields version, wordmark, secondary actions, then Search before compacting menus');
-    assert.ok(/app-topbar-touch-compact \.topbar-search\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?\.topbar-search-label\s*\{[\s\S]*?flex:\s*0 1 8ch[\s\S]*?max-inline-size:\s*8ch[\s\S]*?\.topbar-search-hint\s*\{[\s\S]*?display:\s*none/.test(css), 'iPad and phone touch topbars reuse one Cmd-P launcher with no more than eight characters of label space, preserving room for menus and Refresh');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-1200 #latencyMeter,[\s\S]*?app-vw-lte-1100 \.topbar-nav,[\s\S]*?#status[\s\S]*?app-vw-lte-1280 \.topbar-activity-count\.active[\s\S]*?inline-grid/.test(css), 'the priority ladder hides ping, then navigation, while retaining active AI tones as compact count-in-ball indicators');
+    assert.ok(/app-topbar-menu-compact \.actions > :not\(#refreshMeta\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-menu-compact #refreshMeta\s*\{[\s\S]*?display:\s*inline-grid/.test(css), 'shared compact chrome keeps Refresh while lower-priority top-right buttons yield before menus');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-760 \.topbar \.brand-version\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-touch-compact\.app-vw-lte-560 \.topbar \.brand\s*\{[\s\S]*?min-width:\s*0[\s\S]*?\.brand-title > :not\(\.brand-yolo\)\s*\{[\s\S]*?display:\s*none[\s\S]*?app-vw-lte-600 \.topbar-center-tools\s*\{[\s\S]*?flex:\s*0 0 auto/.test(css), 'the late brand tier yields version then wordmark while phone Search remains a bounded text control');
+    assert.ok(/app-topbar-menu-compact \.topbar-right-tools\s*\{[\s\S]*?display:\s*none[\s\S]*?app-topbar-menu-compact \.actions > \.topbar-activity:not\(#refreshMeta\)\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?overflow:\s*visible/.test(css) && /function syncTopbarActivityPlacement\(\)[\s\S]*topbarActivityUsesPhoneActionsRail\(\)[\s\S]*actions\.insertBefore\(activity, refresh \|\| null\)[\s\S]*normalHost\.append\(activity\)/.test(fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8')), 'shared compact activity circles move into the actions rail immediately before Refresh and return to their normal host after expansion');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    assert.ok(/function syncAppViewportBreakpointClasses\(\)[\s\S]*mobileSinglePaneMode\(\)[\s\S]*classList\?\.toggle\('app-phone-single-pane', phoneSinglePane\)/.test(coreSource) && /body\.app-phone-single-pane \.yolomux-dockview \.dv-groupview,[\s\S]*?body\.app-phone-single-pane \.panel\s*\{[\s\S]*?--pane-split-gap:\s*1px/.test(paneCss), 'the shared phone-only single-pane predicate reduces the existing active-ring width to one pixel without changing tablet spacing');
+    assert.ok(/app-topbar-touch-compact\.app-vw-lte-760 \.topbar-search\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?\.topbar-search-label\s*\{[\s\S]*?flex:\s*0 1 8ch[\s\S]*?max-inline-size:\s*8ch[\s\S]*?\.topbar-search-hint\s*\{[\s\S]*?display:\s*none/.test(css), 'only the late search tier caps Cmd-P at eight characters, preserving full labels whenever the menu still fits');
     assert.ok(/\.actions button\s*\{[\s\S]*?display:\s*inline-grid;[\s\S]*?place-items:\s*center;[\s\S]*?\.actions button::before\s*\{[\s\S]*?display:\s*block;/.test(css), 'topbar action icons use one centered grid shell so the bell and other masked glyphs do not inherit a text baseline offset');
     const webSource = fs.readFileSync('yolomux_lib/web.py', 'utf8');
     assert.ok(/id="status" class="sub a11y-only" role="status" aria-live="polite"/.test(webSource), 'the legacy generic status text remains assistive feedback instead of visible text beside Exit');
@@ -316,6 +359,31 @@ async function runEditorPreviewSuite() {
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/\.server-update-banner-msg\s*\{[\s\S]*flex:\s*1 1 24ch[\s\S]*\.server-update-banner-actions\s*\{[\s\S]*flex-wrap:\s*wrap/.test(css), 'server-version banner gives its message the flexible column and groups wrapping controls');
     assert.ok(/body\.app-vw-lte-760 \.server-update-banner\s*\{[\s\S]*flex-direction:\s*column[\s\S]*body\.app-vw-lte-760 \.server-update-banner-msg\s*\{[\s\S]*flex:\s*0 1 auto/.test(css), 'phone-width server-version banner stacks without giving its message a tall column flex basis');
+  });
+
+  test('touch terminals provide one shared smart-key transport accessory', () => {
+    const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {coarsePointer: true});
+    const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'interrupt'[\s\S]*action: 'tmux-prefix'[\s\S]*action: 'tab'[\s\S]*action: 'copy'[\s\S]*action: 'command-v'[\s\S]*action: 'tmux-scroll-up'[\s\S]*action: 'tmux-scroll-down'[\s\S]*action: 'arrow-up'[\s\S]*action: 'enter'/.test(source), 'touch terminal key definitions put Ctrl-B, Tab, Copy/Paste, and direct tmux scrolling on the first palette page');
+    assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'touch terminal overflow retains Cmd-P and secondary navigation while Paste stays visible in the primary grid');
+    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*state\.ctrl = false[\s\S]*state\.alt = false/.test(source), 'Ctrl and Alt latches are one-shot and share terminal input handling');
+    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport');
+    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more/.test(source) && /function beginTerminalMobileAccessoryDrag[\s\S]*function moveTerminalMobileAccessoryDrag/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*state\.more = true/.test(source), 'the touch key palette opens on demand, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and has one movable per-pane state owner');
+    assert.ok(/async function pasteTerminalMobileAccessoryClipboard[\s\S]*clipboard\.read[\s\S]*uploadFiles\(session, imageFiles, \{source: 'paste'\}\)[\s\S]*handleTerminalData\(session, text/.test(source), 'mobile Cmd-V reads clipboard text or images and routes both through the existing paste/terminal parents');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    assert.ok(/function terminalClipboardPasteAvailable\(\)[\s\S]*function primeTerminalClipboardAvailability\(\)[\s\S]*clipboard\.read/.test(source) && /function showTerminalContextMenu[\s\S]*terminalClipboardPasteAvailable\(\)[\s\S]*pasteTerminalMobileAccessoryClipboard\(session\)[\s\S]*function installTerminalContextMenu[\s\S]*container\.addEventListener\('pointerdown',[\s\S]*event\.pointerType === 'touch'[\s\S]*primeTerminalClipboardAvailability\(\)/.test(coreSource), 'a touch begins one clipboard availability probe before the shared long-press context menu conditionally adds Paste through the existing terminal paste path');
+    assert.ok(/function terminalMobileAccessoryPositionStyle[\s\S]*inset-block-end:auto[\s\S]*function syncTerminalMobileAccessoryState[\s\S]*bar\.style\.insetBlockEnd = positionedBlock \? 'auto' : ''/.test(source), 'a dragged palette releases its bottom anchor instead of stretching down the terminal');
+    api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
+    assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'the palette opens for its terminal');
+    assert.equal(api.dismissTerminalMobileAccessoriesForTest(), true, 'one shared outside-action dismissal closes the open terminal palette');
+    assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'outside interaction closes the palette');
+    api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
+    api.toggleTerminalMobileAccessoryStateForTest('2', 'open');
+    assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'opening another terminal palette closes the prior one');
+    assert.equal(api.terminalMobileAccessoryStateForTest('2').open, true, 'the newly launched palette remains open');
+    assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
+    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*position:\s*absolute[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*position:\s*absolute[\s\S]*grid-auto-rows:\s*max-content[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the touch key palette pins More to the top-right in both layouts, places Copy/Paste left of the D-pad and tmux scrolling right of it, and keeps Ctrl-B/Tab on the first page');
   });
 
   test('YO!agent waiting and queued rows share one compact component style', () => {
@@ -2661,7 +2729,7 @@ async function runEditorPreviewSuite() {
     assert.ok(source.includes('return renderBrowserAppIconDataUrl({count, showBadge: true})'), 'the favicon enables the activity-count badge through the shared renderer');
     assert.ok(source.includes('renderBrowserAppIconDataUrl({size: 192, showBadge: false})'), 'OS notifications use a badge-free 192px icon through the shared renderer');
     assert.ok(source.includes("new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions)"), 'the shared OS-notification boundary applies the icon to every notification');
-    assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*visualActivePaneItem\(\) === target/.test(source), 'one exact-target focus classifier keeps the logical active pane acknowledged across transient terminal blur');
+    assert.ok(/function notificationTargetIsFocused\(item\)[\s\S]*itemIsActivePaneTab\(target\)[\s\S]*focusedPanelItem === target \|\| focusedTerminal === target/.test(source), 'one exact-target focus classifier acknowledges only the pane the user is actually focused in');
     assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*toastTargetItem[\s\S]*browserNotificationsByTarget/.test(source), 'focusing a target Tab dismisses both its in-app and system notifications through one owner');
     assert.ok(/function maybeNotifyWorkingAgentTransition\(session, agentKey, tone, options = \{\}\)[\s\S]*notificationTargetIsFocused\(session\)[\s\S]*dismissNotificationsForTarget\(session\)[\s\S]*return false[\s\S]*showToast\(title/.test(source), 'RUN-to-stop/pause notifications are suppressed before either delivery path when their exact Tab is focused');
     const notificationApi = loadYolomux('', ['1']);
@@ -2669,7 +2737,7 @@ async function runEditorPreviewSuite() {
     notificationApi.setFocusedTerminal('1');
     assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'the focused session is acknowledged before a transition notification is delivered');
     notificationApi.clearFocusedTerminal('1');
-    assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'a transient terminal blur does not notify inside the same logically active session');
+    assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), false, 'a transient terminal blur no longer suppresses a notification without an actual focused target');
     notificationApi.setTranscriptInfoForTest('1', {
       selected_pane: {current_path: '/home/test/yolomux.dev8001'},
       project: {
@@ -3383,6 +3451,7 @@ async function runEditorPreviewSuite() {
     const debugPaneSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const guiSpec = fs.readFileSync('docs/specs/GUI.md', 'utf8');
+    assert.ok(/function debugGraphRangeControlsHtml[\s\S]*js-debug-range-prefix[\s\S]*js-debug-range-slider[\s\S]*js-debug-range-label[\s\S]*function debugGraphControlsHtml[\s\S]*debugGraphRangeControlsHtml\(nowMs\)[\s\S]*debugGraphResolutionLabelHtml/.test(debugPaneSource), 'YO!stats renders Range, slider, and actual range together instead of a fixed 24h end label');
     const chartGroupsSource = debugPaneSource.match(/const jsDebugGraphChartGroups = Object\.freeze\(\[([\s\S]*?)\n\]\);/)?.[1] || '';
     const chartKeys = [...chartGroupsSource.matchAll(/\{key: '([^']+)'/g)].map(match => match[1]);
     const chartLabels = {
@@ -9721,7 +9790,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/\.panel-head\s*\{[\s\S]*?padding:\s*var\(--space-2\) var\(--space-1\) 0;/.test(css), 'pane tab strip has a 1px left/right edge gap');
     assert.ok(/\.pane-tab\s*\{[\s\S]*?margin:\s*0 var\(--space-1\) 0 0;/.test(css), 'pane tabs have a 1px horizontal gap');
     assert.ok(/\.yolomux-dockview \.dv-tabs-and-actions-container\s*\{[\s\S]*?height:\s*auto;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview pane headers grow vertically when tabs wrap');
-    assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?inline-size:\s*100%;[\s\S]*?max-inline-size:\s*100%;[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview tab strips wrap across their full width');
+    assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex:\s*0 0 100%;[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?inline-size:\s*100%;[\s\S]*?max-inline-size:\s*100%;[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/.test(css), 'Dockview tab strips wrap across their full header width');
     assert.ok(/\.dockview-tab-first-row-reservation\s*\{[\s\S]*?flex:\s*0 0 var\(--dockview-first-row-reservation-inline-size,\s*0px\)/.test(css), 'Dockview reserves header-action space with a first-row-only flex item');
     assert.equal(css.includes('padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);'), false, 'Dockview does not reserve header-action space on every wrapped row');
     assert.equal(css.includes('.dockview-tab-row-break'), false, 'Dockview tab strips wrap naturally without synthetic row breaks');

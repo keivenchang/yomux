@@ -1194,7 +1194,7 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                   rowCount: rows.length,
                   tabs: tabRects,
                   rows: rows.map(row => row.map(value => ({left: value.left, right: value.right, width: value.width}))),
-                  tabsLeft: tabsContainer.getBoundingClientRect().left,
+                      tabsLeft: tabsContainer.getBoundingClientRect().left,
                       contentRight: tabsContainer.getBoundingClientRect().right,
                       reservation: reservation ? rect(reservation) : null,
                   actionLeft: actions.getBoundingClientRect().left,
@@ -3465,7 +3465,7 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
         const activeRect = activeTab.getBoundingClientRect();
         const hit = document.elementFromPoint(Math.round(activeRect.left + activeRect.width / 2), Math.round(activeRect.top + activeRect.height / 2));
         return {
-          header: rectFor(header),
+              header: rectFor(header),
           toolbar: rectFor(toolbar),
           tabRows: new Set(tabs.map(rect => rect.top)).size,
           tabHeight: tabs[0]?.height || 0,

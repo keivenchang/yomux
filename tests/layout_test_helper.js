@@ -1166,6 +1166,7 @@ globalThis.__layoutTestApi = {
   mobileSinglePaneModeForTest: mobileSinglePaneMode,
   narrowSingleColumnModeForTest: narrowSingleColumnMode,
   fileExplorerUsesNormalTabMovementForTest: fileExplorerUsesNormalTabMovement,
+  tabletUsesDesktopLayoutForTest: tabletUsesDesktopLayout,
   phoneLikeMobileViewportForTest: phoneLikeMobileViewport,
   narrowTouchSingleColumnViewportForTest: narrowTouchSingleColumnViewport,
   mobileRecentTmuxItemsForTest: mobileRecentTmuxItems,
@@ -1277,6 +1278,19 @@ globalThis.__layoutTestApi = {
   focusPanel,
   focusTerminalFromUserAction,
   handleTerminalDataForTest: handleTerminalData,
+  terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
+  terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
+  terminalMobileAccessoryStateForTest(session) {
+    const state = terminalMobileAccessoryState(session);
+    return state ? {...state} : null;
+  },
+  toggleTerminalMobileAccessoryStateForTest: toggleTerminalMobileAccessoryState,
+  dismissTerminalMobileAccessoriesForTest: dismissTerminalMobileAccessories,
+  beginTerminalMobileAccessoryLauncherPressForTest: beginTerminalMobileAccessoryLauncherPress,
+  endTerminalMobileAccessoryLauncherPressForTest: endTerminalMobileAccessoryLauncherPress,
+  consumeTerminalMobileAccessoryLauncherClickForTest: consumeTerminalMobileAccessoryLauncherClick,
+  sendTerminalMobileAccessoryInputForTest: sendTerminalMobileAccessoryInput,
+  terminalMobileAccessoryRepeatsForTest: terminalMobileAccessoryRepeats,
   toggleFileExplorerShortcut,
   clearFileExplorerShortcutRestoreSlotsForTest() { fileExplorerShortcutRestoreSlots = null; },
   focusedTerminalForTest() { return focusedTerminal; },
@@ -2601,6 +2615,7 @@ globalThis.__layoutTestApi = {
   bodyClassListForTest() {
     return document.body.classList;
   },
+  syncAppViewportBreakpointClassesForTest: syncAppViewportBreakpointClasses,
   documentElementStyleForTest() {
     return document.documentElement.style;
   },

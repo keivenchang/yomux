@@ -1,9 +1,8 @@
 function menuCommand(label, action, options = {}) {
-  const command = {type: 'command', label, action, ...options};
-  if (command.keepOpen === undefined && Object.prototype.hasOwnProperty.call(options, 'checked')) {
-    command.keepOpen = true;
-  }
-  return command;
+  // Checked is presentation state, not a request to keep a menu mounted. Navigation commands such
+  // as File -> Finder may be checked yet must still dismiss the menu after they act; real repeated
+  // toggles opt into keepOpen explicitly at their definition.
+  return {type: 'command', label, action, ...options};
 }
 
 function menuSubmenu(label, items, options = {}) {
@@ -36,7 +35,7 @@ function layoutMenuCommand(mode) {
     : normalized === 'split'
       ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
       : '';
-  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail, keepOpen: true});
 }
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
@@ -716,6 +715,7 @@ function appMenuTree() {
       items: [
         menuCommand(tabMetaVisible ? t('menu.view.tabMeta.hide') : t('menu.view.tabMeta.show'), toggleTabMetadata, {
           checked: tabMetaVisible,
+          keepOpen: true,
           detail: t('menu.view.tabMeta.detail'),
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
@@ -727,15 +727,15 @@ function appMenuTree() {
           iconHtml: appMenuUiIcon('refresh'),
         }),
         menuSubmenu(t('menu.view.theme'), [
-          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
-          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
-          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', keepOpen: true, detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
+          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark', keepOpen: true}),
+          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light', keepOpen: true}),
         ]),
         ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
         menuSubmenu(t('menu.view.sortTabs'), [
-          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
-          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
-          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name'}),
+          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', keepOpen: true, detail: t('menu.view.sortTabs.default.detail')}),
+          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', keepOpen: true, detail: t('menu.view.sortTabs.attention.detail')}),
+          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name', keepOpen: true}),
         ]),
       ],
     },
@@ -911,6 +911,10 @@ function renderSessionButtonsMeasured(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
+  // In phone mode the activity control is temporarily reparented beside Refresh. Remove that
+  // prior rendered instance before replacing the menu subtree, or each chrome refresh leaves a
+  // duplicate button in the actions rail.
+  document.querySelectorAll('.actions > #topbarActivity').forEach(activity => activity.remove());
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -1190,7 +1194,10 @@ function createAppMenu(menu) {
     event.stopPropagation();
     if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
-      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      // The phone's single Menus root is a disclosure: its next tap must collapse the currently
+      // open menu immediately. Full desktop roots keep the short grace period that prevents one
+      // physical pointer interaction from being interpreted as open then close.
+      if (wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
       return;
     }
@@ -1328,18 +1335,57 @@ function createAppSubmenu(item) {
   submenu.setAttribute('aria-label', item.label);
   for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
   fitAppMenuPopover(submenu);
+  const setOpen = open => {
+    wrapper.classList.toggle(CLS.open, open);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const compactRoot = () => {
+    const root = wrapper.closest('.app-menu--nested-root');
+    return root?.querySelector(':scope > .app-menu-popover') === wrapper.parentElement ? root : null;
+  };
+  const open = () => {
+    const root = compactRoot();
+    // File/View/tmux/Tabs/Help share one phone Menus layer: switch categories or collapse the
+    // current category without forcing the user to close and reopen the Menus root.
+    root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap.open').forEach(sibling => {
+      if (sibling !== wrapper) {
+        sibling.classList.remove(CLS.open);
+        sibling.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
+      }
+    });
+    setOpen(true);
+  };
+  const toggle = () => {
+    if (button.disabled) return false;
+    if (compactRoot() && wrapper.classList.contains(CLS.open)) {
+      setOpen(false);
+      return true;
+    }
+    open();
+    return true;
+  };
+  button.addEventListener('pointerdown', event => {
+    // Touch browsers can retain the synthetic click after the nested popover has reflowed. Toggle
+    // on the original physical press so File/View/tmux/Tabs/Help always collapse on their next tap.
+    if (event.button !== 0 || !compactRoot()) return;
+    button.dataset.pointerActionHandled = '1';
+    event.preventDefault();
+    event.stopPropagation();
+    toggle();
+  });
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (button.disabled) return;
-    wrapper.classList.add(CLS.open);
-    button.setAttribute('aria-expanded', 'true');
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
+    toggle();
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add(CLS.open);
-      button.setAttribute('aria-expanded', 'true');
+      open();
       focusFirstAppMenuCommand(submenu);
     }
   });

@@ -218,7 +218,7 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-graph-controls {
   display: grid;
-  grid-template-columns: minmax(88px, 2fr) minmax(34px, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: var(--space-6);
   justify-self: stretch;
@@ -309,20 +309,20 @@ body.theme-light .js-debug-graph-view {
 .js-debug-range-slider-control datalist {
   display: none;
 }
-.js-debug-range-label,
-.js-debug-range-end-label {
+.js-debug-range-prefix,
+.js-debug-range-label {
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
 }
-.js-debug-range-label {
-  min-width: 34px;
-  color: var(--text);
-  justify-self: center;
-  text-align: center;
-}
-.js-debug-range-end-label {
+.js-debug-range-prefix {
   flex: 0 0 auto;
+}
+.js-debug-range-label {
+  flex: 0 0 auto;
+  min-width: 2.5rem;
+  color: var(--text);
+  text-align: center;
 }
 .js-debug-zoom-reset {
   flex: 0 0 auto;
