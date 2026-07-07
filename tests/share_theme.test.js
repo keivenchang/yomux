@@ -1449,7 +1449,7 @@ async function runShareThemeSuite() {
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState[\s\S]*return false/.test(appSource), 'read-only share clients cannot locally commit a Finder/Differ session');
-    assert.ok(/function fileExplorerSessionFilesTargetSession\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*fileExplorerChangesSelectedSession[\s\S]*fileExplorerExplicitSyncSession[\s\S]*return ''/.test(appSource), 'read-only share Finder/Differ target resolves only from the host-pinned session');
+    assert.ok(/function fileExplorerSessionFilesTargetSession\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*fileExplorerChangesSelectedSession[\s\S]*fileExplorerExplicitSyncSessionTarget\(\)[\s\S]*return ''/.test(appSource), 'read-only share Finder/Differ target resolves only from the shared explicit pane state');
     const dockviewActivePanelStart = appSource.indexOf('api.onDidActivePanelChange(panel => {');
     assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
     const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
@@ -4257,9 +4257,9 @@ async function runShareThemeSuite() {
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
     const tabsMenu = menus.find(menu => menu.id === 'tabs');
     const tabsMenuLabels = tabsMenu.items.flatMap(menuLabels).filter(Boolean);
-    assert.equal(tmuxMenu.items[0].label, 'YO (auto approve; YOLO)');
+    assert.equal(tmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
-    assert.ok(tmuxMenuLabels.includes('YO!info'), 'tmux menu exposes YO!info alongside session commands');
+    assert.equal(tmuxMenuLabels.includes('YO!info'), false, 'tmux menu omits the duplicate YO!info entry that File already owns');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
     // New-session items use an explicit "new" command label in Tabs; the detail shows the params passed.
     assert.equal(tmuxMenuLabels.includes('new Claude'), false);
@@ -4302,7 +4302,8 @@ async function runShareThemeSuite() {
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
     assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));
     assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));
-    assert.ok(tmuxMenuLabels.includes('Info Bar'));
+    assert.ok(tmuxMenuLabels.includes('Show/hide Info Bar'));
+    assert.ok(tmuxMenuLabels.includes('tmux status bar'));
     assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
     assert.ok(tmuxMenuLabels.includes("Kill tmux session '1'"));
     assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
@@ -4329,12 +4330,11 @@ async function runShareThemeSuite() {
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     assert.equal(yoloTabsMenu.badgeText, '1');
     assert.equal(yoloTabsMenu.badgeTitle, '1 running YOLO job');
-    assert.equal(yoloTmuxMenu.items[0].label, 'YO (auto approve; YOLO)');
+    assert.equal(yoloTmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
     assert.equal(yoloTmuxMenu.items.find(item => item.label === 'YOLO').items.some(item => item.label.startsWith('Sessions')), false);
     api.setAutoApproveStateForTest('1', {enabled: false});
-    assert.equal(api.currentSessionActionTarget(), '1');
     const filesOnlySlots = api.emptyLayoutSlots();
     filesOnlySlots[api.layoutTreeKey] = api.leafNode('left');
     filesOnlySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -4351,8 +4351,23 @@ async function runShareThemeSuite() {
     api.setFocusedPanelItem('2');
     api.setFocusedPanelItem('__files__');
     assert.equal(api.currentSessionActionTarget(), '2');
+    const explicitFocusApi = loadYolomux('', ['1', '2']);
+    const explicitFocusSlots = explicitFocusApi.emptyLayoutSlots();
+    explicitFocusSlots[explicitFocusApi.layoutTreeKey] = explicitFocusApi.splitNode('row', explicitFocusApi.leafNode('left'), explicitFocusApi.leafNode('right'), 50);
+    explicitFocusSlots.left = explicitFocusApi.paneStateWithTabs(['1'], '1');
+    explicitFocusSlots.right = explicitFocusApi.paneStateWithTabs(['2'], '2');
+    explicitFocusApi.setLayoutSlotsForTest(explicitFocusSlots);
+    explicitFocusApi.setExplicitPaneFocusItemForTest('1');
+    explicitFocusApi.setFocusedTerminal('2');
+    assert.equal(explicitFocusApi.explicitPaneFocusItemForTest(), '1', 'passive terminal focus does not replace the shared explicit-pane state');
+    assert.equal(explicitFocusApi.currentTmuxMenuTargetForTest(), '1', 'tmux menu follows the shared explicit-pane state instead of passive focus');
+    explicitFocusApi.setFocusedTerminal('2', {userInitiated: true});
+    assert.equal(explicitFocusApi.explicitPaneFocusItemForTest(), '2', 'clicking or typing in a terminal updates the shared explicit-pane state');
+    assert.equal(explicitFocusApi.currentTmuxMenuTargetForTest(), '2', 'tmux menu updates to the newly explicit terminal');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const currentTmuxMenuTargetBody = source.slice(source.indexOf('function currentTmuxMenuTarget()'), source.indexOf('function orderedPaneItems()'));
+    assert.ok(currentTmuxMenuTargetBody.includes('explicitTmuxPaneFocusSession() || currentSessionActionTarget()'), 'tmux menus use the shared explicit pane state without changing global session actions');
     assert.equal(source.includes("menuNumberSetting('appearance.red_reminder_ms'"), false, 'YOLO submenu no longer exposes removed status pulse timing');
     assert.ok(/function createAppMenuNumberSetting[\s\S]*saveSettingsPatch\(settingPatch\(item\.path, next\)\)/.test(source), 'menu number-setting rows save through the shared settings API');
     assert.equal(/function applyAppMenuNumberSettingPreview[\s\S]*path === 'appearance\.red_reminder_ms'[\s\S]*applyCssSettings\(\)/.test(source), false, 'YOLO menu has no removed status pulse live-preview branch');
@@ -5475,7 +5490,7 @@ async function runShareThemeSuite() {
     namedSessionApi.activatePaneTab('left', 'dynamo2');
     assert.equal(namedSessionApi.currentSessionActionTarget(), 'dynamo2');
     assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === "Rename tmux session 'dynamo2'").disabled, false);
-    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (auto approve; YOLO)');
+    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO (auto-approve) for Tmux Session 'dynamo2'"), false);
     const sessionActions = api.tmuxSessionActionCommands('1');
     assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
@@ -5514,7 +5529,10 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.openedWindowsForTest().map(record => record.url)), ['/preview-popout?path=%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md'], 'file tab Pop out opens the same preview popout route as the header button');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
-    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Info Bar']);
+    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);
+    assert.equal(Boolean(sessionViews[3].checked), false, 'Info Bar stays a direct show/hide toggle');
+    assert.equal(sessionViews[4].checked, false, 'tmux Status Bar starts unchecked when it is off');
+    assert.equal(sessionViews[4].detail, 'Off, Top, Bottom (toggle)', 'tmux Status Bar shows every cycle state and identifies the control as a toggle');
     assert.equal(api.fileIconFor('screenshot.png'), '🖼');
     assert.equal(api.fileIconFor('run.sh'), '🐚');
     assert.equal(api.fileIconFor('main.rs'), '🧩');
@@ -5536,18 +5554,18 @@ async function runShareThemeSuite() {
     const paneInfoLocaleFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json')).sort();
     const localizedPaneInfoLabels = {
       'zh-Hans.json': {
-        'menu.tmux.paneDetails': '信息栏',
+        'menu.tmux.paneDetails': '显示/隐藏信息栏',
         'pane.details.hide': '隐藏信息栏',
         'pane.details.show': '显示信息栏',
       },
       'zh-Hant.json': {
-        'menu.tmux.paneDetails': '資訊列',
+        'menu.tmux.paneDetails': '顯示/隱藏資訊列',
         'pane.details.hide': '隱藏資訊列',
         'pane.details.show': '顯示資訊列',
       },
     };
     const sourcePaneInfoLabels = {
-      'menu.tmux.paneDetails': 'Info Bar',
+      'menu.tmux.paneDetails': 'Show/hide Info Bar',
       'pane.details.hide': 'hide Info Bar',
       'pane.details.show': 'show Info Bar',
     };

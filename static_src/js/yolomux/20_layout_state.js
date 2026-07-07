@@ -708,7 +708,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerChangesSelectedSession = String(finder.session || '').trim();
-    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+    setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);

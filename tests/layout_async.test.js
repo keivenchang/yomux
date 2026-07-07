@@ -1266,7 +1266,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '0', 'share viewers start with 0 running YO jobs before the host snapshot');
       await shareTopbarApi.applyShareUiStateForTest({autoApprove: autoSnapshot});
       assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '1', 'share viewers mirror the host running YO badge from UI state');
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (auto approve; YOLO)', 'share viewers mirror host tmux YO state from UI state');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux', 'share viewers mirror host tmux YO state from UI state');
     }
 
     {

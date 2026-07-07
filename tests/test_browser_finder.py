@@ -797,7 +797,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
         const row = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo"]');
-        fileExplorerExplicitSyncSession = '';
+        setExplicitPaneFocusItem('', {allowInactive: true, clearTmux: true});
         row.click();
         syncFileExplorerRootToActiveTmux('1').then(() => {
           requestAnimationFrame(() => requestAnimationFrame(() => {

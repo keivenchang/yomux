@@ -9367,7 +9367,7 @@ async function runEditorPreviewSuite() {
     // the English brand text, while the two Chinese catalogs render the requested glyphs (asserted below).
     assert.equal(en['brand.tab.info'], 'YO!info', 'en YO!info tab label');
     assert.equal(en['brand.tab.agent'], 'YO!agent', 'en YO!agent tab label');
-    assert.equal(en['menu.tmux.yo.on'], 'YO (auto approve; YOLO)', 'the tmux YO menu identifies YO as auto-approve / YOLO');
+    assert.equal(en['menu.tmux.yo.on'], 'YO (YOLO auto approve) tmux', 'the tmux YO menu identifies YO as a tmux YOLO auto-approve control');
     assert.equal(en['menu.tmux.yolo.enableFor'], "Enable YOLO (auto-approve) for Tmux Session '{session}'", 'the overflow YOLO action states its auto-approve behavior');
     assert.ok(/function tmuxCurrentYoloCommand\(session\)[\s\S]*const label = t\('menu\.tmux\.yo\.on'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'the tmux dropdown uses the explicit YO auto-approve label regardless of its current state');
     assert.equal(es['menu.file'], 'Archivo', 'Phase 1: es translates a representative menu label');

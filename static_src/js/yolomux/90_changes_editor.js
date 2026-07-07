@@ -799,17 +799,19 @@ function fileExplorerSessionFilesTargetSession() {
     if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
       return fileExplorerChangesSelectedSession;
     }
-    if (fileExplorerExplicitSyncSession && sessions.includes(fileExplorerExplicitSyncSession)) {
-      return fileExplorerExplicitSyncSession;
+    const explicitSession = fileExplorerExplicitSyncSessionTarget();
+    if (explicitSession) {
+      return explicitSession;
     }
     return '';
   }
   if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
     return fileExplorerChangesSelectedSession;
   }
-  if (fileExplorerExplicitSyncSession && sessions.includes(fileExplorerExplicitSyncSession)) {
-    fileExplorerChangesSelectedSession = fileExplorerExplicitSyncSession;
-    return fileExplorerExplicitSyncSession;
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) {
+    fileExplorerChangesSelectedSession = explicitSession;
+    return explicitSession;
   }
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;

@@ -669,7 +669,13 @@ const fileExplorerSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
 };
-let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
+// One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
+// auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
+// A Finder/Differ click changes `item` but preserves the terminal context it is inspecting.
+const explicitPaneFocusState = {
+  item: shareBootstrapFinderSession(),
+  tmuxSession: shareBootstrapFinderSession(),
+};
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';

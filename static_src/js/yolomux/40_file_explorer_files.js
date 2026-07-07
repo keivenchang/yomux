@@ -835,9 +835,7 @@ function activeTmuxSessionForFinder(preferredItem = null) {
 }
 
 function fileExplorerExplicitSyncSessionTarget() {
-  return fileExplorerExplicitSyncSession && isTmuxSession(fileExplorerExplicitSyncSession) && activeSessions.includes(fileExplorerExplicitSyncSession)
-    ? fileExplorerExplicitSyncSession
-    : '';
+  return explicitTmuxPaneFocusSession();
 }
 
 function fileExplorerSyncCommandSessionTarget() {
@@ -851,14 +849,13 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
-  if (fileExplorerExplicitSyncSession !== normalizedSession) {
-    if (fileExplorerExplicitSyncSession) restoreCommittedFileExplorerRootDisplay();
-    fileExplorerExplicitSyncSession = normalizedSession;
+  const previous = fileExplorerExplicitSyncSessionTarget();
+  const changed = setExplicitPaneFocusItem(normalizedSession);
+  if (changed) {
+    if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
-    return true;
   }
-  fileExplorerExplicitSyncSession = normalizedSession;
-  return true;
+  return changed;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {

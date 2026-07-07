@@ -2319,7 +2319,7 @@ async function applyShareFinderState(finder = {}) {
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
     fileExplorerChangesSelectedSession = session;
-    fileExplorerExplicitSyncSession = session;
+    setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
   if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';

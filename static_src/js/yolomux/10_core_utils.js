@@ -1959,6 +1959,28 @@ function rememberActivePaneItem(item) {
   if (!isFileExplorerItem(item)) lastActiveNonFileExplorerPaneItem = item;
 }
 
+function explicitPaneFocusItem() {
+  return explicitPaneFocusState.item && itemIsActivePaneTab(explicitPaneFocusState.item) ? explicitPaneFocusState.item : null;
+}
+
+function explicitTmuxPaneFocusSession() {
+  const session = explicitPaneFocusState.tmuxSession;
+  return isTmuxSession(session) && activeSessions.includes(session) ? session : '';
+}
+
+function setExplicitPaneFocusItem(item, options = {}) {
+  const next = String(item || '').trim();
+  if (next && options.allowInactive !== true && !itemIsActivePaneTab(next)) return false;
+  const nextTmuxSession = isTmuxSession(next)
+    ? next
+    : (options.clearTmux === true ? null : explicitPaneFocusState.tmuxSession);
+  if (explicitPaneFocusState.item === (next || null) && explicitPaneFocusState.tmuxSession === nextTmuxSession) return false;
+  explicitPaneFocusState.item = next || null;
+  explicitPaneFocusState.tmuxSession = nextTmuxSession;
+  if (options.renderMenu !== false && typeof renderSessionButtons === 'function') renderSessionButtons();
+  return true;
+}
+
 function visualActivePaneItem() {
   if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
   if (lastActivePaneItem && itemIsActivePaneTab(lastActivePaneItem)) return lastActivePaneItem;
@@ -2078,6 +2100,8 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   if (isTmuxSession(item)) {
     acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
     rememberFileExplorerExplicitSyncSession(item);
+  } else {
+    setExplicitPaneFocusItem(item);
   }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
@@ -2164,6 +2188,8 @@ function clearFocusForInactiveLayout() {
   if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
   if (lastActiveNonFileExplorerPaneItem && !itemIsActivePaneTab(lastActiveNonFileExplorerPaneItem)) lastActiveNonFileExplorerPaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
+  if (explicitPaneFocusState.item && !itemIsActivePaneTab(explicitPaneFocusState.item)) explicitPaneFocusState.item = null;
+  if (explicitPaneFocusState.tmuxSession && !activeSessions.includes(explicitPaneFocusState.tmuxSession)) explicitPaneFocusState.tmuxSession = null;
 }
 
 function terminalPaneIsActive(session) {
@@ -4255,7 +4281,7 @@ function appendTabActionCommands(menu, item, options = {}) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
     const paneInfoBarLabel = t('menu.tmux.paneDetails');
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
+    const viewItems = tmuxSessionViewCommands(item, {includeStatus: false}).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,

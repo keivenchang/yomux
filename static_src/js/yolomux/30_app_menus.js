@@ -164,6 +164,12 @@ function currentSessionActionTarget() {
   return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }
 
+function currentTmuxMenuTarget() {
+  // All pane-aware surfaces share this explicit click/type state. Hover and auto-focus stay
+  // visual-only, so opening tmux cannot retarget an action to a pane merely under the cursor.
+  return explicitTmuxPaneFocusSession() || currentSessionActionTarget();
+}
+
 function orderedPaneItems(items = activePaneItems()) {
   const unique = [];
   for (const group of [
@@ -410,7 +416,7 @@ function tmuxCurrentYoloCommand(session) {
   });
 }
 
-function tmuxSessionViewCommands(session) {
+function tmuxSessionViewCommands(session, options = {}) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
   const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
@@ -419,6 +425,8 @@ function tmuxSessionViewCommands(session) {
   const transcriptName = t('menu.tmux.transcript', {session: viewLabel});
   const summaryName = t('menu.tmux.aiTranscript', {session: viewLabel});
   const eventLogName = t('menu.tmux.eventLog', {session: viewLabel});
+  const statusMode = hasSession ? tmuxStatusModeForSession(session) : 'none';
+  const statusName = t('pref.appearance.tmux_status_bar.label');
   return [
     menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
@@ -453,6 +461,15 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: [t('menu.tmux.paneDetails'), focusDetail].filter(Boolean).join(' - '),
     }),
+    ...(options.includeStatus === false ? [] : [menuCommand(statusName, async () => {
+        if (hasSession) await cycleTmuxStatusMode(session);
+      }, {
+        checked: statusMode !== 'none',
+        disabled: readOnlyMode || !hasSession,
+        detail: hasSession ? t('menu.tmux.statusBarCycle') : disabledDetail,
+        keepOpen: true,
+        ariaLabel: [statusName, focusDetail].filter(Boolean).join(' - '),
+      })]),
   ];
 }
 
@@ -695,7 +712,7 @@ function fileMenuPanelCommands() {
 }
 
 function appMenuTree() {
-  const activeTmux = currentSessionActionTarget();
+  const activeTmux = currentTmuxMenuTarget();
   const shareSessions = shareSessionsFromLayout();
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
@@ -762,7 +779,6 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),

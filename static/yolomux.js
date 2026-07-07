@@ -670,7 +670,13 @@ const fileExplorerSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
 };
-let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
+// One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
+// auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
+// A Finder/Differ click changes `item` but preserves the terminal context it is inspecting.
+const explicitPaneFocusState = {
+  item: shareBootstrapFinderSession(),
+  tmuxSession: shareBootstrapFinderSession(),
+};
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
@@ -4027,6 +4033,28 @@ function rememberActivePaneItem(item) {
   if (!isFileExplorerItem(item)) lastActiveNonFileExplorerPaneItem = item;
 }
 
+function explicitPaneFocusItem() {
+  return explicitPaneFocusState.item && itemIsActivePaneTab(explicitPaneFocusState.item) ? explicitPaneFocusState.item : null;
+}
+
+function explicitTmuxPaneFocusSession() {
+  const session = explicitPaneFocusState.tmuxSession;
+  return isTmuxSession(session) && activeSessions.includes(session) ? session : '';
+}
+
+function setExplicitPaneFocusItem(item, options = {}) {
+  const next = String(item || '').trim();
+  if (next && options.allowInactive !== true && !itemIsActivePaneTab(next)) return false;
+  const nextTmuxSession = isTmuxSession(next)
+    ? next
+    : (options.clearTmux === true ? null : explicitPaneFocusState.tmuxSession);
+  if (explicitPaneFocusState.item === (next || null) && explicitPaneFocusState.tmuxSession === nextTmuxSession) return false;
+  explicitPaneFocusState.item = next || null;
+  explicitPaneFocusState.tmuxSession = nextTmuxSession;
+  if (options.renderMenu !== false && typeof renderSessionButtons === 'function') renderSessionButtons();
+  return true;
+}
+
 function visualActivePaneItem() {
   if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
   if (lastActivePaneItem && itemIsActivePaneTab(lastActivePaneItem)) return lastActivePaneItem;
@@ -4146,6 +4174,8 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   if (isTmuxSession(item)) {
     acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
     rememberFileExplorerExplicitSyncSession(item);
+  } else {
+    setExplicitPaneFocusItem(item);
   }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
@@ -4232,6 +4262,8 @@ function clearFocusForInactiveLayout() {
   if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
   if (lastActiveNonFileExplorerPaneItem && !itemIsActivePaneTab(lastActiveNonFileExplorerPaneItem)) lastActiveNonFileExplorerPaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
+  if (explicitPaneFocusState.item && !itemIsActivePaneTab(explicitPaneFocusState.item)) explicitPaneFocusState.item = null;
+  if (explicitPaneFocusState.tmuxSession && !activeSessions.includes(explicitPaneFocusState.tmuxSession)) explicitPaneFocusState.tmuxSession = null;
 }
 
 function terminalPaneIsActive(session) {
@@ -6323,7 +6355,7 @@ function appendTabActionCommands(menu, item, options = {}) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
     const paneInfoBarLabel = t('menu.tmux.paneDetails');
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
+    const viewItems = tmuxSessionViewCommands(item, {includeStatus: false}).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,
@@ -7050,7 +7082,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerChangesSelectedSession = String(finder.session || '').trim();
-    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+    setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
@@ -12021,6 +12053,12 @@ function currentSessionActionTarget() {
   return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }
 
+function currentTmuxMenuTarget() {
+  // All pane-aware surfaces share this explicit click/type state. Hover and auto-focus stay
+  // visual-only, so opening tmux cannot retarget an action to a pane merely under the cursor.
+  return explicitTmuxPaneFocusSession() || currentSessionActionTarget();
+}
+
 function orderedPaneItems(items = activePaneItems()) {
   const unique = [];
   for (const group of [
@@ -12267,7 +12305,7 @@ function tmuxCurrentYoloCommand(session) {
   });
 }
 
-function tmuxSessionViewCommands(session) {
+function tmuxSessionViewCommands(session, options = {}) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
   const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
@@ -12276,6 +12314,8 @@ function tmuxSessionViewCommands(session) {
   const transcriptName = t('menu.tmux.transcript', {session: viewLabel});
   const summaryName = t('menu.tmux.aiTranscript', {session: viewLabel});
   const eventLogName = t('menu.tmux.eventLog', {session: viewLabel});
+  const statusMode = hasSession ? tmuxStatusModeForSession(session) : 'none';
+  const statusName = t('pref.appearance.tmux_status_bar.label');
   return [
     menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
@@ -12310,6 +12350,15 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: [t('menu.tmux.paneDetails'), focusDetail].filter(Boolean).join(' - '),
     }),
+    ...(options.includeStatus === false ? [] : [menuCommand(statusName, async () => {
+        if (hasSession) await cycleTmuxStatusMode(session);
+      }, {
+        checked: statusMode !== 'none',
+        disabled: readOnlyMode || !hasSession,
+        detail: hasSession ? t('menu.tmux.statusBarCycle') : disabledDetail,
+        keepOpen: true,
+        ariaLabel: [statusName, focusDetail].filter(Boolean).join(' - '),
+      })]),
   ];
 }
 
@@ -12552,7 +12601,7 @@ function fileMenuPanelCommands() {
 }
 
 function appMenuTree() {
-  const activeTmux = currentSessionActionTarget();
+  const activeTmux = currentTmuxMenuTarget();
   const shareSessions = shareSessionsFromLayout();
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
@@ -12619,7 +12668,6 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
@@ -14387,9 +14435,7 @@ function activeTmuxSessionForFinder(preferredItem = null) {
 }
 
 function fileExplorerExplicitSyncSessionTarget() {
-  return fileExplorerExplicitSyncSession && isTmuxSession(fileExplorerExplicitSyncSession) && activeSessions.includes(fileExplorerExplicitSyncSession)
-    ? fileExplorerExplicitSyncSession
-    : '';
+  return explicitTmuxPaneFocusSession();
 }
 
 function fileExplorerSyncCommandSessionTarget() {
@@ -14403,14 +14449,13 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
-  if (fileExplorerExplicitSyncSession !== normalizedSession) {
-    if (fileExplorerExplicitSyncSession) restoreCommittedFileExplorerRootDisplay();
-    fileExplorerExplicitSyncSession = normalizedSession;
+  const previous = fileExplorerExplicitSyncSessionTarget();
+  const changed = setExplicitPaneFocusItem(normalizedSession);
+  if (changed) {
+    if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
-    return true;
   }
-  fileExplorerExplicitSyncSession = normalizedSession;
-  return true;
+  return changed;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {
@@ -43886,17 +43931,19 @@ function fileExplorerSessionFilesTargetSession() {
     if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
       return fileExplorerChangesSelectedSession;
     }
-    if (fileExplorerExplicitSyncSession && sessions.includes(fileExplorerExplicitSyncSession)) {
-      return fileExplorerExplicitSyncSession;
+    const explicitSession = fileExplorerExplicitSyncSessionTarget();
+    if (explicitSession) {
+      return explicitSession;
     }
     return '';
   }
   if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
     return fileExplorerChangesSelectedSession;
   }
-  if (fileExplorerExplicitSyncSession && sessions.includes(fileExplorerExplicitSyncSession)) {
-    fileExplorerChangesSelectedSession = fileExplorerExplicitSyncSession;
-    return fileExplorerExplicitSyncSession;
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) {
+    fileExplorerChangesSelectedSession = explicitSession;
+    return explicitSession;
   }
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
@@ -55503,7 +55550,7 @@ async function applyShareFinderState(finder = {}) {
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
     fileExplorerChangesSelectedSession = session;
-    fileExplorerExplicitSyncSession = session;
+    setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
   if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
