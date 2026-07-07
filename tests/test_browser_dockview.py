@@ -124,10 +124,15 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
               const rect = button.getBoundingClientRect();
               const icon = button.querySelector('.tab-directional-action-icon');
               const iconRect = icon?.getBoundingClientRect();
+              const iconStyle = icon ? getComputedStyle(icon) : null;
+              const paneStyle = icon ? getComputedStyle(icon, '::after') : null;
               return [button.dataset.direction, {
                 iconClass: icon?.className || '',
                 iconWidth: iconRect?.width || 0,
                 iconHeight: iconRect?.height || 0,
+                iconBorderWidth: iconStyle?.borderTopWidth || '',
+                iconBorderRadius: iconStyle?.borderTopLeftRadius || '',
+                paneBorderRadius: paneStyle?.borderTopLeftRadius || '',
                 left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
               }];
             }),
@@ -151,6 +156,9 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         for zone in ("left", "right", "top", "bottom"):
             assert f"tab-directional-action-icon--{zone}" in geometry[zone]["iconClass"], geometry
             assert geometry[zone]["iconWidth"] > geometry[zone]["iconHeight"] > 0, geometry
+            assert geometry[zone]["iconBorderWidth"] == "2px", geometry
+            assert geometry[zone]["iconBorderRadius"] == "4px", geometry
+            assert geometry[zone]["paneBorderRadius"] == "2px", geometry
         assert max(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
         assert geometry["left"]["left"] < geometry["right"]["left"] < geometry["top"]["left"] < geometry["bottom"]["left"], geometry
 

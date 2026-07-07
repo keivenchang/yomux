@@ -2399,7 +2399,7 @@ function globalActivityStatusLineHtml() {
 }
 
 function topbarActivityUsesMobileCountBalls() {
-  return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
+  return typeof topbarPackingHasStep === 'function' && topbarPackingHasStep('compact-activity');
 }
 
 // The activity rail is useful before phone-only Menus mode: compact balls keep their status
@@ -2408,47 +2408,12 @@ function topbarActivityUsesActionsRail() {
   return topbarActivityUsesMobileCountBalls();
 }
 
-const topbarActionCapacityHideOrder = Object.freeze([
-  'latencyMeter',
-  'logoutButton',
-  'notifyToggle',
-]);
-let topbarActionCapacityFrame = 0;
-
-function topbarActionCapacityFits() {
-  const area = sessionButtons || document.querySelector('.app-menu-area');
-  const search = document.querySelector('.topbar-search');
-  if (!area || !search || search.hidden || getComputedStyle(search).display === 'none') return true;
-  return area.scrollWidth <= area.clientWidth + 1
-    && search.getBoundingClientRect().width >= search.getBoundingClientRect().height;
-}
-
 function syncTopbarActionCapacity() {
-  const actions = document.querySelector('.actions');
-  const activity = document.getElementById('topbarActivity');
-  if (!actions) return [];
-  const candidates = topbarActionCapacityHideOrder
-    .map(id => document.getElementById(id))
-    .filter(node => node?.parentElement === actions);
-  // Always begin from the fullest rail. This makes expansion walk optional icons back in,
-  // rather than preserving a narrower state from a prior viewport.
-  candidates.forEach(node => node.classList.remove('topbar-action-capacity-hidden'));
-  if (!activity || activity.hidden || !topbarActivityUsesActionsRail()) return [];
-  const hidden = [];
-  for (const node of candidates) {
-    if (topbarActionCapacityFits()) break;
-    node.classList.add('topbar-action-capacity-hidden');
-    hidden.push(node.id);
-  }
-  return hidden;
+  return typeof syncTopbarPacking === 'function' ? syncTopbarPacking() : [];
 }
 
 function scheduleTopbarActionCapacity() {
-  if (topbarActionCapacityFrame) return;
-  topbarActionCapacityFrame = requestAnimationFrame(() => {
-    topbarActionCapacityFrame = 0;
-    syncTopbarActionCapacity();
-  });
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 function syncTopbarActivityPlacement() {

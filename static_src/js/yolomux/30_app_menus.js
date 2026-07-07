@@ -843,8 +843,115 @@ function appMenuTree() {
 }
 
 let topbarNavigationCompact = null;
-let topbarNavigationFitFrame = 0;
-let topbarNavigationFitObserver = null;
+let topbarPackingFrame = 0;
+let topbarPackingObserver = null;
+let topbarPackingStepsApplied = [];
+let topbarPackingIsApplying = false;
+
+// The sequence is user-facing priority, not a viewport policy. Start complete, reduce only on
+// actual overflow, then try every removed control again so spare width is never left unused.
+const topbarPackingStepOrder = Object.freeze([
+  'hide-version',
+  'compact-brand',
+  'compact-search',
+  'compact-activity',
+  'hide-latency',
+  'hide-logout',
+  'hide-notify',
+  'hide-language',
+  'hide-owner',
+  'hide-nav',
+  'compact-menu',
+]);
+
+function topbarPackingTargets() {
+  return [document.body, appRootElement()].filter(Boolean);
+}
+
+function topbarPackingHasStep(step) {
+  return document.body?.classList?.contains(`topbar-pack-${step}`) === true;
+}
+
+function setTopbarPackingSteps(steps = []) {
+  const active = new Set(steps);
+  for (const target of topbarPackingTargets()) {
+    for (const step of topbarPackingStepOrder) {
+      target.classList?.toggle(`topbar-pack-${step}`, active.has(step));
+    }
+  }
+}
+
+// Packing changes that affect markup must be rendered before the next measurement. In particular,
+// compact activity moves into the actions rail and compact menus replace five roots with one. If we
+// measured the old markup, the packer could unnecessarily remove buttons or oscillate on resize.
+function applyTopbarPackingSteps(steps = []) {
+  const activityWasCompact = topbarPackingHasStep('compact-activity');
+  setTopbarPackingSteps(steps);
+  const navigationChanged = topbarPackingSyncNavigation(steps);
+  if (!navigationChanged && activityWasCompact !== topbarPackingHasStep('compact-activity')) {
+    updateTopbarActivityStatus();
+  }
+}
+
+function topbarPackingOverflows() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return false;
+  const rect = bar.getBoundingClientRect();
+  const childrenOverflow = Array.from(bar.children).some(child => {
+    const childRect = child.getBoundingClientRect();
+    return childRect.left < rect.left - 1 || childRect.right > rect.right + 1;
+  });
+  return childrenOverflow || bar.scrollWidth > bar.clientWidth + 1;
+}
+
+function topbarPackingSyncNavigation(steps) {
+  const compact = steps.includes('compact-menu');
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  renderSessionButtons({force: true});
+  return true;
+}
+
+function syncTopbarPacking() {
+  if (appMenuIsOpen() || topbarControlIsActive()) return topbarPackingStepsApplied.slice();
+  if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
+  topbarPackingIsApplying = true;
+  try {
+    // Begin with the currently rendered presentation. Resetting to full before every measurement
+    // would briefly replace Menus with five roots, then repeat that replacement on every frame.
+    const applied = topbarPackingStepOrder.filter(topbarPackingHasStep);
+    applyTopbarPackingSteps(applied);
+    while (topbarPackingOverflows() && applied.length < topbarPackingStepOrder.length) {
+      applied.push(topbarPackingStepOrder[applied.length]);
+      applyTopbarPackingSteps(applied);
+    }
+    // Restore only the most recently removed item, then continue toward the full presentation.
+    // Restoring a middle item while a later one stays removed reverses user-facing priority (for
+    // example, showing an optional icon while keeping the full menu collapsed).
+    while (applied.length) {
+      const candidate = applied.slice(0, -1);
+      applyTopbarPackingSteps(candidate);
+      if (topbarPackingOverflows()) {
+        applyTopbarPackingSteps(applied);
+        break;
+      }
+      applied.pop();
+    }
+    topbarPackingStepsApplied = applied.slice();
+    return applied;
+  } finally {
+    topbarPackingIsApplying = false;
+  }
+}
+
+function scheduleTopbarPacking() {
+  if (topbarPackingIsApplying || topbarPackingFrame) return;
+  topbarPackingFrame = requestAnimationFrame(() => {
+    topbarPackingFrame = 0;
+    syncTopbarPacking();
+  });
+}
 
 // Pure geometry helper retained for responsive test coverage. It deliberately does not choose the
 // rendered menu state: that decision must not depend on the current compact/full DOM shape.
@@ -865,25 +972,18 @@ function setTopbarNavigationCompactClass(compact) {
 }
 
 function topbarNavigationShouldBeCompact() {
-  // A measured row depends on whether it currently renders the five roots or one Menus root.
-  // At the phone fallback that created a compact/full render loop, detaching the button between
-  // pointerdown and click. The breakpoint is already after all lower-priority chrome yields, so it
-  // is the stable single owner of this final compact transition.
-  return compactTopbarForViewport();
+  return topbarPackingHasStep('compact-menu');
 }
 
 function scheduleTopbarNavigationFitCheck() {
-  if (topbarNavigationFitFrame) return;
-  topbarNavigationFitFrame = requestAnimationFrame(() => {
-    topbarNavigationFitFrame = 0;
-    syncTopbarNavigationPresentation();
-  });
+  scheduleTopbarPacking();
 }
 
 function installTopbarNavigationFitObserver() {
-  if (topbarNavigationFitObserver || !sessionButtons || typeof ResizeObserver !== 'function') return;
-  topbarNavigationFitObserver = new ResizeObserver(() => scheduleTopbarNavigationFitCheck());
-  topbarNavigationFitObserver.observe(sessionButtons);
+  const bar = document.querySelector('.topbar');
+  if (topbarPackingObserver || !bar || typeof ResizeObserver !== 'function') return;
+  topbarPackingObserver = new ResizeObserver(() => scheduleTopbarPacking());
+  topbarPackingObserver.observe(bar);
 }
 
 function topbarMenuTree() {

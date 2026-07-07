@@ -386,18 +386,21 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .tab-directional-action-icon {
   --tab-directional-icon-inline-size: 32px;
   --tab-directional-icon-block-size: 24px;
+  --tab-directional-icon-border-width: var(--space-2);
+  --tab-directional-icon-outer-radius: var(--radius-control);
+  --tab-directional-icon-inner-radius: var(--space-2);
   position: relative;
   display: block;
   inline-size: var(--tab-directional-icon-inline-size);
   block-size: var(--tab-directional-icon-block-size);
   box-sizing: border-box;
-  border: var(--app-modal-border-width) solid currentColor;
-  border-radius: var(--radius-md);
+  border: var(--tab-directional-icon-border-width) solid currentColor;
+  border-radius: var(--tab-directional-icon-outer-radius);
 }
 .tab-directional-action-icon::after {
   content: "";
   position: absolute;
-  border-radius: var(--radius-sm);
+  border-radius: var(--tab-directional-icon-inner-radius);
   background: currentColor;
 }
 .tab-directional-action-icon--left::after,

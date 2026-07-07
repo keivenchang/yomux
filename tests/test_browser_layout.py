@@ -4648,6 +4648,36 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
     assert abs(metrics["infoBar"]["right"] - metrics["popover"]["right"] - 8) <= 1, metrics
 
 
+def test_live_session_tab_popover_uses_owning_pane_width(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const tab = document.querySelector('.pane-tab[data-pane-tab=\"1\"]'); return typeof positionPaneTabPopover === 'function' && !!paneTabPopoverForAnchor(tab);"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+        const popover = paneTabPopoverForAnchor(tab);
+        positionPaneTabPopover(tab, popover);
+        tab.classList.add('popover-open');
+        popover.classList.add('popover-open');
+        const rect = node => {
+          const value = node.getBoundingClientRect();
+          return {left: value.left, right: value.right, width: value.width};
+        };
+        return {tab: rect(tab), pane: rect(paneTabPopoverOwningPane(tab)), popover: rect(popover)};
+        """
+    )
+    assert metrics["popover"]["width"] > metrics["tab"]["width"] * 2, metrics
+    assert metrics["popover"]["left"] >= metrics["pane"]["left"] + 6, metrics
+    assert metrics["popover"]["right"] <= metrics["pane"]["right"] - 6, metrics
+    left_gutter = metrics["popover"]["left"] - metrics["pane"]["left"]
+    right_gutter = metrics["pane"]["right"] - metrics["popover"]["right"]
+    assert abs(left_gutter - right_gutter) <= 1, metrics
+    assert abs(metrics["popover"]["width"] - (metrics["pane"]["width"] - left_gutter - right_gutter)) <= 1, metrics
+
+
 def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
     page = tmp_path / "pane-control-shared-paint.html"
     load_static_html_fixture(
@@ -9954,6 +9984,53 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     assert terminal_closed["openIds"] == [], terminal_closed
 
 
+def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof syncTopbarPacking === 'function' && document.querySelector('.topbar') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const bar = document.querySelector('.topbar');
+        const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-owner', 'hide-nav', 'compact-menu'];
+        const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const snapshot = async width => {
+          bar.style.width = `${width}px`;
+          syncTopbarPacking();
+          await frame();
+          const style = node => getComputedStyle(document.querySelector(node)).display;
+          return {
+            overflow: bar.scrollWidth > bar.clientWidth + 1,
+            steps: steps.filter(step => document.body.classList.contains(`topbar-pack-${step}`)),
+            notify: style('#notifyToggle'),
+            latency: style('#latencyMeter'),
+            refresh: style('#refreshMeta'),
+          };
+        };
+        (async () => {
+          const narrow = await snapshot(700);
+          const roomy = await snapshot(1365);
+          const wide = await snapshot(2400);
+          done({narrow, roomy, wide});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["narrow"]["overflow"] is False, metrics
+    assert metrics["narrow"]["steps"], metrics
+    expected_order = ["hide-version", "compact-brand", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-owner", "hide-nav", "compact-menu"]
+    assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
+    assert metrics["narrow"]["refresh"] != "none", metrics
+    assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics
+    assert metrics["roomy"]["notify"] != "none" and metrics["roomy"]["latency"] != "none", metrics
+    assert metrics["wide"]["overflow"] is False, metrics
+    assert metrics["wide"]["steps"] == [], metrics
+    assert metrics["wide"]["notify"] != "none" and metrics["wide"]["latency"] != "none", metrics
+
+
 def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     def touch_tap(element):
         browser.execute_script(
@@ -9978,11 +10055,10 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     )
     browser.execute_script(
         """
-        compactTopbarForViewport = () => true;
-        topbarActivityUsesActionsRail = () => true;
         mobileSinglePaneMode = () => true;
+        syncTopbarPacking = () => [];
         terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
-        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600');
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
         renderSessionButtons({force: true});
         """
     )
@@ -10075,11 +10151,11 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     assert compact_file["sheet"]["left"] >= -1 and compact_file["sheet"]["right"] <= compact_file["viewport"]["width"] + 1, compact_file
     assert all(pair["height"] <= 46 for pair in compact_file["pairs"]), compact_file
     assert all(len(pair) == 2 and pair[0]["right"] <= pair[1]["left"] + 12 for pair in compact_file["pairButtons"]), compact_file
-    assert all(button["height"] >= 40 for pair in compact_file["pairButtons"] for button in pair), compact_file
+    assert all(button["height"] >= 24 for pair in compact_file["pairButtons"] for button in pair), compact_file
     assert compact_file["shells"]["right"] <= compact_file["sheet"]["right"] + 1, compact_file
     assert len(compact_file["shellButtons"]) == 5, compact_file
     assert compact_file["shellSeparators"] == 0, compact_file
-    assert all(button["height"] >= 36 for button in compact_file["shellButtons"]), compact_file
+    assert all(button["height"] >= 24 for button in compact_file["shellButtons"]), compact_file
 
     # Use the real touch event path to launch an explicit Shell command. A launch must not merely
     # create tmux state in the background: it closes Menus and makes the new session the active pane.

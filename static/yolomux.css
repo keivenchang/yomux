@@ -1796,15 +1796,6 @@ body.theme-light .topbar-language {
   color: var(--muted);
   background: transparent;
 }
-body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search-label,
-body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search-hint {
-  display: none;
-}
-body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search {
-  flex: 0 1 auto;
-  max-inline-size: none;
-  padding: 0 var(--space-6);
-}
 .topbar-owner-status {
   gap: var(--space-6);
   padding: 0 var(--space-8);
@@ -1862,15 +1853,8 @@ body.app-topbar-coarse-pointer.app-vw-lte-1100 .topbar-search {
   margin-inline: calc(-1 * var(--space-1));
   opacity: 0.5;
 }
-body.app-vw-lte-1100 .topbar-activity-idle {
-  display: none;
-}
-/* Coarse-pointer tablets keep their normal menu bar, but lower-priority controls yield before any
-   topbar group can overlap. Every hidden action remains available from the same File/View menus. */
-body.app-topbar-touch-compact .topbar-language,
-body.app-topbar-touch-compact .topbar-owner-status {
-  display: none;
-}
+/* Pointer affordances remain independent from capacity. The measured packing pass below owns
+   every visibility decision, so locale, zoom, and dynamic status content cannot strand spare space. */
 body.app-topbar-touch-compact .topbar {
   gap: var(--space-6);
 }
@@ -1886,11 +1870,6 @@ body.app-topbar-touch-compact .app-menu-button {
 body.app-topbar-touch-compact .topbar-center-tools,
 body.app-topbar-touch-compact .topbar-right-tools {
   gap: var(--space-6);
-}
-body.app-topbar-touch-compact.app-vw-lte-1200 #latencyMeter,
-body.app-topbar-touch-compact.app-vw-lte-1100 .topbar-nav,
-body.app-topbar-touch-compact.app-vw-lte-980 #status {
-  display: none;
 }
 /* Compact activity is a state on the control itself, not an incidental touch/menu selector.
    The existing status-dot renderer remains the color owner; this changes only count geometry. */
@@ -1935,78 +1914,43 @@ body.app-topbar-touch-compact.app-vw-lte-980 #status {
   transform: translateY(1px);
   pointer-events: none;
 }
-/* Preserve the five menu roots by yielding chrome in one ordered sequence: version, wordmark,
-   secondary actions, then the Cmd-P launcher. Each tier only removes the next lower-priority
-   detail, so a wider tablet immediately restores it without relying on prior layout state. */
-body.app-topbar-touch-compact.app-vw-lte-760 .topbar .brand-version {
+/* The packer starts full, walks these semantic reductions on actual overflow, then tests each
+   removed option again. No viewport breakpoint owns a topbar visibility decision. */
+body.topbar-pack-hide-version .topbar .brand-version {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand {
+body.topbar-pack-compact-brand .topbar .brand {
   min-width: 0;
 }
-body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand-title > :not(.brand-yolo) {
+body.topbar-pack-compact-brand .topbar .brand-title > :not(.brand-yolo) {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta):not(.topbar-activity--mobile-count-balls),
-body.app-topbar-menu-compact .actions > :not(#refreshMeta):not(.topbar-activity--mobile-count-balls) {
+body.topbar-pack-hide-latency #latencyMeter,
+body.topbar-pack-hide-logout #logoutButton,
+body.topbar-pack-hide-notify #notifyToggle,
+body.topbar-pack-hide-language .topbar-language,
+body.topbar-pack-hide-owner .topbar-owner-status,
+body.topbar-pack-hide-nav .topbar-nav {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta,
-body.app-topbar-menu-compact #refreshMeta {
-  display: inline-grid;
-}
-/* Every touch layout uses the same Cmd-P launcher, but it receives only a short localized label
-   area. This preserves menus and Refresh on iPad/phone widths without creating a second search
-   control for mobile. The shared ellipsis owner truncates the longer label safely. */
-body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search {
+body.topbar-pack-compact-search .topbar-search {
   display: inline-flex;
   flex: 0 1 auto;
   min-inline-size: 0;
   margin-inline: var(--space-6) 0;
 }
-body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search-label {
+body.topbar-pack-compact-search .topbar-search-label {
   display: inline-flex;
-  flex: 0 1 8ch;
-  max-inline-size: 8ch;
-}
-body.app-topbar-touch-compact.app-vw-lte-760 .topbar-search-hint {
-  display: none;
-}
-/* On a phone, the searchable launcher is a compact icon instead of a mostly-empty text field.
-   This leaves the scarce topbar width for the nonzero green/red/yellow activity counts before Refresh. */
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-center-tools {
-  flex: 0 0 auto;
-}
-body.app-topbar-touch-compact.app-vw-lte-600 .app-menu-area {
-  width: auto;
-}
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
-  display: inline-flex;
-  /* This basis includes the search icon, gap, and horizontal padding. Eight characters for the
-     entire control left only five visible characters in the localized Search label. */
-  flex: 0 1 12ch;
-  inline-size: auto;
   min-inline-size: 0;
-  padding: 0 var(--space-6);
 }
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label {
-  display: inline-flex;
-}
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label-long {
+body.topbar-pack-compact-search .topbar-search-label-long,
+body.topbar-pack-compact-search .topbar-search-hint {
   display: none;
 }
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label-short {
+body.topbar-pack-compact-search .topbar-search-label-short {
   display: inline;
 }
-body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-hint {
-  display: none;
-}
-/* Compact activity belongs immediately before Refresh in the real actions rail. The empty desktop
-   host must not reserve a flex gap between search and the right-side controls. */
-body.app-topbar-touch-compact.app-vw-lte-600 .topbar-right-tools,
-body.app-topbar-menu-compact .topbar-right-tools {
-  display: none;
-}
+/* Compact activity belongs immediately before Refresh in the real actions rail. */
 .actions > .topbar-activity--mobile-count-balls {
   display: inline-flex;
   inline-size: auto;
@@ -2019,9 +1963,6 @@ body.app-topbar-menu-compact .topbar-right-tools {
 }
 .actions > .topbar-activity--mobile-count-balls::before {
   display: none;
-}
-.actions > .topbar-action-capacity-hidden {
-  display: none !important;
 }
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
@@ -8504,18 +8445,21 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .tab-directional-action-icon {
   --tab-directional-icon-inline-size: 32px;
   --tab-directional-icon-block-size: 24px;
+  --tab-directional-icon-border-width: var(--space-2);
+  --tab-directional-icon-outer-radius: var(--radius-control);
+  --tab-directional-icon-inner-radius: var(--space-2);
   position: relative;
   display: block;
   inline-size: var(--tab-directional-icon-inline-size);
   block-size: var(--tab-directional-icon-block-size);
   box-sizing: border-box;
-  border: var(--app-modal-border-width) solid currentColor;
-  border-radius: var(--radius-md);
+  border: var(--tab-directional-icon-border-width) solid currentColor;
+  border-radius: var(--tab-directional-icon-outer-radius);
 }
 .tab-directional-action-icon::after {
   content: "";
   position: absolute;
-  border-radius: var(--radius-sm);
+  border-radius: var(--tab-directional-icon-inner-radius);
   background: currentColor;
 }
 .tab-directional-action-icon--left::after,

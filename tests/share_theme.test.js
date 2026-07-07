@@ -2760,14 +2760,15 @@ async function runShareThemeSuite() {
     });
     const popoverStyle = api.documentElementStyleForTest();
     const popoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
-    assert.equal(popoverLeft, 34);
-    assert.equal(popoverForPosition.style.left, '34px', 'tab popovers carry replayable inline left instead of relying only on document CSS variables');
+    assert.equal(popoverLeft, 10);
+    assert.equal(popoverForPosition.style.left, '10px', 'session tab popovers align to the owning pane gutter instead of the narrow tab label');
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
-    assert.equal(popoverForPosition.style.width, '520px', 'tab popovers carry replayable inline width so share viewers do not recompute vw-sized popovers against the client viewport');
+    assert.equal(popoverForPosition.style.width, '490px', 'session tab popovers use their owning pane width minus the shared edge gutter');
+    assert.equal(popoverForPosition.style.maxWidth, '490px', 'owning-pane width overrides the generic desktop popover cap');
     assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
-    assert.ok(popoverForPosition.getBoundingClientRect().width > panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width);
     const tabberPaneForPopover = {
       getBoundingClientRect() {
         return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
@@ -2806,7 +2807,7 @@ async function runShareThemeSuite() {
       querySelector() { return zeroWidthPopover; },
     });
     const zeroWidthLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
-    assert.ok(zeroWidthLeft + 520 <= 1200, '#45: an unmeasured (0-width) right-edge popover still clamps on-screen for its real width');
+    assert.ok(zeroWidthLeft + 520 <= 1200, '#45: an unmeasured generic popover still clamps on-screen for its fallback width');
     const viewportClamp = api.clampToViewport(1190, 790, 100, 100, {edgeGap: 8});
     assert.equal(viewportClamp.left, 1092);
     assert.equal(viewportClamp.top, 692);

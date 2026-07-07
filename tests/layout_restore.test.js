@@ -2079,7 +2079,7 @@ async function runLayoutRestoreSuite() {
 	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*gap:\s*var\(--space-2\)/.test(css), 'topbar activity count keeps number-to-dot spacing compact');
 	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*calc\(-1 \* var\(--space-1\)\)/.test(css), 'topbar activity separator adds no extra horizontal padding');
 	    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)[\s\S]*width:\s*var\(--agent-status-ball-size\)/.test(css), 'topbar activity balls reuse the shared status-ball size parent');
-	    assert.ok(/body\.app-vw-lte-1100 \.topbar-activity-idle\s*\{[\s\S]*display:\s*none/.test(css), 'topbar idle label still hides at the existing narrow-viewport breakpoint');
+	    assert.ok(/\.topbar-activity--mobile-count-balls \.topbar-activity-count:not\(\.active\),[\s\S]*?\.topbar-activity-idle,[\s\S]*?\.topbar-activity-sep\s*\{[\s\S]*display:\s*none/.test(css), 'compact activity hides zero tones and the idle label through the measured packing state');
 	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
   });
 

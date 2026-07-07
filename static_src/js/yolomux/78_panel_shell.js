@@ -842,6 +842,13 @@ function refreshFileTabPopover(tab, item) {
   bindFilePopoverActions(popover);
 }
 
+function paneTabPopoverOwningPane(tab) {
+  const directPane = tab?.closest?.('.panel');
+  if (directPane) return directPane;
+  // Dockview renders its tab strip beside its active panel rather than inside it.
+  return tab?.closest?.('.dv-groupview')?.querySelector?.('.dockview-panel-content > .panel') || null;
+}
+
 function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
   popover = popover || paneTabPopoverForAnchor(tab);
@@ -849,6 +856,13 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
+  // previews content-sized, but let every session surface share the full owning-pane geometry.
+  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+    ? paneTabPopoverOwningPane(tab)
+    : null;
+  const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
+  const paneRect = tabberPaneRect || sessionPaneRect;
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
@@ -861,13 +875,14 @@ function positionPaneTabPopover(tab, popover = null) {
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
+  const paneGutter = sessionPaneRect ? edgeGap : 0;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
-    Math.floor(tabberPaneRect?.left ?? rect.left),
+    Math.floor(paneRect ? paneRect.left + paneGutter : rect.left),
     Math.ceil(rect.bottom) + bridgeGap,
     width,
     height,
@@ -882,7 +897,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
-    popover.style.maxWidth = (tabberPaneRect || useAvailableInlineWidth) ? inlineSize : '';
+    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }

@@ -723,27 +723,18 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
 }
 
 const appViewportBreakpointPx = [1500, 1280, 1200, 1100, 1080, 980, 760, 720, 600, 560];
-const compactTopbarMenuMaxWidthPx = 480;
-const compactTopbarChromeMaxWidthPx = 1500;
 
-// Full top-level menus outrank version, wordmark, top-right actions, and search. At the final
-// narrow fallback, every pointer type uses the same one-root hierarchy; desktop pane layouts stay intact.
-function compactTopbarForViewport(viewport = appViewport()) {
-  // Browser zoom or a stale visual viewport can report a narrower app coordinate space than the
-  // actual topbar has. Prefer the native layout viewport width for chrome packing, while pane
-  // layout continues to use appViewport's safe geometry.
-  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarMenuMaxWidthPx;
-}
-
-function compactTopbarChromeForViewport(viewport = appViewport()) {
-  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarChromeMaxWidthPx;
+// Topbar presentation is selected by its measured rendered width in syncTopbarPacking(). Keep
+// this compatibility helper for fixture callers; viewport width is deliberately not a topbar input.
+function compactTopbarForViewport(_viewport = appViewport()) {
+  return false;
 }
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
-  // A narrow desktop reuses the proven compact-touch topbar presentation. This is chrome only:
-  // the separate mobile layout classifier still keeps desktop pane and split behavior unchanged.
-  const touchTopbar = compactTopbarChromeForViewport(viewport);
+  // Pointer affordances are independent of topbar capacity. The measured packing pass decides
+  // which controls fit for every viewport, font, locale, zoom level, and activity state.
+  const touchTopbar = browserUsesCoarsePointer();
   // This mirrors the shared phone-only one-pane policy (not the broader narrow-iPad rule), so
   // phone chrome can reduce a redundant focus surround without changing tablet split geometry.
   const phoneSinglePane = mobileSinglePaneMode();

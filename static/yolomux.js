@@ -2746,27 +2746,18 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
 }
 
 const appViewportBreakpointPx = [1500, 1280, 1200, 1100, 1080, 980, 760, 720, 600, 560];
-const compactTopbarMenuMaxWidthPx = 480;
-const compactTopbarChromeMaxWidthPx = 1500;
 
-// Full top-level menus outrank version, wordmark, top-right actions, and search. At the final
-// narrow fallback, every pointer type uses the same one-root hierarchy; desktop pane layouts stay intact.
-function compactTopbarForViewport(viewport = appViewport()) {
-  // Browser zoom or a stale visual viewport can report a narrower app coordinate space than the
-  // actual topbar has. Prefer the native layout viewport width for chrome packing, while pane
-  // layout continues to use appViewport's safe geometry.
-  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarMenuMaxWidthPx;
-}
-
-function compactTopbarChromeForViewport(viewport = appViewport()) {
-  return Math.max(effectiveViewportWidth(viewport), nativeViewport().width) <= compactTopbarChromeMaxWidthPx;
+// Topbar presentation is selected by its measured rendered width in syncTopbarPacking(). Keep
+// this compatibility helper for fixture callers; viewport width is deliberately not a topbar input.
+function compactTopbarForViewport(_viewport = appViewport()) {
+  return false;
 }
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
-  // A narrow desktop reuses the proven compact-touch topbar presentation. This is chrome only:
-  // the separate mobile layout classifier still keeps desktop pane and split behavior unchanged.
-  const touchTopbar = compactTopbarChromeForViewport(viewport);
+  // Pointer affordances are independent of topbar capacity. The measured packing pass decides
+  // which controls fit for every viewport, font, locale, zoom level, and activity state.
+  const touchTopbar = browserUsesCoarsePointer();
   // This mirrors the shared phone-only one-pane policy (not the broader narrow-iPad rule), so
   // phone chrome can reduce a redundant focus surround without changing tablet split geometry.
   const phoneSinglePane = mobileSinglePaneMode();
@@ -8734,7 +8725,7 @@ function globalActivityStatusLineHtml() {
 }
 
 function topbarActivityUsesMobileCountBalls() {
-  return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
+  return typeof topbarPackingHasStep === 'function' && topbarPackingHasStep('compact-activity');
 }
 
 // The activity rail is useful before phone-only Menus mode: compact balls keep their status
@@ -8743,47 +8734,12 @@ function topbarActivityUsesActionsRail() {
   return topbarActivityUsesMobileCountBalls();
 }
 
-const topbarActionCapacityHideOrder = Object.freeze([
-  'latencyMeter',
-  'logoutButton',
-  'notifyToggle',
-]);
-let topbarActionCapacityFrame = 0;
-
-function topbarActionCapacityFits() {
-  const area = sessionButtons || document.querySelector('.app-menu-area');
-  const search = document.querySelector('.topbar-search');
-  if (!area || !search || search.hidden || getComputedStyle(search).display === 'none') return true;
-  return area.scrollWidth <= area.clientWidth + 1
-    && search.getBoundingClientRect().width >= search.getBoundingClientRect().height;
-}
-
 function syncTopbarActionCapacity() {
-  const actions = document.querySelector('.actions');
-  const activity = document.getElementById('topbarActivity');
-  if (!actions) return [];
-  const candidates = topbarActionCapacityHideOrder
-    .map(id => document.getElementById(id))
-    .filter(node => node?.parentElement === actions);
-  // Always begin from the fullest rail. This makes expansion walk optional icons back in,
-  // rather than preserving a narrower state from a prior viewport.
-  candidates.forEach(node => node.classList.remove('topbar-action-capacity-hidden'));
-  if (!activity || activity.hidden || !topbarActivityUsesActionsRail()) return [];
-  const hidden = [];
-  for (const node of candidates) {
-    if (topbarActionCapacityFits()) break;
-    node.classList.add('topbar-action-capacity-hidden');
-    hidden.push(node.id);
-  }
-  return hidden;
+  return typeof syncTopbarPacking === 'function' ? syncTopbarPacking() : [];
 }
 
 function scheduleTopbarActionCapacity() {
-  if (topbarActionCapacityFrame) return;
-  topbarActionCapacityFrame = requestAnimationFrame(() => {
-    topbarActionCapacityFrame = 0;
-    syncTopbarActionCapacity();
-  });
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 function syncTopbarActivityPlacement() {
@@ -12746,8 +12702,115 @@ function appMenuTree() {
 }
 
 let topbarNavigationCompact = null;
-let topbarNavigationFitFrame = 0;
-let topbarNavigationFitObserver = null;
+let topbarPackingFrame = 0;
+let topbarPackingObserver = null;
+let topbarPackingStepsApplied = [];
+let topbarPackingIsApplying = false;
+
+// The sequence is user-facing priority, not a viewport policy. Start complete, reduce only on
+// actual overflow, then try every removed control again so spare width is never left unused.
+const topbarPackingStepOrder = Object.freeze([
+  'hide-version',
+  'compact-brand',
+  'compact-search',
+  'compact-activity',
+  'hide-latency',
+  'hide-logout',
+  'hide-notify',
+  'hide-language',
+  'hide-owner',
+  'hide-nav',
+  'compact-menu',
+]);
+
+function topbarPackingTargets() {
+  return [document.body, appRootElement()].filter(Boolean);
+}
+
+function topbarPackingHasStep(step) {
+  return document.body?.classList?.contains(`topbar-pack-${step}`) === true;
+}
+
+function setTopbarPackingSteps(steps = []) {
+  const active = new Set(steps);
+  for (const target of topbarPackingTargets()) {
+    for (const step of topbarPackingStepOrder) {
+      target.classList?.toggle(`topbar-pack-${step}`, active.has(step));
+    }
+  }
+}
+
+// Packing changes that affect markup must be rendered before the next measurement. In particular,
+// compact activity moves into the actions rail and compact menus replace five roots with one. If we
+// measured the old markup, the packer could unnecessarily remove buttons or oscillate on resize.
+function applyTopbarPackingSteps(steps = []) {
+  const activityWasCompact = topbarPackingHasStep('compact-activity');
+  setTopbarPackingSteps(steps);
+  const navigationChanged = topbarPackingSyncNavigation(steps);
+  if (!navigationChanged && activityWasCompact !== topbarPackingHasStep('compact-activity')) {
+    updateTopbarActivityStatus();
+  }
+}
+
+function topbarPackingOverflows() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return false;
+  const rect = bar.getBoundingClientRect();
+  const childrenOverflow = Array.from(bar.children).some(child => {
+    const childRect = child.getBoundingClientRect();
+    return childRect.left < rect.left - 1 || childRect.right > rect.right + 1;
+  });
+  return childrenOverflow || bar.scrollWidth > bar.clientWidth + 1;
+}
+
+function topbarPackingSyncNavigation(steps) {
+  const compact = steps.includes('compact-menu');
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  renderSessionButtons({force: true});
+  return true;
+}
+
+function syncTopbarPacking() {
+  if (appMenuIsOpen() || topbarControlIsActive()) return topbarPackingStepsApplied.slice();
+  if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
+  topbarPackingIsApplying = true;
+  try {
+    // Begin with the currently rendered presentation. Resetting to full before every measurement
+    // would briefly replace Menus with five roots, then repeat that replacement on every frame.
+    const applied = topbarPackingStepOrder.filter(topbarPackingHasStep);
+    applyTopbarPackingSteps(applied);
+    while (topbarPackingOverflows() && applied.length < topbarPackingStepOrder.length) {
+      applied.push(topbarPackingStepOrder[applied.length]);
+      applyTopbarPackingSteps(applied);
+    }
+    // Restore only the most recently removed item, then continue toward the full presentation.
+    // Restoring a middle item while a later one stays removed reverses user-facing priority (for
+    // example, showing an optional icon while keeping the full menu collapsed).
+    while (applied.length) {
+      const candidate = applied.slice(0, -1);
+      applyTopbarPackingSteps(candidate);
+      if (topbarPackingOverflows()) {
+        applyTopbarPackingSteps(applied);
+        break;
+      }
+      applied.pop();
+    }
+    topbarPackingStepsApplied = applied.slice();
+    return applied;
+  } finally {
+    topbarPackingIsApplying = false;
+  }
+}
+
+function scheduleTopbarPacking() {
+  if (topbarPackingIsApplying || topbarPackingFrame) return;
+  topbarPackingFrame = requestAnimationFrame(() => {
+    topbarPackingFrame = 0;
+    syncTopbarPacking();
+  });
+}
 
 // Pure geometry helper retained for responsive test coverage. It deliberately does not choose the
 // rendered menu state: that decision must not depend on the current compact/full DOM shape.
@@ -12768,25 +12831,18 @@ function setTopbarNavigationCompactClass(compact) {
 }
 
 function topbarNavigationShouldBeCompact() {
-  // A measured row depends on whether it currently renders the five roots or one Menus root.
-  // At the phone fallback that created a compact/full render loop, detaching the button between
-  // pointerdown and click. The breakpoint is already after all lower-priority chrome yields, so it
-  // is the stable single owner of this final compact transition.
-  return compactTopbarForViewport();
+  return topbarPackingHasStep('compact-menu');
 }
 
 function scheduleTopbarNavigationFitCheck() {
-  if (topbarNavigationFitFrame) return;
-  topbarNavigationFitFrame = requestAnimationFrame(() => {
-    topbarNavigationFitFrame = 0;
-    syncTopbarNavigationPresentation();
-  });
+  scheduleTopbarPacking();
 }
 
 function installTopbarNavigationFitObserver() {
-  if (topbarNavigationFitObserver || !sessionButtons || typeof ResizeObserver !== 'function') return;
-  topbarNavigationFitObserver = new ResizeObserver(() => scheduleTopbarNavigationFitCheck());
-  topbarNavigationFitObserver.observe(sessionButtons);
+  const bar = document.querySelector('.topbar');
+  if (topbarPackingObserver || !bar || typeof ResizeObserver !== 'function') return;
+  topbarPackingObserver = new ResizeObserver(() => scheduleTopbarPacking());
+  topbarPackingObserver.observe(bar);
 }
 
 function topbarMenuTree() {
@@ -32977,6 +33033,13 @@ function refreshFileTabPopover(tab, item) {
   bindFilePopoverActions(popover);
 }
 
+function paneTabPopoverOwningPane(tab) {
+  const directPane = tab?.closest?.('.panel');
+  if (directPane) return directPane;
+  // Dockview renders its tab strip beside its active panel rather than inside it.
+  return tab?.closest?.('.dv-groupview')?.querySelector?.('.dockview-panel-content > .panel') || null;
+}
+
 function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
   popover = popover || paneTabPopoverForAnchor(tab);
@@ -32984,6 +33047,13 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
+  // previews content-sized, but let every session surface share the full owning-pane geometry.
+  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+    ? paneTabPopoverOwningPane(tab)
+    : null;
+  const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
+  const paneRect = tabberPaneRect || sessionPaneRect;
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
@@ -32996,13 +33066,14 @@ function positionPaneTabPopover(tab, popover = null) {
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
+  const paneGutter = sessionPaneRect ? edgeGap : 0;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
-    Math.floor(tabberPaneRect?.left ?? rect.left),
+    Math.floor(paneRect ? paneRect.left + paneGutter : rect.left),
     Math.ceil(rect.bottom) + bridgeGap,
     width,
     height,
@@ -33017,7 +33088,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
-    popover.style.maxWidth = (tabberPaneRect || useAvailableInlineWidth) ? inlineSize : '';
+    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }
