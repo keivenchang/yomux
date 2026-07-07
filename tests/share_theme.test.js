@@ -1603,6 +1603,7 @@ async function runShareThemeSuite() {
     assert.ok(pcPaneControls.includes('panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize'));
     assert.equal(pcPaneControls.includes('>Info</button>'), false);
     assert.ok(pcPaneControls.indexOf('pane-detail-toggle') < pcPaneControls.indexOf('pane-minimize'));
+    assert.ok(pcPaneControls.indexOf('pane-expand') < pcPaneControls.indexOf('pane-minimize'), 'shared frame controls order the expand (+) before minimize (_)');
     assert.ok(pcPaneControls.includes('hidden type="button" data-pane-expand="1"'));
     const expandablePcSlots = api.emptyLayoutSlots();
     expandablePcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
@@ -1634,6 +1635,7 @@ async function runShareThemeSuite() {
     assert.ok(macPaneControls.indexOf('pane-detail-toggle') < macPaneControls.indexOf('pane-minimize'));
     assert.ok(macPaneControls.includes('data-pane-expand="1"'));
     assert.ok(macPaneControls.includes('pane-expand pc-window-control pc-zoom'));
+    assert.ok(macPaneControls.indexOf('pane-expand') < macPaneControls.indexOf('pane-minimize'), 'Mac frame controls use the shared + then _ order');
     assert.ok(macPaneControls.includes('hidden type="button" data-pane-expand="1"'));
     const macFinderControls = macApi.panelControlsHtml('__files__');
     assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
