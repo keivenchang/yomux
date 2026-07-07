@@ -90,6 +90,23 @@ def test_build_persists_sqlite_without_large_json_payload(tmp_path, monkeypatch)
     assert count >= 2
 
 
+def test_disk_index_candidate_prefilter_preserves_punctuation_free_fuzzy_filename_queries(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    (tmp_path / "2026.md").write_text("notes\n", encoding="utf-8")
+    _build_filesystem_index(tmp_path)
+
+    opened = file_index._read_sqlite_index(tmp_path, SEARCH_SKIP_DIRS, filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE)
+    assert opened is not None
+    conn, _metadata = opened
+    try:
+        names = [row[1] for row in file_index._sqlite_search_candidates(conn, ["2026md"])]
+    finally:
+        conn.close()
+
+    assert names == ["2026.md"]
+
+
 def test_unchanged_search_index_refresh_skips_entry_rewrite(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

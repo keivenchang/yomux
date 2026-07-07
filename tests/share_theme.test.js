@@ -5033,7 +5033,7 @@ async function runShareThemeSuite() {
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
-    assert.ok(api.searchRankWeights.domainPrior.files.file > api.searchRankWeights.domainPrior.files.pane, 'Cmd-P domain weights rank files before panes for comparable matches');
+    assert.ok(api.searchRankWeights.paneNameContiguous.files > api.searchRankWeights.domainPrior.files.file, 'Cmd-P gives a contiguous pane name match priority over a comparable file match');
     assert.ok(api.searchRankWeights.domainPrior.command.pane > api.searchRankWeights.domainPrior.command.file, 'Shift-Cmd-P domain weights rank panes before files for comparable matches');
     assert.ok(
       api.commandPaletteItemScore({group: 'Tabs', label: 'YO!agent', detail: '', searchFields: ['YO!agent']}, 'yoagent') >
@@ -5079,18 +5079,18 @@ async function runShareThemeSuite() {
     const claudeCandidates = [paneCandidate('claude'), fileCandidate('claude_notes.md')];
     const rankingCases = [
       {
-        name: 'Cmd-P ranks anchored files first, then anchored pane, then non-anchored file',
+        name: 'Cmd-P ranks a contiguous pane name before anchored files',
         surface: 'files',
         query: '6',
         candidates: sixCandidates,
-        expected: ['6.md', '6-plan.md', '6 Fix same-strip', 'a6.txt'],
+        expected: ['6 Fix same-strip', '6.md', '6-plan.md', 'a6.txt'],
       },
       {
         name: 'Cmd-P keeps a matching pane mixed into a file-heavy first screen',
         surface: 'files',
         query: '6',
         candidates: fileHeavySixCandidates,
-        expected: ['6-00.md', '6-01.md', '6 Fix same-strip', '6-02.md', '6-03.md'],
+        expected: ['6 Fix same-strip', '6-00.md', '6-01.md', '6-02.md', '6-03.md'],
         limit: 5,
       },
       {
@@ -5157,11 +5157,11 @@ async function runShareThemeSuite() {
         expected: ['claude', 'claude_notes.md'],
       },
       {
-        name: 'Cmd-P ranks matching files before panes',
+        name: 'Cmd-P ranks a contiguous matching pane name before files',
         surface: 'files',
         query: 'claude',
         candidates: claudeCandidates,
-        expected: ['claude_notes.md', 'claude'],
+        expected: ['claude', 'claude_notes.md'],
       },
       {
         name: 'empty Cmd-P file results sort by recency',

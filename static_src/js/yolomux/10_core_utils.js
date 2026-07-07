@@ -2249,6 +2249,7 @@ const searchRankWeights = Object.freeze({
   fileNamePrefix: 3500,
   fileNameContains: 1800,
   fileNameSubsequence: 600,
+  paneNameContiguous: {files: 50000, command: 100000},
   finderAlias: 25000,
   finderAliasFilesMode: 2500,
   paneExactIdentifier: 30000,

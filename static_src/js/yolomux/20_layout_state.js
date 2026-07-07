@@ -3861,6 +3861,7 @@ function commandPaletteItemScore(item, query, options = {}) {
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
     + commandPalettePaneExactIdentifierBonus(item, query)
+    + commandPalettePaneNameContiguousBonus(item, query, options)
     + commandPaletteFinderAliasBonus(item, query, options)
     + commandPaletteFileNameBonus(item, query)
     + commandPaletteRecencyBonus(item, options)
@@ -3868,6 +3869,15 @@ function commandPaletteItemScore(item, query, options = {}) {
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPalettePaneNameContiguousBonus(item, query, options = {}) {
+  if (commandPaletteItemDomain(item) !== 'pane') return 0;
+  const tokens = String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const label = String(item.label || '').toLowerCase();
+  if (!tokens.length || !label || !tokens.every(token => label.includes(token))) return 0;
+  const surface = commandPaletteSurface(options);
+  return searchRankWeights.paneNameContiguous[surface] || 0;
 }
 
 function commandPaletteIdentifierKey(value) {

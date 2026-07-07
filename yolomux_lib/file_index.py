@@ -388,9 +388,10 @@ def _metadata_truncated(metadata: dict[str, Any]) -> bool:
     return str(metadata.get("truncated") or "") == "1"
 
 
-def _sqlite_like_pattern(term: str) -> str:
-    escaped = str(term or "").lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
+def _sqlite_subsequence_pattern(term: str) -> str:
+    """Match the same punctuation-tolerant character order as the fuzzy ranker."""
+    escaped = [char.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for char in str(term or "").lower()]
+    return f"%{'%'.join(escaped)}%"
 
 
 def _sqlite_search_candidates(
@@ -403,7 +404,7 @@ def _sqlite_search_candidates(
     clauses = []
     params = []
     for term in terms:
-        pattern = _sqlite_like_pattern(term)
+        pattern = _sqlite_subsequence_pattern(term)
         clauses.append("(lower(name) LIKE ? ESCAPE '\\' OR lower(relative_path) LIKE ? ESCAPE '\\' OR lower(path) LIKE ? ESCAPE '\\')")
         params.extend([pattern, pattern, pattern])
     where = " AND ".join(clauses)
