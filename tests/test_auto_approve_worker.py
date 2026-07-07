@@ -5,6 +5,8 @@ import pytest
 
 
 from yolomux_lib import auto_approve_worker
+from yolomux_lib.auto_approve_policy import auto_approve_poll_is_quiet
+from yolomux_lib.auto_approve_policy import auto_approve_quiet_poll_interval
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +127,15 @@ class PostWalkMoveModule(StableWalkModule):
 class MissingPaneModule(DummyApproveModule):
     def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> None:
         return None
+
+
+def test_quiet_polling_requires_static_non_working_screen_and_caps_at_four_seconds():
+    assert auto_approve_poll_is_quiet("working", False) is False
+    assert auto_approve_poll_is_quiet("idle", True) is False
+    assert auto_approve_poll_is_quiet("idle", False) is True
+    assert auto_approve_quiet_poll_interval(0.5, 30, 0) == pytest.approx(2.25)
+    assert auto_approve_quiet_poll_interval(0.5, 60, -0.5) == pytest.approx(3.5)
+    assert auto_approve_quiet_poll_interval(0.5, 60, 0.5) == pytest.approx(4.5)
 
 
 def test_send_action_confirms_after_reverifying_the_walked_highlight():

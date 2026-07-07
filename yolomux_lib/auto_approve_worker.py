@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import threading
@@ -19,6 +20,10 @@ import auto_approve_tmux
 
 from .agent_tui import AgentPaneState
 from .agent_tui import classify_agent_pane
+from .auto_approve_policy import AUTO_APPROVE_QUIET_JITTER_SECONDS
+from .auto_approve_policy import AUTO_APPROVE_QUIET_MAX_INTERVAL_SECONDS
+from .auto_approve_policy import auto_approve_poll_is_quiet
+from .auto_approve_policy import auto_approve_quiet_poll_interval
 from . import yolo_rules
 from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
@@ -32,8 +37,6 @@ from .types import AutoApproveState
 # and the thread can release its flock before a takeover re-acquires.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
 AUTO_APPROVE_MISSING_CAPTURE_LIMIT = 3
-AUTO_APPROVE_IDLE_RAMP_SECONDS = 60.0
-AUTO_APPROVE_IDLE_MAX_INTERVAL_SECONDS = 10.0
 
 
 LOGGER = logging.getLogger(__name__)
@@ -184,6 +187,9 @@ class AutoApproveWorker:
         self.pending_prompt = False
         self.missing_capture_count = 0
         self.capture_gate_observed = False
+        self.last_screen_key = ""
+        self.last_visible_screen_hash = ""
+        self.last_poll_is_quiet = False
         self.process_lock = AutoApproveProcessLock(target, owner_extra)
         self.lock_owner: dict[str, Any] | None = None
 
@@ -259,15 +265,13 @@ class AutoApproveWorker:
         try:
             module = auto_approve_tmux
             idle_since: float | None = None
-            max_interval = max(AUTO_APPROVE_IDLE_MAX_INTERVAL_SECONDS, self.interval)
-            ramp_duration = AUTO_APPROVE_IDLE_RAMP_SECONDS
             self.update(lock_owner=self.process_lock.owner)
             self.update_last_action("yolo.status.watching", "watching")
 
             while not self.stop_event.is_set():
                 try:
                     acted = self.process_once(module)
-                    if acted:
+                    if acted or not self.last_poll_is_quiet:
                         idle_since = None
                         wait_for = self.interval
                     else:
@@ -275,8 +279,11 @@ class AutoApproveWorker:
                         if idle_since is None:
                             idle_since = now
                         idle_secs = now - idle_since
-                        t = min(idle_secs / ramp_duration, 1.0)
-                        wait_for = self.interval + t * (max_interval - self.interval)
+                        wait_for = auto_approve_quiet_poll_interval(
+                            self.interval,
+                            idle_secs,
+                            random.uniform(-AUTO_APPROVE_QUIET_JITTER_SECONDS, AUTO_APPROVE_QUIET_JITTER_SECONDS),
+                        )
                     self.stop_event.wait(wait_for)
                 except EXPECTED_AUTO_APPROVE_ERRORS as exc:
                     self.update(error=str(exc))
@@ -287,11 +294,12 @@ class AutoApproveWorker:
                         message_key="yolo.status.autoApproveError",
                         error=str(exc),
                     )
-                    self.stop_event.wait(max_interval)
+                    self.stop_event.wait(AUTO_APPROVE_QUIET_MAX_INTERVAL_SECONDS)
         finally:
             self.process_lock.release()
 
     def process_once(self, module: Any) -> bool:
+        self.last_poll_is_quiet = False
         if self.capture_gate is not None and self.capture_gate_observed and not self.pending_prompt and not self.last_hash and not self.last_blocked_hash:
             try:
                 should_capture = self.capture_gate(self.target)
@@ -301,6 +309,7 @@ class AutoApproveWorker:
                 should_capture = True
             if should_capture is False:
                 self.update_last_action("yolo.status.activityQuiet", "idle; tmux activity quiet")
+                self.last_poll_is_quiet = self.last_screen_key != "working"
                 return False
 
         visible_text = module.tmux_capture_pane(self.target, visible_only=True)
@@ -322,6 +331,12 @@ class AutoApproveWorker:
         self.capture_gate_observed = True
 
         state, pane_text = self.classify_pane_state(module, visible_text)
+        screen_key = str(state.screen.get("key") or "")
+        visible_hash = hashlib.sha256(visible_text.encode("utf-8", errors="replace")).hexdigest()
+        screen_changed = bool(self.last_visible_screen_hash) and visible_hash != self.last_visible_screen_hash
+        self.last_visible_screen_hash = visible_hash
+        self.last_screen_key = screen_key
+        self.last_poll_is_quiet = auto_approve_poll_is_quiet(screen_key, screen_changed)
         prompt_state = state.prompt
         approval_state = state.approval or {}
         if state.reason_code == "needs-input":

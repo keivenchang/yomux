@@ -8727,7 +8727,7 @@ class TmuxWebtermApp:
         return yolo_rules.reload_rules()
 
     def auto_approve_interval_seconds(self) -> float:
-        return self.performance_setting_seconds("auto_approve_interval_seconds", 0.1, 10.0)
+        return self.performance_setting_seconds("auto_approve_interval_seconds", 0.1, 4.0)
 
     def auto_approve_prompt_source(self) -> str:
         value = settings_payload().get("settings", {}).get("yolo", {}).get("prompt_source", "hybrid")
