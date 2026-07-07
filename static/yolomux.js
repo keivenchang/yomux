@@ -12620,7 +12620,6 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
-  const yoloCount = yoloWorkingSessions().length;
   return [
     {
       id: 'file',
@@ -12698,8 +12697,6 @@ function appMenuTree() {
     {
       id: 'tabs',
       label: t('common.tabsLabel'),
-      badgeText: String(yoloCount),
-      badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
       items: tabMenuItems(openItems),
     },
     {

@@ -4333,14 +4333,14 @@ async function runShareThemeSuite() {
     assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").detail, '');
     api.setAutoApproveStateForTest('1', {enabled: true});
     const idleYoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    assert.equal(idleYoloTabsMenu.badgeText, '0');
-    assert.equal(idleYoloTabsMenu.badgeTitle, '0 running YOLO jobs');
+    assert.equal(idleYoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while idle');
+    assert.equal(idleYoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while idle');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
     assert.equal(yoloTmuxMenu.badgeText, undefined);
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    assert.equal(yoloTabsMenu.badgeText, '1');
-    assert.equal(yoloTabsMenu.badgeTitle, '1 running YOLO job');
+    assert.equal(yoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while work is active');
+    assert.equal(yoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while work is active');
     assert.equal(yoloTmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);

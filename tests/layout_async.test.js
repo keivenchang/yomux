@@ -1263,9 +1263,9 @@ async function runLayoutAsyncSuite() {
       const shareTopbarApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-yolo-badge', mode: 'ro', session: '1', sessions: ['1']},
       });
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '0', 'share viewers start with 0 running YO jobs before the host snapshot');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'Tabs never shows a running-YOLO circle');
       await shareTopbarApi.applyShareUiStateForTest({autoApprove: autoSnapshot});
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '1', 'share viewers mirror the host running YO badge from UI state');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'host UI state cannot restore the removed Tabs circle in a share viewer');
       assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux', 'share viewers mirror host tmux YO state from UI state');
     }
 
