@@ -6704,9 +6704,9 @@ class TmuxWebtermApp:
 
     def poll_auto_approve_client_event_once(self) -> list[str]:
         started = time.perf_counter()
-        # Attention must not wait behind the read-path cache: this poll drives the SSE update that
-        # turns a visible terminal confirmation into its red stop indicator.
-        payload, status = self.refresh_auto_approve_cache_sync()
+        # The read endpoint may return stale data while it refreshes, but this watcher owns the
+        # SSE transition that turns terminal attention into the visible indicator.
+        payload, status = self.refresh_auto_approve_cache_sync(require_fresh=True)
         signature_payload = {"status": int(status), "data": payload}
         serialization_started = time.perf_counter()
         signature = self.stable_client_event_payload_signature(signature_payload)
@@ -12792,8 +12792,8 @@ class TmuxWebtermApp:
         return payload, HTTPStatus.OK
 
     def auto_approve_cache_payload(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
-        stored_at, (payload, status) = cached
-        age_seconds = max(0.0, time.monotonic() - stored_at)
+        _, (payload, status) = cached
+        age_seconds = self.auto_approve_cache_age_seconds(cached)
         result = copy.deepcopy(payload)
         result["cache"] = {
             "age_seconds": round(age_seconds, 3),
@@ -12802,6 +12802,12 @@ class TmuxWebtermApp:
             "stale": age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS,
         }
         return result, status
+
+    def auto_approve_cache_age_seconds(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> float:
+        return max(0.0, time.monotonic() - cached[0])
+
+    def auto_approve_cache_is_fresh(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> bool:
+        return self.auto_approve_cache_age_seconds(cached) <= AUTO_APPROVE_CACHE_MAX_AGE_SECONDS
 
     def set_auto_approve_cache(self, payload: AutoApproveStatusPayload, status: HTTPStatus, generation: int, worker: object) -> bool:
         with self.auto_approve_cache_condition:
@@ -12850,13 +12856,13 @@ class TmuxWebtermApp:
             raise
         return True
 
-    def refresh_auto_approve_cache_sync(self) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
+    def refresh_auto_approve_cache_sync(self, require_fresh: bool = False) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
         while True:
             with self.auto_approve_cache_condition:
                 record = self.auto_approve_cache_record
-                while record.worker is not None and record.payload is None:
+                while record.worker is not None and (record.payload is None or (require_fresh and not self.auto_approve_cache_is_fresh(record.payload))):
                     self.auto_approve_cache_condition.wait(timeout=0.5)
-                if record.payload is not None:
+                if record.payload is not None and (not require_fresh or self.auto_approve_cache_is_fresh(record.payload)):
                     return self.auto_approve_cache_payload(record.payload)
                 record.generation += 1
                 generation = record.generation
@@ -12889,9 +12895,7 @@ class TmuxWebtermApp:
         with self.auto_approve_cache_condition:
             cached = self.auto_approve_cache_record.payload
             if cached is not None:
-                stored_at, _payload = cached
-                age_seconds = max(0.0, time.monotonic() - stored_at)
-                if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
+                if not self.auto_approve_cache_is_fresh(cached):
                     self.start_auto_approve_cache_refresh()
                 return self.auto_approve_cache_payload(cached)
         return self.refresh_auto_approve_cache_sync()

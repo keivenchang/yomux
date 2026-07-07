@@ -2459,6 +2459,39 @@ def test_sync_auto_approve_cache_waits_for_current_async_refresh(monkeypatch):
     assert build_calls == [True]
 
 
+def test_sync_fresh_auto_approve_cache_waits_for_expired_async_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_calls = []
+    stale_payload = {"marker": "stale", "sessions": {}}
+
+    def build_auto_approve_status(timings=None):
+        build_calls.append(True)
+        build_started.set()
+        assert release_build.wait(timeout=3)
+        return {"marker": "fresh", "sessions": {}}, HTTPStatus.OK
+
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
+    try:
+        assert webapp.start_auto_approve_cache_refresh() is True
+        assert build_started.wait(timeout=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting = executor.submit(webapp.refresh_auto_approve_cache_sync, require_fresh=True)
+            assert waiting.done() is False
+            release_build.set()
+            payload, status = waiting.result(timeout=3)
+    finally:
+        release_build.set()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["marker"] == "fresh"
+    assert build_calls == [True]
+
+
 def test_auto_approve_cache_failure_cleanup_is_generation_guarded():
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
@@ -3364,7 +3397,7 @@ def test_timer_client_event_polls_initialize_without_initial_push(monkeypatch):
         {"items": []},
         {"items": [{"repo": "owner/repo", "number": 1}]},
     ]
-    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda: auto_payloads.pop(0))
+    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda **_kwargs: auto_payloads.pop(0))
     monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
     monkeypatch.setattr(webapp, "watched_prs_payload", lambda: watched_payloads.pop(0))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
@@ -3383,6 +3416,47 @@ def test_timer_client_event_polls_initialize_without_initial_push(monkeypatch):
     assert events[0][1]["refresh"] is True
     assert "signature" in events[0][1]
     assert "data" not in events[0][1]
+
+
+def test_timer_auto_approve_poll_refreshes_expired_cache_before_publishing(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    events = []
+    working_payload = {
+        "session_order": ["1"],
+        "sessions": {"1": {"enabled": True, "screen": {}, "agent_windows": [{"state": "working"}]}},
+        "errors": [],
+        "rules": {},
+    }
+    idle_payload = {
+        "session_order": ["1"],
+        "sessions": {"1": {"enabled": True, "screen": {}, "agent_windows": [{"state": "idle"}]}},
+        "errors": [],
+        "rules": {},
+    }
+    builds = []
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache_record.payload = (time.monotonic(), (working_payload, HTTPStatus.OK))
+
+    def build_auto_approve_status(timings=None):
+        builds.append(True)
+        return idle_payload, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_auto_approve_client_event_once() == []
+        with webapp.auto_approve_cache_condition:
+            cached = webapp.auto_approve_cache_record.payload
+            assert cached is not None
+            webapp.auto_approve_cache_record.payload = (cached[0] - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 0.1, cached[1])
+        assert webapp.poll_auto_approve_client_event_once() == ["auto_approve_changed"]
+        assert webapp.poll_auto_approve_client_event_once() == []
+    finally:
+        webapp.control_server.stop()
+
+    assert builds == [True]
+    assert [event_type for event_type, _payload in events] == ["auto_approve_changed"]
+    assert events[0][1]["refresh"] is True
 
 
 def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
@@ -3420,7 +3494,7 @@ def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
         {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "activity_age_seconds": 2.0, "activity_ts": 11, "panes": [{"pane_id": "%1", "title": "b work", "history_bytes": 20, "history_size": 2}]}], "generated_at": 2.0},
         {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "active": True, "activity_age_seconds": 3.0, "activity_ts": 12, "panes": [{"pane_id": "%1", "title": "c work", "history_bytes": 30, "history_size": 3}]}], "generated_at": 3.0},
     ]
-    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda: auto_payloads.pop(0))
+    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda **_kwargs: auto_payloads.pop(0))
     monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
