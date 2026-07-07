@@ -1439,6 +1439,7 @@
   "shortcuts.moveTab": "הזז או פצל לשונית",
   "shortcuts.openPreferences": "פתח העדפות",
   "shortcuts.openYoagentRight": "פתח את YO!agent בחלונית ימנית",
+  "shortcuts.pageTmuxScrollback": "גלול את היסטוריית tmux בעמוד",
   "shortcuts.pinTab": "הצמד/בטל הצמדת כרטיסייה פעילה",
   "shortcuts.pinTabPrompt": "{keys}: להצמיד / לבטל את הכרטיסייה הפעילה",
   "shortcuts.redoChunk": "בצע שוב קבלה/דחייה של מקטע",

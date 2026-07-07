@@ -1439,6 +1439,7 @@
   "shortcuts.moveTab": "Déplacer ou diviser l'onglet",
   "shortcuts.openPreferences": "Ouvrir les Préférences",
   "shortcuts.openYoagentRight": "Ouvrez YO!agent dans un volet de droite",
+  "shortcuts.pageTmuxScrollback": "Faire défiler l'historique tmux d'une page",
   "shortcuts.pinTab": "Épingler/désépingler l'onglet actif",
   "shortcuts.pinTabPrompt": "{keys} : épingler/désépingler l'onglet actif",
   "shortcuts.redoChunk": "Rétablir l'acceptation/le rejet du bloc",

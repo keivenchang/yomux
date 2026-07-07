@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "टैब move या split करें",
   "shortcuts.openPreferences": "Preferences खोलें",
   "shortcuts.openYoagentRight": "दाएँ फलक में YO!agent खोलें",
+  "shortcuts.pageTmuxScrollback": "tmux स्क्रॉलबैक एक पृष्ठ स्क्रॉल करें",
   "shortcuts.pinTab": "सक्रिय टैब को पिन/अनपिन करें",
   "shortcuts.pinTabPrompt": "{keys}: सक्रिय टैब को पिन/अनपिन करें",
   "shortcuts.redoChunk": "Chunk accept/reject redo करें",

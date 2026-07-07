@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "移動或分割分頁",
   "shortcuts.openPreferences": "開啟偏好設定",
   "shortcuts.openYoagentRight": "在右側窗格開啟優!助手",
+  "shortcuts.pageTmuxScrollback": "將 tmux 回捲捲動一頁",
   "shortcuts.pinTab": "釘選/取消釘選使用中分頁",
   "shortcuts.pinTabPrompt": "{keys}：釘選/取消釘選使用中分頁",
   "shortcuts.redoChunk": "重做接受／拒絕區塊",

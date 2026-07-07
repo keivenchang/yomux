@@ -1753,6 +1753,36 @@ body.theme-light .js-debug-graph-view {
   color: var(--text);
   font-weight: 800;
 }
+@media (max-width: 520px) {
+  .keyboard-shortcuts-overlay {
+    align-items: stretch;
+    padding: var(--space-4);
+  }
+  .keyboard-shortcuts-dialog {
+    width: 100%;
+    max-height: calc(100vh - var(--space-8));
+  }
+  .keyboard-shortcuts-head {
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-7);
+  }
+  .keyboard-shortcuts-head h2 {
+    min-width: 0;
+    font-size: var(--ui-font-size-sm);
+  }
+  .keyboard-shortcuts-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+    padding: var(--space-7);
+  }
+  .keyboard-shortcut-row {
+    gap: var(--space-4);
+  }
+  .keyboard-shortcut-row > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
 .keyboard-legend-detail {
   color: var(--muted);
   font-size: var(--ui-font-size-2xs);

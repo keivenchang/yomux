@@ -1439,6 +1439,7 @@
   "shortcuts.moveTab": "Spostati o dividi tab",
   "shortcuts.openPreferences": "Preferenze Aperte",
   "shortcuts.openYoagentRight": "Aprire YO!agent in un vetro destro",
+  "shortcuts.pageTmuxScrollback": "Scorri lo scrollback tmux di una pagina",
   "shortcuts.pinTab": "Pin / spin attivi tab",
   "shortcuts.pinTabPrompt": "{keys}: pina / spendi attiva tab",
   "shortcuts.redoChunk": "Rifare il blocco accetta/rifiuto",

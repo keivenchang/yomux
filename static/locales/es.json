@@ -1439,6 +1439,7 @@
   "shortcuts.moveTab": "Mover o dividir pestaña",
   "shortcuts.openPreferences": "Abrir Preferencias",
   "shortcuts.openYoagentRight": "Abra YO!agent en el panel derecho",
+  "shortcuts.pageTmuxScrollback": "Desplazar el historial de tmux una página",
   "shortcuts.pinTab": "Anclar/desanclar pestaña activa",
   "shortcuts.pinTabPrompt": "{keys}: fijar/desanclar pestaña activa",
   "shortcuts.redoChunk": "Rehacer aceptar/rechazar fragmento",

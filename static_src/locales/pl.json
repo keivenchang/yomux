@@ -1467,6 +1467,7 @@
   "shortcuts.moveTab": "Przeprowadz się lub rozdziel tab",
   "shortcuts.openPreferences": "Otwarte Preferencje",
   "shortcuts.openYoagentRight": "Otwórz YO!agent w prawej szybie",
+  "shortcuts.pageTmuxScrollback": "Przewiń bufor tmux o stronę",
   "shortcuts.pinTab": "Przypin / odpinanie aktywne tab",
   "shortcuts.pinTabPrompt": "{keys}: PIN / Odpinowanie aktywne tab",
   "shortcuts.redoChunk": "Powtórz fragment akceptując/odrzucającego",

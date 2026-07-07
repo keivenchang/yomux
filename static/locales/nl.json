@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "Beweeg of splits tab",
   "shortcuts.openPreferences": "Open Voorkeuren",
   "shortcuts.openYoagentRight": "Open YO!agent in een rechter ruit",
+  "shortcuts.pageTmuxScrollback": "Tmux-terugrolbuffer één pagina bladeren",
   "shortcuts.pinTab": "Actief tabblad vastmaken / losmaken",
   "shortcuts.pinTabPrompt": "{keys}: actief tabblad vastmaken / losmaken",
   "shortcuts.redoChunk": "Accepteer/afwijzing chunk opnieuw",

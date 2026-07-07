@@ -1467,6 +1467,7 @@
   "shortcuts.moveTab": "Переместить или разделить вкладку",
   "shortcuts.openPreferences": "Открыть Настройки",
   "shortcuts.openYoagentRight": "Откройте YO!agent на правой панели.",
+  "shortcuts.pageTmuxScrollback": "Прокрутить буфер tmux на страницу",
   "shortcuts.pinTab": "Закрепить/открепить активную вкладку",
   "shortcuts.pinTabPrompt": "{keys}: закрепить/открепить активную вкладку",
   "shortcuts.redoChunk": "Повторить принятие/отклонение фрагмента",

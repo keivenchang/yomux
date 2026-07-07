@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "移动或拆分标签",
   "shortcuts.openPreferences": "打开偏好设置",
   "shortcuts.openYoagentRight": "在右侧窗格打开优!助手",
+  "shortcuts.pageTmuxScrollback": "将 tmux 回滚滚动一页",
   "shortcuts.pinTab": "固定/取消固定活动标签页",
   "shortcuts.pinTabPrompt": "{keys}：固定/取消固定活动标签页",
   "shortcuts.redoChunk": "重做接受／拒绝块",

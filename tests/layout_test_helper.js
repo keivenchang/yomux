@@ -1298,6 +1298,7 @@ globalThis.__layoutTestApi = {
   globalShortcutTargetAllowsFinderShortcut,
   globalShortcutShouldToggleFinderForTest: globalShortcutShouldToggleFinder,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
+  handleTerminalTmuxHistoryNavigationKeydownForTest: handleTerminalTmuxHistoryNavigationKeydown,
   osc52ClipboardText,
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
   rememberTerminalAppClipboardTextForTest: rememberTerminalAppClipboardText,

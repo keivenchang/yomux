@@ -4431,6 +4431,7 @@ async function runShareThemeSuite() {
     assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
     assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
+    assert.ok(api.keyboardShortcutsHtml().includes('Page tmux scrollback') && api.keyboardShortcutsHtml().includes('Ctrl+↑ / Ctrl+↓'), 'shortcut overlay documents tmux page scrolling with the platform app modifier');
     assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+Backspace / Ctrl+Delete'), 'shortcut overlay documents both close-tab fallback keys');
     assert.ok(api.keyboardShortcutsHtml().includes('Select all rows') && api.keyboardShortcutsHtml().includes('Ctrl+A'), 'shortcut overlay documents Finder/Differ select-all');
@@ -4575,6 +4576,63 @@ async function runShareThemeSuite() {
     assert.equal(stopped, 1, 'terminal DOM copy guard stops propagation before Claude/xterm');
     assert.equal(stoppedImmediate, 1, 'terminal DOM copy guard stops sibling handlers before Claude/xterm');
     assert.deepStrictEqual(fetchCalls, [], 'terminal DOM copy guard does not ask tmux for normal Cmd-C');
+    for (const key of ['PageUp', 'PageDown']) {
+      prevented = 0;
+      stopped = 0;
+      stoppedImmediate = 0;
+      const xtermEvent = {
+        type: 'keydown',
+        code: key,
+        key,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        preventDefault() {},
+        stopPropagation() {},
+        stopImmediatePropagation() {},
+      };
+      assert.equal(domCopyShortcutHandler(xtermEvent), true, `${key} remains available to the foreground terminal application`);
+      const terminalEvent = {
+        type: 'keydown',
+        code: key,
+        key,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        preventDefault() { prevented += 1; },
+        stopPropagation() { stopped += 1; },
+        stopImmediatePropagation() { stoppedImmediate += 1; },
+      };
+      domKeydownHandler(terminalEvent);
+      assert.equal(prevented, 0, `${key} is not claimed by the tmux history shortcut`);
+      assert.equal(stopped, 0, `${key} reaches xterm and the foreground terminal application`);
+      assert.equal(stoppedImmediate, 0, `${key} does not stop sibling terminal handlers`);
+    }
+    const pcPageApi = loadYolomux('', ['1'], 'https:', 'Win32');
+    for (const [name, api] of [['Mac', terminalCopyApi], ['PC', pcPageApi]]) {
+      for (const key of ['ArrowUp', 'ArrowDown']) {
+        let historyPrevented = 0;
+        const localTerm = {
+          rows: 30,
+          scrollLines() {},
+        };
+        const isMac = name === 'Mac';
+        assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('missing-session', localTerm, {
+          type: 'keydown',
+          code: key,
+          key,
+          metaKey: isMac,
+          ctrlKey: !isMac,
+          altKey: false,
+          shiftKey: false,
+          preventDefault() { historyPrevented += 1; },
+        }), true, `${name} app-modified ${key} is claimed by the tmux history guard`);
+        assert.equal(historyPrevented, 1, `${name} app-modified ${key} suppresses browser scrolling`);
+        assert.equal(Math.sign(localTerm.pendingWheelScrollLines), key === 'ArrowUp' ? -1 : 1, `${name} app-modified ${key} uses one local terminal page`);
+      }
+    }
     terminalCopyApi.registerTerminalForTest('1', {
       getSelection: () => '',
       clearSelection: () => { clearSelectionCount += 1; },

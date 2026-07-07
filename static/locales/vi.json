@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "Di chuyển hoặc tách tab",
   "shortcuts.openPreferences": "Mở Tùy chọn",
   "shortcuts.openYoagentRight": "Mở YO!agent trong ngăn bên phải",
+  "shortcuts.pageTmuxScrollback": "Cuộn lịch sử tmux một trang",
   "shortcuts.pinTab": "Pin / bỏ ghim hoạt động tab",
   "shortcuts.pinTabPrompt": "{keys}: ghim / bỏ ghim hoạt động tab",
   "shortcuts.redoChunk": "Làm lại khối chấp nhận / từ chối",

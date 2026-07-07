@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "Hareket et ya da bölün tab",
   "shortcuts.openPreferences": "Açık Tercihler",
   "shortcuts.openYoagentRight": "Sağ camda YO!agent açın",
+  "shortcuts.pageTmuxScrollback": "tmux kaydırma geçmişinde bir sayfa ilerle",
   "shortcuts.pinTab": "Pin / pin aç aktif tab",
   "shortcuts.pinTabPrompt": "{keys}: pin / pin aç aktif tab",
   "shortcuts.redoChunk": "Yeniden kabul et/reddet kısmı",

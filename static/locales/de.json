@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "Tab verschieben oder teilen",
   "shortcuts.openPreferences": "Einstellungen öffnen",
   "shortcuts.openYoagentRight": "Öffnen Sie YO!agent im rechten Bereich",
+  "shortcuts.pageTmuxScrollback": "Tmux-Scrollback um eine Seite",
   "shortcuts.pinTab": "Aktiven Tab anheften/entfernen",
   "shortcuts.pinTabPrompt": "{keys}: Aktive Registerkarte anheften/entfernen",
   "shortcuts.redoChunk": "Annehmen/Ablehnen des Blocks wiederholen",

@@ -1439,6 +1439,7 @@
   "shortcuts.moveTab": "Mover ou dividir aba",
   "shortcuts.openPreferences": "Abrir Preferências",
   "shortcuts.openYoagentRight": "Abra o YO!agent em um painel direito",
+  "shortcuts.pageTmuxScrollback": "Rolar o histórico do tmux uma página",
   "shortcuts.pinTab": "Fixar/desafixar guia ativa",
   "shortcuts.pinTabPrompt": "{keys}: fixar/desafixar guia ativa",
   "shortcuts.redoChunk": "Refazer aceitar/rejeitar bloco",

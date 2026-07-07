@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "ย้ายหรือแยก tab",
   "shortcuts.openPreferences": "เปิดการตั้งค่า",
   "shortcuts.openYoagentRight": "เปิด YO!agent ในบานหน้าต่างด้านขวา",
+  "shortcuts.pageTmuxScrollback": "เลื่อนประวัติ tmux หนึ่งหน้า",
   "shortcuts.pinTab": "พิน / ปลดหมุดที่ใช้งานอยู่ tab",
   "shortcuts.pinTabPrompt": "{keys}: ปักหมุด / ปลดหมุดที่ใช้งานอยู่ tab",
   "shortcuts.redoChunk": "ทําซ้ํายอมรับ/ปฏิเสธก้อน",

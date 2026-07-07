@@ -1523,6 +1523,7 @@
   "shortcuts.moveTab": "نقل أو تقسيم تبويب",
   "shortcuts.openPreferences": "فتح التفضيلات",
   "shortcuts.openYoagentRight": "افتح YO!agent في الجزء الأيمن",
+  "shortcuts.pageTmuxScrollback": "تمرير سجل tmux صفحة واحدة",
   "shortcuts.pinTab": "تثبيت/إلغاء تثبيت علامة التبويب النشطة",
   "shortcuts.pinTabPrompt": "{keys}: تثبيت / إلغاء تثبيت علامة التبويب النشطة",
   "shortcuts.redoChunk": "إعادة قبول/رفض مقطع",

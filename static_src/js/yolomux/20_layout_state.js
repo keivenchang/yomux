@@ -2916,6 +2916,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
       {label: t('common.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
+      {label: t('shortcuts.pageTmuxScrollback'), keys: `${appShortcutText('↑')} / ${appShortcutText('↓')}`},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},

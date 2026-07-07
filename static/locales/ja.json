@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "タブを移動または分割",
   "shortcuts.openPreferences": "設定を開く",
   "shortcuts.openYoagentRight": "右側のペインで YO!agent を開きます",
+  "shortcuts.pageTmuxScrollback": "tmux スクロールバックを1ページ移動",
   "shortcuts.pinTab": "アクティブなタブの固定/固定解除",
   "shortcuts.pinTabPrompt": "{keys}: アクティブなタブの固定/固定解除",
   "shortcuts.redoChunk": "チャンクの承認/却下をやり直す",

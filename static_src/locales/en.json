@@ -1411,6 +1411,7 @@
   "shortcuts.moveTab": "Move or split tab",
   "shortcuts.openPreferences": "Open Preferences",
   "shortcuts.openYoagentRight": "Open YO!agent in a right pane",
+  "shortcuts.pageTmuxScrollback": "Page tmux scrollback",
   "shortcuts.pinTab": "Pin / unpin active tab",
   "shortcuts.pinTabPrompt": "{keys}: pin / unpin active tab",
   "shortcuts.redoChunk": "Redo accept/reject chunk",

@@ -5873,6 +5873,80 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
     assert metrics["rejections"] == [], metrics
 
 
+def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const screen = document.querySelector('#term-1 .xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const pageLines = Math.max(1, Math.floor(terminals.get('1').term.rows * terminalWheelPageFraction));
+        const dispatch = key => {
+          const event = new KeyboardEvent('keydown', {key, code: key, ctrlKey: true, bubbles: true, cancelable: true});
+          const accepted = screen.dispatchEvent(event);
+          return {key, accepted, defaultPrevented: event.defaultPrevented};
+        };
+        const historyUp = dispatch('ArrowUp');
+        setTimeout(() => {
+          const historyDown = dispatch('ArrowDown');
+          setTimeout(() => {
+            const frames = socket.sent
+              .map(message => {
+                try { return JSON.parse(message); } catch (_error) { return null; }
+              })
+              .filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
+            done({pageLines, historyUp, historyDown, frames, errors: window.__bootErrors || [], rejections: window.__bootRejections || []});
+          }, 60);
+        }, 60);
+        """
+    )
+    assert metrics["historyUp"] == {"key": "ArrowUp", "accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["historyDown"] == {"key": "ArrowDown", "accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["frames"] == [
+        {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
+        {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
+    ], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_keyboard_shortcuts_overlay_fits_narrow_viewport(browser, tmp_path):
+    browser.set_window_size(375, 680)
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        openKeyboardShortcutsOverlay();
+        const dialog = document.querySelector('.keyboard-shortcuts-dialog');
+        const body = document.querySelector('.keyboard-shortcuts-body');
+        const rect = dialog.getBoundingClientRect();
+        return {
+          rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom},
+          viewport: {width: innerWidth, height: innerHeight},
+          bodyScrollsHorizontally: body.scrollWidth > body.clientWidth + 1,
+          rowsOverflow: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.scrollWidth > row.clientWidth + 1),
+          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes('Ctrl+↑ / Ctrl+↓')),
+        };
+        """
+    )
+    assert metrics["rect"]["left"] >= 0, metrics
+    assert metrics["rect"]["right"] <= metrics["viewport"]["width"], metrics
+    assert metrics["rect"]["top"] >= 0, metrics
+    assert metrics["rect"]["bottom"] <= metrics["viewport"]["height"], metrics
+    assert metrics["bodyScrollsHorizontally"] is False, metrics
+    assert metrics["rowsOverflow"] is False, metrics
+    assert metrics["pageBinding"] is True, metrics
+
+
 def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_path):
     page = tmp_path / "shared-activity-cadence.html"
     load_static_html_fixture(

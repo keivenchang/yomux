@@ -6055,17 +6055,45 @@ function handleTerminalTmuxWindowShortcutKeydown(session, event) {
   return true;
 }
 
+function terminalTmuxHistoryNavigationDirection(event) {
+  if (event?.type !== 'keydown' || !appModifier(event) || event.shiftKey) return 0;
+  if (event.key === 'ArrowUp' || event.code === 'ArrowUp') return -1;
+  if (event.key === 'ArrowDown' || event.code === 'ArrowDown') return 1;
+  return 0;
+}
+
+function handleTerminalTmuxHistoryNavigationKeydown(session, term, event) {
+  const direction = terminalTmuxHistoryNavigationDirection(event);
+  if (!direction) return false;
+  // PageUp/PageDown belong to foreground TUIs such as vim and Emacs. The app modifier has no
+  // terminal escape-sequence meaning, so reserve it for explicit tmux scrollback paging.
+  event.preventDefault?.();
+  const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+  const signedLines = direction * pageLines;
+  const item = terminals.get(session);
+  if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+    queueTmuxScroll(item, signedLines);
+    return true;
+  }
+  if (term) queueLocalTerminalScroll(term, signedLines);
+  return true;
+}
+
 function installTerminalCopyShortcut(session, term, container = null) {
   // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
   // must still send SIGINT to the PTY, and Cmd-C must stay browser/xterm copy
   // only. Tmux copy-mode text has a separate explicit shortcut/menu action.
   container?.addEventListener?.('keydown', event => {
-    if (!handleTerminalTmuxWindowShortcutKeydown(session, event) && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
+    if (!handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+      && !handleTerminalTmuxWindowShortcutKeydown(session, event)
+      && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
-    return (handleTerminalTmuxWindowShortcutKeydown(session, event) || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
+    return (handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+      || handleTerminalTmuxWindowShortcutKeydown(session, event)
+      || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
   });
 }
 
@@ -9104,6 +9132,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
       {label: t('common.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
+      {label: t('shortcuts.pageTmuxScrollback'), keys: `${appShortcutText('↑')} / ${appShortcutText('↓')}`},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
