@@ -3788,6 +3788,11 @@ function handleTerminalDataMeasured(session, data, options = {}) {
     ? stripTerminalQueryResponses(data)
     : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
+  // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
+  // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
+  if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
+    closeOtherSessionPopovers(null, {force: true});
+  }
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
     clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});

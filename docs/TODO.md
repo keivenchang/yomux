@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Active Queue Follow-Ups
 
-- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive `7777`, `8001`, `8002`, and `8003`, verify startup ownership order, `8001` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
+- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive `7000`, `7001`, `7002`, and `7003`, verify startup ownership order, `7001` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
 - [ ] [M] License history remote finalization. Only after explicit force-push authorization, push the rewritten PolyForm Noncommercial history with `--force-with-lease`, then verify a fresh clone against the key license searches. The current-tree migration, local history rewrite, and local verification are already complete.
 
 ## Current Priorities

@@ -296,7 +296,7 @@ Codex may select option 2 by default for remembered prefixes. The detector must 
 ```text
   Would you like to run the following command?
 
-  $ curl -sk -u yolomux:yolomux https://localhost:7777/
+  $ curl -sk -u yolomux:yolomux https://localhost:7000/
 
   1. Yes, proceed (y)
 › 2. Yes, and don't ask again for commands that start with `curl -sk -u` (p)

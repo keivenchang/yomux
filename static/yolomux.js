@@ -698,6 +698,9 @@ const commandPaletteState = {
   query: '',
   index: 0,
   items: [],
+  // An empty peer pane can request that its next quick-open lands in that exact slot. The palette
+  // remains the one chooser; this is only its transient placement context, never a second opener.
+  targetSlot: '',
 };
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
@@ -706,6 +709,9 @@ const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
 const commandPaletteRecentKeys = new Map();
 let commandPaletteRecentSequence = 0;
+// Fill workspace is a temporary pane-layout view. Keep the complete pre-fill tree here so Restore
+// returns every tab, split, and placeholder exactly as the user left it.
+let filledWorkspaceLayout = null;
 const fileQuickOpenState = {
   root: '',
   candidates: [],
@@ -847,8 +853,8 @@ const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
-// Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
-// provide two usable columns.
+// This is a conservative touch breakpoint: narrow tablets use one column before a two-pane
+// layout becomes cramped, even though desktop users may manually create 300px panes.
 const narrowTouchSingleColumnMaxWidthPx = 680;
 const tabletDesktopLayoutMinWidthPx = 900;
 const defaultLayoutMode = 'split';
@@ -857,6 +863,9 @@ const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
 const layoutBoundaryDropFraction = 0.08;
 const layoutBoundaryDropMinPx = 28;
 const layoutBoundaryDropMaxPx = 64;
+// Dockview keeps a small gutter between neighboring leaf groups. Directional tab actions compare
+// their rendered edges with this shared allowance instead of assuming touching DOM rectangles.
+const directionalPaneAdjacencyTolerancePx = 8;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -1653,6 +1662,11 @@ let pendingLayoutRender = null;
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};
+// One interaction record owns hover detail, context actions, and touch long-press for every tab
+// surface.  Keeping these together prevents a mobile action gesture from drifting into a tab click.
+let tabInteractionController = null;
+const tabTouchLongPressDelayMs = 500;
+const tabTouchLongPressMoveThresholdPx = 10;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
@@ -4200,6 +4214,9 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
+  // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
+  // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
+  if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
   focusTerminalDom(session, delay);
@@ -5439,7 +5456,7 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
     event.preventDefault();
     event.stopPropagation();
     if (!button.disabled) handler();
-    closeMenu();
+    if (options.keepOpen !== true) closeMenu();
   });
   menu.appendChild(button);
   return button;
@@ -5473,7 +5490,7 @@ function rootCssLengthPx(name) {
   return Math.max(0, width);
 }
 
-const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 320;
+const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 300;
 const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
 
 function minSplitPaneWidthPx() {
@@ -5492,10 +5509,16 @@ function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   const edgeGap = popoverEdgeGapPx();
   const viewport = appViewport();
-  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
-  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, viewport.height - rect.height - edgeGap));
+  const sheet = menu.classList?.contains('tab-action-sheet');
+  const desiredLeft = sheet ? x - rect.width / 2 : x;
+  const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
+  const maxTop = Math.max(edgeGap, viewport.height - rect.height - edgeGap);
+  const shouldOpenAbove = sheet && y + rect.height > viewport.height - edgeGap && y - rect.height - edgeGap >= edgeGap;
+  const desiredTop = shouldOpenAbove ? y - rect.height - edgeGap : y;
+  const top = Math.min(Math.max(edgeGap, desiredTop), maxTop);
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+  menu.style.bottom = 'auto';
 }
 
 function closeTerminalContextMenu() {
@@ -6164,6 +6187,20 @@ function installTerminalContextMenu(session, term, container) {
   });
 }
 
+function openTabDescriptionPopover(item, anchor) {
+  if (!anchor?.isConnected) return false;
+  const popover = typeof paneTabPopoverForAnchor === 'function' ? paneTabPopoverForAnchor(anchor) : null;
+  if (!popover) return false;
+  closeSessionContextMenu();
+  closeOtherSessionPopovers(anchor, {force: true});
+  if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(anchor, popover);
+  anchor.classList.add('popover-open');
+  popover.classList.add('popover-open');
+  if (typeof maybeLoadFileTabForPopover === 'function') maybeLoadFileTabForPopover(anchor, item);
+  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
+  return true;
+}
+
 function showTabContextMenu(item, x, y, options = {}) {
   if (!isPinnableTab(item) && !isTmuxSession(item)) return;
   closeAppMenus();
@@ -6171,8 +6208,99 @@ function showTabContextMenu(item, x, y, options = {}) {
   closeFileContextMenu();
   closeOtherSessionPopovers(null);
   const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu session-context-menu';
+  menu.className = `terminal-context-menu session-context-menu${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
   menu.setAttribute('role', 'menu');
+  const refreshPosition = () => positionContextMenu(menu, x, y);
+  const appendDescription = () => {
+    const info = transcriptMetadataState.payload.sessions?.[item];
+    const tab = itemLabel(item);
+    const rawDescription = isTmuxSession(item)
+      ? sessionWorkDescription(item, info, 0)
+      : tabMenuDetailText(item, info);
+    const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
+    const text = t('tab.actions.moreDescription', {tab, description});
+    const line = makeButton({
+      className: 'tab-action-description',
+      label: text,
+      ariaLabel: text,
+      title: t('common.details'),
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openTabDescriptionPopover(item, options.tab);
+      },
+    });
+    menu.appendChild(line);
+  };
+  const renderActions = () => {
+    menu.replaceChildren();
+    appendDescription();
+    appendTabSplitCommands(menu, item, options);
+    if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
+      appendContextMenuButton(
+        menu,
+        tabWorkspaceIsFilled(item) ? t('layout.status.restored', {item: itemLabel(item)}) : t('pane.expand'),
+        () => { toggleTabWorkspaceFill(item); },
+        closeSessionContextMenu,
+      );
+    }
+    appendContextMenuSeparator(menu);
+    appendTabActionCommands(menu, item, options);
+    refreshPosition();
+  };
+  renderActions();
+  sessionContextMenu.open(menu, x, y);
+}
+
+function appendTabSplitCommands(menu, item, options = {}) {
+  const sourceSlot = options.sourceSlot || slotForItem(item);
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  const zones = ['left', 'right', 'top', 'bottom'];
+  const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const canPresent = Boolean(
+    sourceSlot
+      && sourceRect
+      && !narrowSingleColumnMode()
+      && !isFileExplorerItem(activeItemForSide(sourceSlot)),
+  );
+  if (!canPresent) return;
+  const directionalIconHtml = zone => `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
+  const actionGroups = document.createElement('div');
+  actionGroups.className = 'tab-directional-action-groups';
+  const appendDirectionalActions = (kind, label, action) => {
+    const group = document.createElement('section');
+    group.className = `tab-split-actions tab-${kind}-actions`;
+    group.dataset.tabActionKind = kind;
+    const title = document.createElement('div');
+    title.className = 'tab-directional-actions-title';
+    title.textContent = label;
+    group.appendChild(title);
+    for (const zone of zones) {
+      const directionLabel = `${label} ${t(`layout.zone.${zone}`)}`;
+      const button = appendContextMenuButton(
+        group,
+        directionLabel,
+        () => { void action(zone); },
+        closeSessionContextMenu,
+        {
+          disabled: capabilities[kind][zone] !== true,
+          className: `tab-split-action tab-${kind}-action`,
+          iconHtml: directionalIconHtml(zone),
+          ariaLabel: directionLabel,
+          title: directionLabel,
+        },
+      );
+      button.dataset.direction = zone;
+    }
+    actionGroups.appendChild(group);
+  };
+  appendDirectionalActions('move', t('tab.actions.move'), zone => moveLayoutItemDirectional(item, sourceSlot, zone));
+  appendDirectionalActions('swap', t('layout.drop.swap'), zone => swapLayoutItemDirectional(item, sourceSlot, zone));
+  menu.appendChild(actionGroups);
+  appendContextMenuSeparator(menu);
+}
+
+function appendTabActionCommands(menu, item, options = {}) {
   if (isPinnableTab(item)) {
     const pinned = tabIsPinned(item);
     appendContextMenuButton(
@@ -6209,7 +6337,6 @@ function showTabContextMenu(item, x, y, options = {}) {
     const killItem = tmuxSessionKillCommand(item);
     appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   }
-  sessionContextMenu.open(menu, x, y);
 }
 
 function showSessionContextMenu(session, x, y, options = {}) {
@@ -6520,7 +6647,9 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   if (children.length === 1) return children[0];
   const hasFileExplorer = children.some(child => child.containsFileExplorer);
   const hasDirectFileExplorerLeaf = children.some(child => child.directFileExplorerLeaf);
-  const kept = direction === 'row' && hasDirectFileExplorerLeaf
+  // Most mutations prune a now-empty peer. Directional tab split and temporary Fill/Restore are
+  // deliberately different: their empty peer is a user-visible placement target, not stale debris.
+  const kept = options.preservePlaceholderSlots === true || (direction === 'row' && hasDirectFileExplorerLeaf)
     ? children
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
@@ -7090,11 +7219,15 @@ function mobileRecentTmuxItems() {
 
 function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
-  const preferred = resolveLayoutItem(options.focusSession);
+  // A URL can restore several desktop panes into one phone pane. Its visible active tabs carry
+  // the only durable selection signal at boot, so retain the final one instead of discarding it
+  // and always selecting the first recent session.
+  const restoredActive = requested.length ? activePaneItems(slots).at(-1) : null;
+  const preferred = resolveLayoutItem(options.focusSession || restoredActive);
   // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
   // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
   // back on the next one-column normalization.
-  const candidates = requested.length ? [preferred, ...requested] : [preferred, ...mobileRecentTmuxItems()];
+  const candidates = requested.length ? requested : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
   for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
@@ -7146,11 +7279,11 @@ function initialLayoutSlots() {
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
-  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(layoutFromUrl) : layoutFromUrl;
+  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(layoutFromUrl);
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -7759,15 +7892,23 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
   return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
 }
 
+function attentionAcknowledgementKeyIsGeneratedWindowKey(key) {
+  // The server adds a per-window generation to every generated agent-window key. That generation
+  // changes before a genuinely later prompt can reuse a key, so a delayed pre-ack snapshot must
+  // not resurrect a red/yellow marker that the shared ledger has already acknowledged.
+  const value = String(key || '');
+  return value.startsWith('["agent-window",') && value.split(',').length >= 7;
+}
+
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
   const record = attentionAcknowledgementRecord(value);
-  // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
-  // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
-  // The one exception is this exact acknowledgement while its request is still pending: after the
-  // gray fade retires, the preceding snapshot is stale and must not flash red/yellow again.
-  if ((payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) && record?.pending !== true) return false;
+  // Legacy/fallback keys have no server-owned generation, so an explicit later false may re-arm
+  // them. Generated keys do have one; keeping their shared ledger record prevents a stale cached
+  // auto-status response from re-adding the ball after the user has clicked or typed in its pane.
+  const explicitlyUnacknowledged = payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false;
+  if (explicitlyUnacknowledged && record?.pending !== true && !attentionAcknowledgementKeyIsGeneratedWindowKey(value)) return false;
   if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -9722,6 +9863,8 @@ function revealOpenFileLineSoon(path, line) {
 }
 
 function fileQuickOpenTargetSlot() {
+  const requested = String(commandPaletteState.targetSlot || '');
+  if (requested && layoutSlotKeys().includes(requested)) return requested;
   return focusedActivationSlot();
 }
 
@@ -10310,6 +10453,7 @@ function openCommandPalette(options = {}) {
   closeAppMenus();
   abortFileQuickOpenSearch();
   commandPaletteMode = options.mode === 'files' ? 'files' : 'command';
+  commandPaletteState.targetSlot = String(options.targetSlot || '');
   commandPaletteState.query = '';
   commandPaletteState.index = 0;
   node.hidden = false;
@@ -11573,12 +11717,16 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
+  // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
+  if (options.preserveFilledWorkspaceLayout !== true) filledWorkspaceLayout = null;
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
     focusSession: options.focusSession,
     preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
+    preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
@@ -16840,7 +16988,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
 
 function persistIndexedDirsSetting(op = {}) {
   // C11: MERGE the change into the current shared file_explorer.indexed_dirs rather than overwriting it
-  // with this page's whole set. Two browser origins (:7777 vs :8001) do NOT share localStorage, so a
+  // with this page's whole set. Two browser origins (:7000 vs :7001) do NOT share localStorage, so a
   // whole-list save from one would drop the other's dirs and make rows flip indexed/un-indexed on the
   // next settings poll. An explicit {add}/{remove} applies just that one op to the shared list; a bare
   // save (initial localStorage->setting migration) only UNIONS this page's dirs in, never removing.
@@ -17950,7 +18098,11 @@ function bindTabberPanel(panel) {
     if (tabRow && panel.contains(tabRow) && tabItem && (isPinnableTab(tabItem) || isTmuxSession(tabItem))) {
       event.preventDefault();
       event.stopPropagation();
-      showTabContextMenu(tabItem, event.clientX, event.clientY, {tab: tabRow.querySelector?.('.tabber-session-tab') || tabRow});
+      tabInteractionControllerForApp().showActions({
+        anchor: tabRow.querySelector?.('.tabber-session-tab') || tabRow,
+        item: tabItem,
+        sourceSlot: () => slotForItem(tabItem),
+      }, event);
       return;
     }
     const row = event.target.closest?.('.file-tree-row[data-tabber-type="repo"]');
@@ -24877,6 +25029,148 @@ function createHoverPopover(options) {
   return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
 }
 
+function tabInteractionControllerForApp() {
+  if (tabInteractionController) return tabInteractionController;
+  let touchPress = null;
+  let suppressContextUntil = 0;
+  const currentDescriptor = descriptor => descriptor?.anchor?.__yolomuxTabInteractionDescriptor || descriptor;
+  const close = () => {
+    touchPress = null;
+    closeOtherSessionPopovers(null, {force: true});
+    closeSessionContextMenu();
+  };
+  const pointForAnchor = anchor => {
+    const rect = anchor?.getBoundingClientRect?.();
+    return {
+      x: Math.round((rect?.left || 0) + (rect?.width || 0) / 2),
+      y: Math.round((rect?.bottom || 0) + 6),
+    };
+  };
+  const showActions = (descriptor, event = null, options = {}) => {
+    descriptor = currentDescriptor(descriptor);
+    const item = String(descriptor?.item || '').trim();
+    if (!item || (!isPinnableTab(item) && !isTmuxSession(item))) return false;
+    const eventPoint = event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? {x: event.clientX, y: event.clientY}
+      : pointForAnchor(descriptor.anchor);
+    // A touch long press is an anchored tab action, not a global bottom sheet. Use the tab's
+    // lower edge so the compact action surface opens beside the tab that owns it.
+    const point = options.presentation === 'sheet' ? pointForAnchor(descriptor.anchor) : eventPoint;
+    closeOtherSessionPopovers(null, {force: true});
+    showTabContextMenu(item, point.x, point.y, {
+      tab: descriptor.anchor,
+      sourceSlot: descriptor.sourceSlot?.() || slotForItem(item),
+      presentation: options.presentation || 'context',
+    });
+    return true;
+  };
+  const bindDetail = descriptor => {
+    const {anchor} = descriptor;
+    const detailPopover = () => {
+      const current = currentDescriptor(descriptor);
+      return typeof current?.popover === 'function' ? current.popover() : current?.popover;
+    };
+    if (!detailPopover()) return null;
+    return createHoverPopover({
+      anchor,
+      popover: detailPopover,
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      hideDelay: () => popoverHideDelayMs,
+      canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
+      onQueue: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      onOpen: event => {
+        currentDescriptor(descriptor)?.onDetailOpen?.(event);
+      },
+      onClose: event => currentDescriptor(descriptor)?.onDetailClose?.(event),
+      position: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      closeOthers: () => closeOtherSessionPopovers(anchor),
+    });
+  };
+  const bind = descriptor => {
+    const anchor = descriptor?.anchor;
+    if (!anchor) return null;
+    anchor.__yolomuxTabInteractionDescriptor = descriptor;
+    if (anchor.dataset?.tabInteractionBound === 'true') return {showActions: event => showActions(descriptor, event), close};
+    if (anchor.dataset) anchor.dataset.tabInteractionBound = 'true';
+    const detail = bindDetail(descriptor);
+    const cancelTouchPress = () => {
+      if (!touchPress || touchPress.anchor !== anchor) return;
+      clearTimer(touchPress.timer);
+      touchPress = null;
+    };
+    const movedBeyondThreshold = event => {
+      if (!touchPress || touchPress.anchor !== anchor) return false;
+      return Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > tabTouchLongPressMoveThresholdPx;
+    };
+    anchor.addEventListener('contextmenu', event => {
+      if (Date.now() < suppressContextUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor, event);
+    });
+    anchor.addEventListener('keydown', event => {
+      if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor);
+    }, true);
+    anchor.addEventListener('pointerdown', event => {
+      if (event.pointerType !== 'touch' || event.button !== 0) return;
+      cancelTouchPress();
+      const current = currentDescriptor(descriptor);
+      const item = String(current?.item || '');
+      const sourceSlot = current?.sourceSlot?.() || slotForItem(item);
+      const record = {
+        anchor,
+        x: event.clientX,
+        y: event.clientY,
+        timer: null,
+        opened: false,
+        sourceSlot,
+        priorActiveItem: sourceSlot ? activeItemForSide(sourceSlot) : '',
+      };
+      record.timer = setTimeout(() => {
+        if (touchPress !== record || movedBeyondThreshold({clientX: record.x, clientY: record.y})) return;
+        record.opened = showActions(descriptor, {clientX: record.x, clientY: record.y}, {presentation: 'sheet'});
+        if (record.opened) {
+          // Dockview activates a tab on touch pointer-down before the browser can know this is a
+          // long press. Put the prior visible tab back before opening the sheet; a long press is
+          // an action gesture, never an activation or keyboard-focus gesture.
+          if (record.sourceSlot && record.priorActiveItem && record.priorActiveItem !== item) {
+            activatePaneTab(record.sourceSlot, record.priorActiveItem);
+          }
+          suppressContextUntil = Date.now() + tabTouchLongPressDelayMs;
+        }
+      }, tabTouchLongPressDelayMs);
+      touchPress = record;
+    }, true);
+    anchor.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' && movedBeyondThreshold(event)) cancelTouchPress();
+    }, true);
+    anchor.addEventListener('pointerup', event => {
+      if (event.pointerType !== 'touch' || !touchPress || touchPress.anchor !== anchor) return;
+      const opened = touchPress.opened;
+      cancelTouchPress();
+      if (!opened) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+    anchor.addEventListener('pointercancel', cancelTouchPress, true);
+    anchor.addEventListener('dragstart', cancelTouchPress, true);
+    return {detail, showActions: event => showActions(descriptor, event), close};
+  };
+  tabInteractionController = {bind, close, showActions};
+  return tabInteractionController;
+}
+
+function bindTabInteraction(descriptor) {
+  return tabInteractionControllerForApp().bind(descriptor);
+}
+
 function cssEscape(value) {
   if (window.CSS?.escape) return CSS.escape(value);
   return String(value).replace(/["\\]/g, '\\$&');
@@ -26656,7 +26950,7 @@ function sessionTerminalIsLive(session) {
   return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
 }
 
-async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
+async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
   if (!isLayoutItem(session) || !targetSlot) return;
   // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
   // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
@@ -26665,7 +26959,11 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
-  const next = layoutWithoutItem(session);
+  const next = layoutWithoutItem(session, {
+    // Directional Move deliberately leaves the source as an explicit drop target when its
+    // final tab leaves. Ordinary tab drag/move continues to compact that now-empty slot.
+    preserveRemovedSlot: options.preserveSourcePlaceholder === true,
+  });
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
   if (!next[targetSlot]) next[targetSlot] = emptyPaneState();
   const tabs = next[targetSlot].tabs;
@@ -26680,6 +26978,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
+    preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
     message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
   });
 }
@@ -26740,29 +27039,276 @@ function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct
   return splitNode('row', children[0], children[1], docked.pct);
 }
 
-async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
-  if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
+async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, pct = null, options = {}) {
+  if (!isLayoutItem(item) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return false;
+  // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
+  // empty source while it is pending; the directional action still owes the user the explicit peer
+  // they chose when the gesture began.
+  const preserveRemovedSlot = options.preserveSourcePlaceholder === true
+    && sourceSlot === targetSlot
+    && paneTabs(sourceSlot).length === 1;
+  if (isTmuxSession(item)) {
+    const ensured = await ensureSession(item);
     if (!ensured) return;
   }
-  const next = layoutWithoutItem(session, {preserveEmptySlot: shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) ? sourceSlot : null});
+  // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
+  // operates on what the user can see, so that old group cannot become a hidden third pane.
+  const sourceSlots = options.forceSplitEmpty === true
+    ? layoutSlotsWithoutUnrenderedPlaceholders()
+    : layoutSlots;
+  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot)
+    ? sourceSlot
+    : null;
+  const next = layoutWithoutItemFromSlots(item, sourceSlots, {
+    preserveEmptySlot,
+    preserveRemovedSlot,
+  });
   const targetTabs = paneTabs(targetSlot, next);
-  if (!targetTabs.length) {
-    await moveSessionToSlot(session, targetSlot, sourceSlot);
-    return;
+  if (!targetTabs.length && options.forceSplitEmpty !== true) {
+    await moveSessionToSlot(item, targetSlot, sourceSlot);
+    return true;
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([session], session);
+  next[newSlot] = paneStateWithTabs([item], item);
   const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
   const existingNode = leafNode(targetSlot);
   const newNode = leafNode(newSlot);
-  const splitPct = splitPercentForNewItem(session, zone, pct);
+  const splitPct = splitPercentForNewItem(item, zone, pct);
   const replacement = zone === 'right' || zone === 'bottom'
     ? splitNode(direction, existingNode, newNode, splitPct)
     : splitNode(direction, newNode, existingNode, splitPct);
   next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
-  applyLayoutSlots(next, {focusSession: session, prune: false});
+  applyLayoutSlots(next, {
+    focusSession: item,
+    preservePlaceholderSlots: preserveRemovedSlot,
+    prune: false,
+  });
+  return true;
+}
+
+async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
+  return splitLayoutItemAtSlot(session, targetSlot, zone, sourceSlot, pct);
+}
+
+function layoutSlotsWithoutUnrenderedPlaceholders(slots = layoutSlots) {
+  const next = emptyLayoutSlots();
+  const copy = node => {
+    if (!node) return null;
+    if (node.slot) {
+      const slot = node.slot;
+      if (!paneHasLayoutContent(slot, slots)) return null;
+      // An empty group with no DOM rectangle is a Dockview bookkeeping artifact. A rendered
+      // placeholder remains a real user-visible pane and must keep its position.
+      if (paneIsPlaceholder(slot, slots) && !layoutSlotScreenRect(slot)) return null;
+      next[slot] = paneStateForLayoutSlot(slot, slots);
+      return leafNode(slot);
+    }
+    const children = (node.children || []).map(copy).filter(Boolean);
+    if (children.length === 1) return children[0];
+    if (children.length < 2) return null;
+    return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
+  };
+  next[layoutTreeKey] = copy(slots[layoutTreeKey]);
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+}
+
+function directionalRectValue(rect, edge) {
+  if (!rect) return 0;
+  if (Number.isFinite(Number(rect[edge]))) return Number(rect[edge]);
+  if (edge === 'right') return Number(rect.left || 0) + Number(rect.width || 0);
+  if (edge === 'bottom') return Number(rect.top || 0) + Number(rect.height || 0);
+  return Number(rect[edge] || 0);
+}
+
+function directionalRectOverlap(firstStart, firstEnd, secondStart, secondEnd) {
+  return Math.max(0, Math.min(firstEnd, secondEnd) - Math.max(firstStart, secondStart));
+}
+
+function layoutSlotsTouchingDirection(sourceSlot, zone, slots = layoutSlots) {
+  const sourceRect = layoutSlotScreenRect(sourceSlot);
+  if (!sourceRect) return [];
+  const tolerance = directionalPaneAdjacencyTolerancePx;
+  const sourceLeft = directionalRectValue(sourceRect, 'left');
+  const sourceRight = directionalRectValue(sourceRect, 'right');
+  const sourceTop = directionalRectValue(sourceRect, 'top');
+  const sourceBottom = directionalRectValue(sourceRect, 'bottom');
+  return layoutSlotKeys(slots).filter(targetSlot => {
+    if (targetSlot === sourceSlot) return false;
+    const targetRect = layoutSlotScreenRect(targetSlot);
+    if (!targetRect) return false;
+    const targetLeft = directionalRectValue(targetRect, 'left');
+    const targetRight = directionalRectValue(targetRect, 'right');
+    const targetTop = directionalRectValue(targetRect, 'top');
+    const targetBottom = directionalRectValue(targetRect, 'bottom');
+    if (zone === 'left') {
+      return Math.abs(targetRight - sourceLeft) <= tolerance
+        && directionalRectOverlap(sourceTop, sourceBottom, targetTop, targetBottom) > tolerance;
+    }
+    if (zone === 'right') {
+      return Math.abs(targetLeft - sourceRight) <= tolerance
+        && directionalRectOverlap(sourceTop, sourceBottom, targetTop, targetBottom) > tolerance;
+    }
+    if (zone === 'top') {
+      return Math.abs(targetBottom - sourceTop) <= tolerance
+        && directionalRectOverlap(sourceLeft, sourceRight, targetLeft, targetRight) > tolerance;
+    }
+    return Math.abs(targetTop - sourceBottom) <= tolerance
+      && directionalRectOverlap(sourceLeft, sourceRight, targetLeft, targetRight) > tolerance;
+  });
+}
+
+function directionalLocalSplitHasRoom(rect, zone) {
+  if (zone === 'left' || zone === 'right') return rect.width / 2 >= minSplitPaneWidthPx();
+  return rect.height / 2 >= minSplitPaneHeightPx();
+}
+
+function directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, slots, targets) {
+  const directTargets = Array.isArray(targets) ? targets : layoutSlotsTouchingDirection(sourceSlot, zone, slots);
+  const finderOnly = directTargets.length === 1 && isFileExplorerItem(activeItemForSide(directTargets[0], slots));
+  if (directTargets.length && !finderOnly) return false;
+  const oppositeZone = zone === 'left' ? 'right'
+    : zone === 'right' ? 'left'
+      : zone === 'top' ? 'bottom'
+        : 'top';
+  // Finder/Differ is a reserved pane, not a peer tab target. It must not block creating a
+  // local terminal split on the content side of its boundary.
+  const oppositeContentTargets = layoutSlotsTouchingDirection(sourceSlot, oppositeZone, slots)
+    .filter(slot => !isFileExplorerItem(activeItemForSide(slot, slots)));
+  return oppositeContentTargets.length === 0 && directionalLocalSplitHasRoom(sourceRect, zone);
+}
+
+// Directional tab actions resolve visible pane geometry first. A layout tree can encode the same
+// rendered grid in more than one way; users must get the same Move/Swap choices in both forms.
+// If a side touches more than one leaf, moving into an arbitrary one would be surprising, so that
+// direction is intentionally unavailable rather than using a hidden tree-order tie breaker.
+function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), slots = layoutSlots) {
+  const visibleSlots = layoutSlotsWithoutUnrenderedPlaceholders(slots);
+  const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const allowed = Boolean(
+    isLayoutItem(item)
+      && sourceSlot
+      && !narrowSingleColumnMode()
+      && !tabIsPinned(item)
+      && !isFileExplorerItem(activeItemForSide(sourceSlot, slots))
+      && sourceRect,
+  );
+  const result = {move: {}, swap: {}, targets: {}};
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (!allowed) {
+      result.move[zone] = false;
+      result.swap[zone] = false;
+      result.targets[zone] = null;
+      continue;
+    }
+    const targets = layoutSlotsTouchingDirection(sourceSlot, zone, visibleSlots);
+    if (targets.length === 1) {
+      const targetSlot = targets[0];
+      const targetIsUsable = !isFileExplorerItem(activeItemForSide(targetSlot, visibleSlots));
+      const targetItem = activeItemForSide(targetSlot, visibleSlots);
+      const targetHasTab = Boolean(targetItem);
+      if (!targetIsUsable) {
+        result.targets[zone] = null;
+        result.move[zone] = directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, visibleSlots, targets);
+        result.swap[zone] = false;
+        continue;
+      }
+      result.targets[zone] = targetSlot;
+      result.move[zone] = true;
+      result.swap[zone] = targetHasTab && !tabIsPinned(targetItem) && !paneIsPlaceholder(targetSlot, slots);
+      continue;
+    }
+    result.targets[zone] = null;
+    result.move[zone] = directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, visibleSlots, targets);
+    result.swap[zone] = false;
+  }
+  return Object.freeze({
+    move: Object.freeze(result.move),
+    swap: Object.freeze(result.swap),
+    targets: Object.freeze(result.targets),
+  });
+}
+
+// Compatibility adapter for callers that only need the Move availability map.
+function tabSplitCapabilities(item, sourceSlot = slotForItem(item), slots = layoutSlots) {
+  return tabDirectionalActionCapabilities(item, sourceSlot, slots).move;
+}
+
+function tabCanFillWorkspace(item, slots = layoutSlots) {
+  const sourceSlot = slotForItem(item, slots);
+  return Boolean(
+    isLayoutItem(item)
+      && sourceSlot
+      && layoutLeafSlots(slots[layoutTreeKey]).length > 1
+      && !paneIsPlaceholder(sourceSlot, slots),
+  );
+}
+
+function tabWorkspaceIsFilled(item) {
+  return filledWorkspaceLayout?.item === item;
+}
+
+function toggleTabWorkspaceFill(item) {
+  if (!isLayoutItem(item)) return false;
+  if (tabWorkspaceIsFilled(item)) {
+    const saved = filledWorkspaceLayout;
+    filledWorkspaceLayout = null;
+    applyLayoutSlots(cloneLayoutSlots(saved.slots), {
+      focusSession: item,
+      message: t('layout.status.restored', {item: itemLabel(item)}),
+      preserveFilledWorkspaceLayout: true,
+      preservePlaceholderSlots: true,
+      prune: false,
+    });
+    return true;
+  }
+  if (!tabCanFillWorkspace(item)) return false;
+  const sourceSlot = slotForItem(item);
+  const next = emptyLayoutSlots();
+  next[sourceSlot] = paneStateForLayoutSlot(sourceSlot);
+  next[layoutTreeKey] = leafNode(sourceSlot);
+  filledWorkspaceLayout = {item, slots: cloneLayoutSlots(layoutSlots)};
+  applyLayoutSlots(next, {
+    focusSession: item,
+    message: t('layout.status.expanded', {item: itemLabel(item)}),
+    preserveFilledWorkspaceLayout: true,
+    preservePlaceholderSlots: true,
+    prune: false,
+  });
+  return true;
+}
+
+async function moveLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  if (capabilities.move[zone] !== true) return false;
+  const targetSlot = capabilities.targets[zone];
+  if (targetSlot) {
+    await moveSessionToSlot(item, targetSlot, sourceSlot, 0, {preserveSourcePlaceholder: true});
+    return true;
+  }
+  return splitLayoutItemAtSlot(item, sourceSlot, zone, sourceSlot, null, {
+    forceSplitEmpty: true,
+    preserveSourcePlaceholder: true,
+  });
+}
+
+async function swapLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  const targetSlot = capabilities.targets[zone];
+  if (capabilities.swap[zone] !== true || !targetSlot) return false;
+  const targetItem = activeItemForSide(targetSlot);
+  if (!targetItem) return false;
+  const next = cloneLayoutSlots(layoutSlots);
+  const sourceTabs = paneTabs(sourceSlot, next).map(tab => tab === item ? targetItem : tab);
+  const targetTabs = paneTabs(targetSlot, next).map(tab => tab === targetItem ? item : tab);
+  next[sourceSlot] = paneStateWithTabs(sourceTabs, targetItem);
+  next[targetSlot] = paneStateWithTabs(targetTabs, item);
+  applyLayoutSlots(next, {focusSession: item, prune: false});
+  return true;
+}
+
+// Existing callers use the old verb. Keep it as the one-line alias so Split and Move cannot drift.
+async function splitLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  return moveLayoutItemDirectional(item, sourceSlot, zone);
 }
 
 async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pct = null) {
@@ -29512,6 +30058,7 @@ const dockviewContentComponentName = 'yolomux-panel';
 const dockviewTabComponentName = 'yolomux-tab';
 const dockviewPanelRenderer = 'onlyWhenVisible';
 const dockviewRootId = 'dockviewRoot';
+const dockviewEmptyPaneItemPrefix = '__dockview-empty-pane__:';
 // named geometry/timing constants for the Dockview layer (were repeated unnamed literals).
 const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a header drag is treated as a drag
 const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
@@ -29539,6 +30086,20 @@ const dockviewLayoutState = {
   panePointerDragSuppressedUntil: 0,
   tabActivationPerf: null,
 };
+
+function dockviewEmptyPaneItem(slot) {
+  return `${dockviewEmptyPaneItemPrefix}${encodeURIComponent(String(slot || ''))}`;
+}
+
+function dockviewEmptyPaneSlot(item) {
+  const text = String(item || '');
+  if (!text.startsWith(dockviewEmptyPaneItemPrefix)) return null;
+  try {
+    return decodeURIComponent(text.slice(dockviewEmptyPaneItemPrefix.length)) || null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function dockviewBeginTabActivationPerf(item) {
   const previous = dockviewLayoutState.tabActivationPerf;
@@ -30689,6 +31250,20 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
       minimumHeight: minSplitPaneHeightPx(),
     };
   }
+  for (const slot of layoutSlotKeys(slots)) {
+    if (!paneIsPlaceholder(slot, slots)) continue;
+    const item = dockviewEmptyPaneItem(slot);
+    panels[item] = {
+      id: item,
+      contentComponent: dockviewContentComponentName,
+      tabComponent: dockviewTabComponentName,
+      title: t('pane.empty'),
+      renderer: dockviewPanelRenderer,
+      params: {item},
+      minimumWidth: minSplitPaneWidthPx(),
+      minimumHeight: minSplitPaneHeightPx(),
+    };
+  }
   return {
     grid: {
       root: dockviewSerializedNodeFromLayout(tree, slots, rootOrientation),
@@ -30746,14 +31321,18 @@ function flattenLayoutNodeForDirection(node, slots, direction, weight = 1) {
 function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
   const tabs = paneTabs(slot, slots);
   const groupId = slot || nextLayoutSlot(slots);
+  const placeholder = paneIsPlaceholder(slot, slots);
   dockviewLayoutState.groupSlots.set(groupId, groupId);
   return {
     type: 'leaf',
     data: {
       id: groupId,
-      views: tabs.slice(),
-      activeView: activeItemForSide(slot, slots) || tabs[0],
-      hideHeader: tabs.length === 1 && isFileExplorerItem(tabs[0]),
+      // Dockview does not visually retain a zero-view group. Its synthetic, headerless panel
+      // gives our existing empty-pane renderer a real group to occupy while keeping app state
+      // explicitly tab-free.
+      views: placeholder ? [dockviewEmptyPaneItem(groupId)] : tabs.slice(),
+      activeView: placeholder ? dockviewEmptyPaneItem(groupId) : (activeItemForSide(slot, slots) || tabs[0]),
+      hideHeader: placeholder || (tabs.length === 1 && isFileExplorerItem(tabs[0])),
     },
     size: Math.max(1, Math.round(weight)),
     visible: true,
@@ -30810,7 +31389,9 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
       const group = node.data || {};
       const slot = dockviewSlotForGroupId(group.id, usedSlots);
       usedSlots.add(slot);
-      let tabs = (Array.isArray(group.views) ? group.views : [])
+      const views = Array.isArray(group.views) ? group.views : [];
+      let tabs = views
+        .filter(view => dockviewEmptyPaneSlot(view) === null)
         .map(resolveLayoutItem)
         .filter(item => isLayoutItem(item));
       let activeView = resolveLayoutItem(group.activeView);
@@ -30820,8 +31401,11 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
         activeView = activeItemForSide(slot, previous) || fileExplorerItemId;
         dockviewLayoutState.reloadAfterAdoption = true;
       }
-      next[slot] = paneStateWithTabs(tabs, activeView);
-      return paneHasLayoutContent(slot, next) ? leafNode(slot) : null;
+      // Dockview keeps an explicit zero-tab group after a directional Move so the user has the
+      // empty half they asked for. It is not stale layout: retain it as our placeholder pane
+      // instead of dropping the leaf while translating Dockview back into app state.
+      next[slot] = tabs.length ? paneStateWithTabs(tabs, activeView) : emptyPlaceholderPaneState();
+      return leafNode(slot);
     }
     const children = (Array.isArray(node.data) ? node.data : [])
       .map(child => ({
@@ -30833,7 +31417,7 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
   };
   next[layoutTreeKey] = parse(data?.grid?.root, data?.grid?.orientation || 'HORIZONTAL');
   preserveDockviewDockedFileExplorerSplit(next, previous);
-  return compactLayoutSlots(next);
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
 }
 
 function dockviewGroupId(group) {
@@ -30972,6 +31556,12 @@ function createDockviewPanelRenderer() {
   let panel = null;
   const mount = params => {
     item = params?.params?.item || params?.api?.id || item;
+    const emptySlot = dockviewEmptyPaneSlot(item);
+    if (emptySlot) {
+      panel = null;
+      element.replaceChildren(renderEmptyPane(emptySlot));
+      return;
+    }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
@@ -31155,6 +31745,11 @@ function createDockviewTabRenderer() {
   let disposables = [];
   const render = () => {
     if (!item) return;
+    if (dockviewEmptyPaneSlot(item)) {
+      element.hidden = true;
+      element.replaceChildren();
+      return;
+    }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
       const popover = paneTabPopoverForAnchor(element);
@@ -31169,7 +31764,7 @@ function createDockviewTabRenderer() {
       bindPaneTabPopover(element, item);
     } else if (!isVirtualItem(item)) {
       bindPaneTabPopover(element, item);
-    }
+    } else bindTabInteraction({anchor: element, item, sourceSlot: () => slotForItem(item)});
   };
   const dispose = () => {
     cleanupDetachedPaneTabPopover(element);
@@ -31231,12 +31826,6 @@ function createDockviewTabRenderer() {
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
-  });
-  element.addEventListener('contextmenu', event => {
-    if (!isPinnableTab(item) && !isTmuxSession(item)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showTabContextMenu(item, event.clientX, event.clientY, {tab: element});
   });
   return {
     element,
@@ -31870,8 +32459,22 @@ function renderEmptyPane(slot) {
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
   panel.setAttribute('aria-label', t('pane.empty'));
-  panel.appendChild(document.createElement('div'));
-  panel.children[0].className = 'empty-pane-fill';
+  const fill = document.createElement('div');
+  fill.className = 'empty-pane-fill';
+  const title = document.createElement('strong');
+  title.textContent = t('pane.dropTab');
+  const hint = document.createElement('span');
+  hint.className = 'empty-pane-hint';
+  hint.textContent = t('pane.empty');
+  const add = makeButton({
+    className: 'empty-pane-add control-active-hover',
+    label: t('pane.addTab'),
+    title: t('topbar.search.title', {mod: isMacPlatform() ? 'Cmd' : 'Ctrl'}),
+    ariaLabel: t('topbar.search.aria'),
+    onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
+  });
+  fill.append(title, hint, add);
+  panel.appendChild(fill);
   return panel;
 }
 
@@ -32132,7 +32735,7 @@ function createPaneTab(side, item, displayContext = {}) {
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
-  }
+  } else bindTabInteraction({anchor: tab, item, sourceSlot: () => side});
   tab.setAttribute('aria-label', paneTabAriaLabel(item));
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
@@ -32182,13 +32785,6 @@ function createPaneTab(side, item, displayContext = {}) {
       beginPaneTabRename(tab, item);
     });
   }
-  if (isPinnableTab(item)) {
-    tab.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      showTabContextMenu(item, event.clientX, event.clientY, {tab});
-    });
-  }
   bindPaneTabNativeDragSource(tab, item, () => side);
   return tab;
 }
@@ -32232,32 +32828,24 @@ function beginFileTabRename(tab, item) {
 
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
-  if (!popover) return;
+  if (!popover) return bindTabInteraction({anchor: tab, item: session});
   const detached = tab.classList?.contains('dockview-pane-tab') === true
     || tab.classList?.contains('tabber-session-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
-    onOpen: () => maybeLoadFileTabForPopover(tab, session),
-    onStateOpen: () => popover.classList.add('popover-open'),
-    onClose: () => popover.classList.remove('popover-open'),
-  });
-}
-
-function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
-  createHoverPopover({
-    anchor,
-    popover,
-    showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
-    hideDelay: () => popoverHideDelayMs,
-    canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
-    onQueue: position,
-    onOpen: event => {
-      options.onStateOpen?.(event);
-      options.onOpen?.(event);
+  return bindTabInteraction({
+    anchor: tab,
+    item: session,
+    sourceSlot: () => slotForItem(session),
+    popover: () => paneTabPopoverForAnchor(tab),
+    positionDetail: () => {
+      const currentPopover = paneTabPopoverForAnchor(tab);
+      if (currentPopover) positionPaneTabPopover(tab, currentPopover);
     },
-    onClose: options.onClose,
-    position,
-    closeOthers: () => closeOtherSessionPopovers(anchor),
+    onDetailOpen: () => {
+      paneTabPopoverForAnchor(tab)?.classList.add('popover-open');
+      maybeLoadFileTabForPopover(tab, session);
+    },
+    onDetailClose: () => paneTabPopoverForAnchor(tab)?.classList.remove('popover-open'),
   });
 }
 
@@ -32336,13 +32924,16 @@ function positionPaneTabPopover(tab, popover = null) {
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
   const bounds = viewportBounds(edgeGap);
   const maxInline = Math.max(0, bounds.right - bounds.left);
+  const useAvailableInlineWidth = narrowSingleColumnMode();
   // #45: when the live popover width measures 0 (e.g. before first paint), fall back to the popover's
   // CSS inline size (capped to the viewport) — NOT the tiny tab width. Over-estimating only pulls a
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
-  const width = Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+  const width = useAvailableInlineWidth
+    ? maxInline
+    : Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
@@ -32361,7 +32952,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
-    popover.style.maxWidth = tabberPaneRect ? inlineSize : '';
+    popover.style.maxWidth = (tabberPaneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }
@@ -60929,6 +61520,11 @@ function handleTerminalDataMeasured(session, data, options = {}) {
     ? stripTerminalQueryResponses(data)
     : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
+  // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
+  // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
+  if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
+    closeOtherSessionPopovers(null, {force: true});
+  }
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
     clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});

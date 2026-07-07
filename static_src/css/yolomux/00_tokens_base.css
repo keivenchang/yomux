@@ -15,6 +15,8 @@
   --bg: #0f1115;
   --panel: #151922;
   --panel-inactive: #202633;
+  --empty-pane-border: var(--neutral-border-strong);
+  --empty-pane-bg: color-mix(in srgb, var(--panel2) 88%, transparent);
   --panel2: #1e2430;
   --panel2-inactive: #252c3a;
   --input-bg: var(--panel2);
@@ -288,6 +290,7 @@
   --pane-resizer-hover-line-size: 5px;
   --pane-resizer-hit-inset: 5px;
   --pane-resizer-touch-handle-size: 44px;
+  --touch-target-min-size: var(--pane-resizer-touch-handle-size);
   /* Touch: the grab zone spans the full divider length (see @media pointer:coarse in
      40_layout_panes_tabs.css); the visible affordance is a small centered grip pill —
      length runs ALONG the divider, thickness runs ACROSS it — not a big filled disc. */
@@ -340,7 +343,7 @@
   --file-explorer-tree-inline-size: clamp(280px, 22vw, 340px);
   --file-explorer-editor-inline-size: clamp(420px, 42vw, 640px);
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
-  --min-split-pane-width: 320px;
+  --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
   --z-layer-background: 0;
   --z-layer-raised: 1;
@@ -704,6 +707,8 @@ body.theme-light {
   --bg: #f6f8fb;
   --panel: var(--paint-white);
   --panel-inactive: #eef2f7;
+  --empty-pane-border: var(--neutral-border-strong);
+  --empty-pane-bg: color-mix(in srgb, var(--panel2) 68%, transparent);
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
   --input-bg: var(--panel2);
@@ -1118,6 +1123,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .share-entry-heading strong,
 .share-url-primary-head > span,
 .share-users-row span,
+.tab-action-description,
 .terminal-drop-suggestion-label {
   min-width: 0;
   overflow: hidden;

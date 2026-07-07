@@ -2,6 +2,7 @@ const dockviewContentComponentName = 'yolomux-panel';
 const dockviewTabComponentName = 'yolomux-tab';
 const dockviewPanelRenderer = 'onlyWhenVisible';
 const dockviewRootId = 'dockviewRoot';
+const dockviewEmptyPaneItemPrefix = '__dockview-empty-pane__:';
 // named geometry/timing constants for the Dockview layer (were repeated unnamed literals).
 const DRAG_HYSTERESIS_PX = 8;            // px a pointer must move before a header drag is treated as a drag
 const PANE_DRAG_SUPPRESS_MS = 500;       // window after a pane drag during which pointer events are ignored
@@ -29,6 +30,20 @@ const dockviewLayoutState = {
   panePointerDragSuppressedUntil: 0,
   tabActivationPerf: null,
 };
+
+function dockviewEmptyPaneItem(slot) {
+  return `${dockviewEmptyPaneItemPrefix}${encodeURIComponent(String(slot || ''))}`;
+}
+
+function dockviewEmptyPaneSlot(item) {
+  const text = String(item || '');
+  if (!text.startsWith(dockviewEmptyPaneItemPrefix)) return null;
+  try {
+    return decodeURIComponent(text.slice(dockviewEmptyPaneItemPrefix.length)) || null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function dockviewBeginTabActivationPerf(item) {
   const previous = dockviewLayoutState.tabActivationPerf;
@@ -1179,6 +1194,20 @@ function dockviewJsonFromLayoutSlots(slots = layoutSlots) {
       minimumHeight: minSplitPaneHeightPx(),
     };
   }
+  for (const slot of layoutSlotKeys(slots)) {
+    if (!paneIsPlaceholder(slot, slots)) continue;
+    const item = dockviewEmptyPaneItem(slot);
+    panels[item] = {
+      id: item,
+      contentComponent: dockviewContentComponentName,
+      tabComponent: dockviewTabComponentName,
+      title: t('pane.empty'),
+      renderer: dockviewPanelRenderer,
+      params: {item},
+      minimumWidth: minSplitPaneWidthPx(),
+      minimumHeight: minSplitPaneHeightPx(),
+    };
+  }
   return {
     grid: {
       root: dockviewSerializedNodeFromLayout(tree, slots, rootOrientation),
@@ -1236,14 +1265,18 @@ function flattenLayoutNodeForDirection(node, slots, direction, weight = 1) {
 function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
   const tabs = paneTabs(slot, slots);
   const groupId = slot || nextLayoutSlot(slots);
+  const placeholder = paneIsPlaceholder(slot, slots);
   dockviewLayoutState.groupSlots.set(groupId, groupId);
   return {
     type: 'leaf',
     data: {
       id: groupId,
-      views: tabs.slice(),
-      activeView: activeItemForSide(slot, slots) || tabs[0],
-      hideHeader: tabs.length === 1 && isFileExplorerItem(tabs[0]),
+      // Dockview does not visually retain a zero-view group. Its synthetic, headerless panel
+      // gives our existing empty-pane renderer a real group to occupy while keeping app state
+      // explicitly tab-free.
+      views: placeholder ? [dockviewEmptyPaneItem(groupId)] : tabs.slice(),
+      activeView: placeholder ? dockviewEmptyPaneItem(groupId) : (activeItemForSide(slot, slots) || tabs[0]),
+      hideHeader: placeholder || (tabs.length === 1 && isFileExplorerItem(tabs[0])),
     },
     size: Math.max(1, Math.round(weight)),
     visible: true,
@@ -1300,7 +1333,9 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
       const group = node.data || {};
       const slot = dockviewSlotForGroupId(group.id, usedSlots);
       usedSlots.add(slot);
-      let tabs = (Array.isArray(group.views) ? group.views : [])
+      const views = Array.isArray(group.views) ? group.views : [];
+      let tabs = views
+        .filter(view => dockviewEmptyPaneSlot(view) === null)
         .map(resolveLayoutItem)
         .filter(item => isLayoutItem(item));
       let activeView = resolveLayoutItem(group.activeView);
@@ -1310,8 +1345,11 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
         activeView = activeItemForSide(slot, previous) || fileExplorerItemId;
         dockviewLayoutState.reloadAfterAdoption = true;
       }
-      next[slot] = paneStateWithTabs(tabs, activeView);
-      return paneHasLayoutContent(slot, next) ? leafNode(slot) : null;
+      // Dockview keeps an explicit zero-tab group after a directional Move so the user has the
+      // empty half they asked for. It is not stale layout: retain it as our placeholder pane
+      // instead of dropping the leaf while translating Dockview back into app state.
+      next[slot] = tabs.length ? paneStateWithTabs(tabs, activeView) : emptyPlaceholderPaneState();
+      return leafNode(slot);
     }
     const children = (Array.isArray(node.data) ? node.data : [])
       .map(child => ({
@@ -1323,7 +1361,7 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
   };
   next[layoutTreeKey] = parse(data?.grid?.root, data?.grid?.orientation || 'HORIZONTAL');
   preserveDockviewDockedFileExplorerSplit(next, previous);
-  return compactLayoutSlots(next);
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
 }
 
 function dockviewGroupId(group) {
@@ -1462,6 +1500,12 @@ function createDockviewPanelRenderer() {
   let panel = null;
   const mount = params => {
     item = params?.params?.item || params?.api?.id || item;
+    const emptySlot = dockviewEmptyPaneSlot(item);
+    if (emptySlot) {
+      panel = null;
+      element.replaceChildren(renderEmptyPane(emptySlot));
+      return;
+    }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
@@ -1645,6 +1689,11 @@ function createDockviewTabRenderer() {
   let disposables = [];
   const render = () => {
     if (!item) return;
+    if (dockviewEmptyPaneSlot(item)) {
+      element.hidden = true;
+      element.replaceChildren();
+      return;
+    }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
       const popover = paneTabPopoverForAnchor(element);
@@ -1659,7 +1708,7 @@ function createDockviewTabRenderer() {
       bindPaneTabPopover(element, item);
     } else if (!isVirtualItem(item)) {
       bindPaneTabPopover(element, item);
-    }
+    } else bindTabInteraction({anchor: element, item, sourceSlot: () => slotForItem(item)});
   };
   const dispose = () => {
     cleanupDetachedPaneTabPopover(element);
@@ -1721,12 +1770,6 @@ function createDockviewTabRenderer() {
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
-  });
-  element.addEventListener('contextmenu', event => {
-    if (!isPinnableTab(item) && !isTmuxSession(item)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showTabContextMenu(item, event.clientX, event.clientY, {tab: element});
   });
   return {
     element,

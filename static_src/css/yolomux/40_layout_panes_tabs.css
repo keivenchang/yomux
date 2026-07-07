@@ -802,11 +802,23 @@ body.theme-light .drop-slot.drag-over {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  border: 1px dashed #94a2b5;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-6);
+  border: 1px dashed var(--empty-pane-border);
   border-radius: var(--radius-md);
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 46%),
-    rgba(255, 255, 255, 0.012);
+  background: var(--empty-pane-bg);
+}
+.empty-pane-hint {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.empty-pane-add {
+  min-width: var(--touch-target-min-size);
+  min-height: var(--touch-target-min-size);
+  padding-inline: var(--space-7);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .panel.file-drag-over::before {
   content: attr(data-file-drop-label);
@@ -2118,12 +2130,6 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 body.theme-light .panel.empty-pane-panel {
   background: var(--panel2);
   border-color: var(--pc-control-border);
-}
-body.theme-light .empty-pane-fill {
-  border-color: var(--pc-control-border);
-  background:
-    linear-gradient(135deg, rgb(var(--overlay-slate-rgb) / 0.045), rgb(var(--overlay-slate-rgb) / 0) 46%),
-    rgb(var(--overlay-slate-rgb) / 0.018);
 }
 body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */

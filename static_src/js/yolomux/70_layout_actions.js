@@ -490,7 +490,7 @@ function sessionTerminalIsLive(session) {
   return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
 }
 
-async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
+async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
   if (!isLayoutItem(session) || !targetSlot) return;
   // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
   // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
@@ -499,7 +499,11 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
-  const next = layoutWithoutItem(session);
+  const next = layoutWithoutItem(session, {
+    // Directional Move deliberately leaves the source as an explicit drop target when its
+    // final tab leaves. Ordinary tab drag/move continues to compact that now-empty slot.
+    preserveRemovedSlot: options.preserveSourcePlaceholder === true,
+  });
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
   if (!next[targetSlot]) next[targetSlot] = emptyPaneState();
   const tabs = next[targetSlot].tabs;
@@ -514,6 +518,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
+    preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
     message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
   });
 }
@@ -574,29 +579,276 @@ function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct
   return splitNode('row', children[0], children[1], docked.pct);
 }
 
-async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
-  if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
+async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, pct = null, options = {}) {
+  if (!isLayoutItem(item) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return false;
+  // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
+  // empty source while it is pending; the directional action still owes the user the explicit peer
+  // they chose when the gesture began.
+  const preserveRemovedSlot = options.preserveSourcePlaceholder === true
+    && sourceSlot === targetSlot
+    && paneTabs(sourceSlot).length === 1;
+  if (isTmuxSession(item)) {
+    const ensured = await ensureSession(item);
     if (!ensured) return;
   }
-  const next = layoutWithoutItem(session, {preserveEmptySlot: shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) ? sourceSlot : null});
+  // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
+  // operates on what the user can see, so that old group cannot become a hidden third pane.
+  const sourceSlots = options.forceSplitEmpty === true
+    ? layoutSlotsWithoutUnrenderedPlaceholders()
+    : layoutSlots;
+  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot)
+    ? sourceSlot
+    : null;
+  const next = layoutWithoutItemFromSlots(item, sourceSlots, {
+    preserveEmptySlot,
+    preserveRemovedSlot,
+  });
   const targetTabs = paneTabs(targetSlot, next);
-  if (!targetTabs.length) {
-    await moveSessionToSlot(session, targetSlot, sourceSlot);
-    return;
+  if (!targetTabs.length && options.forceSplitEmpty !== true) {
+    await moveSessionToSlot(item, targetSlot, sourceSlot);
+    return true;
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([session], session);
+  next[newSlot] = paneStateWithTabs([item], item);
   const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
   const existingNode = leafNode(targetSlot);
   const newNode = leafNode(newSlot);
-  const splitPct = splitPercentForNewItem(session, zone, pct);
+  const splitPct = splitPercentForNewItem(item, zone, pct);
   const replacement = zone === 'right' || zone === 'bottom'
     ? splitNode(direction, existingNode, newNode, splitPct)
     : splitNode(direction, newNode, existingNode, splitPct);
   next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
-  applyLayoutSlots(next, {focusSession: session, prune: false});
+  applyLayoutSlots(next, {
+    focusSession: item,
+    preservePlaceholderSlots: preserveRemovedSlot,
+    prune: false,
+  });
+  return true;
+}
+
+async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
+  return splitLayoutItemAtSlot(session, targetSlot, zone, sourceSlot, pct);
+}
+
+function layoutSlotsWithoutUnrenderedPlaceholders(slots = layoutSlots) {
+  const next = emptyLayoutSlots();
+  const copy = node => {
+    if (!node) return null;
+    if (node.slot) {
+      const slot = node.slot;
+      if (!paneHasLayoutContent(slot, slots)) return null;
+      // An empty group with no DOM rectangle is a Dockview bookkeeping artifact. A rendered
+      // placeholder remains a real user-visible pane and must keep its position.
+      if (paneIsPlaceholder(slot, slots) && !layoutSlotScreenRect(slot)) return null;
+      next[slot] = paneStateForLayoutSlot(slot, slots);
+      return leafNode(slot);
+    }
+    const children = (node.children || []).map(copy).filter(Boolean);
+    if (children.length === 1) return children[0];
+    if (children.length < 2) return null;
+    return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
+  };
+  next[layoutTreeKey] = copy(slots[layoutTreeKey]);
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+}
+
+function directionalRectValue(rect, edge) {
+  if (!rect) return 0;
+  if (Number.isFinite(Number(rect[edge]))) return Number(rect[edge]);
+  if (edge === 'right') return Number(rect.left || 0) + Number(rect.width || 0);
+  if (edge === 'bottom') return Number(rect.top || 0) + Number(rect.height || 0);
+  return Number(rect[edge] || 0);
+}
+
+function directionalRectOverlap(firstStart, firstEnd, secondStart, secondEnd) {
+  return Math.max(0, Math.min(firstEnd, secondEnd) - Math.max(firstStart, secondStart));
+}
+
+function layoutSlotsTouchingDirection(sourceSlot, zone, slots = layoutSlots) {
+  const sourceRect = layoutSlotScreenRect(sourceSlot);
+  if (!sourceRect) return [];
+  const tolerance = directionalPaneAdjacencyTolerancePx;
+  const sourceLeft = directionalRectValue(sourceRect, 'left');
+  const sourceRight = directionalRectValue(sourceRect, 'right');
+  const sourceTop = directionalRectValue(sourceRect, 'top');
+  const sourceBottom = directionalRectValue(sourceRect, 'bottom');
+  return layoutSlotKeys(slots).filter(targetSlot => {
+    if (targetSlot === sourceSlot) return false;
+    const targetRect = layoutSlotScreenRect(targetSlot);
+    if (!targetRect) return false;
+    const targetLeft = directionalRectValue(targetRect, 'left');
+    const targetRight = directionalRectValue(targetRect, 'right');
+    const targetTop = directionalRectValue(targetRect, 'top');
+    const targetBottom = directionalRectValue(targetRect, 'bottom');
+    if (zone === 'left') {
+      return Math.abs(targetRight - sourceLeft) <= tolerance
+        && directionalRectOverlap(sourceTop, sourceBottom, targetTop, targetBottom) > tolerance;
+    }
+    if (zone === 'right') {
+      return Math.abs(targetLeft - sourceRight) <= tolerance
+        && directionalRectOverlap(sourceTop, sourceBottom, targetTop, targetBottom) > tolerance;
+    }
+    if (zone === 'top') {
+      return Math.abs(targetBottom - sourceTop) <= tolerance
+        && directionalRectOverlap(sourceLeft, sourceRight, targetLeft, targetRight) > tolerance;
+    }
+    return Math.abs(targetTop - sourceBottom) <= tolerance
+      && directionalRectOverlap(sourceLeft, sourceRight, targetLeft, targetRight) > tolerance;
+  });
+}
+
+function directionalLocalSplitHasRoom(rect, zone) {
+  if (zone === 'left' || zone === 'right') return rect.width / 2 >= minSplitPaneWidthPx();
+  return rect.height / 2 >= minSplitPaneHeightPx();
+}
+
+function directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, slots, targets) {
+  const directTargets = Array.isArray(targets) ? targets : layoutSlotsTouchingDirection(sourceSlot, zone, slots);
+  const finderOnly = directTargets.length === 1 && isFileExplorerItem(activeItemForSide(directTargets[0], slots));
+  if (directTargets.length && !finderOnly) return false;
+  const oppositeZone = zone === 'left' ? 'right'
+    : zone === 'right' ? 'left'
+      : zone === 'top' ? 'bottom'
+        : 'top';
+  // Finder/Differ is a reserved pane, not a peer tab target. It must not block creating a
+  // local terminal split on the content side of its boundary.
+  const oppositeContentTargets = layoutSlotsTouchingDirection(sourceSlot, oppositeZone, slots)
+    .filter(slot => !isFileExplorerItem(activeItemForSide(slot, slots)));
+  return oppositeContentTargets.length === 0 && directionalLocalSplitHasRoom(sourceRect, zone);
+}
+
+// Directional tab actions resolve visible pane geometry first. A layout tree can encode the same
+// rendered grid in more than one way; users must get the same Move/Swap choices in both forms.
+// If a side touches more than one leaf, moving into an arbitrary one would be surprising, so that
+// direction is intentionally unavailable rather than using a hidden tree-order tie breaker.
+function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), slots = layoutSlots) {
+  const visibleSlots = layoutSlotsWithoutUnrenderedPlaceholders(slots);
+  const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const allowed = Boolean(
+    isLayoutItem(item)
+      && sourceSlot
+      && !narrowSingleColumnMode()
+      && !tabIsPinned(item)
+      && !isFileExplorerItem(activeItemForSide(sourceSlot, slots))
+      && sourceRect,
+  );
+  const result = {move: {}, swap: {}, targets: {}};
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (!allowed) {
+      result.move[zone] = false;
+      result.swap[zone] = false;
+      result.targets[zone] = null;
+      continue;
+    }
+    const targets = layoutSlotsTouchingDirection(sourceSlot, zone, visibleSlots);
+    if (targets.length === 1) {
+      const targetSlot = targets[0];
+      const targetIsUsable = !isFileExplorerItem(activeItemForSide(targetSlot, visibleSlots));
+      const targetItem = activeItemForSide(targetSlot, visibleSlots);
+      const targetHasTab = Boolean(targetItem);
+      if (!targetIsUsable) {
+        result.targets[zone] = null;
+        result.move[zone] = directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, visibleSlots, targets);
+        result.swap[zone] = false;
+        continue;
+      }
+      result.targets[zone] = targetSlot;
+      result.move[zone] = true;
+      result.swap[zone] = targetHasTab && !tabIsPinned(targetItem) && !paneIsPlaceholder(targetSlot, slots);
+      continue;
+    }
+    result.targets[zone] = null;
+    result.move[zone] = directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, visibleSlots, targets);
+    result.swap[zone] = false;
+  }
+  return Object.freeze({
+    move: Object.freeze(result.move),
+    swap: Object.freeze(result.swap),
+    targets: Object.freeze(result.targets),
+  });
+}
+
+// Compatibility adapter for callers that only need the Move availability map.
+function tabSplitCapabilities(item, sourceSlot = slotForItem(item), slots = layoutSlots) {
+  return tabDirectionalActionCapabilities(item, sourceSlot, slots).move;
+}
+
+function tabCanFillWorkspace(item, slots = layoutSlots) {
+  const sourceSlot = slotForItem(item, slots);
+  return Boolean(
+    isLayoutItem(item)
+      && sourceSlot
+      && layoutLeafSlots(slots[layoutTreeKey]).length > 1
+      && !paneIsPlaceholder(sourceSlot, slots),
+  );
+}
+
+function tabWorkspaceIsFilled(item) {
+  return filledWorkspaceLayout?.item === item;
+}
+
+function toggleTabWorkspaceFill(item) {
+  if (!isLayoutItem(item)) return false;
+  if (tabWorkspaceIsFilled(item)) {
+    const saved = filledWorkspaceLayout;
+    filledWorkspaceLayout = null;
+    applyLayoutSlots(cloneLayoutSlots(saved.slots), {
+      focusSession: item,
+      message: t('layout.status.restored', {item: itemLabel(item)}),
+      preserveFilledWorkspaceLayout: true,
+      preservePlaceholderSlots: true,
+      prune: false,
+    });
+    return true;
+  }
+  if (!tabCanFillWorkspace(item)) return false;
+  const sourceSlot = slotForItem(item);
+  const next = emptyLayoutSlots();
+  next[sourceSlot] = paneStateForLayoutSlot(sourceSlot);
+  next[layoutTreeKey] = leafNode(sourceSlot);
+  filledWorkspaceLayout = {item, slots: cloneLayoutSlots(layoutSlots)};
+  applyLayoutSlots(next, {
+    focusSession: item,
+    message: t('layout.status.expanded', {item: itemLabel(item)}),
+    preserveFilledWorkspaceLayout: true,
+    preservePlaceholderSlots: true,
+    prune: false,
+  });
+  return true;
+}
+
+async function moveLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  if (capabilities.move[zone] !== true) return false;
+  const targetSlot = capabilities.targets[zone];
+  if (targetSlot) {
+    await moveSessionToSlot(item, targetSlot, sourceSlot, 0, {preserveSourcePlaceholder: true});
+    return true;
+  }
+  return splitLayoutItemAtSlot(item, sourceSlot, zone, sourceSlot, null, {
+    forceSplitEmpty: true,
+    preserveSourcePlaceholder: true,
+  });
+}
+
+async function swapLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  const targetSlot = capabilities.targets[zone];
+  if (capabilities.swap[zone] !== true || !targetSlot) return false;
+  const targetItem = activeItemForSide(targetSlot);
+  if (!targetItem) return false;
+  const next = cloneLayoutSlots(layoutSlots);
+  const sourceTabs = paneTabs(sourceSlot, next).map(tab => tab === item ? targetItem : tab);
+  const targetTabs = paneTabs(targetSlot, next).map(tab => tab === targetItem ? item : tab);
+  next[sourceSlot] = paneStateWithTabs(sourceTabs, targetItem);
+  next[targetSlot] = paneStateWithTabs(targetTabs, item);
+  applyLayoutSlots(next, {focusSession: item, prune: false});
+  return true;
+}
+
+// Existing callers use the old verb. Keep it as the one-line alias so Split and Move cannot drift.
+async function splitLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
+  return moveLayoutItemDirectional(item, sourceSlot, zone);
 }
 
 async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pct = null) {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-default_port="${YOLOMUX_PORT:-7777}"
+default_port="${YOLOMUX_PORT:-7000}"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 dev_mode="auto"
@@ -14,7 +14,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. Defaults to port 7777. Non-7777 ports use --dev by default.
+Restart this checkout's YOLOmux server. Defaults to port 7000. Non-7000 ports use --dev by default.
 
 Examples:
   ./boot.sh
@@ -122,7 +122,7 @@ use_dev_mode() {
   case "$dev_mode" in
     always) return 0 ;;
     never) return 1 ;;
-    auto) [[ "$port" != "7777" ]] ;;
+    auto) [[ "$port" != "7000" ]] ;;
     *) die "invalid dev mode: $dev_mode" ;;
   esac
 }

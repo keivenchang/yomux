@@ -318,6 +318,110 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .session-context-menu {
   min-width: 178px;
 }
+.tab-action-sheet {
+  width: min(calc(100vw - (2 * var(--popover-edge-gap))), 38rem);
+  max-height: min(72vh, 42rem);
+  overflow: auto;
+  transform: none;
+}
+.tab-action-description {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: var(--space-4) var(--space-5);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  cursor: pointer;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  text-align: start;
+}
+.tab-action-description:hover,
+.tab-action-description:focus-visible {
+  background: var(--overlay-option-hover-bg);
+  outline: none;
+}
+.tab-directional-action-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+.tab-split-actions {
+  display: grid;
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-rows: var(--touch-target-min-size);
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tab-directional-actions-title {
+  align-self: center;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tab-split-actions .tab-split-action[data-direction="left"] { grid-column: 2; }
+.tab-split-actions .tab-split-action[data-direction="right"] { grid-column: 3; }
+.tab-split-actions .tab-split-action[data-direction="top"] { grid-column: 4; }
+.tab-split-actions .tab-split-action[data-direction="bottom"] { grid-column: 5; }
+.terminal-context-menu .tab-split-actions .tab-split-action {
+  display: grid;
+  place-items: center;
+  min-height: var(--touch-target-min-size);
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  text-align: center;
+}
+.tab-split-actions .tab-split-action .context-menu-line {
+  display: grid;
+  place-items: center;
+}
+.tab-split-actions .tab-split-action .context-menu-label {
+  display: none;
+}
+.tab-directional-action-icon {
+  --tab-directional-icon-inline-size: 32px;
+  --tab-directional-icon-block-size: 24px;
+  position: relative;
+  display: block;
+  inline-size: var(--tab-directional-icon-inline-size);
+  block-size: var(--tab-directional-icon-block-size);
+  box-sizing: border-box;
+  border: var(--app-modal-border-width) solid currentColor;
+  border-radius: var(--radius-md);
+}
+.tab-directional-action-icon::after {
+  content: "";
+  position: absolute;
+  border-radius: var(--radius-sm);
+  background: currentColor;
+}
+.tab-directional-action-icon--left::after,
+.tab-directional-action-icon--right::after {
+  inset-block: var(--space-4);
+  inline-size: var(--space-7);
+}
+.tab-directional-action-icon--left::after { inset-inline-start: var(--space-3); }
+.tab-directional-action-icon--right::after { inset-inline-end: var(--space-3); }
+.tab-directional-action-icon--top::after,
+.tab-directional-action-icon--bottom::after {
+  inset-inline: var(--space-4);
+  block-size: var(--space-7);
+}
+.tab-directional-action-icon--top::after { inset-block-start: var(--space-3); }
+.tab-directional-action-icon--bottom::after { inset-block-end: var(--space-3); }
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:hover,
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:focus-visible {
+  color: var(--chrome-text-strong);
+  background: var(--overlay-option-hover-bg);
+}
+.terminal-context-menu .tab-split-actions .tab-split-action:disabled {
+  border-color: transparent;
+}
 .session-rename-backdrop {
   z-index: var(--z-topbar);
   place-items: center;

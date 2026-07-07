@@ -30,7 +30,7 @@ def test_boot_print_command_defaults_to_prod_port():
     command = printable_command_text(result.stdout)
     assert "yolomux.py" in command
     assert "--host 127.0.0.1" in command
-    assert "--port 7777" in command
+    assert "--port 7000" in command
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command

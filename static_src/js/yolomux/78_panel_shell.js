@@ -369,8 +369,22 @@ function renderEmptyPane(slot) {
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
   panel.setAttribute('aria-label', t('pane.empty'));
-  panel.appendChild(document.createElement('div'));
-  panel.children[0].className = 'empty-pane-fill';
+  const fill = document.createElement('div');
+  fill.className = 'empty-pane-fill';
+  const title = document.createElement('strong');
+  title.textContent = t('pane.dropTab');
+  const hint = document.createElement('span');
+  hint.className = 'empty-pane-hint';
+  hint.textContent = t('pane.empty');
+  const add = makeButton({
+    className: 'empty-pane-add control-active-hover',
+    label: t('pane.addTab'),
+    title: t('topbar.search.title', {mod: isMacPlatform() ? 'Cmd' : 'Ctrl'}),
+    ariaLabel: t('topbar.search.aria'),
+    onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
+  });
+  fill.append(title, hint, add);
+  panel.appendChild(fill);
   return panel;
 }
 
@@ -631,7 +645,7 @@ function createPaneTab(side, item, displayContext = {}) {
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
-  }
+  } else bindTabInteraction({anchor: tab, item, sourceSlot: () => side});
   tab.setAttribute('aria-label', paneTabAriaLabel(item));
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
@@ -681,13 +695,6 @@ function createPaneTab(side, item, displayContext = {}) {
       beginPaneTabRename(tab, item);
     });
   }
-  if (isPinnableTab(item)) {
-    tab.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      showTabContextMenu(item, event.clientX, event.clientY, {tab});
-    });
-  }
   bindPaneTabNativeDragSource(tab, item, () => side);
   return tab;
 }
@@ -731,32 +738,24 @@ function beginFileTabRename(tab, item) {
 
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
-  if (!popover) return;
+  if (!popover) return bindTabInteraction({anchor: tab, item: session});
   const detached = tab.classList?.contains('dockview-pane-tab') === true
     || tab.classList?.contains('tabber-session-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
-    onOpen: () => maybeLoadFileTabForPopover(tab, session),
-    onStateOpen: () => popover.classList.add('popover-open'),
-    onClose: () => popover.classList.remove('popover-open'),
-  });
-}
-
-function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
-  createHoverPopover({
-    anchor,
-    popover,
-    showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
-    hideDelay: () => popoverHideDelayMs,
-    canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
-    onQueue: position,
-    onOpen: event => {
-      options.onStateOpen?.(event);
-      options.onOpen?.(event);
+  return bindTabInteraction({
+    anchor: tab,
+    item: session,
+    sourceSlot: () => slotForItem(session),
+    popover: () => paneTabPopoverForAnchor(tab),
+    positionDetail: () => {
+      const currentPopover = paneTabPopoverForAnchor(tab);
+      if (currentPopover) positionPaneTabPopover(tab, currentPopover);
     },
-    onClose: options.onClose,
-    position,
-    closeOthers: () => closeOtherSessionPopovers(anchor),
+    onDetailOpen: () => {
+      paneTabPopoverForAnchor(tab)?.classList.add('popover-open');
+      maybeLoadFileTabForPopover(tab, session);
+    },
+    onDetailClose: () => paneTabPopoverForAnchor(tab)?.classList.remove('popover-open'),
   });
 }
 
@@ -835,13 +834,16 @@ function positionPaneTabPopover(tab, popover = null) {
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
   const bounds = viewportBounds(edgeGap);
   const maxInline = Math.max(0, bounds.right - bounds.left);
+  const useAvailableInlineWidth = narrowSingleColumnMode();
   // #45: when the live popover width measures 0 (e.g. before first paint), fall back to the popover's
   // CSS inline size (capped to the viewport) — NOT the tiny tab width. Over-estimating only pulls a
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
-  const width = Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+  const width = useAvailableInlineWidth
+    ? maxInline
+    : Math.min(maxInline, tabberPaneRect?.width || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
@@ -860,7 +862,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
-    popover.style.maxWidth = tabberPaneRect ? inlineSize : '';
+    popover.style.maxWidth = (tabberPaneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }

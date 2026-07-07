@@ -677,6 +677,20 @@ async function runShareThemeSuite() {
       assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
     }
     {
+      const cooldownApi = loadYolomux('', ['1']);
+      const cooldownKey = '["agent-window","1","0","%1","codex","cooldown","4000"]';
+      cooldownApi.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+      cooldownApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'codex'}]});
+      const staleCooldownPayload = {agent_windows: [
+        {kind: 'codex', state: 'idle', window_index: 0, pane_target: '%1', window_label: '0:codex', current: true, window_active: true, working_stopped_ts: 4000, cooldown_attention_key: cooldownKey, cooldown_acknowledged: false},
+      ]};
+      cooldownApi.setAutoApproveStateForTest('1', staleCooldownPayload);
+      assert.equal(cooldownApi.handleTerminalDataForTest('1', 'a', {attentionOptions: {localOnly: true, acknowledgeAgentWindowDelayMs: 0}}), true, 'typed xterm bytes acknowledge the active yellow completion');
+      assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey), true, 'typing records the generated yellow completion key');
+      cooldownApi.setAutoApproveStateForTest('1', staleCooldownPayload);
+      assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey, {cooldown_acknowledged: false}), true, 'a delayed pre-ack yellow snapshot cannot restore the active terminal badge');
+    }
+    {
       const acknowledgementApi = loadYolomux('', ['1']);
       const attentionKey = '["agent-window","1","0","%1","claude","needs-input","burst"]';
       acknowledgementApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'claude'}]});
@@ -5455,25 +5469,28 @@ async function runShareThemeSuite() {
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     api.showSessionContextMenu('1', 10, 10);
     const contextMenu = contextMenuNode();
-    assert.ok(contextMenu.children[0].innerHTML.includes('Pin Tab'), 'tab context menu starts with Pin Tab');
-    assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
-    assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
+    const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
+    assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
+    assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
+    assert.ok(pinTabRow?.innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
+    assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
     api.setPinnedTabsForTest(['1']);
     api.showSessionContextMenu('1', 20, 20);
     const pinnedContextMenu = contextMenuNode();
-    assert.ok(pinnedContextMenu.children[0].innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
-    assert.equal(pinnedContextMenu.children[0].getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
+    const unpinTabRow = Array.from(pinnedContextMenu.children).find(child => child.getAttribute('aria-label') === 'Unpin Tab');
+    assert.ok(unpinTabRow?.innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
+    assert.equal(unpinTabRow?.getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
     const filePathForMenu = '/home/test/yolomux.dev/README.md';
     api.setOpenFileStateForTest(filePathForMenu, {mtime: 1, kind: 'text', original: '# hello', content: '# hello', dirty: false});
     const fileItemForMenu = api.registerFileEditorLayoutItem(filePathForMenu);
     api.showTabContextMenu(fileItemForMenu, 30, 30);
     const fileContextMenu = contextMenuNode();
-    assert.ok(fileContextMenu.children[0].innerHTML.includes('Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
+    assert.ok(Array.from(fileContextMenu.children).some(child => child.getAttribute('aria-label') === 'Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
     const filePopoutButton = Array.from(fileContextMenu.children).find(child => child.getAttribute('aria-label') === 'Pop out');
     assert.ok(filePopoutButton, 'preview-capable file editor tabs expose Pop out in the shared tab context menu');
     for (const listener of filePopoutButton.listeners.get('click') || []) {
@@ -6644,7 +6661,7 @@ async function runShareThemeSuite() {
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
-    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
+    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), true, 'the shared 300px desktop split minimum permits a terminal below Finder at its exact boundary');
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
     const editorItem = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle', targetRect: roomyFinderDropRect}), false);
@@ -6659,7 +6676,7 @@ async function runShareThemeSuite() {
     assert.equal(api.itemInLayout('__changes__'), false, 'retired standalone Differ is pruned if it appears outside URL alias resolution');
     api.setLayoutSlotsForTest(finderOnly);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
+    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), true, 'the shared 300px split boundary also permits a normal Preferences tab below Finder');
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'left'}), false, 'Finder pane drags never advertise a pane split preview');
@@ -6670,10 +6687,10 @@ async function runShareThemeSuite() {
     normalSplitSlots[api.layoutTreeKey] = api.leafNode('slot1');
     normalSplitSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(normalSplitSlots);
-    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 620, height: 520}}), false, 'pane edge previews require enough width for both panes');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 620, height: 520}}), true, 'a 620px pane can now preview two 300px desktop panes plus the shared gutter');
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 720, height: 520}}), true);
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'bottom', targetRect: {width: 720, height: 420}}), false, 'pane edge previews require enough height for both panes');
-    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), false, 'middle drops do not preview when the target cannot display the incoming tab');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), true, 'a 300px pane can display an incoming tab without creating a split');
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 420, height: 520}}), true);
 
     const dragMatrixSlots = api.emptyLayoutSlots();

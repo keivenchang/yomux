@@ -355,6 +355,148 @@ function createHoverPopover(options) {
   return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
 }
 
+function tabInteractionControllerForApp() {
+  if (tabInteractionController) return tabInteractionController;
+  let touchPress = null;
+  let suppressContextUntil = 0;
+  const currentDescriptor = descriptor => descriptor?.anchor?.__yolomuxTabInteractionDescriptor || descriptor;
+  const close = () => {
+    touchPress = null;
+    closeOtherSessionPopovers(null, {force: true});
+    closeSessionContextMenu();
+  };
+  const pointForAnchor = anchor => {
+    const rect = anchor?.getBoundingClientRect?.();
+    return {
+      x: Math.round((rect?.left || 0) + (rect?.width || 0) / 2),
+      y: Math.round((rect?.bottom || 0) + 6),
+    };
+  };
+  const showActions = (descriptor, event = null, options = {}) => {
+    descriptor = currentDescriptor(descriptor);
+    const item = String(descriptor?.item || '').trim();
+    if (!item || (!isPinnableTab(item) && !isTmuxSession(item))) return false;
+    const eventPoint = event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? {x: event.clientX, y: event.clientY}
+      : pointForAnchor(descriptor.anchor);
+    // A touch long press is an anchored tab action, not a global bottom sheet. Use the tab's
+    // lower edge so the compact action surface opens beside the tab that owns it.
+    const point = options.presentation === 'sheet' ? pointForAnchor(descriptor.anchor) : eventPoint;
+    closeOtherSessionPopovers(null, {force: true});
+    showTabContextMenu(item, point.x, point.y, {
+      tab: descriptor.anchor,
+      sourceSlot: descriptor.sourceSlot?.() || slotForItem(item),
+      presentation: options.presentation || 'context',
+    });
+    return true;
+  };
+  const bindDetail = descriptor => {
+    const {anchor} = descriptor;
+    const detailPopover = () => {
+      const current = currentDescriptor(descriptor);
+      return typeof current?.popover === 'function' ? current.popover() : current?.popover;
+    };
+    if (!detailPopover()) return null;
+    return createHoverPopover({
+      anchor,
+      popover: detailPopover,
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      hideDelay: () => popoverHideDelayMs,
+      canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
+      onQueue: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      onOpen: event => {
+        currentDescriptor(descriptor)?.onDetailOpen?.(event);
+      },
+      onClose: event => currentDescriptor(descriptor)?.onDetailClose?.(event),
+      position: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      closeOthers: () => closeOtherSessionPopovers(anchor),
+    });
+  };
+  const bind = descriptor => {
+    const anchor = descriptor?.anchor;
+    if (!anchor) return null;
+    anchor.__yolomuxTabInteractionDescriptor = descriptor;
+    if (anchor.dataset?.tabInteractionBound === 'true') return {showActions: event => showActions(descriptor, event), close};
+    if (anchor.dataset) anchor.dataset.tabInteractionBound = 'true';
+    const detail = bindDetail(descriptor);
+    const cancelTouchPress = () => {
+      if (!touchPress || touchPress.anchor !== anchor) return;
+      clearTimer(touchPress.timer);
+      touchPress = null;
+    };
+    const movedBeyondThreshold = event => {
+      if (!touchPress || touchPress.anchor !== anchor) return false;
+      return Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > tabTouchLongPressMoveThresholdPx;
+    };
+    anchor.addEventListener('contextmenu', event => {
+      if (Date.now() < suppressContextUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor, event);
+    });
+    anchor.addEventListener('keydown', event => {
+      if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor);
+    }, true);
+    anchor.addEventListener('pointerdown', event => {
+      if (event.pointerType !== 'touch' || event.button !== 0) return;
+      cancelTouchPress();
+      const current = currentDescriptor(descriptor);
+      const item = String(current?.item || '');
+      const sourceSlot = current?.sourceSlot?.() || slotForItem(item);
+      const record = {
+        anchor,
+        x: event.clientX,
+        y: event.clientY,
+        timer: null,
+        opened: false,
+        sourceSlot,
+        priorActiveItem: sourceSlot ? activeItemForSide(sourceSlot) : '',
+      };
+      record.timer = setTimeout(() => {
+        if (touchPress !== record || movedBeyondThreshold({clientX: record.x, clientY: record.y})) return;
+        record.opened = showActions(descriptor, {clientX: record.x, clientY: record.y}, {presentation: 'sheet'});
+        if (record.opened) {
+          // Dockview activates a tab on touch pointer-down before the browser can know this is a
+          // long press. Put the prior visible tab back before opening the sheet; a long press is
+          // an action gesture, never an activation or keyboard-focus gesture.
+          if (record.sourceSlot && record.priorActiveItem && record.priorActiveItem !== item) {
+            activatePaneTab(record.sourceSlot, record.priorActiveItem);
+          }
+          suppressContextUntil = Date.now() + tabTouchLongPressDelayMs;
+        }
+      }, tabTouchLongPressDelayMs);
+      touchPress = record;
+    }, true);
+    anchor.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' && movedBeyondThreshold(event)) cancelTouchPress();
+    }, true);
+    anchor.addEventListener('pointerup', event => {
+      if (event.pointerType !== 'touch' || !touchPress || touchPress.anchor !== anchor) return;
+      const opened = touchPress.opened;
+      cancelTouchPress();
+      if (!opened) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+    anchor.addEventListener('pointercancel', cancelTouchPress, true);
+    anchor.addEventListener('dragstart', cancelTouchPress, true);
+    return {detail, showActions: event => showActions(descriptor, event), close};
+  };
+  tabInteractionController = {bind, close, showActions};
+  return tabInteractionController;
+}
+
+function bindTabInteraction(descriptor) {
+  return tabInteractionControllerForApp().bind(descriptor);
+}
+
 function cssEscape(value) {
   if (window.CSS?.escape) return CSS.escape(value);
   return String(value).replace(/["\\]/g, '\\$&');

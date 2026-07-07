@@ -71,6 +71,363 @@ def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_
     assert "Kill tmux session '1'" in result["labels"], result
 
 
+def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_script(
+        """
+        activatePaneTab('left', '1');
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        const event = new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: Math.round(rect.left + rect.width / 2),
+          clientY: Math.round(rect.bottom),
+        });
+        tab.dispatchEvent(event);
+        const menu = document.querySelector('.session-context-menu');
+        const initial = Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim());
+        const description = menu?.querySelector('.tab-action-description')?.textContent.trim() || '';
+        const descriptionNode = menu?.querySelector('.tab-action-description');
+        const descriptionStyle = descriptionNode ? (() => {
+          const style = getComputedStyle(descriptionNode);
+          return {whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow};
+        })() : null;
+        descriptionNode?.click();
+        const detailPopover = paneTabPopoverForAnchor(tab);
+        const descriptionOpensDetail = Boolean(
+          !document.querySelector('.session-context-menu')
+          && tab.classList.contains('popover-open')
+          && detailPopover?.classList.contains('popover-open')
+          && detailPopover?.textContent?.trim()
+        );
+        focusTerminalFromUserAction('2');
+        const detailClosesOnTerminalEngagement = !tab.classList.contains('popover-open')
+          && !detailPopover?.classList.contains('popover-open');
+        const keyEvent = new KeyboardEvent('keydown', {bubbles: true, cancelable: true, key: 'F10', shiftKey: true});
+        tab.dispatchEvent(keyEvent);
+        const keyboardMenu = document.querySelector('.session-context-menu');
+        return {
+          prevented: event.defaultPrevented,
+          keyboardPrevented: keyEvent.defaultPrevented,
+          active: activeItemForSide('left'),
+          initial,
+          description,
+          descriptionStyle,
+          descriptionTag: descriptionNode?.tagName || '',
+          descriptionOpensDetail,
+          detailClosesOnTerminalEngagement,
+          directionalLabels: Array.from(keyboardMenu?.querySelectorAll('.tab-split-action') || []).map(button => button.getAttribute('aria-label') || ''),
+          directionalGeometry: Array.from(keyboardMenu?.querySelectorAll('.tab-split-actions') || []).map(group => Object.fromEntries(
+            Array.from(group.querySelectorAll('.tab-split-action')).map(button => {
+              const rect = button.getBoundingClientRect();
+              const icon = button.querySelector('.tab-directional-action-icon');
+              const iconRect = icon?.getBoundingClientRect();
+              return [button.dataset.direction, {
+                iconClass: icon?.className || '',
+                iconWidth: iconRect?.width || 0,
+                iconHeight: iconRect?.height || 0,
+                left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+              }];
+            }),
+          )),
+          keyboardDescription: keyboardMenu?.querySelector('.tab-action-description')?.textContent.trim() || '',
+        };
+        """
+    )
+    assert result["prevented"] is True, result
+    assert result["keyboardPrevented"] is True and result["keyboardDescription"].startswith("More desc: 2"), result
+    assert result["active"] == "1", result
+    assert result["description"].startswith("More desc: 2"), result
+    assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
+    assert result["detailClosesOnTerminalEngagement"] is True, result
+    assert result["descriptionStyle"] == {"whiteSpace": "nowrap", "textOverflow": "ellipsis", "overflow": "hidden"}, result
+    assert "details" not in result["initial"], result
+    assert all(f"Move {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
+    assert all(f"Swap {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
+    assert len(result["directionalGeometry"]) == 2, result
+    for geometry in result["directionalGeometry"]:
+        for zone in ("left", "right", "top", "bottom"):
+            assert f"tab-directional-action-icon--{zone}" in geometry[zone]["iconClass"], geometry
+            assert geometry[zone]["iconWidth"] > geometry[zone]["iconHeight"] > 0, geometry
+        assert max(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
+        assert geometry["left"]["left"] < geometry["right"]["left"] < geometry["top"]["left"] < geometry["bottom"]["left"], geometry
+
+
+def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        activatePaneTab('left', '1');
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        const options = {bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 17, button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+        tab.dispatchEvent(new PointerEvent('pointerdown', options));
+        setTimeout(() => {
+          tab.dispatchEvent(new PointerEvent('pointerup', options));
+          const menu = document.querySelector('.session-context-menu');
+          const sheetRect = menu?.getBoundingClientRect();
+          done({
+            active: activeItemForSide('left'),
+            sheet: menu?.classList.contains('tab-action-sheet') === true,
+            description: menu?.querySelector('.tab-action-description')?.textContent.trim() || '',
+            tabBottom: rect.bottom,
+            sheetTop: sheetRect?.top || 0,
+            viewportHeight: window.innerHeight,
+          });
+        }, tabTouchLongPressDelayMs + 80);
+        """
+    )
+    assert result["active"] == "1", result
+    assert result["sheet"] is True and result["description"].startswith("More desc: 2"), result
+    assert result["sheetTop"] >= result["tabBottom"] and result["sheetTop"] - result["tabBottom"] <= 12, result
+
+
+def test_dockview_touch_tab_drag_cancels_long_press_sheet(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        const base = {bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 18, button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+        tab.dispatchEvent(new PointerEvent('pointerdown', base));
+        tab.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: base.clientX + tabTouchLongPressMoveThresholdPx + 2}));
+        setTimeout(() => done({sheet: document.querySelector('.tab-action-sheet') !== null}), tabTouchLongPressDelayMs + 80);
+        """
+    )
+    assert result["sheet"] is False, result
+
+
+def test_dockview_tab_action_move_creates_a_local_split_for_the_pressed_tmux_tab(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
+        const action = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move left');
+        action?.click();
+        const wait = () => {
+          const oneSlot = slotForItem('1');
+          const twoSlot = slotForItem('2');
+          if (!oneSlot || !twoSlot || oneSlot === twoSlot) return requestAnimationFrame(wait);
+          const one = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+          const two = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+          done({oneSlot, twoSlot, oneLeft: one?.left, twoLeft: two?.left, tree: layoutSlots[layoutTreeKey]});
+        };
+        wait();
+        """
+    )
+    assert result["oneSlot"] != result["twoSlot"], result
+    assert result["twoLeft"] < result["oneLeft"], result
+    assert result["tree"]["split"] == "row", result
+
+
+def test_dockview_tab_action_move_and_swap_use_the_directional_neighbor(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    moved = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
+        Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move right')?.click();
+        const wait = () => {
+          if (slotForItem('1') !== 'right' || !paneIsPlaceholder('left')) return requestAnimationFrame(wait);
+          done({left: paneStateForLayoutSlot('left'), right: paneStateForLayoutSlot('right'), tree: layoutSlots[layoutTreeKey]});
+        };
+        wait();
+        """
+    )
+    assert moved["left"]["placeholder"] is True, moved
+    assert moved["right"]["tabs"] == ["1", "2"], moved
+    assert moved["tree"]["split"] == "row", moved
+
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    swapped = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
+        Array.from(document.querySelectorAll('.tab-swap-action')).find(button => button.getAttribute('aria-label') === 'Swap right')?.click();
+        const wait = () => {
+          const left = paneStateForLayoutSlot('left');
+          const right = paneStateForLayoutSlot('right');
+          if (left.tabs?.[0] !== '2' || right.tabs?.[0] !== '1') return requestAnimationFrame(wait);
+          done({left, right, tree: layoutSlots[layoutTreeKey]});
+        };
+        wait();
+        """
+    )
+    assert swapped["left"]["tabs"] == ["2"], swapped
+    assert swapped["right"]["tabs"] == ["1"], swapped
+    assert swapped["tree"]["split"] == "row", swapped
+
+
+def test_dockview_tab_action_splits_inside_docked_finder_content(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@30(left,content)&tabs=left:files;content:1",
+        sessions=["1"],
+        grid_width=1400,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
+        const moveLeft = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move left');
+        const moveRight = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move right');
+        const enabled = {left: moveLeft?.disabled === false, right: moveRight?.disabled === false};
+        moveLeft?.click();
+        const finish = () => {
+          const empty = document.querySelector('.empty-pane-panel')?.getBoundingClientRect();
+          const finder = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+          const terminal = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+          if (!empty || !finder || !terminal) return requestAnimationFrame(finish);
+          done({enabled, empty, finder, terminal, tree: layoutSlots[layoutTreeKey]});
+        };
+        finish();
+        """
+    )
+    assert result["enabled"] == {"left": True, "right": True}, result
+    assert result["empty"]["width"] > 100 and result["empty"]["height"] > 100, result
+    assert result["finder"]["right"] <= result["terminal"]["left"] + 2, result
+    assert result["terminal"]["right"] <= result["empty"]["left"] + 2, result
+
+
+def test_dockview_tab_action_vertical_move_splits_only_the_selected_leaf(browser, tmp_path):
+    for zone in ("top", "bottom"):
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+            sessions=["1", "2"],
+            grid_width=1200,
+            grid_height=700,
+        )
+        wait_for_dockview(browser, min_tabs=2)
+        result = browser.execute_async_script(
+            """
+            const zone = arguments[0];
+            const done = arguments[arguments.length - 1];
+            let settled = false;
+            const finish = value => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timeout);
+              done(value);
+            };
+            const sourceSlot = slotForItem('1');
+            let moveAction = null;
+            const timeout = setTimeout(() => finish({timeout: true, tree: layoutSlots[layoutTreeKey]}), 3000);
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+            const tabRect = tab.getBoundingClientRect();
+            tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: tabRect.left + tabRect.width / 2, clientY: tabRect.bottom}));
+            moveAction = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === `Move ${zone}`);
+            moveAction?.click();
+            const wait = () => {
+              const root = layoutSlots[layoutTreeKey];
+              if (root?.split !== 'row' || root.children?.[0]?.split !== 'column') return requestAnimationFrame(wait);
+              const itemSlot = slotForItem('1');
+              const one = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+              const two = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+              const empty = document.querySelector('.empty-pane-panel')?.getBoundingClientRect();
+              finish({root, itemSlot, leftPlaceholder: paneIsPlaceholder('left'), one, two, empty});
+            };
+            wait();
+            """,
+            zone,
+        )
+        assert result.get("timeout") is not True, (zone, result)
+        assert result["itemSlot"] != "left", (zone, result)
+        assert result["leftPlaceholder"] is True, (zone, result)
+        assert result["root"]["children"][0]["split"] == "column", (zone, result)
+        assert result["empty"]["width"] > 100 and result["empty"]["height"] > 100, (zone, result)
+        assert result["one"]["bottom"] - result["one"]["top"] < result["two"]["bottom"] - result["two"]["top"] - 20, (zone, result)
+        if zone == "top":
+            assert result["one"]["top"] < result["two"]["top"] + 2, result
+            assert result["one"]["bottom"] < result["two"]["bottom"] - 20, result
+        else:
+            assert result["one"]["top"] > result["two"]["top"] + 20, result
+            assert result["one"]["bottom"] > result["two"]["bottom"] - 2, result
+
+
+def test_dockview_tab_directional_actions_use_rendered_geometry_and_reject_ambiguous_targets(browser, tmp_path):
+    fixture_kwargs = {"sessions": ["1", "2", "3", "4"], "grid_width": 1200, "grid_height": 700}
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=col@50(row@50(a,b),row@50(c,d))&tabs=a:1;b:2;c:3;d:4",
+        **fixture_kwargs,
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    rows_then_columns = browser.execute_script(
+        "return tabDirectionalActionCapabilities('1', slotForItem('1'));"
+    )
+
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=row@50(col@50(a,c),col@50(b,d))&tabs=a:1;b:2;c:3;d:4",
+        **fixture_kwargs,
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    columns_then_rows = browser.execute_script(
+        "return tabDirectionalActionCapabilities('1', slotForItem('1'));"
+    )
+    assert rows_then_columns == columns_then_rows
+    assert rows_then_columns == {
+        "move": {"left": False, "right": True, "top": False, "bottom": True},
+        "swap": {"left": False, "right": True, "top": False, "bottom": True},
+        "targets": {"left": None, "right": "b", "top": None, "bottom": "c"},
+    }
+
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@50(left,col@50(upper,lower))&tabs=left:1;upper:2;lower:3",
+        sessions=["1", "2", "3"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    ambiguous = browser.execute_script(
+        "return tabDirectionalActionCapabilities('1', slotForItem('1'));"
+    )
+    assert ambiguous["move"]["right"] is False
+    assert ambiguous["swap"]["right"] is False
+    assert ambiguous["targets"]["right"] is None
+
+
 def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_budget(browser, tmp_path):
     sessions = [str(index) for index in range(1, 13)]
     transcript_sessions = {
@@ -280,22 +637,22 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=1,7777&layout=left&tabs=left:1,7777",
-        sessions=["1", "7777"],
+        "?sessions=1,7000&layout=left&tabs=left:1,7000",
+        sessions=["1", "7000"],
         transcript_sessions={
             "1": {"panes": [{"target": "%1", "window": 1, "window_name": "claude", "active": True, "process_label": "claude"}]},
-            "7777": {"panes": [{"target": "%77", "window": 77, "window_name": "codex", "active": True, "process_label": "codex"}]},
+            "7000": {"panes": [{"target": "%77", "window": 77, "window_name": "codex", "active": True, "process_label": "codex"}]},
         },
         auto_approve_payload={
-            "session_order": ["1", "7777"],
+            "session_order": ["1", "7000"],
             "sessions": {
                 "1": {
                     "target": "1",
                     "enabled": False,
                     "agent_windows": [{"kind": "claude", "state": "idle", "window_index": 1, "working_stopped_ts": stopped_ts}],
                 },
-                "7777": {
-                    "target": "7777",
+                "7000": {
+                    "target": "7000",
                     "enabled": False,
                     "agent_windows": [
                         {"kind": "codex", "state": "working", "window_index": 77},
@@ -310,7 +667,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
     metrics = browser.execute_script(
         """
-        return ['1', '7777'].map(item => {
+        return ['1', '7000'].map(item => {
           const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
           const core = tab?.querySelector('.pane-tab-core');
           const status = tab?.querySelector('.session-agent-activity-marker');
@@ -4268,6 +4625,43 @@ def test_dockview_same_axis_second_split_preserves_target_half(browser, tmp_path
     assert widths[0] >= widths[1] * 1.75, metrics
     assert widths[0] >= widths[2] * 1.75, metrics
     assert abs(widths[1] - widths[2]) <= 40, metrics
+
+
+def test_dockview_drag_creates_quarter_quarter_half_layout(browser, tmp_path):
+    browser.set_window_size(1700, 800)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:1;right:2,3",
+        sessions=["1", "2", "3"],
+        grid_width=1280,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    end = browser.execute_script(
+        """
+        const target = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = target.getBoundingClientRect();
+        return {
+          x: Math.round(rect.left + 8),
+          y: Math.round(rect.top + rect.height * 0.5),
+        };
+        """
+    )
+    cdp_drag(browser, dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5), end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: len([group for group in dockview_layout_metrics(driver)["groups"] if group["tabs"]]) == 3
+    )
+    metrics = dockview_layout_metrics(browser)
+    groups = sorted([group for group in metrics["groups"] if group["tabs"]], key=lambda group: group["rect"]["left"])
+    widths = [group["rect"]["width"] for group in groups]
+    root = metrics["slots"]["__tree"]
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert [group["tabs"] for group in groups] == [["3"], ["1"], ["2"]], metrics
+    assert root["split"] == "row", metrics
+    assert abs(widths[0] - widths[1]) <= 40, metrics
+    assert widths[2] >= widths[0] * 1.75 and widths[2] >= widths[1] * 1.75, metrics
 
 
 def test_dockview_drag_to_root_left_of_stacked_panes_creates_full_height_pane(browser, tmp_path):

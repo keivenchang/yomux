@@ -16,6 +16,8 @@
   --bg: #0f1115;
   --panel: #151922;
   --panel-inactive: #202633;
+  --empty-pane-border: var(--neutral-border-strong);
+  --empty-pane-bg: color-mix(in srgb, var(--panel2) 88%, transparent);
   --panel2: #1e2430;
   --panel2-inactive: #252c3a;
   --input-bg: var(--panel2);
@@ -289,6 +291,7 @@
   --pane-resizer-hover-line-size: 5px;
   --pane-resizer-hit-inset: 5px;
   --pane-resizer-touch-handle-size: 44px;
+  --touch-target-min-size: var(--pane-resizer-touch-handle-size);
   /* Touch: the grab zone spans the full divider length (see @media pointer:coarse in
      40_layout_panes_tabs.css); the visible affordance is a small centered grip pill —
      length runs ALONG the divider, thickness runs ACROSS it — not a big filled disc. */
@@ -341,7 +344,7 @@
   --file-explorer-tree-inline-size: clamp(280px, 22vw, 340px);
   --file-explorer-editor-inline-size: clamp(420px, 42vw, 640px);
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
-  --min-split-pane-width: 320px;
+  --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
   --z-layer-background: 0;
   --z-layer-raised: 1;
@@ -705,6 +708,8 @@ body.theme-light {
   --bg: #f6f8fb;
   --panel: var(--paint-white);
   --panel-inactive: #eef2f7;
+  --empty-pane-border: var(--neutral-border-strong);
+  --empty-pane-bg: color-mix(in srgb, var(--panel2) 68%, transparent);
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
   --input-bg: var(--panel2);
@@ -1119,6 +1124,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .share-entry-heading strong,
 .share-url-primary-head > span,
 .share-users-row span,
+.tab-action-description,
 .terminal-drop-suggestion-label {
   min-width: 0;
   overflow: hidden;
@@ -6580,11 +6586,23 @@ body.theme-light .drop-slot.drag-over {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  border: 1px dashed #94a2b5;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-6);
+  border: 1px dashed var(--empty-pane-border);
   border-radius: var(--radius-md);
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 46%),
-    rgba(255, 255, 255, 0.012);
+  background: var(--empty-pane-bg);
+}
+.empty-pane-hint {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.empty-pane-add {
+  min-width: var(--touch-target-min-size);
+  min-height: var(--touch-target-min-size);
+  padding-inline: var(--space-7);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .panel.file-drag-over::before {
   content: attr(data-file-drop-label);
@@ -7897,12 +7915,6 @@ body.theme-light .panel.empty-pane-panel {
   background: var(--panel2);
   border-color: var(--pc-control-border);
 }
-body.theme-light .empty-pane-fill {
-  border-color: var(--pc-control-border);
-  background:
-    linear-gradient(135deg, rgb(var(--overlay-slate-rgb) / 0.045), rgb(var(--overlay-slate-rgb) / 0) 46%),
-    rgb(var(--overlay-slate-rgb) / 0.018);
-}
 body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
@@ -8256,6 +8268,110 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .session-context-menu {
   min-width: 178px;
+}
+.tab-action-sheet {
+  width: min(calc(100vw - (2 * var(--popover-edge-gap))), 38rem);
+  max-height: min(72vh, 42rem);
+  overflow: auto;
+  transform: none;
+}
+.tab-action-description {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: var(--space-4) var(--space-5);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  cursor: pointer;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  text-align: start;
+}
+.tab-action-description:hover,
+.tab-action-description:focus-visible {
+  background: var(--overlay-option-hover-bg);
+  outline: none;
+}
+.tab-directional-action-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+.tab-split-actions {
+  display: grid;
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-rows: var(--touch-target-min-size);
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tab-directional-actions-title {
+  align-self: center;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tab-split-actions .tab-split-action[data-direction="left"] { grid-column: 2; }
+.tab-split-actions .tab-split-action[data-direction="right"] { grid-column: 3; }
+.tab-split-actions .tab-split-action[data-direction="top"] { grid-column: 4; }
+.tab-split-actions .tab-split-action[data-direction="bottom"] { grid-column: 5; }
+.terminal-context-menu .tab-split-actions .tab-split-action {
+  display: grid;
+  place-items: center;
+  min-height: var(--touch-target-min-size);
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  text-align: center;
+}
+.tab-split-actions .tab-split-action .context-menu-line {
+  display: grid;
+  place-items: center;
+}
+.tab-split-actions .tab-split-action .context-menu-label {
+  display: none;
+}
+.tab-directional-action-icon {
+  --tab-directional-icon-inline-size: 32px;
+  --tab-directional-icon-block-size: 24px;
+  position: relative;
+  display: block;
+  inline-size: var(--tab-directional-icon-inline-size);
+  block-size: var(--tab-directional-icon-block-size);
+  box-sizing: border-box;
+  border: var(--app-modal-border-width) solid currentColor;
+  border-radius: var(--radius-md);
+}
+.tab-directional-action-icon::after {
+  content: "";
+  position: absolute;
+  border-radius: var(--radius-sm);
+  background: currentColor;
+}
+.tab-directional-action-icon--left::after,
+.tab-directional-action-icon--right::after {
+  inset-block: var(--space-4);
+  inline-size: var(--space-7);
+}
+.tab-directional-action-icon--left::after { inset-inline-start: var(--space-3); }
+.tab-directional-action-icon--right::after { inset-inline-end: var(--space-3); }
+.tab-directional-action-icon--top::after,
+.tab-directional-action-icon--bottom::after {
+  inset-inline: var(--space-4);
+  block-size: var(--space-7);
+}
+.tab-directional-action-icon--top::after { inset-block-start: var(--space-3); }
+.tab-directional-action-icon--bottom::after { inset-block-end: var(--space-3); }
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:hover,
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:focus-visible {
+  color: var(--chrome-text-strong);
+  background: var(--overlay-option-hover-bg);
+}
+.terminal-context-menu .tab-split-actions .tab-split-action:disabled {
+  border-color: transparent;
 }
 .session-rename-backdrop {
   z-index: var(--z-topbar);

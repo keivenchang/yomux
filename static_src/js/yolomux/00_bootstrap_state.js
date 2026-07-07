@@ -697,6 +697,9 @@ const commandPaletteState = {
   query: '',
   index: 0,
   items: [],
+  // An empty peer pane can request that its next quick-open lands in that exact slot. The palette
+  // remains the one chooser; this is only its transient placement context, never a second opener.
+  targetSlot: '',
 };
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
@@ -705,6 +708,9 @@ const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
 const commandPaletteRecentKeys = new Map();
 let commandPaletteRecentSequence = 0;
+// Fill workspace is a temporary pane-layout view. Keep the complete pre-fill tree here so Restore
+// returns every tab, split, and placeholder exactly as the user left it.
+let filledWorkspaceLayout = null;
 const fileQuickOpenState = {
   root: '',
   candidates: [],
@@ -846,8 +852,8 @@ const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
 const mobileSinglePaneTabLimit = 2;
-// Two panes use the shared 320px fallback plus a divider. A touch viewport below this cannot
-// provide two usable columns.
+// This is a conservative touch breakpoint: narrow tablets use one column before a two-pane
+// layout becomes cramped, even though desktop users may manually create 300px panes.
 const narrowTouchSingleColumnMaxWidthPx = 680;
 const tabletDesktopLayoutMinWidthPx = 900;
 const defaultLayoutMode = 'split';
@@ -856,6 +862,9 @@ const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
 const layoutBoundaryDropFraction = 0.08;
 const layoutBoundaryDropMinPx = 28;
 const layoutBoundaryDropMaxPx = 64;
+// Dockview keeps a small gutter between neighboring leaf groups. Directional tab actions compare
+// their rendered edges with this shared allowance instead of assuming touching DOM rectangles.
+const directionalPaneAdjacencyTolerancePx = 8;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -1652,6 +1661,11 @@ let pendingLayoutRender = null;
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};
+// One interaction record owns hover detail, context actions, and touch long-press for every tab
+// surface.  Keeping these together prevents a mobile action gesture from drifting into a tab click.
+let tabInteractionController = null;
+const tabTouchLongPressDelayMs = 500;
+const tabTouchLongPressMoveThresholdPx = 10;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();

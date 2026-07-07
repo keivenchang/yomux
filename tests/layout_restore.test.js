@@ -123,7 +123,7 @@ async function runLayoutRestoreSuite() {
     const warning = api.httpsWarningForTest();
     assert.equal(warning.hidden, false);
     assert.ok(warning.dataset.tip.includes('Highly recommend that you restart with'));
-    assert.ok(warning.dataset.tip.includes('--port 7777 --self-signed'));
+    assert.ok(warning.dataset.tip.includes('--port 7000 --self-signed'));
     assert.equal(warning.dataset.tip.includes('--host 0.0.0.0'), false);
 
     const secureApi = loadYolomux('', ['1'], 'https:');
@@ -931,7 +931,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(loadingState.kind, 'file', 'path-backed tabs use a file placeholder type, not literal "loading"');
     assert.equal(loadingState.loading, true, 'path-backed tabs still expose loading status until the file is fetched');
     const paneTabSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/bindDelayedSessionPopover\(tab, popover[\s\S]*maybeLoadFileTabForPopover\(tab, session\)/.test(paneTabSource), 'file tab popovers load stale/missing file state through the shared hover popover onOpen hook');
+    assert.ok(/bindTabInteraction\(\{[\s\S]*anchor: tab,[\s\S]*popover:[\s\S]*maybeLoadFileTabForPopover\(tab, session\)/.test(paneTabSource), 'file tab popovers load stale/missing file state through the shared tab interaction controller detail hook');
     assert.ok(/function loadFileEditorState[\s\S]*if \(panel\) renderFileEditorPanel\(panel, item\)/.test(paneTabSource), 'inactive file-tab hover loads can fetch without a mounted editor panel');
 
     assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
@@ -2784,7 +2784,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
     assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
     assert.ok(/function openFileQuickOpenPath\(path, options = \{\}\)[\s\S]*const targetSlot = fileQuickOpenTargetSlot\(\);[\s\S]*openedItem = await openFileInEditor\(path, \{name: label\}, targetSlot[\s\S]*\? \{targetSlot, userInitiated: true\}[\s\S]*: \{userInitiated: true\}\)/.test(source), 'quick-open normal file opens pass the active pane target slot');
-    assert.ok(/function fileQuickOpenTargetSlot\(\)\s*\{\s*return focusedActivationSlot\(\);/.test(source), 'DOIT.56 N2: quick-open uses the shared focused-pane activation target');
+    assert.ok(/function fileQuickOpenTargetSlot\(\)[\s\S]*commandPaletteState\.targetSlot[\s\S]*layoutSlotKeys\(\)\.includes\(requested\)[\s\S]*return focusedActivationSlot\(\);/.test(source), 'quick-open keeps the shared focused-pane fallback while an empty pane can request its exact destination');
     assert.ok(/function fileEditorActivationSlot\(\)[\s\S]*focusedActivationSlot\(\)[\s\S]*lastActiveNonFileExplorerPaneItem[\s\S]*slotForSession\(lastActiveNonFileExplorerPaneItem\)/.test(source), 'DOIT.56 N2: file opens remember the last active non-Finder pane when Differ itself has focus');
     assert.ok(/function slotForTabActivation\(item\)\s*\{[\s\S]*return fileEditorActivationSlot\(\) \|\| largestNonFileExplorerPaneSlot\(\)/.test(source), 'DOIT.56 N2: new virtual/file tabs prefer the focused non-Finder pane before largest-pane fallback');
     assert.ok(/async function openFileEditorPane\(path, options = \{\}\)[\s\S]*const activationSlot = slotForTabActivation\(item\);[\s\S]*await moveSessionToSlot\(item, activationSlot/.test(source), 'DOIT.56 N2: generic file opens share the same focused-pane activation target');
@@ -2987,17 +2987,254 @@ async function runLayoutRestoreSuite() {
     const section = new TestElement('section');
     section.rect = {left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500};
     const row = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
-    assert.equal(api.splitPercentForPointer(section, row, {clientX: 10, clientY: 0}), 32);
-    assert.equal(api.splitPercentForPointer(section, row, {clientX: 990, clientY: 0}), 68);
+    assert.equal(api.splitPercentForPointer(section, row, {clientX: 10, clientY: 0}), 30);
+    assert.equal(api.splitPercentForPointer(section, row, {clientX: 990, clientY: 0}), 70);
     const nested = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 50);
-    assert.equal(api.layoutNodeMinWidth(nested), 960);
+    assert.equal(api.layoutNodeMinWidth(nested), 900);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(css.includes('--min-split-pane-width: 320px'));
+    assert.ok(css.includes('--min-split-pane-width: 300px'));
     assert.ok(css.includes('--min-split-pane-height: 220px'));
-    assert.equal(api.minSplitPaneWidthPx(), 320, 'minSplitPaneWidthPx follows the CSS token/fallback value');
+    assert.equal(api.minSplitPaneWidthPx(), 300, 'minSplitPaneWidthPx follows the CSS token/fallback value');
     assert.equal(api.minSplitPaneHeightPx(), 220, 'minSplitPaneHeightPx follows the CSS token/fallback value');
     assert.equal(/rootCssLengthPx\('--min-split-pane-(width|height)'\)\s*\|\|\s*(320|220)/.test(source), false, 'min split-pane fallback literals stay behind shared helpers');
+  });
+
+  await testAsync('directional tab split retains an explicit empty peer and Fill workspace restores the saved layout', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs(['__info__'], '__info__');
+    api.setLayoutSlotsForTest(slots);
+    api.setLayoutColumnRectsForTest({
+      left: {left: 0, top: 0, right: 960, bottom: 640, width: 960, height: 640},
+    });
+
+    assert.deepStrictEqual(canonical(api.tabSplitCapabilities('__info__', 'left')), {
+      left: true, right: true, top: true, bottom: true,
+    }, 'a roomy desktop pane advertises all four shared directional actions');
+    assert.equal(await api.splitLayoutItemDirectional('__info__', 'left', 'right'), true);
+    const split = api.layoutSlotsForTest();
+    const itemSlot = api.layoutSlotKeys(split).find(slot => api.paneTabs(slot, split).includes('__info__'));
+    assert.ok(itemSlot && itemSlot !== 'left', split);
+    assert.equal(api.paneIsPlaceholder('left', split), true, 'moving the only tab leaves an intentional add/drop peer');
+    assert.deepStrictEqual(canonical(split[api.layoutTreeKey]), {
+      split: 'row', pct: 50, children: [{slot: 'left'}, {slot: itemSlot}],
+    }, 'Split right puts the selected tab on the requested right side');
+
+    assert.equal(api.tabCanFillWorkspace('__info__'), true);
+    assert.equal(api.toggleTabWorkspaceFill('__info__'), true);
+    const filled = api.layoutSlotsForTest();
+    assert.deepStrictEqual(canonical(filled[api.layoutTreeKey]), {slot: itemSlot}, 'Fill workspace keeps the selected pane and its tabs, not browser fullscreen');
+    assert.equal(api.tabWorkspaceIsFilled('__info__'), true);
+    assert.equal(api.toggleTabWorkspaceFill('__info__'), true);
+    const restored = api.layoutSlotsForTest();
+    assert.deepStrictEqual(canonical(restored[api.layoutTreeKey]), canonical(split[api.layoutTreeKey]), 'Restore returns the exact saved pane topology');
+    assert.equal(api.paneIsPlaceholder('left', restored), true);
+  });
+
+  await testAsync('a visually single pane can Move left or right despite a retained empty Dockview group', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['1']);
+    const stale = api.emptyLayoutSlots();
+    stale[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('stale'));
+    stale.left = api.paneStateWithTabs(['__info__'], '__info__');
+    stale.stale = api.emptyPlaceholderPaneState();
+    api.setLayoutSlotsForTest(stale);
+    api.setLayoutColumnRectsForTest({
+      left: {left: 0, top: 0, right: 960, bottom: 640, width: 960, height: 640},
+    });
+
+    const capabilities = canonical(api.tabDirectionalActionCapabilities('__info__', 'left'));
+    assert.equal(capabilities.move.left, true);
+    assert.equal(capabilities.move.right, true);
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'left', 'left'), true);
+    const moved = api.layoutSlotsForTest();
+    const itemSlot = api.layoutSlotKeys(moved).find(slot => api.paneTabs(slot, moved).includes('__info__'));
+    assert.ok(itemSlot && itemSlot !== 'left');
+    assert.deepStrictEqual(canonical(moved[api.layoutTreeKey]), {
+      split: 'row', pct: 50, children: [{slot: itemSlot}, {slot: 'left'}],
+    });
+    assert.equal(moved.stale, undefined, 'the invisible prior placeholder must not survive as a third pane');
+  });
+
+  await testAsync('an unrendered Dockview content group cannot disable a visually single pane split', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2']);
+    const stale = api.emptyLayoutSlots();
+    stale[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('hidden'));
+    stale.left = api.paneStateWithTabs(['__info__'], '__info__');
+    stale.hidden = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(stale);
+    api.setLayoutColumnRectsForTest({
+      left: {left: 0, top: 0, right: 960, bottom: 640, width: 960, height: 640},
+    });
+
+    assert.deepStrictEqual(canonical(api.tabDirectionalActionCapabilities('__info__', 'left').move), {
+      left: true, right: true, top: true, bottom: true,
+    });
+  });
+
+  await testAsync('a vertical pair still offers a local left or right Move when a hidden row group is stale', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2']);
+    const stale = api.emptyLayoutSlots();
+    stale[api.layoutTreeKey] = api.splitNode('row',
+      api.splitNode('column', api.leafNode('top'), api.leafNode('bottom')),
+      api.leafNode('stale'),
+    );
+    stale.top = api.paneStateWithTabs(['__info__'], '__info__');
+    stale.bottom = api.paneStateWithTabs(['2'], '2');
+    stale.stale = api.emptyPlaceholderPaneState();
+    api.setLayoutSlotsForTest(stale);
+    api.setLayoutColumnRectsForTest({
+      top: {left: 0, top: 0, right: 960, bottom: 318, width: 960, height: 318},
+      bottom: {left: 0, top: 322, right: 960, bottom: 640, width: 960, height: 318},
+    });
+
+    const capabilities = canonical(api.tabDirectionalActionCapabilities('__info__', 'top'));
+    assert.deepStrictEqual(capabilities.move, {left: true, right: true, top: false, bottom: true});
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'top', 'right'), true);
+    const moved = api.layoutSlotsForTest();
+    const itemSlot = api.layoutSlotKeys(moved).find(slot => api.paneTabs(slot, moved).includes('__info__'));
+    assert.ok(itemSlot && itemSlot !== 'top');
+    assert.deepStrictEqual(canonical(moved[api.layoutTreeKey]), {
+      split: 'column', pct: 50, children: [
+        {split: 'row', pct: 50, children: [{slot: 'top'}, {slot: itemSlot}]},
+        {slot: 'bottom'},
+      ],
+    });
+    assert.equal(moved.stale, undefined);
+  });
+
+  await testAsync('a docked Finder is a reserved boundary, not a blocker for local terminal left or right Move', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('finder'), api.leafNode('content'));
+    slots.finder = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
+    slots.content = api.paneStateWithTabs(['__info__'], '__info__');
+    api.setLayoutSlotsForTest(slots);
+    api.setLayoutColumnRectsForTest({
+      finder: {left: 0, top: 0, right: 240, bottom: 640, width: 240, height: 640},
+      content: {left: 244, top: 0, right: 1000, bottom: 640, width: 756, height: 640},
+    });
+
+    const capabilities = canonical(api.tabDirectionalActionCapabilities('__info__', 'content'));
+    assert.deepStrictEqual(capabilities.move, {left: true, right: true, top: true, bottom: true});
+    assert.deepStrictEqual(capabilities.targets, {left: null, right: null, top: null, bottom: null});
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'content', 'left'), true);
+    const moved = api.layoutSlotsForTest();
+    const itemSlot = api.layoutSlotKeys(moved).find(slot => api.paneTabs(slot, moved).includes('__info__'));
+    assert.ok(itemSlot && itemSlot !== 'content');
+    assert.deepStrictEqual(canonical(moved[api.layoutTreeKey]), {
+      split: 'row', pct: 50, children: [
+        {slot: 'finder'},
+        {split: 'row', pct: 50, children: [{slot: itemSlot}, {slot: 'content'}]},
+      ],
+    });
+  });
+
+  await testAsync('directional Move and Swap use visible leaf geometry, retain local nesting, and reject ambiguous targets', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
+    const horizontalRects = {
+      left: {left: 0, top: 0, right: 500, bottom: 700, width: 500, height: 700},
+      right: {left: 504, top: 0, right: 1004, bottom: 700, width: 500, height: 700},
+    };
+    const horizontal = () => {
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs(['__info__'], '__info__');
+      slots.right = api.paneStateWithTabs(['2'], '2');
+      return slots;
+    };
+
+    api.setLayoutSlotsForTest(horizontal());
+    api.setLayoutColumnRectsForTest(horizontalRects);
+    assert.deepStrictEqual(canonical(api.tabDirectionalActionCapabilities('__info__', 'left')), {
+      move: {left: false, right: true, top: true, bottom: true},
+      swap: {left: false, right: true, top: false, bottom: false},
+      targets: {left: null, right: 'right', top: null, bottom: null},
+    });
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'left', 'top'), true);
+    let next = api.layoutSlotsForTest();
+    const movedSlot = api.layoutSlotKeys(next).find(slot => api.paneTabs(slot, next).includes('__info__'));
+    assert.equal(next[api.layoutTreeKey].split, 'row');
+    assert.equal(next[api.layoutTreeKey].children[0].split, 'column', 'local top Move nests only in A\'s former leaf');
+    assert.equal(next[api.layoutTreeKey].children[1].slot, 'right', 'B remains a full-height sibling, not a forced grid cell');
+    assert.equal(api.paneIsPlaceholder('left', next), true);
+    assert.ok(movedSlot && movedSlot !== 'left');
+
+    api.setLayoutSlotsForTest(horizontal());
+    api.setLayoutColumnRectsForTest(horizontalRects);
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'left', 'right'), true);
+    next = api.layoutSlotsForTest();
+    assert.equal(api.paneIsPlaceholder('left', next), true, 'Move into B preserves the vacated source slot');
+    assert.deepStrictEqual([...api.paneTabs('right', next)], ['__info__', '2']);
+
+    api.setLayoutSlotsForTest(horizontal());
+    api.setLayoutColumnRectsForTest(horizontalRects);
+    assert.equal(await api.swapLayoutItemDirectional('__info__', 'left', 'right'), true);
+    next = api.layoutSlotsForTest();
+    assert.deepStrictEqual([...api.paneTabs('left', next)], ['2']);
+    assert.deepStrictEqual([...api.paneTabs('right', next)], ['__info__']);
+
+    api.setLayoutSlotsForTest(horizontal());
+    api.setLayoutColumnRectsForTest(horizontalRects);
+    api.setPinnedTabsForTest(['__info__']);
+    const pinnedSource = api.tabDirectionalActionCapabilities('__info__', 'left');
+    assert.deepStrictEqual(canonical(pinnedSource.move), {left: false, right: false, top: false, bottom: false});
+    assert.deepStrictEqual(canonical(pinnedSource.swap), {left: false, right: false, top: false, bottom: false});
+
+    api.setPinnedTabsForTest(['2']);
+    const pinnedTarget = api.tabDirectionalActionCapabilities('__info__', 'left');
+    assert.equal(pinnedTarget.move.right, true, 'Move can join a stack containing a pinned tab without relocating it');
+    assert.equal(pinnedTarget.swap.right, false, 'Swap cannot relocate the pinned target tab');
+    api.setPinnedTabsForTest([]);
+
+    const gridRects = {
+      a: {left: 0, top: 0, right: 500, bottom: 348, width: 500, height: 348},
+      b: {left: 504, top: 0, right: 1004, bottom: 348, width: 500, height: 348},
+      c: {left: 0, top: 352, right: 500, bottom: 700, width: 500, height: 348},
+      d: {left: 504, top: 352, right: 1004, bottom: 700, width: 500, height: 348},
+    };
+    const gridSlots = tree => {
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = tree;
+      for (const slot of ['a', 'b', 'c', 'd']) slots[slot] = api.paneStateWithTabs([{a: '1', b: '2', c: '3', d: '4'}[slot]], {a: '1', b: '2', c: '3', d: '4'}[slot]);
+      return slots;
+    };
+    const rowsThenColumns = api.splitNode('column',
+      api.splitNode('row', api.leafNode('a'), api.leafNode('b')),
+      api.splitNode('row', api.leafNode('c'), api.leafNode('d')),
+    );
+    const columnsThenRows = api.splitNode('row',
+      api.splitNode('column', api.leafNode('a'), api.leafNode('c')),
+      api.splitNode('column', api.leafNode('b'), api.leafNode('d')),
+    );
+    api.setLayoutColumnRectsForTest(gridRects);
+    api.setLayoutSlotsForTest(gridSlots(rowsThenColumns));
+    const firstGrid = canonical(api.tabDirectionalActionCapabilities('1', 'a'));
+    api.setLayoutSlotsForTest(gridSlots(columnsThenRows));
+    const secondGrid = canonical(api.tabDirectionalActionCapabilities('1', 'a'));
+    assert.deepStrictEqual(firstGrid, secondGrid, 'equivalent rendered grids do not expose tree-dependent actions');
+    assert.deepStrictEqual(firstGrid, {
+      move: {left: false, right: true, top: false, bottom: true},
+      swap: {left: false, right: true, top: false, bottom: true},
+      targets: {left: null, right: 'b', top: null, bottom: 'c'},
+    });
+
+    const ambiguous = api.emptyLayoutSlots();
+    ambiguous[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('column', api.leafNode('upper'), api.leafNode('lower')));
+    ambiguous.left = api.paneStateWithTabs(['__info__'], '__info__');
+    ambiguous.upper = api.paneStateWithTabs(['2'], '2');
+    ambiguous.lower = api.paneStateWithTabs(['3'], '3');
+    api.setLayoutSlotsForTest(ambiguous);
+    api.setLayoutColumnRectsForTest({
+      left: {left: 0, top: 0, right: 500, bottom: 700, width: 500, height: 700},
+      upper: {left: 504, top: 0, right: 1004, bottom: 348, width: 500, height: 348},
+      lower: {left: 504, top: 352, right: 1004, bottom: 700, width: 500, height: 348},
+    });
+    const ambiguousCaps = api.tabDirectionalActionCapabilities('__info__', 'left');
+    assert.equal(ambiguousCaps.move.right, false);
+    assert.equal(ambiguousCaps.swap.right, false);
+    assert.equal(await api.moveLayoutItemDirectional('__info__', 'left', 'right'), false);
   });
 
   test('t@2474', () => {

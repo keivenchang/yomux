@@ -5858,25 +5858,25 @@ def test_input_heartbeat_parallel_lifecycle_attributes_are_retired():
 
 def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp(["7777"])
+    webapp = app_module.TmuxWebtermApp(["7000"])
     refreshes = []
 
     def fail_tmux(*_args, **_kwargs):
         raise AssertionError("record_user_input must not call tmux")
 
     try:
-        webapp.set_transcripts_payload_cache({"sessions": {"7777": {"panes": []}}})
+        webapp.set_transcripts_payload_cache({"sessions": {"7000": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fail_tmux)
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
 
-        webapp.record_user_input("7777", 1, data="x")
+        webapp.record_user_input("7000", 1, data="x")
         assert webapp.flush_input_heartbeats()
         activity = webapp.activity_snapshot_with_recency()
 
-        assert activity["7777"]["last_user_input_ts"] == 2000.0
-        assert "7777:0" not in activity
+        assert activity["7000"]["last_user_input_ts"] == 2000.0
+        assert "7000:0" not in activity
         assert refreshes == [(False, True)]
     finally:
         webapp.stop_input_heartbeat_worker()
@@ -5885,17 +5885,17 @@ def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monk
 
 def test_active_window_for_can_refresh_live_tmux_window_off_input_path(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp(["7777"])
+    webapp = app_module.TmuxWebtermApp(["7000"])
 
     def fake_tmux(args, timeout=5.0):
-        assert args == ["display-message", "-p", "-t", "7777:", "#{window_index}"]
+        assert args == ["display-message", "-p", "-t", "7000:", "#{window_index}"]
         return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
 
     try:
-        webapp.set_transcripts_payload_cache({"sessions": {"7777": {"panes": []}}})
+        webapp.set_transcripts_payload_cache({"sessions": {"7000": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fake_tmux)
 
-        assert webapp.active_window_for("7777") == "0"
+        assert webapp.active_window_for("7000") == "0"
     finally:
         webapp.control_server.stop()
 

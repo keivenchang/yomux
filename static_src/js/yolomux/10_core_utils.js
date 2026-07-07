@@ -2144,6 +2144,9 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
+  // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
+  // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
+  if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
   focusTerminalDom(session, delay);
@@ -3383,7 +3386,7 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
     event.preventDefault();
     event.stopPropagation();
     if (!button.disabled) handler();
-    closeMenu();
+    if (options.keepOpen !== true) closeMenu();
   });
   menu.appendChild(button);
   return button;
@@ -3417,7 +3420,7 @@ function rootCssLengthPx(name) {
   return Math.max(0, width);
 }
 
-const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 320;
+const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 300;
 const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
 
 function minSplitPaneWidthPx() {
@@ -3436,10 +3439,16 @@ function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   const edgeGap = popoverEdgeGapPx();
   const viewport = appViewport();
-  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
-  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, viewport.height - rect.height - edgeGap));
+  const sheet = menu.classList?.contains('tab-action-sheet');
+  const desiredLeft = sheet ? x - rect.width / 2 : x;
+  const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
+  const maxTop = Math.max(edgeGap, viewport.height - rect.height - edgeGap);
+  const shouldOpenAbove = sheet && y + rect.height > viewport.height - edgeGap && y - rect.height - edgeGap >= edgeGap;
+  const desiredTop = shouldOpenAbove ? y - rect.height - edgeGap : y;
+  const top = Math.min(Math.max(edgeGap, desiredTop), maxTop);
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+  menu.style.bottom = 'auto';
 }
 
 function closeTerminalContextMenu() {
@@ -4108,6 +4117,20 @@ function installTerminalContextMenu(session, term, container) {
   });
 }
 
+function openTabDescriptionPopover(item, anchor) {
+  if (!anchor?.isConnected) return false;
+  const popover = typeof paneTabPopoverForAnchor === 'function' ? paneTabPopoverForAnchor(anchor) : null;
+  if (!popover) return false;
+  closeSessionContextMenu();
+  closeOtherSessionPopovers(anchor, {force: true});
+  if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(anchor, popover);
+  anchor.classList.add('popover-open');
+  popover.classList.add('popover-open');
+  if (typeof maybeLoadFileTabForPopover === 'function') maybeLoadFileTabForPopover(anchor, item);
+  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
+  return true;
+}
+
 function showTabContextMenu(item, x, y, options = {}) {
   if (!isPinnableTab(item) && !isTmuxSession(item)) return;
   closeAppMenus();
@@ -4115,8 +4138,99 @@ function showTabContextMenu(item, x, y, options = {}) {
   closeFileContextMenu();
   closeOtherSessionPopovers(null);
   const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu session-context-menu';
+  menu.className = `terminal-context-menu session-context-menu${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
   menu.setAttribute('role', 'menu');
+  const refreshPosition = () => positionContextMenu(menu, x, y);
+  const appendDescription = () => {
+    const info = transcriptMetadataState.payload.sessions?.[item];
+    const tab = itemLabel(item);
+    const rawDescription = isTmuxSession(item)
+      ? sessionWorkDescription(item, info, 0)
+      : tabMenuDetailText(item, info);
+    const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
+    const text = t('tab.actions.moreDescription', {tab, description});
+    const line = makeButton({
+      className: 'tab-action-description',
+      label: text,
+      ariaLabel: text,
+      title: t('common.details'),
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openTabDescriptionPopover(item, options.tab);
+      },
+    });
+    menu.appendChild(line);
+  };
+  const renderActions = () => {
+    menu.replaceChildren();
+    appendDescription();
+    appendTabSplitCommands(menu, item, options);
+    if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
+      appendContextMenuButton(
+        menu,
+        tabWorkspaceIsFilled(item) ? t('layout.status.restored', {item: itemLabel(item)}) : t('pane.expand'),
+        () => { toggleTabWorkspaceFill(item); },
+        closeSessionContextMenu,
+      );
+    }
+    appendContextMenuSeparator(menu);
+    appendTabActionCommands(menu, item, options);
+    refreshPosition();
+  };
+  renderActions();
+  sessionContextMenu.open(menu, x, y);
+}
+
+function appendTabSplitCommands(menu, item, options = {}) {
+  const sourceSlot = options.sourceSlot || slotForItem(item);
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  const zones = ['left', 'right', 'top', 'bottom'];
+  const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const canPresent = Boolean(
+    sourceSlot
+      && sourceRect
+      && !narrowSingleColumnMode()
+      && !isFileExplorerItem(activeItemForSide(sourceSlot)),
+  );
+  if (!canPresent) return;
+  const directionalIconHtml = zone => `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
+  const actionGroups = document.createElement('div');
+  actionGroups.className = 'tab-directional-action-groups';
+  const appendDirectionalActions = (kind, label, action) => {
+    const group = document.createElement('section');
+    group.className = `tab-split-actions tab-${kind}-actions`;
+    group.dataset.tabActionKind = kind;
+    const title = document.createElement('div');
+    title.className = 'tab-directional-actions-title';
+    title.textContent = label;
+    group.appendChild(title);
+    for (const zone of zones) {
+      const directionLabel = `${label} ${t(`layout.zone.${zone}`)}`;
+      const button = appendContextMenuButton(
+        group,
+        directionLabel,
+        () => { void action(zone); },
+        closeSessionContextMenu,
+        {
+          disabled: capabilities[kind][zone] !== true,
+          className: `tab-split-action tab-${kind}-action`,
+          iconHtml: directionalIconHtml(zone),
+          ariaLabel: directionLabel,
+          title: directionLabel,
+        },
+      );
+      button.dataset.direction = zone;
+    }
+    actionGroups.appendChild(group);
+  };
+  appendDirectionalActions('move', t('tab.actions.move'), zone => moveLayoutItemDirectional(item, sourceSlot, zone));
+  appendDirectionalActions('swap', t('layout.drop.swap'), zone => swapLayoutItemDirectional(item, sourceSlot, zone));
+  menu.appendChild(actionGroups);
+  appendContextMenuSeparator(menu);
+}
+
+function appendTabActionCommands(menu, item, options = {}) {
   if (isPinnableTab(item)) {
     const pinned = tabIsPinned(item);
     appendContextMenuButton(
@@ -4153,7 +4267,6 @@ function showTabContextMenu(item, x, y, options = {}) {
     const killItem = tmuxSessionKillCommand(item);
     appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   }
-  sessionContextMenu.open(menu, x, y);
 }
 
 function showSessionContextMenu(session, x, y, options = {}) {

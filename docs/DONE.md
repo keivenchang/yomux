@@ -1423,6 +1423,12 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-07-03 Work Queue Drain
 
+### Unified tab interaction controller
+
+- Completed and removed `DOIT.tab_interaction_controller.md`. Regular pane tabs, Dockview tabs, and Tabber rows now use one controller for cursor details, right-/Control-click and keyboard actions, and pure-touch long press. Mouse, trackpad, and Pencil keep desktop hover behavior even on tablets; touch uses a cancellable bottom sheet and restores any Dockview pointer-down activation before it appears.
+- The action surface has one identity/status header, in-place Details/Back, directional Move & Resize commands, normal actions, and destructive actions last. A one-tab directional split preserves an explicit empty peer with targeted Add tab quick-open, while Expand pane is a temporary Fill workspace snapshot/restore rather than browser fullscreen or an implicit whole-workspace arrange.
+- Verification passed generated-asset/i18n checks, 189 editor-preview assertions, 67 layout-restore assertions, 44 Tabber assertions, the focused tab interaction Chrome cases, and the complete browser lane (335 passed, 4 skipped).
+
 ### Standard CSS radius ownership
 
 - Completed and removed `DOIT.1.md`. All 86 standard component radius declarations across the six component CSS partials now reuse the existing `--radius-sm`, `--radius-control`, `--radius-md`, `--radius-lg`, and `--radius-pill` owners, including compound segmented corners and logical YO!info corners. The rendered pixel values are unchanged; a future token edit now propagates to every matching control, card, tab, and pill.

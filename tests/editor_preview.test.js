@@ -317,6 +317,24 @@ async function runEditorPreviewSuite() {
     }, 'hiding a phone tab does not let the recent-session seed add it back');
   });
 
+  test('phone reload restores URL tabs instead of reseeding recent sessions', () => {
+    const api = loadYolomux('?layout=row@50(left,right)&tabs=left:1;right:2*', ['1', '2', '3'], 'http:', 'iPhone', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 390, height: 844},
+      bootstrapOverrides: {recentSessions: ['3', '2', '1']},
+    });
+    assert.equal(api.mobileSinglePaneModeForTest(), true, 'the fixture exercises phone reload behavior');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '2', tabs: ['1', '2']},
+    }, 'a phone reload collapses the URL layout to one pane while preserving its tab order and selected tab instead of reseeding recent sessions');
+  });
+
+  test('narrow touch popovers use the available inline viewport width', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
+    assert.ok(/const useAvailableInlineWidth = narrowSingleColumnMode\(\);[\s\S]*const width = useAvailableInlineWidth[\s\S]*\? maxInline[\s\S]*popover\.style\.maxWidth = \(tabberPaneRect \|\| useAvailableInlineWidth\) \? inlineSize : ''/.test(source), 'phone and narrow-touch tab details use the edge-gutter-clamped viewport width instead of inheriting the desktop popover cap');
+  });
+
   test('Finder close hides Finder without closing its whole pane', () => {
     const api = loadYolomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
@@ -1952,6 +1970,17 @@ async function runEditorPreviewSuite() {
     const repeatedAskParentRearmed = api.tmuxPaneTabHtml('1', repeatedAskPaneInfo, null, false);
     assert.ok(/agent-window-status-dot[^>]*status-indicator--attention/.test(repeatedAskRearmed), 'a fresh backend false re-arms the same-key red stop after a prior acknowledgement');
     assert.ok(/session-agent-activity-marker[\s\S]*status-indicator--attention/.test(repeatedAskParentRearmed), 'the parent Tab re-arms with exactly the same red state as its child');
+    const generatedWindowKey = '["agent-window","1","2","%2","codex","approval","waiting:4"]';
+    const generatedWindowPayload = {agent_windows: [
+      {kind: 'codex', state: 'approval', window_index: 2, pane_target: '%2', window_label: '2:codex', attention_key: generatedWindowKey, attention_acknowledged: false},
+    ]};
+    api.setAutoApproveStateForTest('1', generatedWindowPayload);
+    api.applyAttentionAcknowledgementResponseForTest({acknowledged: [generatedWindowKey]});
+    api.setAutoApproveStateForTest('1', generatedWindowPayload);
+    const staleGeneratedWindowBar = api.tmuxWindowBarHtml('1', repeatedAskPaneInfo);
+    const staleGeneratedParentTab = api.tmuxPaneTabHtml('1', repeatedAskPaneInfo, null, false);
+    assert.equal(staleGeneratedWindowBar.includes('agent-window-status-dot'), false, 'a delayed false snapshot cannot re-arm a server-generated acknowledgement key after terminal input');
+    assert.equal(staleGeneratedParentTab.includes('status-indicator--attention'), false, 'the stale generated snapshot cannot restore its parent Tab red/yellow ball');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'working', window_index: 3, last_active_ts: nowSeconds, window_label: '3:codex'},
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
@@ -10050,9 +10079,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/dockviewHeaderActionsHtml\(item\)[\s\S]*popout:\s*paneCanPopout\(item\)/.test(dockviewSource), 'Dockview header actions show the popout control only for canPopout tab types');
     assert.ok(/button\.dataset\.panePopout[\s\S]*openPanePopout\(button\.dataset\.panePopout \|\| item\)/.test(dockviewSource), 'Dockview popout button dispatches through the shared openPanePopout helper');
     assert.ok(/function showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*paneCanPopout\(item\)[\s\S]*appendContextMenuButton\(menu, t\('tab\.popout'\), \(\) => openPanePopout\(item\), closeSessionContextMenu\)/.test(fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8')), 'shared tab context menu gates Pop out through paneCanPopout and opens via openPanePopout');
-    assert.ok(/showTabContextMenu\(item, event\.clientX, event\.clientY, \{tab: element\}\)/.test(dockviewSource), 'Dockview tabs use the shared tab context menu');
-    assert.ok(/showTabContextMenu\(item, event\.clientX, event\.clientY, \{tab\}\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'pane tabs use the shared tab context menu');
-    assert.ok(/showTabContextMenu\(tabItem, event\.clientX, event\.clientY, \{tab: tabRow\.querySelector\?\.\('\.tabber-session-tab'\) \|\| tabRow\}\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Tabber rows use the shared tab context menu');
+    assert.ok(/bindTabInteraction\(\{anchor: element, item, sourceSlot: \(\) => slotForItem\(item\)\}\)/.test(dockviewSource), 'Dockview tabs route context and touch actions through the shared tab interaction controller');
+    assert.ok(/bindTabInteraction\(\{anchor: tab, item, sourceSlot: \(\) => side\}\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'pane tabs route context and touch actions through the shared tab interaction controller');
+    assert.ok(/tabInteractionControllerForApp\(\)\.showActions\(\{[\s\S]*item: tabItem,[\s\S]*sourceSlot: \(\) => slotForItem\(tabItem\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Tabber rows route context actions through the shared tab interaction controller');
     assert.ok(/function paneFrameControlsHtml\(session, options = \{\}\)[\s\S]*includePopout[\s\S]*data-pane-popout/.test(terminalBootSource), 'shared pane-frame controls own the popout button markup');
     const layoutActionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     assert.ok(/function closePopoutsForLayoutItem\(item\)[\s\S]*closePanePopout\(item\)[\s\S]*closeFilePreviewPopout/.test(source), 'source pane cleanup routes generic and preview pop-outs through one shared close helper');

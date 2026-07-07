@@ -1885,7 +1885,7 @@ async function runTabberSuite() {
     assert.equal(runningClaude?.date, api.sessionFileTimeText(9000), 'B4: active agent windows display the same transcript timestamp used for row mtime, not running/status text');
 
     // B5 context-menu source guard + event path.
-    assert.ok(/data-tabber-type="session"[\s\S]*data-tabber-type="window"[\s\S]*showTabContextMenu\(tabItem, event\.clientX, event\.clientY/.test(source), 'B5: right-click on a Tabber session/window row reuses the shared tab context menu');
+    assert.ok(/data-tabber-type="session"[\s\S]*data-tabber-type="window"[\s\S]*tabInteractionControllerForApp\(\)\.showActions\(\{[\s\S]*item: tabItem,[\s\S]*sourceSlot: \(\) => slotForItem\(tabItem\)/.test(source), 'B5: right-click on a Tabber session/window row uses the shared tab interaction controller');
     assert.ok(/data-tabber-type="repo"[\s\S]*?showFileTreeContextMenu\(row, abs,/.test(source), 'B5: right-click on an absolute path row reuses the shared file context menu');
     const contextPanel = new TestElement('tabber-context-panel');
     const contextSessionRow = new TestElement('tabber-context-session-row');
@@ -1909,7 +1909,7 @@ async function runTabberSuite() {
     contextPanel.listeners.get('contextmenu')[0](contextMenuEvent);
     const contextMenu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('session-context-menu'));
     assert.equal(contextMenuEvent.defaultPrevented, true, 'right-clicking a Tabber session row opens the shared tab context menu');
-    assert.ok(contextMenu?.children[0]?.innerHTML.includes('Pin Tab'), 'Tabber session context menu includes the shared Pin Tab action');
+    assert.ok(Array.from(contextMenu?.children || []).some(child => child.getAttribute?.('aria-label') === 'Pin Tab'), 'Tabber session context menu includes the shared Pin Tab action');
     assert.ok(Array.from(contextMenu?.children || []).some(child => String(child.textContent || '').includes("Rename tmux session '1'")), 'Tabber session context menu includes the shared rename action');
   });
 

@@ -6,8 +6,8 @@ How YOLOmux updates its own running code, when it auto-restarts vs asks for a ma
 
 YOLOmux is developed across several git **worktrees** that share one repository and one `origin`:
 
-- `~/yolomux/` holds the canonical `main` branch — the "local main" / integration + production checkout. The prod server (port 7777) runs from here. Code is never edited here; `main` only advances by `git -C ~/yolomux merge --ff-only <branch>` or `git pull --ff-only`.
-- `~/yolomux.dev8001/`, `~/yolomux.dev8002/`, `~/yolomux.dev8003/` are dev worktrees. Each has its own local branch handle (`yolomux.dev800N`) and serves the port in its name (8001/8002/8003). All edits happen in a dev worktree.
+- `~/yolomux/` holds the canonical `main` branch — the "local main" / integration + production checkout. The prod server (port 7000) runs from here. Code is never edited here; `main` only advances by `git -C ~/yolomux merge --ff-only <branch>` or `git pull --ff-only`.
+- `~/yolomux.dev8001/`, `~/yolomux.dev8002/`, `~/yolomux.dev8003/` are dev worktrees. Each has its own local branch handle (`yolomux.dev800N`) and maps to ports 7001/7002/7003. All edits happen in a dev worktree.
 
 Because `main` is checked out in `~/yolomux`, it cannot also be checked out in a dev worktree. Two consequences that are easy to get wrong:
 

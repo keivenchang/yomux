@@ -3,7 +3,7 @@ import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_YOLOMUX_PORTS = ("8001", "7777")
+LIVE_YOLOMUX_PORTS = ("7000", "7001")
 
 
 def test_automated_tests_do_not_reference_live_yolomux_ports():

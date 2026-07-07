@@ -303,7 +303,9 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   if (children.length === 1) return children[0];
   const hasFileExplorer = children.some(child => child.containsFileExplorer);
   const hasDirectFileExplorerLeaf = children.some(child => child.directFileExplorerLeaf);
-  const kept = direction === 'row' && hasDirectFileExplorerLeaf
+  // Most mutations prune a now-empty peer. Directional tab split and temporary Fill/Restore are
+  // deliberately different: their empty peer is a user-visible placement target, not stale debris.
+  const kept = options.preservePlaceholderSlots === true || (direction === 'row' && hasDirectFileExplorerLeaf)
     ? children
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
@@ -873,11 +875,15 @@ function mobileRecentTmuxItems() {
 
 function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
-  const preferred = resolveLayoutItem(options.focusSession);
+  // A URL can restore several desktop panes into one phone pane. Its visible active tabs carry
+  // the only durable selection signal at boot, so retain the final one instead of discarding it
+  // and always selecting the first recent session.
+  const restoredActive = requested.length ? activePaneItems(slots).at(-1) : null;
+  const preferred = resolveLayoutItem(options.focusSession || restoredActive);
   // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
   // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
   // back on the next one-column normalization.
-  const candidates = requested.length ? [preferred, ...requested] : [preferred, ...mobileRecentTmuxItems()];
+  const candidates = requested.length ? requested : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
   for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
@@ -929,11 +935,11 @@ function initialLayoutSlots() {
   if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
-  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(layoutFromUrl) : layoutFromUrl;
+  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(layoutFromUrl);
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -1542,15 +1548,23 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
   return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
 }
 
+function attentionAcknowledgementKeyIsGeneratedWindowKey(key) {
+  // The server adds a per-window generation to every generated agent-window key. That generation
+  // changes before a genuinely later prompt can reuse a key, so a delayed pre-ack snapshot must
+  // not resurrect a red/yellow marker that the shared ledger has already acknowledged.
+  const value = String(key || '');
+  return value.startsWith('["agent-window",') && value.split(',').length >= 7;
+}
+
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
   const record = attentionAcknowledgementRecord(value);
-  // A fresh server snapshot is authoritative. Do not let a prior browser-local acknowledgement
-  // suppress a new prompt that happens to have the same visible ASK text and acknowledgement key.
-  // The one exception is this exact acknowledgement while its request is still pending: after the
-  // gray fade retires, the preceding snapshot is stale and must not flash red/yellow again.
-  if ((payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false) && record?.pending !== true) return false;
+  // Legacy/fallback keys have no server-owned generation, so an explicit later false may re-arm
+  // them. Generated keys do have one; keeping their shared ledger record prevents a stale cached
+  // auto-status response from re-adding the ball after the user has clicked or typed in its pane.
+  const explicitlyUnacknowledged = payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false;
+  if (explicitlyUnacknowledged && record?.pending !== true && !attentionAcknowledgementKeyIsGeneratedWindowKey(value)) return false;
   if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -3505,6 +3519,8 @@ function revealOpenFileLineSoon(path, line) {
 }
 
 function fileQuickOpenTargetSlot() {
+  const requested = String(commandPaletteState.targetSlot || '');
+  if (requested && layoutSlotKeys().includes(requested)) return requested;
   return focusedActivationSlot();
 }
 
@@ -4093,6 +4109,7 @@ function openCommandPalette(options = {}) {
   closeAppMenus();
   abortFileQuickOpenSearch();
   commandPaletteMode = options.mode === 'files' ? 'files' : 'command';
+  commandPaletteState.targetSlot = String(options.targetSlot || '');
   commandPaletteState.query = '';
   commandPaletteState.index = 0;
   node.hidden = false;
@@ -5356,12 +5373,16 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
+  // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
+  if (options.preserveFilledWorkspaceLayout !== true) filledWorkspaceLayout = null;
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
     focusSession: options.focusSession,
     preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
+    preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();

@@ -467,7 +467,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
     removeItem(key) { sessionStorageMap.delete(String(key)); },
   };
-  const locationPort = String(options.locationPort || '7777');
+  const locationPort = String(options.locationPort || '7000');
   const location = {
     search,
     pathname: '/',
@@ -1177,6 +1177,14 @@ globalThis.__layoutTestApi = {
   layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
+  tabSplitCapabilities,
+  tabDirectionalActionCapabilities,
+  moveLayoutItemDirectional,
+  swapLayoutItemDirectional,
+  splitLayoutItemDirectional,
+  tabCanFillWorkspace,
+  tabWorkspaceIsFilled,
+  toggleTabWorkspaceFill,
   applyLayoutMode,
   setLayoutToSinglePane,
   setLayoutToSplitPanes,
