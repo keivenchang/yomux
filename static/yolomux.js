@@ -39268,7 +39268,6 @@ const jsDebugGraphClientMetrics = Object.freeze([
 ]);
 const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
-const jsDebugGraphAgentTokenTotalSeriesKey = 'agentTokenTotal';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
@@ -40850,21 +40849,6 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
-function debugGraphAgentTokenTotalBucketValue(bucket) {
-  if (!(bucket?.agentTokenRates instanceof Map)) return 0;
-  let total = 0;
-  for (const item of bucket.agentTokenRates.values()) total += debugGraphAgentTokenBucketValue(bucket, item);
-  return total;
-}
-
-function debugGraphAgentTokenTotalBucketHasData(bucket) {
-  if (!(bucket?.agentTokenRates instanceof Map)) return false;
-  for (const item of bucket.agentTokenRates.values()) {
-    if (Number(item?.samples || 0) > 0 || Number(item?.tokens || 0) > 0) return true;
-  }
-  return false;
-}
-
 function debugGraphAgentTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
@@ -40914,7 +40898,6 @@ function debugGraphBucketValue(bucket, key) {
   if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
   if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
   if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
-  if (key === jsDebugGraphAgentTokenTotalSeriesKey) return debugGraphAgentTokenTotalBucketValue(bucket);
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
@@ -40992,7 +40975,6 @@ function debugGraphBucketHasSeriesData(bucket, key) {
   if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
   if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
   if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
-  if (key === jsDebugGraphAgentTokenTotalSeriesKey) return debugGraphAgentTokenTotalBucketHasData(bucket);
   if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
     const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
     const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
@@ -41308,18 +41290,7 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
     }));
-  if (!agentSeries.length) return agentSeries;
-  return [...agentSeries, {
-    key: jsDebugGraphAgentTokenTotalSeriesKey,
-    labelKey: 'debug.graph.series.allAgentsTotal',
-    unit: 'tokensPerMinute',
-    cssKey: 'agentTokenTotal',
-    agentTokenSeries: true,
-    agentTokenTotalSeries: true,
-    overlayLineOnly: true,
-    color: 'var(--js-debug-agent-token-total)',
-    linePattern: 'dot',
-  }];
+  return agentSeries;
 }
 
 function debugGraphClientMetricSeriesDefs(buckets) {
@@ -41713,7 +41684,7 @@ function debugGraphSeriesClassKey(series) {
 }
 
 function debugGraphAgentTokenPatternIndex(series) {
-  if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return -1;
+  if (series?.agentTokenSeries !== true) return -1;
   const index = Math.floor(Number(series.agentTokenPatternIndex));
   return Number.isFinite(index) && index >= 0 ? index % jsDebugGraphAgentTokenPatternCount : 0;
 }
@@ -41790,7 +41761,7 @@ function debugGraphSeriesLineClassName(series, extraClass = '') {
 }
 
 function debugGraphSeriesTokenAgentAttrs(series) {
-  if (series?.agentTokenSeries !== true || series?.agentTokenTotalSeries === true) return '';
+  if (series?.agentTokenSeries !== true) return '';
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
@@ -41890,7 +41861,7 @@ function debugGraphLegendHtml(seriesItems) {
 }
 
 function debugGraphLegendSwatchHtml(series) {
-  if (series?.agentTokenSeries === true && series?.agentTokenTotalSeries !== true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (series?.agentTokenSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }

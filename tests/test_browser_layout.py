@@ -672,13 +672,11 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="turquoise" style="--js-debug-series-color: var(--js-debug-agent-token-turquoise)" x="8" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="rose" style="--js-debug-series-color: var(--js-debug-agent-token-rose)" x="10" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="violet" style="--js-debug-series-color: var(--js-debug-agent-token-violet)" x="12" y="9" width="1" height="1"></rect>
-          <path class="js-debug-line js-debug-line--agentTokenTotal js-debug-line--pattern js-debug-line--pattern-dot" style="--js-debug-series-color: var(--js-debug-agent-token-total)" d="M0 12L20 12"></path>
         </svg>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--api"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--sse"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
-        <span class="js-debug-legend-swatch js-debug-legend-swatch--agentTokenTotal" style="--js-debug-series-color: var(--js-debug-agent-token-total)"></span>
         <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
@@ -717,14 +715,6 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               systemCpu: colorFor('var(--bad)'),
             },
             agentTokens: ['cyan', 'orange', 'magenta', 'beige', 'turquoise', 'rose', 'violet'].map(agentToken),
-            total: {
-              line: line('agentTokenTotal'),
-              swatch: swatch('agentTokenTotal'),
-              dasharray: getComputedStyle(document.querySelector('.js-debug-line--agentTokenTotal')).strokeDasharray,
-              strokeWidth: getComputedStyle(document.querySelector('.js-debug-line--agentTokenTotal')).strokeWidth,
-              swatchWidth: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).width,
-              swatchBackground: getComputedStyle(document.querySelector('.js-debug-legend-swatch--agentTokenTotal')).backgroundImage,
-            },
             clientLines: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
             clientOpacity: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, Number(getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).opacity)])),
             clientLegend: {peer: getComputedStyle(document.querySelector('[data-client-legend="peer"]')).strokeDasharray},
@@ -757,11 +747,6 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
             for right in range(left + 1, len(item["agentTokens"]))
         ]
         assert all(distances), (theme, item)
-        assert item["total"]["line"] == item["total"]["swatch"], (theme, item)
-        assert item["total"]["dasharray"] == "1px, 4px", (theme, item)
-        assert item["total"]["strokeWidth"] == "2.4px", (theme, item)
-        assert item["total"]["swatchWidth"] == "16px", (theme, item)
-        assert "repeating-linear-gradient" in item["total"]["swatchBackground"], (theme, item)
         assert item["clientLines"] == {
             "solid": "none",
             "peer": "1px, 3px",

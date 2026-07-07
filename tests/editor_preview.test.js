@@ -4593,7 +4593,7 @@ async function runEditorPreviewSuite() {
     assert.ok((html.match(/data-js-debug-token-agent="/g) || []).length >= 3, 'YO!stats renders per-agent generated-token series');
     assert.equal(agentTokenChartHtml.includes('data-js-debug-area-series="agentToken:'), false, 'agent token chart no longer renders token areas');
     assert.ok(agentTokenChartHtml.includes('js-debug-bar--agentToken') && agentTokenChartHtml.includes('data-js-debug-bar-stacked="agentToken:'), 'agent token bars are stacked by agent');
-    const tokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.agentTokenSeries === true && series.agentTokenTotalSeries !== true);
+    const tokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.agentTokenSeries === true);
     assert.deepStrictEqual([...tokenSeries.map(series => series.agentTokenPatternIndex)], [0, 1, 2], 'agent token series receive stable palette-aligned infill patterns');
     assert.equal((agentTokenChartHtml.match(/data-js-debug-token-pattern-def="/g) || []).length, 3, 'agent token chart emits one SVG infill definition per agent');
     for (const patternIndex of [0, 1, 2]) {
@@ -4601,15 +4601,12 @@ async function runEditorPreviewSuite() {
       assert.match(agentTokenChartHtml, new RegExp(`fill: url\\(#js-debug-agent-token-pattern-${patternIndex}-`), `agent token bars use SVG infill pattern ${patternIndex}`);
     }
     assert.ok(/data-js-debug-bar-series="agentToken:[^"]+"[\s\S]{0,260}data-js-debug-bar-total="210"/.test(agentTokenChartHtml), 'agent token bar stack top is cumulative across agent token series');
-    assert.equal((agentTokenChartHtml.match(/data-js-debug-moving-average="/g) || []).length, 0, 'agent token chart does not disguise its exact total as a moving average');
-    assert.ok(/data-js-debug-series="agentTokenTotal"[\s\S]*data-js-debug-line-pattern="dot"/.test(agentTokenChartHtml), 'agent token chart overlays the exact dotted all-agent total');
-    assert.equal(agentTokenChartHtml.includes('data-js-debug-bar-series="agentTokenTotal"'), false, 'summed token total is an overlay, not another stacked bar');
-    assert.ok(/data-js-debug-legend="agentTokenTotal"[\s\S]*<span>All agents total<\/span>/.test(agentTokenChartHtml), 'token legend names the exact dotted total');
+    assert.equal((agentTokenChartHtml.match(/data-js-debug-moving-average="/g) || []).length, 0, 'agent token chart does not disguise its stacked bars as a moving average');
+    assert.equal(agentTokenChartHtml.includes('agentTokenTotal'), false, 'agent token chart shows only per-agent stacked bars and legend entries');
     assert.ok(/js-debug-agent-token-cyan:[\s\S]*js-debug-agent-token-orange:[\s\S]*js-debug-agent-token-magenta:[\s\S]*js-debug-agent-token-beige/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), 'agent token bars use a deliberately separated cyan, orange, magenta, and beige palette');
     assert.ok(/function debugGraphAgentTokenPatternDefinitionHtml\(series, options = \{\}\)[\s\S]*debugGraphAgentTokenPatternShapeHtml\(patternIndex\)[\s\S]*function debugGraphAgentTokenPatternDefsHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series\)[\s\S]*function debugGraphAgentTokenLegendSwatchHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series, \{legend: true\}\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token bars and legend swatches consume one SVG pattern-definition helper');
     assert.ok(/const jsDebugGraphAgentTokenPatternShapes = Object\.freeze\(\[[\s\S]*<path d="M0 1H6"[\s\S]*const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes\.length/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token infill variants come from one horizontal-only pattern owner');
     assert.equal(/js-debug-legend-item\[data-js-debug-token-pattern=/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), false, 'agent token legend does not maintain a duplicate CSS pattern map');
-    assert.ok(/\.js-debug-line\.js-debug-line--agentTokenTotal\s*\{[\s\S]*stroke-dasharray:\s*1 4/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), 'the exact total uses a stronger dotted stroke');
     assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label');
     assert.equal(/data-js-debug-legend="agentToken:[^"]+"[\s\S]{0,240}<strong>/.test(html), false, 'per-agent token legend omits current token/min values');
     assert.ok(/data-js-debug-bar-series="transitionAgents"[\s\S]{0,220}data-js-debug-bar-stacked="transitionAgents"[\s\S]{0,220}data-js-debug-bar-total="3"/.test(html), 'transition bars are only yellow transition, not idle agents');
