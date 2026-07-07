@@ -808,6 +808,10 @@ function sessionWorkDescription(session, info, limit = 96) {
 }
 
 function sessionTabDescription(session, info) {
+  // A fresh Xterm can be fully interactive before transcript/repository metadata exists. Its tab
+  // already identifies the session and tmux window, so a generic "Loading..." description implies
+  // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
+  if (!info) return '';
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';

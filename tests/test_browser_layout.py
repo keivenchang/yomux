@@ -4598,6 +4598,56 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert abs(short_meta["metaRight"] - short_meta["zoneRight"]) <= 1
 
 
+def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp_path):
+    page = tmp_path / "pane-info-popover-full-width.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <article id="panel" class="panel active-pane" style="width: 900px; height: 300px;">
+        <div id="info-bar" class="pane-info-bar panel-detail-row">
+          <div id="zone" class="pane-info-bar-popover-zone panel-popover-zone popover-open">
+            <div class="panel-session-label"><span class="session-button-dir">7001</span></div>
+            <div class="pane-info-bar-meta meta">short metadata</div>
+            <div id="popover" class="session-popover" role="tooltip"><div class="popover-title">Extra session information</div><div class="popover-desc">This card should use all available pane width.</div></div>
+          </div>
+          <div class="tmux-window-bar" data-tmux-window-bar-context="info-bar"><button type="button" class="tab tmux-window-button">0:codex</button><button type="button" class="tab tmux-window-button">1:claude</button></div>
+          <div class="pane-info-bar-controls"><button type="button" class="btn-base">2/3</button></div>
+          <button type="button" class="panel-detail-close"></button>
+        </div>
+      </article>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); }
+      .panel { overflow: hidden; }
+      .pane-info-bar { box-sizing: border-box; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = node => {
+          const r = node.getBoundingClientRect();
+          return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width};
+        };
+        const panel = document.getElementById('panel');
+        const zone = document.getElementById('zone');
+        const popover = document.getElementById('popover');
+        const infoBar = document.getElementById('info-bar');
+        const style = getComputedStyle(popover);
+        return {panel: rect(panel), zone: rect(zone), popover: rect(popover), infoBar: rect(infoBar), position: style.position, visibility: style.visibility, overflow: getComputedStyle(infoBar).overflow};
+        """
+    )
+    assert metrics["position"] == "absolute", metrics
+    assert metrics["visibility"] == "visible", metrics
+    assert metrics["overflow"] == "visible", metrics
+    assert metrics["zone"]["width"] < metrics["panel"]["width"] * 0.85, metrics
+    assert metrics["popover"]["width"] > metrics["zone"]["width"] * 1.15, metrics
+    assert metrics["popover"]["left"] >= metrics["infoBar"]["left"] + 6, metrics
+    assert metrics["popover"]["right"] <= metrics["infoBar"]["right"] - 6, metrics
+    assert abs(metrics["popover"]["left"] - metrics["infoBar"]["left"] - 8) <= 1, metrics
+    assert abs(metrics["infoBar"]["right"] - metrics["popover"]["right"] - 8) <= 1, metrics
+
+
 def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
     page = tmp_path / "pane-control-shared-paint.html"
     load_static_html_fixture(
@@ -9867,7 +9917,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
             element,
         )
 
-    load_live_runtime_boot_fixture(browser, tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"], dangerously_yolo=True, available_agents=["claude", "codex", "term"])
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
     )
@@ -9875,6 +9925,8 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         """
         compactTopbarForViewport = () => true;
         topbarActivityUsesPhoneActionsRail = () => true;
+        mobileSinglePaneMode = () => true;
+        terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
         document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600');
         renderSessionButtons({force: true});
         """
@@ -9939,8 +9991,70 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
 
+    # This is a real rendered touch sheet, not a source-only assertion. The compact agent pairs
+    # must remain one row each and shell choices must remain chips inside the viewport.
+    tabs_button = browser.execute_script(
+        """
+        const root = document.querySelector('.app-menu--nested-root');
+        return Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap > .app-menu-command') || [])
+          .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('Tabs')) || null;
+        """
+    )
+    touch_tap(tabs_button)
+    compact_tabs = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const sheet = root?.querySelector(':scope > .app-menu-popover');
+            const pairs = Array.from(root?.querySelectorAll('.app-menu-command-pair') || []);
+            const shells = root?.querySelector('.app-menu-command-row--shells');
+            if (!sheet || pairs.length !== 2 || !shells) return null;
+            const rect = node => {
+              const box = node.getBoundingClientRect();
+              return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height};
+            };
+            return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), viewport: {width: visualViewport.width, height: visualViewport.height}};
+            """
+        )
+    )
+    assert compact_tabs["sheet"]["left"] >= -1 and compact_tabs["sheet"]["right"] <= compact_tabs["viewport"]["width"] + 1, compact_tabs
+    assert all(pair["height"] <= 46 for pair in compact_tabs["pairs"]), compact_tabs
+    assert all(len(pair) == 2 and pair[0]["right"] <= pair[1]["left"] + 12 for pair in compact_tabs["pairButtons"]), compact_tabs
+    assert all(button["height"] >= 40 for pair in compact_tabs["pairButtons"] for button in pair), compact_tabs
+    assert compact_tabs["shells"]["right"] <= compact_tabs["sheet"]["right"] + 1, compact_tabs
+    assert len(compact_tabs["shellButtons"]) == 5, compact_tabs
+    assert all(button["height"] >= 36 for button in compact_tabs["shellButtons"]), compact_tabs
+
+    # Use the real touch event path to launch an explicit Xterm shell. A launch must not merely
+    # create tmux state in the background: it closes Menus and makes the new session the active pane.
+    shell_button = browser.execute_script(
+        "return document.querySelector('.app-menu-command-row--shells .app-menu-command')"
+    )
+    touch_tap(shell_button)
+    launch_state = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+                const request = Array.from(window.__bootFetches || []).find(call => call.path === '/api/create-session');
+                if (!request || layoutSlots.left?.active !== '3') return null;
+                const panel = document.getElementById('panel-3');
+                const panelRect = panel?.getBoundingClientRect?.();
+                if (!panel || !panel.querySelector('.xterm') || !panelRect?.width || !panelRect?.height) return null;
+                const root = document.querySelector('.app-menu--nested-root');
+                return {request, active: activeSessions.slice(), selected: layoutSlots.left?.active || '', tabs: layoutSlots.left?.tabs || [], panel: {width: panelRect.width, height: panelRect.height}, rootOpen: root?.classList.contains('open') || false};
+            """
+        )
+    )
+    assert launch_state["request"]["method"] == "POST", launch_state
+    assert "agent=term" in launch_state["request"]["search"] and "terminal=bash" in launch_state["request"]["search"], launch_state
+    assert launch_state["selected"] == "3" and "3" in launch_state["tabs"] and launch_state["panel"]["height"] > 20 and launch_state["rootOpen"] is False, launch_state
+
     # A second phone tap is a disclosure toggle, not a grace-period reopen. This keeps the compact
     # root usable as a one-tap close affordance without changing full desktop menu hover behavior.
+    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    button.click()
+    assert WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
+    )
     browser.execute_script("arguments[0].click()", button)
     closed = WebDriverWait(browser, 5).until(
         lambda driver: (state if not (state := driver.execute_script(

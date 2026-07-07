@@ -3723,13 +3723,14 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"appearance": {"active_color": "purple"}}})
     monkeypatch.setattr(app_module, "tmux", fake_tmux)
     try:
-        payload, status = webapp.create_next_session("term")
+        payload, status = webapp.create_next_session("term", terminal="bash")
     finally:
         webapp.control_server.stop()
 
     commands = [args for args, _timeout in tmux_calls]
     assert status == HTTPStatus.OK
     assert payload["session"] == "1"
+    assert payload["terminal"] == "bash"
     assert commands[0][:6] == ["new-session", "-d", "-s", "1", "-c", str(tmp_path)]
     assert ["set-option", "-t", "1:", "status", "off"] in commands
     assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
@@ -3776,6 +3777,19 @@ def test_create_next_session_rejects_full_access_without_server_opt_in(monkeypat
 
     assert status == HTTPStatus.FORBIDDEN
     assert "--dangerously-yolo" in payload["error"]
+
+
+def test_create_next_session_rejects_an_implicit_terminal(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda maintenance=True: [])
+    monkeypatch.setattr(app_module, "available_agent_commands", lambda: ["term"])
+    try:
+        payload, status = webapp.create_next_session("term")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert payload["error"] == "choose an explicit terminal command"
 
 def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])

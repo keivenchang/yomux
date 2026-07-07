@@ -2794,7 +2794,7 @@ async function runShareThemeSuite() {
     assert.equal(diagnostics.reduction, 80, 'viewport diagnostics expose the toolbar-sized reduction instead of hiding it behind the keyboard classifier');
     assert.equal(diagnostics.keyboardCandidate, false, 'viewport diagnostics distinguish the toolbar-sized reduction from a keyboard candidate');
     assert.ok(diagnosticsApi.viewportDiagnosticsTextForTest(diagnostics).includes('delta 80px · keyboard no (>140px)'), 'the temporary iPad overlay states the exact threshold decision');
-    const mobileApi = loadYolomux('', ['old', 'recent', 'newest', 'older'], 'http:', 'iPhone', 'admin', {
+    const mobileApi = loadYolomux('', ['old', 'recent', 'newest', 'older', 'created'], 'http:', 'iPhone', 'admin', {
       coarsePointer: true,
       viewport: {width: 390, height: 844},
       bootstrapOverrides: {recentSessions: ['newest', 'recent', 'old', 'older']},
@@ -2803,8 +2803,15 @@ async function runShareThemeSuite() {
     assert.equal(mobileApi.phoneLikeMobileViewportForTest({width: 1366, height: 885}), false, 'the reported iPad Safari viewport stays out of the phone-only policy');
     assert.deepEqual(canonical(mobileApi.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: 'newest', tabs: ['newest', 'recent']},
-    }, 'fresh mobile boot opens only the two server-ranked recent tmux sessions in one pane, without Finder/Differ/Tabber');
+      left: {active: 'newest', tabs: ['newest', 'recent', 'old']},
+    }, 'fresh mobile boot opens up to three server-ranked recent tmux sessions in one pane, without Finder/Differ/Tabber');
+    const launchedMobileSlots = mobileApi.emptyLayoutSlots();
+    launchedMobileSlots[mobileApi.layoutTreeKey] = mobileApi.leafNode('left');
+    launchedMobileSlots.left = mobileApi.paneStateWithTabs(['newest', 'recent', 'created'], 'created');
+    assert.deepEqual(canonical(mobileApi.mobileSinglePaneLayoutSlotsForTest(launchedMobileSlots, {focusSession: 'created'})), {
+      __tree: {slot: 'left'},
+      left: {active: 'created', tabs: ['created', 'newest', 'recent']},
+    }, 'a newly launched phone tab takes the three-tab budget and becomes active instead of being discarded behind older tabs');
     assert.deepEqual(mobileApi.availableLayoutModesForTest(), ['single'], 'mobile exposes no multi-pane layout mode');
     mobileApi.applyLayoutMode('grid');
     assert.equal(mobileApi.layoutSlotKeys(mobileApi.layoutSlotsForTest()).length, 1, 'direct layout-mode requests cannot recreate a mobile split');
@@ -2926,18 +2933,21 @@ async function runShareThemeSuite() {
     const tabMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     const menuLabels = item => item.type === 'command-pair'
       ? [item.primary.label, item.secondary.label]
-      : (item.type === 'command-row' ? item.items.map(command => command.label) : [item.label]);
+      : (item.type === 'command-row' ? [item.label, ...item.items.map(command => command.label)] : [item.label]);
     const tabMenuLabels = tabMenu.items.flatMap(menuLabels).filter(Boolean);
+    assert.equal(api.menuTabCommand('1').html.includes('Loading...'), false, 'a fresh terminal tab omits unavailable transcript metadata instead of implying its interactive terminal is still loading');
     const claudeLaunchPair = tabMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude');
     const codexLaunchPair = tabMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex');
     assert.ok(tabMenuLabels.includes('new Claude'), 'Tabs menu owns new Claude');
-    assert.equal(claudeLaunchPair.secondary.label, '+ --dangerously-skip-permissions', 'Claude presents normal and full-access launches on one compact row');
+    assert.equal(claudeLaunchPair.secondary.label, 'new Claude (full access)', 'Claude presents normal and full-access launches on one compact row');
+    assert.equal(claudeLaunchPair.secondary.title, '+ --dangerously-skip-permissions', 'the concise full-access action retains the exact Claude bypass flag as its tooltip');
     assert.ok(tabMenuLabels.includes('new Codex'), 'Tabs menu owns new Codex');
-    assert.ok(codexLaunchPair.secondary.label.startsWith('+ --dangerously-bypass-approvals-and-sandbox'), 'Codex presents its bypass flags as the paired full-access action');
-    const xtermLaunchRow = tabMenu.items.find(item => item.type === 'command-row' && item.items[0]?.label === 'new Xterm');
-    assert.equal(xtermLaunchRow.className, 'app-menu-command-row', 'Xterm commands use the shared one-line row layout');
-    assert.deepEqual(xtermLaunchRow.items.map(item => item.label), ['new Xterm', 'bash', 'tsh', 'zsh'], 'Xterm shows its default action plus every server-provided terminal command on one row');
-    assert.ok(xtermLaunchRow.items[0].iconHtml.includes('app-menu-ui-icon-shell'), 'new Xterm uses the shared shell icon');
+    assert.equal(codexLaunchPair.secondary.label, 'new Codex (full access)', 'Codex uses the concise full-access action label');
+    assert.ok(codexLaunchPair.secondary.title.startsWith('+ --dangerously-bypass-approvals-and-sandbox'), 'the concise Codex action retains its bypass flags as its tooltip');
+    const xtermLaunchRow = tabMenu.items.find(item => item.type === 'command-row' && item.label === 'new Xterm');
+    assert.equal(xtermLaunchRow.className, 'app-menu-command-row app-menu-command-row--shells', 'Xterm commands use the shared compact shell-row layout');
+    assert.deepEqual(xtermLaunchRow.items.map(item => item.label), ['bash', 'tsh', 'zsh'], 'Xterm shows only explicit server-provided terminal commands on one row');
+    assert.ok(xtermLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'new Xterm uses the shared shell icon as a non-clickable row label');
     const normalServerApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
     const normalServerTabs = normalServerApi.appMenuTree().find(menu => menu.id === 'tabs');
     assert.equal(normalServerTabs.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose full-access agent launch controls');
@@ -4268,7 +4278,7 @@ async function runShareThemeSuite() {
     assert.ok(tabsMenuLabels.includes('new Claude'));
     assert.ok(tabsMenuLabels.includes('new Codex'));
     assert.ok(tabsMenuLabels.includes('new Xterm'), 'Xterm is always offered (a plain shell), not greyed unavailable');
-    assert.ok(tabsMenu.items.find(item => item.type === 'command-row' && item.items[0]?.label === 'new Xterm').items[0].iconHtml.includes('app-menu-ui-icon-shell'), 'Tabs -> new Xterm uses the shell symbol');
+    assert.ok(tabsMenu.items.find(item => item.type === 'command-row' && item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'Tabs -> new Xterm uses the shell symbol');
     assert.equal(tmuxMenuLabels.includes('+ --dangerously-skip-permissions'), false, 'launch choices remain in Tabs, not the tmux menu');
     api.setAgentAuthForTest({claude: {installed: false, logged_in: false, unavailable_reason: 'not-on-path'}});
     const unavailableTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
@@ -4279,14 +4289,15 @@ async function runShareThemeSuite() {
       const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
       const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(/function agentLaunchCommand\(agent, dangerouslyYolo = false\)[\s\S]*full_access[\s\S]*normal/.test(newSessionSrc), 'the server-owned normal/full-access launch-command helper exists');
-      assert.ok(/const launch = \(dangerouslyYolo, terminal = ''\) => menuCommand\([\s\S]*newTmuxSessionFullAccessLabel\(agent\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)/.test(newSessionSrc), 'new-session labels use the explicit normal or full-access choice');
-      assert.ok(/agent === 'term'[\s\S]*menuCommandRow\(\[launch\(false\), \.\.\.terminalLaunchNames\(\)\.map\(terminal => launch\(false, terminal\)\)\]/.test(newSessionSrc), 'Xterm exposes its default action plus every server-provided terminal command in one command row');
+      assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels use a concise full-access action while retaining the exact bypass flags in its tooltip');
+      assert.ok(/agent === 'term'[\s\S]*menuCommandRow\(terminalLaunchNames\(\)\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: newTmuxSessionLabel\(agent\)/.test(newSessionSrc), 'Xterm exposes only explicit terminal commands after its non-clickable row label');
       assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'new Xterm uses the shared shell icon path while Claude/Codex keep agent icons');
       assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands before the two stable tab groups');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
-      assert.ok(/function newTmuxSessionFullAccessLabel\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the full-access half of a paired row visibly carries the exact command flags');
+      assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the full-access action retains the exact command flags for its tooltip and accessible name');
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
       assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Xterm command rows stay on one line and scroll only as a final narrow-screen fallback');
+      assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells[\s\S]*border-radius:\s*var\(--radius-pill\)/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and horizontally scrollable shell pills');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
@@ -5480,7 +5491,7 @@ async function runShareThemeSuite() {
     const filteredNamedTabs = filteredNamedCommands.filter(item => item.targetItem);
     assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries without hiding launch commands');
     assert.deepEqual(filteredNamedTabs.map(item => item.targetItem), ['dynamo2'], 'Tabs search keeps the matching session command');
-    const filteredLaunchCommands = namedSessionApi.tabMenuItems().flatMap(item => item.type === 'command-row' ? item.items : [item]);
+    const filteredLaunchCommands = namedSessionApi.tabMenuItems().flatMap(item => item.type === 'command-row' ? [{label: item.label}, ...item.items] : [item]);
     assert.ok(filteredLaunchCommands.some(item => item.label === 'new Xterm'), 'Tabs search keeps new-session commands available');
     assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('dynamo2', 'do2')), 'Tabs search matches the raw session name');
     namedSessionApi.setTabsMenuSearchTextForTest('');

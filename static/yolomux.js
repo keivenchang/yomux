@@ -856,7 +856,7 @@ const minNonFileExplorerSplitPercent = 30;
 const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
-const mobileSinglePaneTabLimit = 2;
+const mobileSinglePaneTabLimit = 3;
 // This is a conservative touch breakpoint: narrow tablets use one column before a two-pane
 // layout becomes cramped, even though desktop users may manually create 300px panes.
 const narrowTouchSingleColumnMaxWidthPx = 680;
@@ -7253,11 +7253,17 @@ function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   // the only durable selection signal at boot, so retain the final one instead of discarding it
   // and always selecting the first recent session.
   const restoredActive = requested.length ? activePaneItems(slots).at(-1) : null;
-  const preferred = resolveLayoutItem(options.focusSession || restoredActive);
-  // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
+  const explicitFocus = resolveLayoutItem(options.focusSession);
+  const preferred = explicitFocus || resolveLayoutItem(restoredActive);
+  // Seed a fresh phone view from the three most-recent tmux sessions, but once it has a concrete
   // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
   // back on the next one-column normalization.
-  const candidates = requested.length ? requested : [preferred, ...mobileRecentTmuxItems()];
+  // A created or explicitly selected tab must win the three-tab phone budget. Without putting it
+  // first, launching another terminal successfully creates tmux state but normalization retains
+  // older tabs and makes the launch look like a no-op.
+  const candidates = requested.length
+    ? (explicitFocus ? [explicitFocus, ...requested] : requested)
+    : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
   for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
@@ -12388,9 +12394,9 @@ function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
     : t('menu.tmux.newSession', {name: agentName(agent)});
 }
 
-function newTmuxSessionFullAccessLabel(agent) {
+function newTmuxSessionFullAccessFlags(agent) {
   const flags = agentLaunchParams(agent, true);
-  return flags ? `+ ${flags}` : t('menu.tmux.newSession.fullAccess', {name: agentName(agent)});
+  return flags ? `+ ${flags}` : '';
 }
 
 function terminalLaunchNames() {
@@ -12418,18 +12424,26 @@ function newTmuxSessionItems() {
         : (loggedOut
           ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
           : (capped ? t('menu.tmux.limitReached') : '')));
-    const launch = (dangerouslyYolo, terminal = '') => menuCommand(
-      terminal || (dangerouslyYolo ? newTmuxSessionFullAccessLabel(agent) : newTmuxSessionLabel(agent)),
-      () => createNextSession(agent, {dangerouslyYolo, terminal}), {
-      iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
-      disabled: readOnlyMode || !available || loggedOut || capped,
-      detail: unavailableDetail,
-      ariaLabel: dangerouslyYolo
-        ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
-        : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
-    });
+    const launch = (dangerouslyYolo, terminal = '') => {
+      const fullAccessFlags = dangerouslyYolo ? newTmuxSessionFullAccessFlags(agent) : '';
+      return menuCommand(
+        terminal || (dangerouslyYolo ? newTmuxSessionLabel(agent, true) : newTmuxSessionLabel(agent)),
+        () => createNextSession(agent, {dangerouslyYolo, terminal}), {
+          iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
+          disabled: readOnlyMode || !available || loggedOut || capped,
+          detail: unavailableDetail,
+          title: fullAccessFlags,
+          ariaLabel: dangerouslyYolo
+            ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
+            : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
+        });
+    };
     return agent === 'term'
-      ? menuCommandRow([launch(false), ...terminalLaunchNames().map(terminal => launch(false, terminal))], {className: 'app-menu-command-row'})
+      ? menuCommandRow(terminalLaunchNames().map(terminal => launch(false, terminal)), {
+        className: 'app-menu-command-row app-menu-command-row--shells',
+        label: newTmuxSessionLabel(agent),
+        iconHtml: newTmuxSessionIcon(agent),
+      })
       : (fullAccessAgentLaunchesEnabled
         ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
         : launch(false));
@@ -13188,7 +13202,11 @@ function createAppMenuCommandPair(item) {
 }
 
 function createAppMenuCommandRow(item) {
-  return createAppMenuCommandGroup(item.items || [], item.className, (item.items || []).map(command => command?.ariaLabel || command?.label));
+  return createAppMenuCommandGroup(item.items || [], item.className, [item.label, ...(item.items || []).map(command => command?.ariaLabel || command?.label)], {
+    separator: Boolean(item.label),
+    prefixLabel: item.label,
+    prefixIconHtml: item.iconHtml,
+  });
 }
 
 function createAppMenuCommandGroup(items, className, labels, options = {}) {
@@ -13197,7 +13215,14 @@ function createAppMenuCommandGroup(items, className, labels, options = {}) {
   row.setAttribute('role', 'group');
   row.setAttribute('aria-label', labels.filter(Boolean).join(' / '));
   for (const [index, command] of items.entries()) {
-    if (options.separator === true && index > 0) {
+    if (index === 0 && options.prefixLabel) {
+      const prefix = document.createElement('span');
+      prefix.className = 'app-menu-command-row-label';
+      const iconHtml = options.prefixIconHtml ? `<span class="app-menu-icon">${stripTitleAttrs(options.prefixIconHtml)}</span>` : '';
+      prefix.innerHTML = `${iconHtml}<span>${esc(options.prefixLabel)}</span>`;
+      row.appendChild(prefix);
+    }
+    if (options.separator === true && (index > 0 || options.prefixLabel)) {
       const separator = document.createElement('span');
       separator.className = 'app-menu-command-separator';
       separator.setAttribute('aria-hidden', 'true');
@@ -13403,6 +13428,7 @@ function createAppMenuCommand(item, options = {}) {
     checked: item.checked,
     disabled: item.disabled,
     ariaLabel,
+    title: item.title,
     dataset: item.checked !== undefined ? {checked: item.checked ? 'true' : 'false'} : undefined,
     html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
   });
@@ -25578,6 +25604,10 @@ function sessionWorkDescription(session, info, limit = 96) {
 }
 
 function sessionTabDescription(session, info) {
+  // A fresh Xterm can be fully interactive before transcript/repository metadata exists. Its tab
+  // already identifies the session and tmux window, so a generic "Loading..." description implies
+  // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
+  if (!info) return '';
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';

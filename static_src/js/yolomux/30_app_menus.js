@@ -499,9 +499,9 @@ function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
     : t('menu.tmux.newSession', {name: agentName(agent)});
 }
 
-function newTmuxSessionFullAccessLabel(agent) {
+function newTmuxSessionFullAccessFlags(agent) {
   const flags = agentLaunchParams(agent, true);
-  return flags ? `+ ${flags}` : t('menu.tmux.newSession.fullAccess', {name: agentName(agent)});
+  return flags ? `+ ${flags}` : '';
 }
 
 function terminalLaunchNames() {
@@ -529,18 +529,26 @@ function newTmuxSessionItems() {
         : (loggedOut
           ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
           : (capped ? t('menu.tmux.limitReached') : '')));
-    const launch = (dangerouslyYolo, terminal = '') => menuCommand(
-      terminal || (dangerouslyYolo ? newTmuxSessionFullAccessLabel(agent) : newTmuxSessionLabel(agent)),
-      () => createNextSession(agent, {dangerouslyYolo, terminal}), {
-      iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
-      disabled: readOnlyMode || !available || loggedOut || capped,
-      detail: unavailableDetail,
-      ariaLabel: dangerouslyYolo
-        ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
-        : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
-    });
+    const launch = (dangerouslyYolo, terminal = '') => {
+      const fullAccessFlags = dangerouslyYolo ? newTmuxSessionFullAccessFlags(agent) : '';
+      return menuCommand(
+        terminal || (dangerouslyYolo ? newTmuxSessionLabel(agent, true) : newTmuxSessionLabel(agent)),
+        () => createNextSession(agent, {dangerouslyYolo, terminal}), {
+          iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
+          disabled: readOnlyMode || !available || loggedOut || capped,
+          detail: unavailableDetail,
+          title: fullAccessFlags,
+          ariaLabel: dangerouslyYolo
+            ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
+            : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
+        });
+    };
     return agent === 'term'
-      ? menuCommandRow([launch(false), ...terminalLaunchNames().map(terminal => launch(false, terminal))], {className: 'app-menu-command-row'})
+      ? menuCommandRow(terminalLaunchNames().map(terminal => launch(false, terminal)), {
+        className: 'app-menu-command-row app-menu-command-row--shells',
+        label: newTmuxSessionLabel(agent),
+        iconHtml: newTmuxSessionIcon(agent),
+      })
       : (fullAccessAgentLaunchesEnabled
         ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
         : launch(false));
@@ -1299,7 +1307,11 @@ function createAppMenuCommandPair(item) {
 }
 
 function createAppMenuCommandRow(item) {
-  return createAppMenuCommandGroup(item.items || [], item.className, (item.items || []).map(command => command?.ariaLabel || command?.label));
+  return createAppMenuCommandGroup(item.items || [], item.className, [item.label, ...(item.items || []).map(command => command?.ariaLabel || command?.label)], {
+    separator: Boolean(item.label),
+    prefixLabel: item.label,
+    prefixIconHtml: item.iconHtml,
+  });
 }
 
 function createAppMenuCommandGroup(items, className, labels, options = {}) {
@@ -1308,7 +1320,14 @@ function createAppMenuCommandGroup(items, className, labels, options = {}) {
   row.setAttribute('role', 'group');
   row.setAttribute('aria-label', labels.filter(Boolean).join(' / '));
   for (const [index, command] of items.entries()) {
-    if (options.separator === true && index > 0) {
+    if (index === 0 && options.prefixLabel) {
+      const prefix = document.createElement('span');
+      prefix.className = 'app-menu-command-row-label';
+      const iconHtml = options.prefixIconHtml ? `<span class="app-menu-icon">${stripTitleAttrs(options.prefixIconHtml)}</span>` : '';
+      prefix.innerHTML = `${iconHtml}<span>${esc(options.prefixLabel)}</span>`;
+      row.appendChild(prefix);
+    }
+    if (options.separator === true && (index > 0 || options.prefixLabel)) {
       const separator = document.createElement('span');
       separator.className = 'app-menu-command-separator';
       separator.setAttribute('aria-hidden', 'true');
@@ -1514,6 +1533,7 @@ function createAppMenuCommand(item, options = {}) {
     checked: item.checked,
     disabled: item.disabled,
     ariaLabel,
+    title: item.title,
     dataset: item.checked !== undefined ? {checked: item.checked ? 'true' : 'false'} : undefined,
     html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
   });

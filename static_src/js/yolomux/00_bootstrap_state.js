@@ -855,7 +855,7 @@ const minNonFileExplorerSplitPercent = 30;
 const mobileSinglePaneMaxWidthPx = 760;
 const mobileSinglePaneLandscapeMaxWidthPx = 960;
 const mobileSinglePaneLandscapeMaxHeightPx = 520;
-const mobileSinglePaneTabLimit = 2;
+const mobileSinglePaneTabLimit = 3;
 // This is a conservative touch breakpoint: narrow tablets use one column before a two-pane
 // layout becomes cramped, even though desktop users may manually create 300px panes.
 const narrowTouchSingleColumnMaxWidthPx = 680;

@@ -2127,6 +2127,24 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }
+/* The phone/iPad Menus root is an accordion, not a desktop-width dropdown. Keep its open sheet inside
+   the visual viewport; command rows may handle their own compact overflow without clipping the page. */
+body.app-topbar-touch-compact .app-menu--nested-root > .app-menu-popover {
+  position: fixed;
+  inset-block: calc(var(--topbar-height) + var(--space-4)) var(--space-4);
+  inset-inline: var(--space-4);
+  width: auto !important;
+  max-width: none;
+  max-height: none;
+  overflow: auto;
+  transform: none !important;
+}
+body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
+  width: 100% !important;
+  max-width: none;
+  box-sizing: border-box;
+  margin-inline: 0;
+}
 .app-submenu-popover {
   display: none;
   --app-submenu-inline-offset: 22px;
@@ -2184,6 +2202,16 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
   align-self: center;
   color: var(--muted);
   font: var(--ui-font-size)/1 var(--mono-font);
+}
+.app-menu-command-row-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-inline: var(--space-6);
+  color: var(--pane-tab-text);
+  font: 600 var(--ui-font-size)/1.2 var(--ui-font);
+  white-space: nowrap;
 }
 .app-menu-command-row {
   display: flex;
@@ -2275,6 +2303,9 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
   align-items: center;
   gap: var(--space-4);
 }
+.app-menu-command-row-label .app-menu-icon {
+  min-width: 24px;
+}
 .app-menu-command-row .app-menu-label {
   min-width: 0;
   white-space: nowrap;
@@ -2297,6 +2328,41 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
 }
 .app-menu-command-pair .app-menu-detail {
   display: none;
+}
+/* Agent launches remain two separate touch targets. The full-access button uses the localized action
+   name; its exact bypass flags stay in the accessible label/title rather than consuming the whole sheet. */
+body.app-topbar-touch-compact .app-menu-command-pair {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+body.app-topbar-touch-compact .app-menu-command-pair .app-menu-command {
+  min-height: 44px;
+}
+body.app-topbar-touch-compact .app-menu-command-row,
+body.app-topbar-touch-compact .app-menu-command-row .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row-label {
+  min-height: 44px;
+}
+/* Shell choices are peers, not full menu rows. Keep the explicit command names compact and let a
+   narrow phone scroll this one row horizontally instead of clipping the final choices. */
+.app-menu-command-row--shells {
+  padding-block: var(--space-2);
+  scrollbar-width: thin;
+}
+.app-menu-command-row--shells .app-menu-command {
+  min-width: 48px;
+  padding-inline: var(--space-5);
+  border-color: var(--sep-muted);
+  border-radius: var(--radius-pill);
+  background: var(--panel2);
+}
+.app-menu-command-row--shells .app-menu-command:hover:not(:disabled),
+.app-menu-command-row--shells .app-menu-command:focus-visible {
+  border-color: var(--accent-gold);
+}
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-row-label {
+  min-height: 40px;
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,
@@ -6750,6 +6816,13 @@ body.theme-light .drop-slot.drag-over {
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
+/* The compact session label owns hover state, but its extra-info card describes the
+   whole pane. Let the card use the Info Bar's full inline size instead of limiting it
+   to the shrinking metadata slice beside the window controls. */
+.panel-detail-row:has(.panel-popover-zone.popover-open) {
+  overflow: visible;
+  z-index: var(--z-session-popover);
+}
 /* When the Info Bar leads with the sub-window button bar (order:-1), sit it flush-left —
    drop the leading inset so the first window button hugs the panel edge. */
 .panel-detail-row:has(.tmux-window-bar) {
@@ -6790,8 +6863,8 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel-popover-zone > .session-popover {
   top: calc(100% + 4px);
-  left: 8px;
-  right: 8px;
+  left: var(--space-8);
+  right: var(--space-8);
   width: auto;
   max-height: min(60vh, 520px);
   white-space: normal;
@@ -6904,8 +6977,9 @@ body.theme-light .drop-slot.drag-over {
 .panel-popover-zone {
   flex: 1 1 auto;
   min-width: 0;
-  position: relative;
-  overflow: hidden;
+  /* The containing block is .panel-detail-row so the popover spans the full pane. */
+  position: static;
+  overflow: visible;
   white-space: nowrap;
 }
 .panel-session-label .session-button-name {

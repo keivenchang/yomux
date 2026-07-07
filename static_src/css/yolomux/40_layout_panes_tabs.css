@@ -877,6 +877,13 @@ body.theme-light .drop-slot.drag-over {
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
+/* The compact session label owns hover state, but its extra-info card describes the
+   whole pane. Let the card use the Info Bar's full inline size instead of limiting it
+   to the shrinking metadata slice beside the window controls. */
+.panel-detail-row:has(.panel-popover-zone.popover-open) {
+  overflow: visible;
+  z-index: var(--z-session-popover);
+}
 /* When the Info Bar leads with the sub-window button bar (order:-1), sit it flush-left —
    drop the leading inset so the first window button hugs the panel edge. */
 .panel-detail-row:has(.tmux-window-bar) {
@@ -917,8 +924,8 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel-popover-zone > .session-popover {
   top: calc(100% + 4px);
-  left: 8px;
-  right: 8px;
+  left: var(--space-8);
+  right: var(--space-8);
   width: auto;
   max-height: min(60vh, 520px);
   white-space: normal;
@@ -1031,8 +1038,9 @@ body.theme-light .drop-slot.drag-over {
 .panel-popover-zone {
   flex: 1 1 auto;
   min-width: 0;
-  position: relative;
-  overflow: hidden;
+  /* The containing block is .panel-detail-row so the popover spans the full pane. */
+  position: static;
+  overflow: visible;
   white-space: nowrap;
 }
 .panel-session-label .session-button-name {

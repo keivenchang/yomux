@@ -11674,7 +11674,13 @@ class TmuxWebtermApp:
                 **user_message_payload("status.sessionCreateFailedDefault", diagnostic, error=diagnostic),
             }, HTTPStatus.FORBIDDEN
         terminal_name = str(terminal or "").strip()
-        if agent == "term" and terminal_name and terminal_command(terminal_name) is None:
+        if agent == "term" and not terminal_name:
+            diagnostic = "choose an explicit terminal command"
+            return {
+                "agent": agent,
+                **user_message_payload("status.sessionCreateFailedDefault", diagnostic, error=diagnostic),
+            }, HTTPStatus.BAD_REQUEST
+        if agent == "term" and terminal_command(terminal_name) is None:
             diagnostic = f"terminal command is not available on this server PATH: {terminal_name}"
             return {
                 "agent": agent,

@@ -309,7 +309,7 @@ async function runEditorPreviewSuite() {
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
       left: {active: '1', tabs: ['1', '2']},
-    }, 'a fresh phone view is seeded from its two most-recent tmux tabs');
+    }, 'a fresh phone view retains its available recent tmux tabs, up to the three-tab phone limit');
     api.minimizePaneFromLayout('2');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},

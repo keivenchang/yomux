@@ -879,11 +879,17 @@ function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   // the only durable selection signal at boot, so retain the final one instead of discarding it
   // and always selecting the first recent session.
   const restoredActive = requested.length ? activePaneItems(slots).at(-1) : null;
-  const preferred = resolveLayoutItem(options.focusSession || restoredActive);
-  // Seed a fresh phone view from the two most-recent tmux sessions, but once it has a concrete
+  const explicitFocus = resolveLayoutItem(options.focusSession);
+  const preferred = explicitFocus || resolveLayoutItem(restoredActive);
+  // Seed a fresh phone view from the three most-recent tmux sessions, but once it has a concrete
   // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
   // back on the next one-column normalization.
-  const candidates = requested.length ? requested : [preferred, ...mobileRecentTmuxItems()];
+  // A created or explicitly selected tab must win the three-tab phone budget. Without putting it
+  // first, launching another terminal successfully creates tmux state but normalization retains
+  // older tabs and makes the launch look like a no-op.
+  const candidates = requested.length
+    ? (explicitFocus ? [explicitFocus, ...requested] : requested)
+    : [preferred, ...mobileRecentTmuxItems()];
   const tmuxItems = [];
   for (const item of candidates) {
     if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
