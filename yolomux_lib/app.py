@@ -510,6 +510,9 @@ STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 3
+# Versioned separately from the token-rate schema: this one-time repair reconstructs the history
+# erased by the first schema-3 writer from the transcript counters that remain on disk.
+STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION = 1
 STATS_SHARED_FRESH_SECONDS = 3.0
 TMUX_AI_STATUS_VERSION = 1
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
@@ -3039,6 +3042,7 @@ class TmuxWebtermApp:
             "updated_at": now,
             "sequence": sequence,
             "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
+            "agent_token_history_recovery_version": STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION,
             "sample": dict(sample),
             "raw_buckets": sorted(raw_buckets, key=lambda item: (item[0], item[1])),
             "rollup_buckets": sorted(rollup_buckets, key=lambda item: (item[0], item[1])),
@@ -3578,20 +3582,70 @@ class TmuxWebtermApp:
         return records
 
     @staticmethod
-    def stats_history_clear_agent_token_snapshots(stats_history: dict[str, Any]) -> None:
+    def stats_history_recalculate_agent_token_totals(bucket: dict[str, Any]) -> None:
+        rates = bucket.get("agent_token_rates")
+        canonical_rates: dict[str, dict[str, Any]] = {}
+        token_total = 0.0
+        sample_total = 0.0
+        for item in stats_history_agent_token_rate_records(rates):
+            key = item["key"]
+            canonical = {
+                "label": item["label"],
+                "total": float(item.get("total") or 0.0),
+                "samples": float(item.get("samples") or 0.0),
+                "tokens": float(item.get("tokens") or 0.0),
+                "seconds": float(item.get("seconds") or 0.0),
+                "source": str(item.get("source") or ""),
+            }
+            canonical_rates[key] = canonical
+            token_total += canonical["tokens"]
+            sample_total += canonical["samples"]
+        bucket["agent_token_rates"] = canonical_rates
+        bucket["tokens_per_agent_total"] = token_total
+        bucket["agent_token_samples"] = sample_total
+
+    @classmethod
+    def stats_history_migrate_agent_token_snapshots(cls, stats_history: dict[str, Any]) -> None:
         for container_name in ("raw_buckets", "rollup_buckets"):
             snapshots = stats_history.get(container_name)
             if not isinstance(snapshots, list):
                 continue
             for snapshot in snapshots:
                 if isinstance(snapshot, dict):
-                    snapshot["tokens_per_agent_total"] = 0.0
-                    snapshot["agent_token_samples"] = 0.0
-                    snapshot["agent_token_rates"] = {}
+                    bucket = snapshot
                 elif isinstance(snapshot, list) and len(snapshot) >= len(STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY):
-                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("tokens_per_agent_total")] = 0.0
-                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_samples")] = 0.0
-                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")] = {}
+                    fields = STATS_HISTORY_SHARED_BUCKET_FIELDS if len(snapshot) == len(STATS_HISTORY_SHARED_BUCKET_FIELDS) else STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY
+                    bucket = dict(zip(fields, snapshot, strict=True))
+                else:
+                    continue
+                try:
+                    duration = max(0.0, float(bucket.get("duration") or 0.0))
+                except (TypeError, ValueError):
+                    duration = 0.0
+                rates = bucket.get("agent_token_rates") if isinstance(bucket.get("agent_token_rates"), dict) else {}
+                for item in rates.values():
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        tokens = max(0.0, float(item.get("tokens", item.get("total", 0.0)) or 0.0))
+                        seconds = max(0.0, float(item.get("seconds") or 0.0))
+                    except (TypeError, ValueError):
+                        continue
+                    # Schema 2 could merge identical owner intervals more than once. The stored
+                    # rate is still useful, so preserve it while projecting duplicate elapsed
+                    # coverage back onto this bucket's real wall-clock duration.
+                    if duration > 0 and seconds > duration:
+                        tokens *= duration / seconds
+                        seconds = duration
+                    item["tokens"] = tokens
+                    item["total"] = tokens
+                    item["seconds"] = seconds
+                    item["samples"] = 1.0 if tokens > 0 or seconds > 0 else 0.0
+                cls.stats_history_recalculate_agent_token_totals(bucket)
+                if isinstance(snapshot, list):
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("tokens_per_agent_total")] = bucket["tokens_per_agent_total"]
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_samples")] = bucket["agent_token_samples"]
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")] = bucket["agent_token_rates"]
 
     @staticmethod
     def stats_history_has_agent_token_snapshots(stats_history: dict[str, Any]) -> bool:
@@ -3608,6 +3662,157 @@ class TmuxWebtermApp:
                         return True
         return False
 
+    def stats_agent_token_recovery_records(self, rows: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
+        """Rebuild the retained token timeline from the durable transcript counters."""
+
+        recovery_start = now - STATS_HISTORY_RETENTION_SECONDS
+        records: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for index, row in enumerate(rows):
+            key = self.stats_agent_token_key(row, index)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            transcript = str(row.get("transcript") or "").strip()
+            kind = str(row.get("kind") or "").strip().lower()
+            if not transcript or kind not in {"claude", "codex"}:
+                continue
+            label = self.stats_agent_token_label(row)
+            previous_by_source: dict[str, float] = {}
+            for event in session_files.transcript_generated_token_events(Path(transcript), kind):
+                previous = previous_by_source.get(event.source)
+                interval_start = previous if previous is not None else event.timestamp - STATS_AGENT_TOKEN_BUCKET_SECONDS
+                previous_by_source[event.source] = event.timestamp
+                interval_end = event.timestamp
+                if interval_end <= interval_start or interval_end <= recovery_start or interval_start >= now:
+                    continue
+                clipped_start = max(interval_start, recovery_start)
+                clipped_end = min(interval_end, now)
+                if clipped_end <= clipped_start:
+                    continue
+                covered_fraction = (clipped_end - clipped_start) / (interval_end - interval_start)
+                records.extend(self.stats_agent_token_delta_records(
+                    key,
+                    label,
+                    clipped_start,
+                    clipped_end,
+                    event.tokens * covered_fraction,
+                ))
+        return records
+
+    def stats_history_agent_token_recovery_buckets(
+        self,
+        records: list[dict[str, Any]],
+        now: float,
+    ) -> dict[tuple[int, int], dict[str, Any]]:
+        buckets: dict[tuple[int, int], dict[str, Any]] = {}
+        for record in records:
+            try:
+                sample_time = float(record.get("time") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if sample_time < now - STATS_HISTORY_RETENTION_SECONDS:
+                continue
+            duration = self.stats_history_bucket_seconds(sample_time, now)
+            start = int(math.floor(sample_time / duration) * duration)
+            key = (start, duration)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = stats_history_empty_bucket(start, duration)
+                buckets[key] = bucket
+            self.stats_history_merge_agent_token_rates_locked(bucket, record.get("agent_token_rates"))
+            self.stats_history_recalculate_agent_token_totals(bucket)
+        return buckets
+
+    def stats_history_merge_recovered_agent_token_buckets(
+        self,
+        stats_history: dict[str, Any],
+        recovered_buckets: dict[tuple[int, int], dict[str, Any]],
+    ) -> bool:
+        buckets_by_key: dict[tuple[int, int], dict[str, Any]] = {}
+        invalid_snapshots: dict[str, list[Any]] = {"raw_buckets": [], "rollup_buckets": []}
+        for container_name in ("raw_buckets", "rollup_buckets"):
+            snapshots = stats_history.get(container_name)
+            if not isinstance(snapshots, list):
+                continue
+            for snapshot in snapshots:
+                bucket = self.stats_history_shared_bucket_from_snapshot(snapshot)
+                if bucket is None:
+                    invalid_snapshots[container_name].append(snapshot)
+                    continue
+                try:
+                    key = (int(bucket.get("start") or 0), int(bucket.get("duration") or 0))
+                except (TypeError, ValueError):
+                    invalid_snapshots[container_name].append(snapshot)
+                    continue
+                if key[0] <= 0 or key[1] <= 0:
+                    invalid_snapshots[container_name].append(snapshot)
+                    continue
+                buckets_by_key[key] = bucket
+        changed = False
+        for key, recovered in recovered_buckets.items():
+            target = buckets_by_key.get(key)
+            if target is None:
+                target = stats_history_empty_bucket(*key)
+                buckets_by_key[key] = target
+            target_rates = target.get("agent_token_rates") if isinstance(target.get("agent_token_rates"), dict) else {}
+            target["agent_token_rates"] = target_rates
+            for item in stats_history_agent_token_rate_records(recovered.get("agent_token_rates")):
+                if item["key"] in target_rates:
+                    continue
+                target_rates[item["key"]] = {
+                    "label": item["label"],
+                    "total": float(item.get("total") or 0.0),
+                    "samples": float(item.get("samples") or 0.0),
+                    "tokens": float(item.get("tokens") or 0.0),
+                    "seconds": float(item.get("seconds") or 0.0),
+                    "source": str(item.get("source") or "transcript"),
+                }
+                changed = True
+            if changed:
+                self.stats_history_recalculate_agent_token_totals(target)
+        for container_name in ("raw_buckets", "rollup_buckets"):
+            duration = STATS_HISTORY_RAW_BUCKET_SECONDS if container_name == "raw_buckets" else None
+            serialized = [
+                self.stats_history_shared_bucket_snapshot(bucket)
+                for (start, bucket_duration), bucket in buckets_by_key.items()
+                if (bucket_duration == duration if duration is not None else bucket_duration != STATS_HISTORY_RAW_BUCKET_SECONDS)
+            ]
+            stats_history[container_name] = [*invalid_snapshots[container_name], *sorted(serialized, key=lambda snapshot: (snapshot[0], snapshot[1]))]
+        return changed
+
+    @staticmethod
+    def stats_history_agent_token_recovery_needed(stats_history: dict[str, Any]) -> bool:
+        try:
+            return int(stats_history.get("agent_token_history_recovery_version") or 0) < STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION
+        except (TypeError, ValueError):
+            return True
+
+    def stats_history_recover_agent_token_history(self, rows: list[dict[str, Any]], now: float) -> bool:
+        if not self.stats_history_uses_shared_status():
+            return False
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            current = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+            if not self.stats_history_agent_token_recovery_needed(current):
+                return False
+        recovered_buckets = self.stats_history_agent_token_recovery_buckets(self.stats_agent_token_recovery_records(rows, now), now)
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+            stats_history = dict(stats_history)
+            if not self.stats_history_agent_token_recovery_needed(stats_history):
+                return False
+            changed = self.stats_history_merge_recovered_agent_token_buckets(stats_history, recovered_buckets)
+            stats_history["agent_token_history_recovery_version"] = STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION
+            stats_history["updated_at"] = now
+            stats_history["rev"] = max(0, int(stats_history.get("rev") or 0)) + 1
+            status["stats_history"] = stats_history
+            self._write_shared_tmux_ai_status_locked(status)
+        self.stats_history_merge_shared_snapshot(stats_history)
+        self.stats_history_shared_rev = max(self.stats_history_shared_rev, int(stats_history["rev"]))
+        return changed
+
     def stats_agent_token_claim_shared_delta_records_locked(
         self,
         token_measurements: list[dict[str, Any]],
@@ -3621,14 +3826,12 @@ class TmuxWebtermApp:
             stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
             stats_history = dict(stats_history)
             compatible = self.stats_history_agent_tokens_compatible(stats_history)
-            discard_incompatible_history = not compatible and self.stats_history_has_agent_token_snapshots(stats_history)
-            if discard_incompatible_history:
-                # Schema 2 stored overlapping owner intervals. Its aggregate cannot be repaired
-                # after the fact, so discard only token history and establish clean baselines.
-                self.stats_history_clear_agent_token_snapshots(stats_history)
+            migrate_incompatible_history = not compatible and self.stats_history_has_agent_token_snapshots(stats_history)
+            if migrate_incompatible_history:
+                self.stats_history_migrate_agent_token_snapshots(stats_history)
             raw_state = stats_history.get("agent_token_state") if compatible else {}
             state = self.stats_history_shared_agent_state_snapshot(raw_state if isinstance(raw_state, dict) else {})
-            if compatible or not discard_incompatible_history:
+            if compatible or not migrate_incompatible_history:
                 for key, item in self.stats_agent_token_state.items():
                     if key not in state and isinstance(item, dict):
                         state[key] = dict(item)
@@ -3639,6 +3842,8 @@ class TmuxWebtermApp:
             stats_history["rev"] = max(0, int(stats_history.get("rev") or 0)) + 1
             status["stats_history"] = stats_history
             self._write_shared_tmux_ai_status_locked(status)
+        if migrate_incompatible_history:
+            self.stats_history_merge_shared_snapshot(stats_history)
         self.stats_agent_token_state = state
         self.stats_history_shared_rev = max(self.stats_history_shared_rev, int(stats_history["rev"]))
         return records
@@ -3662,6 +3867,8 @@ class TmuxWebtermApp:
         token_measurements: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         transition_seconds = self.notification_transition_seconds()
+        if include_token_rates:
+            self.stats_history_recover_agent_token_history(rows, sample_time)
         with self.stats_agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)

@@ -333,6 +333,30 @@ def test_claude_generated_tokens_include_subagent_transcript_family(tmp_path):
     assert session_files.transcript_generated_tokens(transcript, "claude") == 58
 
 
+def test_transcript_generated_token_events_preserve_codex_counters_and_claude_subagents(tmp_path):
+    codex = tmp_path / "rollout.jsonl"
+    claude = tmp_path / "session.jsonl"
+    subagent = tmp_path / "session" / "subagents" / "agent.jsonl"
+    subagent.parent.mkdir(parents=True)
+
+    def codex_line(timestamp, total):
+        return json.dumps({"timestamp": timestamp, "payload": {"info": {"total_token_usage": {"output_tokens": total}}}}) + "\n"
+
+    def claude_line(timestamp, message_id, output_tokens):
+        return json.dumps({"timestamp": timestamp, "type": "assistant", "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []}}) + "\n"
+
+    codex.write_text(codex_line(100, 11) + codex_line(160, 31), encoding="utf-8")
+    claude.write_text(claude_line(100, "parent", 7) + claude_line(160, "parent", 9), encoding="utf-8")
+    subagent.write_text(claude_line(130, "child", 13), encoding="utf-8")
+
+    codex_events = session_files.transcript_generated_token_events(codex, "codex")
+    claude_events = session_files.transcript_generated_token_events(claude, "claude")
+
+    assert [(event.timestamp, event.tokens) for event in codex_events] == [(100.0, 11.0), (160.0, 20.0)]
+    assert sorted((event.timestamp, event.tokens) for event in claude_events) == [(100.0, 7.0), (130.0, 13.0), (160.0, 2.0)]
+    assert len({event.source for event in claude_events}) == 2
+
+
 def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
     session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"

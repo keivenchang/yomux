@@ -17,6 +17,8 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
+from datetime import timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,15 @@ class TranscriptScanRecord:
     lock: threading.RLock = field(default_factory=threading.RLock)
     persisted_offset: int = 0
     persisted_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class TranscriptUsageEvent:
+    """One timestamped increment in an agent transcript's generated-token counter."""
+
+    source: str
+    timestamp: float
+    tokens: float
 
 
 _TRANSCRIPT_SCAN_CACHE: dict[tuple[Any, ...], TranscriptScanRecord] = {}
@@ -741,6 +752,104 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
     else:
         return None
     return generated_tokens if generated_tokens > 0 else None
+
+
+def transcript_record_timestamp(record: dict[str, Any]) -> float | None:
+    value = record.get("timestamp")
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return timestamp if timestamp > 0 else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def transcript_json_records(path: Path) -> Iterator[dict[str, Any]]:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    yield record
+    except OSError:
+        return
+
+
+def claude_transcript_generated_token_events(path: Path) -> list[TranscriptUsageEvent]:
+    tokens_by_message_id: dict[str, float] = {}
+    source = str(path.expanduser().resolve(strict=False))
+    events: list[TranscriptUsageEvent] = []
+    for record in transcript_json_records(path):
+        if record.get("type") != "assistant":
+            continue
+        timestamp = transcript_record_timestamp(record)
+        message = record.get("message")
+        if timestamp is None or not isinstance(message, dict):
+            continue
+        tokens = claude_usage_generated_tokens(message.get("usage"))
+        if tokens <= 0:
+            continue
+        message_id = str(message.get("id") or "").strip()
+        if message_id:
+            previous = tokens_by_message_id.get(message_id, 0.0)
+            tokens_by_message_id[message_id] = max(previous, tokens)
+            tokens -= previous
+        if tokens > 0:
+            events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens))
+    return events
+
+
+def codex_transcript_generated_token_events(path: Path) -> list[TranscriptUsageEvent]:
+    source = str(path.expanduser().resolve(strict=False))
+    usage_records: list[tuple[float, float | None, float | None]] = []
+    for record in transcript_json_records(path):
+        timestamp = transcript_record_timestamp(record)
+        if timestamp is None:
+            continue
+        total_generated, last_generated = codex_record_usage_generated_tokens(record)
+        if total_generated is not None or last_generated is not None:
+            usage_records.append((timestamp, total_generated, last_generated))
+    if any(total is not None for _timestamp, total, _last in usage_records):
+        previous_total: float | None = None
+        events: list[TranscriptUsageEvent] = []
+        for timestamp, total, _last in usage_records:
+            if total is None:
+                continue
+            tokens = total if previous_total is None else total - previous_total
+            previous_total = total
+            if tokens > 0:
+                events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens))
+        return events
+    return [
+        TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=last)
+        for timestamp, _total, last in usage_records
+        if last is not None and last > 0
+    ]
+
+
+def transcript_generated_token_events(path: Path, kind: str) -> list[TranscriptUsageEvent]:
+    agent_kind = str(kind or "").strip().lower()
+    if agent_kind == "claude":
+        events = [
+            event
+            for transcript_path in claude_transcript_family_paths(path)
+            for event in claude_transcript_generated_token_events(transcript_path)
+        ]
+    elif agent_kind == "codex":
+        events = codex_transcript_generated_token_events(path)
+    else:
+        return []
+    return sorted(events, key=lambda event: (event.source, event.timestamp))
 
 
 def codex_line_may_contain_git_change(line: str) -> bool:

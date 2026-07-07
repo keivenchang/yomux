@@ -1937,6 +1937,84 @@ def test_shared_stats_agent_token_delta_is_claimed_once_across_owner_handoff(mon
     assert shared["agent_token_state"]["1|0|codex"]["tokens"] == pytest.approx(220.0)
 
 
+def test_shared_stats_migrates_legacy_agent_token_intervals_without_dropping_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.background_owner = StatsRoleOwner(owner=True, port=8003)
+    legacy_bucket = app_module.stats_history_empty_bucket(960, 60)
+    legacy_bucket["tokens_per_agent_total"] = 1200.0
+    legacy_bucket["agent_token_samples"] = 4.0
+    legacy_bucket["agent_token_rates"] = {
+        "1|0|codex": {"label": "1:0:codex", "total": 1200.0, "samples": 4.0, "tokens": 1200.0, "seconds": 240.0, "source": "transcript"},
+    }
+    status = webapp.tmux_ai_status_empty()
+    status["stats_history"]["agent_token_schema_version"] = 2
+    status["stats_history"]["rollup_buckets"] = [webapp.stats_history_shared_bucket_snapshot(legacy_bucket)]
+    common.TMUX_AI_STATUS_PATH.write_text(json.dumps(status), encoding="utf-8")
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/codex.jsonl"}])
+
+    def token_count(row):
+        row["_stats_agent_token_source"] = "transcript"
+        row["_stats_agent_token_identity"] = "codex:stable-transcript"
+        return 500.0
+
+    monkeypatch.setattr(webapp, "stats_agent_token_count", token_count)
+    try:
+        webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
+        migrated = json.loads(common.TMUX_AI_STATUS_PATH.read_text(encoding="utf-8"))["stats_history"]
+    finally:
+        webapp.control_server.stop()
+
+    item = migrated["rollup_buckets"][0][app_module.STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")]["1|0|codex"]
+    assert migrated["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
+    assert item["tokens"] == pytest.approx(300.0)
+    assert item["seconds"] == pytest.approx(60.0)
+    assert item["samples"] == pytest.approx(1.0)
+
+
+def test_shared_stats_recovers_missing_agent_token_history_from_transcript_without_overwriting_fresh_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    transcript = tmp_path / "rollout.jsonl"
+    now = 200_040.0
+    transcript.write_text(
+        json.dumps({"timestamp": now - 180, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n"
+        + json.dumps({"timestamp": now - 60, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n"
+        + json.dumps({"timestamp": now, "payload": {"info": {"total_token_usage": {"output_tokens": 340}}}}) + "\n",
+        encoding="utf-8",
+    )
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.background_owner = StatsRoleOwner(owner=True, port=8003)
+    fresh_start = int(now - 60)
+    fresh_bucket = app_module.stats_history_empty_bucket(fresh_start, app_module.STATS_HISTORY_RAW_BUCKET_SECONDS)
+    fresh_bucket["agent_token_rates"] = {
+        "1|0|codex": {"label": "1:0:codex", "total": 9.0, "samples": 1.0, "tokens": 9.0, "seconds": 1.0, "source": "transcript"},
+    }
+    webapp.stats_history_recalculate_agent_token_totals(fresh_bucket)
+    status = webapp.tmux_ai_status_empty()
+    status["stats_history"]["agent_token_schema_version"] = app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
+    status["stats_history"]["raw_buckets"] = [webapp.stats_history_shared_bucket_snapshot(fresh_bucket)]
+    common.TMUX_AI_STATUS_PATH.write_text(json.dumps(status), encoding="utf-8")
+    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(transcript)}]
+    try:
+        assert webapp.stats_history_recover_agent_token_history(rows, now) is True
+        recovered = json.loads(common.TMUX_AI_STATUS_PATH.read_text(encoding="utf-8"))["stats_history"]
+    finally:
+        webapp.control_server.stop()
+
+    raw = {
+        (snapshot[0], snapshot[1]): snapshot
+        for snapshot in recovered["raw_buckets"]
+    }
+    fresh_rates = raw[(fresh_start, app_module.STATS_HISTORY_RAW_BUCKET_SECONDS)][app_module.STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")]
+    assert recovered["agent_token_history_recovery_version"] == app_module.STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION
+    assert fresh_rates["1|0|codex"]["tokens"] == pytest.approx(9.0)
+    assert any(
+        rates.get("1|0|codex", {}).get("tokens") == pytest.approx(100.0)
+        for snapshot in raw.values()
+        for rates in [snapshot[app_module.STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")]]
+    )
+
+
 def test_stats_agent_token_delta_records_accumulate_actual_overlap_seconds():
     webapp = app_module.TmuxWebtermApp([])
     try:

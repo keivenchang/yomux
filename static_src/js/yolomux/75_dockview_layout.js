@@ -102,6 +102,16 @@ function dockviewThemeForApp() {
   return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
 }
 
+function dockviewSplitLayoutHasMinimumSize(zone) {
+  if (!layoutSplitZone(zone)) return false;
+  const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!rect) return false;
+  if (zone === 'left' || zone === 'right') {
+    return (Number(rect.width) || 0) >= DOCKVIEW_MIN_LAYOUT_WIDTH;
+  }
+  return (Number(rect.height) || 0) >= DOCKVIEW_MIN_LAYOUT_HEIGHT;
+}
+
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
   if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
@@ -113,6 +123,7 @@ function dockviewRootBoundaryDropIntent(event) {
   if (!nativeEvent || !rect) return null;
   const zone = rootBoundaryDropZoneForEvent(nativeEvent, rect);
   if (!layoutSplitZone(zone)) return null;
+  if (!dockviewSplitLayoutHasMinimumSize(zone)) return null;
   if (event.kind === 'content' && event.group && !dockviewContentDropCanUseRootBoundary(nativeEvent, zone)) return null;
   if (rootBoundaryDropOverDockedFileExplorer(nativeEvent, zone)) return null;
   return {
@@ -167,10 +178,23 @@ function dockviewPaneContentDropInfo(event) {
 
 function dockviewPaneContentDropIntent(event) {
   const info = dockviewPaneContentDropInfo(event);
-  if (!info) return null;
-  if (!layoutSplitZone(info.intent.zone)) return null;
-  if (dockviewPinnedTabCrossPaneViolation(info.intent)) return null;
-  return dropIntentAllowsSession(info.item, info.intent) ? info.intent : null;
+  return dockviewPaneContentSplitAllowed(info) ? info.intent : null;
+}
+
+function dockviewPaneContentDropAllowed(info) {
+  return Boolean(
+    info
+      && !dockviewPinnedTabCrossPaneViolation(info.intent)
+      && dropIntentAllowsSession(info.item, info.intent)
+  );
+}
+
+function dockviewPaneContentSplitAllowed(info) {
+  return Boolean(
+    dockviewPaneContentDropAllowed(info)
+      && layoutSplitZone(info.intent.zone)
+      && dockviewSplitLayoutHasMinimumSize(info.intent.zone)
+  );
 }
 
 function dockviewShouldSuppressPaneContentDrop(event) {
@@ -178,8 +202,8 @@ function dockviewShouldSuppressPaneContentDrop(event) {
   return Boolean(info && (
     (narrowSingleColumnMode() && event.position !== 'center')
       ||
-    dockviewPinnedTabCrossPaneViolation(info.intent)
-      || !dropIntentAllowsSession(info.item, info.intent)
+    !dockviewPaneContentDropAllowed(info)
+      || (layoutSplitZone(info.intent.zone) && !dockviewPaneContentSplitAllowed(info))
   ));
 }
 
