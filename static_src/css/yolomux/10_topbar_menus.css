@@ -572,6 +572,9 @@ body.theme-light .topbar-language {
   flex: 1 1 auto;
   text-align: start;
 }
+.topbar-search-label-short {
+  display: none;
+}
 .topbar-search-hint {
   flex: 0 0 auto;
   font: inherit;
@@ -776,13 +779,21 @@ body.app-topbar-touch-compact.app-vw-lte-600 .app-menu-area {
 }
 body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search {
   display: inline-flex;
-  flex: 0 1 8ch;
+  /* This basis includes the search icon, gap, and horizontal padding. Eight characters for the
+     entire control left only five visible characters in the localized Search label. */
+  flex: 0 1 12ch;
   inline-size: auto;
   min-inline-size: 0;
   padding: 0 var(--space-6);
 }
 body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label {
   display: inline-flex;
+}
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label-long {
+  display: none;
+}
+body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-label-short {
+  display: inline;
 }
 body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-hint {
   display: none;
@@ -843,14 +854,15 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
   border-radius: var(--radius-pill);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
-.app-menu-button::after {
+.app-menu-button::before {
   content: "";
   width: 0;
   height: 0;
-  border-inline-start: 4px solid transparent;
-  border-inline-end: 4px solid transparent;
-  border-top: 5px solid currentColor;
-  opacity: 0.62;
+  border-block: 4px solid transparent;
+  border-inline-start: 5px solid var(--disclosure-triangle-collapsed-color);
+  opacity: 0.9;
+  transform-origin: center;
+  transition: border-color var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
 }
 .app-menu-button:hover,
 .app-menu-button:focus-visible,
@@ -862,6 +874,10 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
 }
 .app-menu.open > .app-menu-button {
   border-color: var(--accent-gold);
+}
+.app-menu.open > .app-menu-button::before {
+  border-inline-start-color: var(--disclosure-triangle-expanded-color);
+  transform: rotate(90deg);
 }
 .app-menu-popover {
   visibility: hidden;

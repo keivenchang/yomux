@@ -12889,7 +12889,14 @@ function createTopbarSearch() {
   icon.textContent = '⌕';
   const label = document.createElement('span');
   label.className = 'topbar-search-label';
-  label.textContent = t('topbar.search.label');
+  const longLabel = document.createElement('span');
+  longLabel.className = 'topbar-search-label-long';
+  longLabel.textContent = t('topbar.search.label');
+  const compactLabel = document.createElement('span');
+  compactLabel.className = 'topbar-search-label-short';
+  compactLabel.setAttribute('aria-hidden', 'true');
+  compactLabel.textContent = t('common.search');
+  label.append(longLabel, compactLabel);
   const hint = document.createElement('kbd');
   hint.className = 'topbar-search-hint';
   hint.textContent = isMac ? '⌘P' : 'Ctrl+P';

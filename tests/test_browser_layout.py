@@ -6413,7 +6413,7 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
         <div id="sessionButtons" class="app-menu-area">
           <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Menus</button></div></nav>
           <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
-          <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label">Search files, commands</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
+          <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label"><span class="topbar-search-label-long">Search files, commands</span><span class="topbar-search-label-short" aria-hidden="true">Search</span></span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
           <button id="touch-language" class="topbar-language">English</button>
           <button id="touch-owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
           <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count topbar-activity-working active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--working topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-ask active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--attention topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-blocked active"><span class="topbar-activity-count-number">3</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--cooldown topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--cooldown">●</span></span></span><span class="topbar-activity-idle">3 idle</span></button>
@@ -6451,6 +6451,9 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
           actions: box(actions),
           search: box(document.getElementById('touch-search')),
           searchLabel: box(document.getElementById('touch-search-label')),
+          searchShortLabel: box(document.querySelector('.topbar-search-label-short')),
+          searchLongLabel: box(document.querySelector('.topbar-search-label-long')),
+          searchShortLabelOverflow: document.querySelector('.topbar-search-label-short').scrollWidth > document.querySelector('.topbar-search-label-short').clientWidth,
           language: box(document.getElementById('touch-language')),
           owner: box(document.getElementById('touch-owner')),
           nav: box(document.getElementById('touch-nav')),
@@ -6474,6 +6477,10 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     # glass or a mostly empty full-width search field.
     assert metrics["search"]["width"] > metrics["search"]["height"] + 1, metrics
     assert metrics["searchLabel"]["display"] == "flex", metrics
+    assert metrics["searchLongLabel"]["display"] == "none", metrics
+    # A flex child blockifies the inline short label while retaining the compact text content.
+    assert metrics["searchShortLabel"]["display"] == "block", metrics
+    assert metrics["searchShortLabelOverflow"] is False, metrics
     assert metrics["language"]["display"] == "none", metrics
     assert metrics["owner"]["display"] == "none", metrics
     assert metrics["nav"]["display"] == "none", metrics
@@ -9766,6 +9773,35 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
             menu_id,
         )
 
+    def disclosure_metrics(menu_id):
+        return browser.execute_script(
+            """
+            const wrapper = document.querySelector(`.app-menu[data-app-menu="${arguments[0]}"]`);
+            const button = wrapper?.querySelector(':scope > .app-menu-button');
+            const disclosure = button ? getComputedStyle(button, '::before') : null;
+            const resolveColor = token => {
+              const probe = document.createElement('i');
+              probe.style.color = `var(${token})`;
+              document.body.appendChild(probe);
+              const color = getComputedStyle(probe).color;
+              probe.remove();
+              return color;
+            };
+            return {
+              exists: Boolean(button && disclosure),
+              beforeDisplay: disclosure?.display || '',
+              beforeWidth: disclosure?.width || '',
+              beforeBorderLeftWidth: disclosure?.borderLeftWidth || '',
+              beforeBorderRightWidth: disclosure?.borderRightWidth || '',
+              borderLeftColor: disclosure?.borderLeftColor || '',
+              transform: disclosure?.transform || '',
+              closedColor: resolveColor('--disclosure-triangle-collapsed-color'),
+              expandedColor: resolveColor('--disclosure-triangle-expanded-color'),
+            };
+            """,
+            menu_id,
+        )
+
     for menu_id in ["file", "view", "tmux", "tabs", "help"]:
         browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-button').click()
         metrics = WebDriverWait(browser, 5).until(
@@ -9800,9 +9836,27 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         lambda _driver: (state if not (state := menu_metrics("view"))["open"] else False)
     )
     assert closed["openIds"] == [], closed
+    disclosure_closed = disclosure_metrics("file")
+    assert disclosure_closed["exists"] is True, disclosure_closed
+    assert disclosure_closed["beforeDisplay"] == "block", disclosure_closed
+    assert disclosure_closed["beforeWidth"] == "0px", disclosure_closed
+    assert disclosure_closed["beforeBorderLeftWidth"] == "5px", disclosure_closed
+    assert disclosure_closed["beforeBorderRightWidth"] == "0px", disclosure_closed
+    assert disclosure_closed["borderLeftColor"] == disclosure_closed["closedColor"], disclosure_closed
+    assert disclosure_closed["transform"] == "none", disclosure_closed
 
     browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
     assert WebDriverWait(browser, 5).until(lambda _driver: menu_metrics("file")["open"])
+    disclosure_open = WebDriverWait(browser, 5).until(
+        lambda _driver: (
+            state
+            if (state := disclosure_metrics("file"))["borderLeftColor"] == state["expandedColor"]
+            and state["transform"] != "none"
+            else False
+        )
+    )
+    assert disclosure_open["borderLeftColor"] == disclosure_open["expandedColor"], disclosure_open
+    assert disclosure_open["transform"] != "none", disclosure_open
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".xterm")).click().perform()
     terminal_closed = WebDriverWait(browser, 5).until(
         lambda _driver: (state if not (state := menu_metrics("file"))["open"] else False)
