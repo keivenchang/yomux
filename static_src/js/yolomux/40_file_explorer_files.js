@@ -1374,60 +1374,24 @@ function fileTreeRepoPopoverNode() {
   return node;
 }
 
-let fileTreeRepoPopoverTimer = null;
-let fileTreeRepoPopoverHoverToken = 0;
-let fileTreeRepoPopoverCursor = {x: 0, y: 0};   // last pointer pos over the hovered repo row; popover anchors to its RIGHT
-
-function cancelFileTreeRepoPopoverTimer() {
-  if (fileTreeRepoPopoverTimer) {
-    clearTimeout(fileTreeRepoPopoverTimer);
-    fileTreeRepoPopoverTimer = null;
-  }
-  fileTreeRepoPopoverHoverToken += 1;
-}
-
 function showFileTreeRepoPopover(row, repo) {
   if (!repo?.root) return;
   const node = fileTreeRepoPopoverNode();
   node.innerHTML = repoInfoPopoverHtml(repo);
   node.hidden = false;
-  // Anchor to the RIGHT of the cursor (like a tooltip following the pointer), not centered under the row.
-  // Clamp to the viewport so it stays fully on-screen near the right/bottom edge.
-  const popRect = node.getBoundingClientRect?.();
-  const pos = clampToViewport(
-    Math.round(fileTreeRepoPopoverCursor.x + 14),
-    Math.round(fileTreeRepoPopoverCursor.y + 4),
-    Math.ceil(popRect?.width || 0),
-    Math.ceil(popRect?.height || 0),
+  const popRect = node.getBoundingClientRect?.(), pos = clampToViewport(
+    Math.round(Number(row.dataset.repoPopoverX || 0) + 14), Math.round(Number(row.dataset.repoPopoverY || 0) + 4),
+    Math.ceil(popRect?.width || 0), Math.ceil(popRect?.height || 0),
   );
-  node.style.left = `${Math.round(pos.left)}px`;
-  node.style.top = `${Math.round(pos.top)}px`;
+  Object.assign(node.style, {left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px`});
 }
 
-function hideFileTreeRepoPopover() {
-  cancelFileTreeRepoPopoverTimer();
-  fileTreeRepoPopoverPath = null;
-  const node = document.getElementById('fileTreeRepoPopover');
-  if (node) node.hidden = true;
-}
-
-function scheduleRepoRowHoverPopover(row, path) {
-  cancelFileTreeRepoPopoverTimer();
-  const token = fileTreeRepoPopoverHoverToken;
-  const delay = Math.max(0, Number(popoverShowDelayMs) || 0);
-  fileTreeRepoPopoverTimer = setTimeout(() => {
-    fileTreeRepoPopoverTimer = null;
-    if (token !== fileTreeRepoPopoverHoverToken || !row?.isConnected) return;
-    showRepoRowHoverPopover(row, path);
-  }, delay);
-}
+function hideFileTreeRepoPopover() { document.getElementById('fileTreeRepoPopover')?.setAttribute('hidden', ''); }
 
 async function showRepoRowHoverPopover(row, path) {
-  const normalized = normalizeDirectoryPath(path);
-  fileTreeRepoPopoverPath = normalized;
+  const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
-  showFileTreeRepoPopover(row, fileExplorerRepoInfoCache.get(normalized));
-  const cached = fileExplorerRepoInfoCache.get(normalized);
+  showFileTreeRepoPopover(row, cached);
   if (cached && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
@@ -1436,9 +1400,28 @@ async function showRepoRowHoverPopover(row, path) {
     if (info.repo) {
       cacheFileExplorerRepoInfo(normalized, info.repo);
       updateFileTreeGitStatusRows();
-      if (fileTreeRepoPopoverPath === normalized) showFileTreeRepoPopover(row, info.repo);
+      if (row.dataset.popoverHoverState === 'open') showFileTreeRepoPopover(row, info.repo);
     }
   } catch (_) {}
+}
+
+function fileTreeRepoHoverController(row, path) {
+  if (row.__yolomuxRepoHoverController) return row.__yolomuxRepoHoverController;
+  const updatePointer = event => Object.assign(row.dataset, {repoPopoverX: String(event?.clientX || row.dataset.repoPopoverX || 0), repoPopoverY: String(event?.clientY || row.dataset.repoPopoverY || 0)});
+  return row.__yolomuxRepoHoverController = createHoverPopover({
+    anchor: row,
+    popover: fileTreeRepoPopoverNode,
+    stateClass: null,
+    canOpen: () => row.dataset.isRepo === 'true',
+    position: event => {
+      updatePointer(event);
+      const repo = fileExplorerRepoInfoCache.get(normalizeDirectoryPath(path));
+      if (repo) showFileTreeRepoPopover(row, repo);
+    },
+    onPointerMove: updatePointer,
+    onOpen: () => { void showRepoRowHoverPopover(row, path); },
+    onClose: hideFileTreeRepoPopover,
+  });
 }
 
 async function commitFileExplorerPathInput(input) {
@@ -2586,13 +2569,9 @@ function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
-    row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
-    row.onmousemove = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; };
-    row.onmouseleave = () => hideFileTreeRepoPopover();
+    fileTreeRepoHoverController(row, fullPath);
   } else if (!differMode) {
-    cancelFileTreeRepoPopoverTimer();
     row.onmouseenter = null;
-    row.onmousemove = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
     if (entry.is_symlink === true && entry.symlink_target) {

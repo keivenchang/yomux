@@ -149,7 +149,6 @@ const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
-const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
@@ -165,6 +164,15 @@ const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
   idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
 });
+function debugGraphAgentStatusSeriesDef(key) {
+  return {
+    key,
+    labelKey: jsDebugAgentStatusSeriesLabelKeys[key],
+    unit: 'count',
+    value: bucket => jsDebugAgentStatusBucketValueGetters[key](bucket),
+    hasData: bucket => Number(bucket?.agentActivitySamples || 0) > 0,
+  };
+}
 const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-cyan)',
   'var(--js-debug-agent-token-orange)',
@@ -206,11 +214,11 @@ const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
-  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
-  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid'},
+  ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
+  ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
+  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
@@ -1774,24 +1782,6 @@ function debugGraphDisplayedSummary(group, buckets) {
   };
 }
 
-function debugGraphBucketValue(bucket, key) {
-  if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
-  if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
-  if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
-  if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
-  if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
-  if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
-  if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
-    const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
-    const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return item ? debugGraphAgentTokenBucketValue(bucket, item) : 0;
-  }
-  if (key === 'cpu') return bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0;
-  if (key === 'systemCpu') return bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0;
-  if (key === 'systemMemory') return bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0;
-  return 0;
-}
-
 function debugGraphThisClientMetricBucket(bucket, metric) {
   if (!bucket || !metric) return null;
   if (bucket.clients instanceof Map) {
@@ -1818,6 +1808,16 @@ function debugGraphOtherClientMetricAverage(bucket, metric) {
   return clientBuckets.reduce((sum, clientBucket) => sum + metric.value(clientBucket), 0) / clientBuckets.length;
 }
 
+function debugGraphClientSeriesDef(metric, {key = metric.key, labelKey, clientId, clientAggregate, clientLinePattern, color = ''}) {
+  const otherClients = clientAggregate === jsDebugGraphOtherClientsAverageAggregate;
+  return {
+    ...metric, key, labelKey, metricLabelKey: metric.labelKey, cssKey: metric.key, clientMetric: true, metricKey: metric.key, clientId, clientAggregate, clientLinePattern,
+    ...(color ? {color} : {}),
+    value: bucket => otherClients ? debugGraphOtherClientMetricAverage(bucket, metric) : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return clientBucket ? metric.value(clientBucket) : 0; })(),
+    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket))); })(),
+  };
+}
+
 function debugGraphProcessCpuBucketValue(bucket, processId) {
   const process = bucket?.servers instanceof Map ? bucket.servers.get(processId) : null;
   return Number(process?.cpuCount || 0) > 0
@@ -1825,69 +1825,29 @@ function debugGraphProcessCpuBucketValue(bucket, processId) {
     : 0;
 }
 
+function debugGraphProcessCpuBucketHasData(bucket, processId) {
+  return Number(bucket?.servers instanceof Map ? bucket.servers.get(processId)?.cpuCount : 0) > 0;
+}
+
+function debugGraphHostMetricBucketItem(bucket, series) {
+  const mapName = series.hostProcessId
+    ? (series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses')
+    : 'gpuDevices';
+  return bucket?.hostMetrics?.[mapName] instanceof Map ? bucket.hostMetrics[mapName].get(series.hostProcessId || series.gpuDeviceId) : null;
+}
+
 function debugGraphHostMetricBucketValue(bucket, series) {
-  const host = bucket?.hostMetrics;
-  if (!host) return 0;
+  const item = debugGraphHostMetricBucketItem(bucket, series);
   if (series.hostProcessId) {
-    const mapName = series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
-    const item = host[mapName] instanceof Map ? host[mapName].get(series.hostProcessId) : null;
-    const total = series.hostMetric === 'memory' || series.hostMetric === 'gpuMemory'
-      ? Number(item?.totalBytes || 0)
-      : Number(item?.totalPercent || 0);
+    const total = series.hostMetric === 'memory' || series.hostMetric === 'gpuMemory' ? Number(item?.totalBytes || 0) : Number(item?.totalPercent || 0);
     return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
   }
-  const item = host.gpuDevices instanceof Map ? host.gpuDevices.get(series.gpuDeviceId) : null;
   const total = series.hostMetric === 'gpuUtil' ? Number(item?.utilTotalPercent || 0) : Number(item?.memoryUsedTotalBytes || 0);
   return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
 }
 
-function debugGraphSeriesBucketValue(bucket, series) {
-  if (series?.clientMetric === true) {
-    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return metric ? debugGraphOtherClientMetricAverage(bucket, metric) : 0;
-    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
-    return metric && clientBucket ? metric.value(clientBucket) : 0;
-  }
-  if (series?.processCpu === true) return debugGraphProcessCpuBucketValue(bucket, series.processId);
-  if (series?.hostMetric) return debugGraphHostMetricBucketValue(bucket, series);
-  return debugGraphBucketValue(bucket, series?.key);
-}
-
-function debugGraphBucketHasSeriesData(bucket, key) {
-  if (!bucket) return false;
-  if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
-  if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
-  if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
-  if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
-    const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
-    const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return Number(item?.samples || 0) > 0 || Number(item?.tokens || 0) > 0;
-  }
-  if (key === 'cpu') return Number(bucket.cpuCount || 0) > 0;
-  if (key === 'systemCpu') return Number(bucket.systemCpuCount || 0) > 0;
-  if (key === 'systemMemory') return Number(bucket.hostMetrics?.systemMemoryCount || 0) > 0;
-  return debugGraphBucketValue(bucket, key) > 0;
-}
-
-function debugGraphSeriesBucketHasData(bucket, series) {
-  if (series?.clientMetric === true) {
-    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return debugGraphOtherClientMetricBuckets(bucket, metric).length > 0;
-    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
-    return Boolean(metric && clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket)));
-  }
-  if (series?.processCpu === true) {
-    const process = bucket?.servers instanceof Map ? bucket.servers.get(series.processId) : null;
-    return Number(process?.cpuCount || 0) > 0;
-  }
-  if (series?.hostMetric) {
-    if (series.hostProcessId) {
-      const mapName = series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
-      return Number(bucket?.hostMetrics?.[mapName] instanceof Map ? bucket.hostMetrics[mapName].get(series.hostProcessId)?.samples : 0) > 0;
-    }
-    return Number(bucket?.hostMetrics?.gpuDevices instanceof Map ? bucket.hostMetrics.gpuDevices.get(series.gpuDeviceId)?.samples : 0) > 0;
-  }
-  return debugGraphBucketHasSeriesData(bucket, series?.key);
+function debugGraphHostMetricBucketHasData(bucket, series) {
+  return Number(debugGraphHostMetricBucketItem(bucket, series)?.samples || 0) > 0;
 }
 
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
@@ -2172,6 +2132,14 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       agentTokenKey: key,
       agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
+      value: bucket => {
+        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+        return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+      },
+      hasData: bucket => {
+        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+        return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+      },
     }));
   return agentSeries;
 }
@@ -2179,14 +2147,9 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
 function debugGraphClientMetricSeriesDefs(buckets) {
   return jsDebugGraphClientMetrics
     .filter(metric => buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, metric).length > 0))
-    .map(metric => ({
-      ...metric,
+    .map(metric => debugGraphClientSeriesDef(metric, {
       key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
       labelKey: 'debug.graph.series.otherClientsAverage',
-      metricLabelKey: metric.labelKey,
-      cssKey: metric.key,
-      clientMetric: true,
-      metricKey: metric.key,
       clientId: jsDebugGraphOtherClientsAverageId,
       clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
       clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
@@ -2205,7 +2168,11 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current};
+  const fallbackSelf = {
+    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
+    value: bucket => bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0,
+    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
+  };
   if (!processes.size) return [fallbackSelf];
   let peerIndex = 0;
   const definitions = [...processes.entries()]
@@ -2226,6 +2193,8 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         processId,
         linePattern: current ? 'solid' : 'dot',
         color,
+        value: bucket => debugGraphProcessCpuBucketValue(bucket, processId),
+        hasData: bucket => debugGraphProcessCpuBucketHasData(bucket, processId),
       };
     });
   return processes.has(currentProcessId) ? definitions : [fallbackSelf, ...definitions];
@@ -2250,6 +2219,8 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       hostMetric: metric,
       gpuDeviceId: deviceId,
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
+      value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
+      hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
     }));
 }
 
@@ -2266,8 +2237,8 @@ function debugGraphSeriesData(buckets) {
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
-    const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
+    const values = buckets.map(bucket => def.value(bucket));
+    const hasDataValues = buckets.map(bucket => def.hasData(bucket));
     const sampleValues = values.filter((_value, index) => hasDataValues[index]);
     const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
     const samples = sampleValues.length;
@@ -2530,7 +2501,7 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
     const dataRanges = debugGraphBucketRanges(buckets)
       .filter(item => hasCurrentClientHeartbeat
         ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
-        : items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
+        : items.some(series => series.hasData(item.bucket)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
     return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain)
@@ -3482,22 +3453,20 @@ function createDebugPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
   panel.id = panelDomId(debugPaneItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(debugPaneItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: debugPaneItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelControlsHtml(debugPaneItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body js-debug-body panel-overlay-root">
-        <div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'preferences-body js-debug-body',
+    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, debugPaneItemId);
   bindDebugPanel(panel);
   return panel;
@@ -3509,7 +3478,7 @@ function renderDebugPanels(options = {}) {
     const body = panel.querySelector('.js-debug-body');
     refreshDebugPanelFromEvents(panel, options);
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      body.innerHTML = `<div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div><div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
       refreshDebugPanelFromEvents(panel, {force: true});
     }
     bindDebugPanel(panel);

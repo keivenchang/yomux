@@ -2,48 +2,43 @@
 function paneFrameControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"`;
+  const unavailableTitle = t('tab.unavailableFor', {name: unavailableLabel});
   const controls = [];
+  const add = spec => controls.push(toolbarButtonHtml({
+    className: ['tab', spec.className, spec.platformKind ? platformWindowControlClass(spec.platformKind) : '', spec.active ? 'active' : ''].filter(Boolean).join(' '),
+    dataset: disabled ? {} : spec.dataset,
+    disabled,
+    hidden: spec.hidden === true,
+    title: disabled ? unavailableTitle : spec.title,
+    ariaLabel: spec.label,
+    pressed: spec.pressed,
+    html: spec.html,
+  }));
   const includeActions = options.actions ?? isTmuxSession(session);
   const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = options.expand !== false;
   const includePopout = options.popout === true;
   if (includeActions) {
-    controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs(t('common.sessionActions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('common.sessionActions'))}" aria-label="${esc(t('common.sessionActions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+    add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
   }
   if (includeDetails) {
     const detailsLabel = t('pane.details.hide');
-    controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+    add({className: 'panel-detail-toggle pane-detail-toggle', platformKind: 'minimize', dataset: {detailToggle: session}, title: detailsLabel, label: detailsLabel, pressed: true, active: true});
   }
   if (includePopout) {
-    controls.push(disabled
-      ? `<button class="tab pane-popout" ${disabledAttrs(t('tab.popout'))}></button>`
-      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="${esc(t('tab.popout'))}" aria-label="${esc(t('tab.popout'))}"></button>`);
+    add({className: 'pane-popout', dataset: {panePopout: session}, title: t('tab.popout'), label: t('tab.popout')});
   }
   if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
-      : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
+    add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
   if (includeMinimize) {
-    controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
   }
   if (options.close) {
     const closeLabel = options.closeLabel || t('pane.closeTab');
     const closeTitle = options.closeTitle || closeLabel;
-    const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = `data-pane-close="${esc(session)}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
-      : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+    add({className: ['pane-close', options.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
   }
   return controls.join('');
 }
@@ -639,12 +634,10 @@ function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
   panel.id = panelDomId(session);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: session,
+    controlsHtml: panelControlsHtml(session),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
@@ -653,15 +646,12 @@ function createPanel(session) {
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMetadataState.payload.sessions?.[session], {infoBar: true}) : ''}
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
-      </div>
-      <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
-        <div id="term-${session}" class="terminal"></div>
-        ${terminalMobileAccessoryHtml(session)}
-        <div id="panel-toasts-${session}" class="panel-toast-stack">
-          <div id="upload-${session}" class="upload-result toast" hidden></div>
-        </div>
-      </div>
-      <div id="transcript-pane-${session}" class="tab-pane">
+      </div>`,
+    bodyClass: 'tab-pane active',
+    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
@@ -680,7 +670,8 @@ function createPanel(session) {
           <div class="transcript-head">${esc(t('events.title'))}</div>
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
-      </div>`;
+      </div>`,
+  });
   bindPanelShell(panel, session);
   bindPanelControls(panel, session);
   return panel;
@@ -1676,29 +1667,7 @@ function infoFilteredRecords(records = [], query = infoSearch) {
 }
 
 function infoSearchHighlightHtml(value, query = infoSearch) {
-  const text = String(value ?? '');
-  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return esc(text);
-  const indexes = new Set();
-  for (const token of tokens) {
-    const match = fuzzySubsequenceMatch(token, text);
-    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
-  }
-  if (!indexes.size) return esc(text);
-  const chars = Array.from(text);
-  const parts = [];
-  let index = 0;
-  while (index < chars.length) {
-    if (!indexes.has(index)) {
-      parts.push(esc(chars[index]));
-      index += 1;
-      continue;
-    }
-    const start = index;
-    while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="info-tree-search-match">${esc(chars.slice(start, index).join(''))}</mark>`);
-  }
-  return parts.join('');
+  return fuzzyHighlightHtml(query, value, {markClass: 'info-tree-search-match'});
 }
 
 function infoRecordSearchValueHtml(record = {}, kind = '', value = '', query = infoSearch) {

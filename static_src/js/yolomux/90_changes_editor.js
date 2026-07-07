@@ -2655,10 +2655,10 @@ function createFileExplorerPanel() {
   panel.id = panelDomId(fileExplorerItemId);
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerLabel();
-  panel.innerHTML = `
-      <div class="panel-head file-explorer-head">
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-        <div class="file-explorer-toolbar">
+  panel.innerHTML = panelFrameHtml({
+    item: fileExplorerItemId,
+    headClass: 'file-explorer-head',
+    headAfterTabsHtml: `<div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             ${fileExplorerModeSwitcherHtml()}
             ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
@@ -2691,14 +2691,12 @@ function createFileExplorerPanel() {
               <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>
             </span>
           </div>
-        </div>
-      </div>
-      <div class="file-explorer-pane panel-overlay-root">
-        <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
-        <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+        </div>`,
+    bodyClass: 'file-explorer-pane',
+    bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
-        <div class="file-explorer-changes-panel" data-file-explorer-changes></div>
-      </div>`;
+        <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
+  });
   bindPanelShell(panel, fileExplorerItemId);
   bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
@@ -3166,9 +3164,10 @@ function createFileEditorPanel(item) {
   panel.className = 'panel file-editor-panel';
   panel.dataset.filePath = path;
   panel.dataset.layoutItem = item;
-  panel.innerHTML = `
-      <div class="panel-head file-editor-panel-head">
-        <div class="file-editor-panel-actions file-editor-frame-actions">
+  panel.innerHTML = panelFrameHtml({
+    item,
+    headClass: 'file-editor-panel-head',
+    controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -3179,13 +3178,10 @@ function createFileEditorPanel(item) {
             closeTitle: t('editor.closePane'),
             closeLabel: t('editor.closePane'),
           })}
-        </div>
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      ${fileEditorToolbarHtml(item)}
-      <div class="file-editor-panel-body panel-overlay-root">
-        <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
-        <div class="file-editor-content">
+        </div>`,
+    afterHeadHtml: fileEditorToolbarHtml(item),
+    bodyClass: 'file-editor-panel-body',
+    bodyHtml: `<div class="file-editor-content">
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
@@ -3199,8 +3195,8 @@ function createFileEditorPanel(item) {
           </form>
           <div class="file-editor-image-panel" hidden></div>
         </div>
-        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>
-      </div>`;
+        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>`,
+  });
   bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;

@@ -438,8 +438,8 @@ def test_attention_ack_merge_never_applies_stale_revision(monkeypatch, tmp_path,
         json.dumps({"version": 1, "rev": 1, "attention_acks": {"rev": 1, "keys": {stale_key: now}}}),
         encoding="utf-8",
     )
-    with app.client_watch_lock:
-        app.client_watch_attention_ack_rev = 2
+    with app.client_watch_service.lock:
+        app.client_watch_service.attention_ack_rev = 2
     with app.attention_ack_lock:
         app.attention_ack_keys = {local_key: now}
 
@@ -458,8 +458,8 @@ def test_attention_ack_timestamp_only_reack_does_not_report_changed(monkeypatch,
         json.dumps({"version": 1, "rev": 2, "attention_acks": {"rev": 2, "keys": {key: now + 10}}}),
         encoding="utf-8",
     )
-    with app.client_watch_lock:
-        app.client_watch_attention_ack_rev = 1
+    with app.client_watch_service.lock:
+        app.client_watch_service.attention_ack_rev = 1
     with app.attention_ack_lock:
         app.attention_ack_keys = {key: now}
 

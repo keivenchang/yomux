@@ -38,6 +38,52 @@ async function runShareThemeSuite() {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
+    const virtualItems = {
+      info: api.infoItemId,
+      yoagent: api.yoagentItemId,
+      chat: api.chatItemId,
+      'chat-media': 'chat-media:https://example.test/image.png',
+      files: api.fileExplorerItemId,
+      'search-history': api.searchHistoryItemId,
+      preferences: api.prefsItemId,
+      debug: api.debugPaneItemId,
+    };
+    const virtualTypes = api.TAB_TYPES.filter(type => Object.hasOwn(virtualItems, type.key));
+    assert.equal(virtualTypes.length, Object.keys(virtualItems).length, 'all virtual panels are registered through the one descriptor factory');
+    for (const type of virtualTypes) {
+      const item = virtualItems[type.key];
+      assert.equal(api.tabTypeForItem(item), type, `${type.key} retains its canonical item matcher`);
+      for (const alias of type.aliases || []) assert.equal(api.tabTypeForParam(alias), type, `${type.key} retains URL alias ${alias}`);
+      const descriptor = {
+        param: type.param(item),
+        label: type.label(item),
+        shortLabel: type.shortLabel(item),
+        terminalTitle: type.terminalTitle(item),
+        detail: type.detail(item),
+        className: type.className(item),
+        icon: type.icon,
+        minWidth: type.minWidth(item),
+        prunePriority: type.prunePriority(item),
+        rowHtml: type.rowHtml(item, {}).includes('pane-tab'),
+        createPanel: typeof type.createPanel,
+        relocalize: typeof type.relocalize,
+        renderAttached: typeof type.renderAttached,
+        cleanup: typeof type.cleanup,
+        focusSearch: typeof type.focusSearch,
+        popoutDisabledReason: typeof type.popoutDisabledReason === 'function' ? type.popoutDisabledReason(item) : '',
+      };
+      assert.ok(descriptor.label && descriptor.shortLabel && descriptor.terminalTitle && descriptor.detail, `${type.key} retains visible descriptor fields`);
+      assert.equal(descriptor.rowHtml, true, `${type.key} keeps the shared virtual pane row renderer unless explicitly specialized`);
+      assert.equal(descriptor.createPanel, 'function', `${type.key} retains its panel factory`);
+      assert.equal(descriptor.minWidth > 0, true, `${type.key} retains a positive minimum width`);
+      assert.equal(descriptor.prunePriority, 0, `${type.key} retains the virtual-pane prune priority`);
+      if (!type.canPopout && !type.popoutRenderer && !type.openPopout) assert.ok(descriptor.popoutDisabledReason, `${type.key} inherits an interactive popout explanation`);
+    }
+    const englishDebugLabel = api.tabTypeForItem(api.debugPaneItemId).label(api.debugPaneItemId);
+    api.i18nSetCatalogForTest('zh-Hant', JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8')));
+    api.setActiveLocaleForTest('zh-Hant');
+    assert.notEqual(api.tabTypeForItem(api.debugPaneItemId).label(api.debugPaneItemId), englishDebugLabel, 'virtual descriptor labels stay lazy across locale changes');
+    api.setActiveLocaleForTest('en');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug layout item resolves to the normal YO!stats tab');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
@@ -1618,7 +1664,7 @@ async function runShareThemeSuite() {
     assert.equal(pcPaneControls.includes('>Info</button>'), false);
     assert.ok(pcPaneControls.indexOf('pane-detail-toggle') < pcPaneControls.indexOf('pane-minimize'));
     assert.ok(pcPaneControls.indexOf('pane-expand') < pcPaneControls.indexOf('pane-minimize'), 'shared frame controls order the expand (+) before minimize (_)');
-    assert.ok(pcPaneControls.includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(pcPaneControls), 'hidden pane-expand controls keep their dataset and explicit hidden state through the shared button builder');
     const expandablePcSlots = api.emptyLayoutSlots();
     expandablePcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     expandablePcSlots.left = api.paneStateWithTabs(['1'], '1');
@@ -1626,14 +1672,14 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(expandablePcSlots);
     assert.equal(api.canPaneExpand('1'), true);
     assert.ok(api.panelControlsHtml('1').includes('pane-expand pc-window-control pc-zoom'));
-    assert.equal(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'), false);
+    assert.equal(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')), false);
     const placeholderPcSlots = api.emptyLayoutSlots();
     placeholderPcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     placeholderPcSlots.left = api.paneStateWithTabs(['1'], '1');
     placeholderPcSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(placeholderPcSlots);
     assert.equal(api.canPaneExpand('1'), false);
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
 
     const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
     assert.equal(macApi.fileExplorerLabel(), 'Finder');
@@ -1650,7 +1696,7 @@ async function runShareThemeSuite() {
     assert.ok(macPaneControls.includes('data-pane-expand="1"'));
     assert.ok(macPaneControls.includes('pane-expand pc-window-control pc-zoom'));
     assert.ok(macPaneControls.indexOf('pane-expand') < macPaneControls.indexOf('pane-minimize'), 'Mac frame controls use the shared + then _ order');
-    assert.ok(macPaneControls.includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(macPaneControls));
     const macFinderControls = macApi.panelControlsHtml('__files__');
     assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
     assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
@@ -1725,7 +1771,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(Array.from(singlePaneUrlApi.layoutSlotKeys(singlePaneUrlApi.currentSlots())), ['left']);
     assert.deepStrictEqual(Array.from(singlePaneUrlApi.paneTabs('left')), ['1', '2', '3', '4', '5', '6', 'ant']);
     assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
-    assert.ok(singlePaneUrlApi.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(singlePaneUrlApi.panelControlsHtml('1')));
 
     const staleFinderWidthUrlApi = loadYolomux(
       '?sessions=1,2&layout=row@22(left,slot1)&tabs=left:1;slot1:2',
@@ -1753,7 +1799,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('left')), ['1', '6', '5', '2', 'ant', '4', '3']);
     assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('left'), '3');
     assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
-    assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
+    assert.ok(/data-pane-expand="3"[^>]* hidden/.test(finderBesideSinglePaneUrlApi.panelControlsHtml('3')));
 
     const defaultFinderApi = loadYolomux('', ['1', '2']);
     assert.equal(defaultFinderApi.itemInLayout('__files__'), true, 'param-less boot includes the Finder pane');
@@ -3201,8 +3247,8 @@ async function runShareThemeSuite() {
       assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
       assert.ok(shareSource.includes('function renderShareStatusPill') && shareSource.includes('share.pill'), 'host topbar renders the YO!share status pill');
       assert.ok(shareSource.includes('share.pillMultiple'), 'host topbar aggregates multiple active YO!share URLs into one status pill');
-      assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'share-view pages keep one viewer id across all terminal websockets in the page');
-      assert.ok(/const shareClientId = \(\(\) => \{[\s\S]*shareViewMode[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'every host/viewer browser gets a stable share client id for echo suppression and cursor color');
+      assert.ok(/function sessionScopedId\(key, create = randomShareViewerId\)[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*sessionStorage\.setItem\(key, created\)/.test(shareSource), 'one shared session-storage transaction owns stable browser IDs');
+      assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource) && /const shareClientId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource), 'share-view and host clients use the shared stable-ID transaction');
       assert.ok(/function wsUrl\(session\)[\s\S]*shareViewMode[\s\S]*URLSearchParams\(\{session, token: shareToken, viewer: shareViewerId\}\)[\s\S]*\/ws\/share-view\?/.test(shareSource), 'share-view terminals use /ws/share-view with the fragment token and shared viewer id');
       assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
       assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
@@ -4304,7 +4350,7 @@ async function runShareThemeSuite() {
       assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
       assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
-      assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells[\s\S]*border-radius:\s*var\(--radius-pill\)/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and horizontally scrollable shell pills');
+      assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and separator-free shell text controls');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
@@ -5098,6 +5144,14 @@ async function runShareThemeSuite() {
     assert.ok(api.fuzzySearchScore('yoagent', ['YO!agent']) > api.fuzzySearchScore('yoagent', ['1', 'y o agent in details']), 'punctuation-insensitive label prefixes beat scattered detail matches');
     assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
+    assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy', {markClass: 'info-tree-search-match'}).includes('<mark class="info-tree-search-match">X</mark>'), 'shared fuzzy highlighter supports the Info tree mark class without a second matcher');
+    const stableId = api.sessionScopedIdForTest('test.stable-id', () => 'created-id');
+    assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
+    assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
+    assert.equal(api.sessionStorageValueForTest('test.stable-id'), 'created-id', 'shared ID helper persists the created ID');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_renderers.js', 'utf8');
+    assert.ok(/function previewFileActionLinks\(path,[\s\S]*rawFileUrl\(path\)[\s\S]*noopener noreferrer[\s\S]*rawFileDownloadUrl\(path\)/.test(previewSource), 'one preview-link helper owns safe Open and Download URLs');
+    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
@@ -6506,7 +6560,7 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(singlePaneBesideFinder);
     assert.equal(api.canPaneExpand('1'), false);
     assert.ok(api.panelControlsHtml('1').includes('data-pane-expand'));
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
     api.expandPaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
@@ -6523,7 +6577,7 @@ async function runShareThemeSuite() {
     api.rememberFileExplorerOpenIntentForTest(false);
     api.setLayoutSlotsForTest(placeholderBesideSinglePane);
     assert.equal(api.canPaneExpand('1'), false);
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
     api.expandPaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},

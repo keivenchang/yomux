@@ -3504,92 +3504,60 @@ function showDropPreview(intent) {
   applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
 }
 
-function dropSessionAtEvent(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    clearDropPreview();
-    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-    return;
+// Grid and Dockview use different hit testing, not different drag semantics. Classify the payload
+// once, then let each surface supply only its target-intent resolver.
+function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSession = () => false, ignoreMissingIntent = false} = {}) {
+  const pane = paneDragPayload(event);
+  if (pane?.slot) {
+    const intent = paneSwapIntentForEvent(event, pane.slot);
+    return {kind: 'pane', payload: pane, intent, allowed: paneSwapIntentAllowed(intent), dropEffect: 'move'};
   }
-  const filePayload = fileDragPayload(event);
-  if (filePayload?.path) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = dropIntentForEvent(event, {allowBoundary: false});
-    clearDropPreview();
-    if (!intent?.targetSlot || !fileDropIntentAllowsPayload(filePayload, intent)) return;
-    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
-    return;
+  const file = fileDragPayload(event);
+  if (file?.path) {
+    const intent = intentForFile?.(event) || null;
+    if (ignoreMissingIntent && !intent) return null;
+    return {kind: 'file', payload: file, intent, allowed: Boolean(intent?.targetSlot && fileDropIntentAllowsPayload(file, intent)), dropEffect: 'copy'};
   }
-  const payload = dragPayload(event);
-  if (!payload?.session) return;
-  if (event.target?.closest?.('.panel-head')) {
-    event.preventDefault();
-    event.stopPropagation();
-    clearDropPreview();
-    return;
-  }
+  const session = dragPayload(event);
+  if (!session?.session) return null;
+  if (suppressSession(event)) return {kind: 'session', payload: session, intent: null, allowed: false, dropEffect: 'none'};
+  const intent = intentForSession?.(event) || null;
+  if (ignoreMissingIntent && !intent) return null;
+  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
+}
+
+function applyLayoutDragIntent(event, drag, {phase = 'over'} = {}) {
+  if (!drag) return false;
   event.preventDefault();
   event.stopPropagation();
-  const intent = dropIntentForEvent(event, {allowBoundary: true});
+  if (phase === 'over') {
+    event.dataTransfer.dropEffect = drag.allowed ? drag.dropEffect : 'none';
+    if (drag.allowed) showDropPreview(drag.intent);
+    else clearDropPreview();
+    return true;
+  }
   clearDropPreview();
-  if (!dropIntentAllowsSession(payload.session, intent)) return;
-  dropSessionWithIntent(payload.session, intent, payload.sourceSlot || slotForSession(payload.session));
+  if (!drag.allowed) return true;
+  if (drag.kind === 'pane') swapPaneSlots(drag.intent.sourceSlot, drag.intent.targetSlot);
+  else if (drag.kind === 'file') openDraggedFilesInEditor(drag.payload, {targetSlot: drag.intent.targetSlot, targetZone: drag.intent.zone});
+  else dropSessionWithIntent(drag.payload.session, drag.intent, drag.payload.sourceSlot || slotForSession(drag.payload.session));
+  return true;
+}
+
+function dropSessionAtEvent(event) {
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: candidate => dropIntentForEvent(candidate, {allowBoundary: false}),
+    intentForSession: candidate => dropIntentForEvent(candidate, {allowBoundary: true}),
+    suppressSession: candidate => Boolean(candidate.target?.closest?.('.panel-head')),
+  }), {phase: 'drop'});
 }
 
 function handleDropDragOver(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    event.preventDefault();
-    event.stopPropagation();
-    if (!paneSwapIntentAllowed(intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'move';
-    showDropPreview(intent);
-    return;
-  }
-  const filePayload = fileDragPayload(event);
-  if (filePayload?.path) {
-    const intent = dropIntentForEvent(event, {allowBoundary: false});
-    if (!fileDropIntentAllowsPayload(filePayload, intent)) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    showDropPreview(intent);
-    return;
-  }
-  const payload = dragPayload(event);
-  if (!payload?.session) return;
-  if (event.target?.closest?.('.panel-head')) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  const intent = dropIntentForEvent(event, {allowBoundary: true});
-  event.preventDefault();
-  event.stopPropagation();
-  if (!dropIntentAllowsSession(payload.session, intent)) {
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  event.dataTransfer.dropEffect = 'move';
-  showDropPreview(intent);
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: candidate => dropIntentForEvent(candidate, {allowBoundary: false}),
+    intentForSession: candidate => dropIntentForEvent(candidate, {allowBoundary: true}),
+    suppressSession: candidate => Boolean(candidate.target?.closest?.('.panel-head')),
+  }));
 }
 
 function handleDropDragLeave(event) {

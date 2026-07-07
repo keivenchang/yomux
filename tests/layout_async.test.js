@@ -682,6 +682,28 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.layoutUrlStateForTest().refreshTimer, null, 'firing consumes only the matching record timer');
   });
 
+  test('editor field application has one normalizer for URL restore and share replay', () => {
+    const editor = {
+      globalThemeMode: 'light',
+      terminalThemeMode: 'light',
+      themeMode: 'github-light',
+      previewDisplayMode: 'vanilla',
+      wrapEnabled: true,
+      lineNumbersEnabled: false,
+      blameEnabled: true,
+      diffExpandUnchanged: true,
+      previewFontSize: 27,
+      modes: [{path: '/tmp/ignored.txt', mode: 'edit'}],
+    };
+    const fromUrl = loadYolomux('', ['1']);
+    const urlModes = [];
+    fromUrl.applyEditorStateFieldsForTest(editor, {applyModeEntry: entry => urlModes.push(entry)});
+    const fromShare = loadYolomux('', ['1']);
+    fromShare.applyShareEditorStateForTest(editor);
+    assert.deepEqual(canonical(fromUrl.editorStateFieldsSnapshotForTest()), canonical(fromShare.editorStateFieldsSnapshotForTest()), 'URL and share apply every common editor field through the same normalizer');
+    assert.deepEqual(canonical(urlModes), canonical(editor.modes), 'the shared normalizer delegates each per-file mode to its transport-specific owner');
+  });
+
   await testAsync('session-files record lets an accepted push invalidate older HTTP work', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);

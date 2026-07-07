@@ -425,9 +425,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     owner.owner = True
     owner.status = "owner"
     webapp.background_owner = owner
-    webapp.tabber_activity_warmer_record.running = True
-    webapp.tabber_activity_cache_record.refresh_worker = threading.Thread()
-    webapp.session_files_work_records[("payload", "1")] = app_module.SessionFilesWorkRecord()
+    webapp.activity_transcript_service.tabber_warmer_record.running = True
+    webapp.activity_transcript_service.tabber_cache_record.refresh_worker = threading.Thread()
+    webapp.session_files_service.work_records[("payload", "1")] = app_module.SessionFilesWorkRecord()
     cleared_indexes = []
     monkeypatch.setattr(file_index, "clear_memory_indexes", lambda: cleared_indexes.append(True))
     try:
@@ -439,9 +439,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     assert response["ok"] is True
     assert owner.is_owner() is False
     assert owner.status == "follower"
-    assert webapp.tabber_activity_warmer_record.running is False
-    assert webapp.tabber_activity_cache_record.refresh_worker is None
-    assert webapp.session_files_work_records == {}
+    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
+    assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is None
+    assert webapp.session_files_service.work_records == {}
     assert cleared_indexes == [True]
     assert "background_owner_released" in {event["type"] for event in events}
 
@@ -617,7 +617,7 @@ def test_follower_does_not_start_tabber_activity_warmer(no_control_socket):
     webapp.background_owner = owner
     try:
         assert webapp.start_tabber_activity_cache_warmer() is False
-        assert webapp.tabber_activity_warmer_record.running is False
+        assert webapp.activity_transcript_service.tabber_warmer_record.running is False
         assert owner.refresh_requests == [BACKGROUND_ROLE_TABBER_ACTIVITY]
     finally:
         webapp.control_server.stop()

@@ -63,7 +63,7 @@ class YoagentSessionSummariesMixin:
     def load_yoagent_session_summaries(self) -> None:
         state = self.deps.read_yolomux_state()
         with self.yoagent_session_summary_lock:
-            self.yoagent_session_summaries = self.deps.sanitized_yoagent_session_summaries(
+            self.yoagent_session_summaries = self.sanitized_yoagent_session_summaries(
                 state.get(YOAGENT_SESSION_SUMMARIES_STATE_KEY)
             )
 
@@ -79,7 +79,7 @@ class YoagentSessionSummariesMixin:
                 return
             for session in stale:
                 self.yoagent_session_summaries.pop(session, None)
-            self.deps.persist_yoagent_session_summaries_locked()
+            self.persist_yoagent_session_summaries_locked()
 
 
     def attach_yoagent_session_summary(self, session: str, summary: dict[str, Any]) -> None:
@@ -155,7 +155,7 @@ class YoagentSessionSummariesMixin:
             return {"session": session, "updated": False, "reason": "no new transcript lines", "stats": stats}
         transcript_text = "\n\n".join(format_transcript_item(item) for item in items)
         transcript_text, truncated = trim_prompt_text(transcript_text, SUMMARY_MAX_PROMPT_CHARS)
-        prompt = self.deps.build_yoagent_session_summary_update_prompt(
+        prompt = self.build_yoagent_session_summary_update_prompt(
             session,
             str(transcript_path),
             str(previous.get("rolling_summary") or ""),
@@ -167,10 +167,10 @@ class YoagentSessionSummariesMixin:
         invocation = str(current_settings.get("invocation") or "cli").strip().lower()
         if backend not in {"codex", "claude"} or invocation != "cli":
             return {"session": session, "updated": False, "reason": "no CLI backend available", "backend": backend}
-        answer, fallback_reason, cli_status = self.deps.run_yoagent_direct_prompt_backend(backend, prompt, settings=current_settings)
+        answer, fallback_reason, cli_status = self.run_yoagent_direct_prompt_backend(backend, prompt, settings=current_settings)
         if not answer:
             return {"session": session, "updated": False, "reason": fallback_reason or "empty summary response", "backend": backend, "cli": cli_status}
-        parsed = self.deps.parse_yoagent_session_summary_response(answer, default_state="working" if agent.status == "running" else "idle")
+        parsed = self.parse_yoagent_session_summary_response(answer, default_state="working" if agent.status == "running" else "idle")
         if not parsed["rolling_summary"]:
             return {"session": session, "updated": False, "reason": "empty parsed summary", "backend": backend, "cli": cli_status}
         now = time.time()
@@ -182,7 +182,7 @@ class YoagentSessionSummariesMixin:
         }
         with self.yoagent_session_summary_lock:
             self.yoagent_session_summaries[session] = record
-            self.deps.persist_yoagent_session_summaries_locked()
+            self.persist_yoagent_session_summaries_locked()
         return {
             "session": session,
             "updated": True,
@@ -198,14 +198,14 @@ class YoagentSessionSummariesMixin:
     def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None, *, force: bool = False) -> dict[str, Any]:
         current_settings = settings or self.yoagent_settings()
         sessions, errors = self.deps.discover_sessions(self.sessions)
-        self.deps.prune_yoagent_session_summaries(set(sessions))
+        self.prune_yoagent_session_summaries(set(sessions))
         updated: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for session in self.tmux_recency_ordered_sessions(self.sessions):
             info = sessions.get(session)
             if info is None:
                 continue
-            result = self.deps.update_yoagent_session_summary(session, info, current_settings, force=force)
+            result = self.update_yoagent_session_summary(session, info, current_settings, force=force)
             if result.get("updated"):
                 updated.append(result)
             else:
@@ -238,7 +238,7 @@ class YoagentSessionSummariesMixin:
     def yoagent_summary_worker_loop(self, record: YoagentSummaryWorkerRecord | None = None) -> None:
         current = record or self.yoagent_summary_worker_record
         try:
-            self.deps.tick_yoagent_session_summaries(self.yoagent_settings(), force=True)
+            self.tick_yoagent_session_summaries(self.yoagent_settings(), force=True)
         finally:
             with self.yoagent_summary_worker_lock:
                 if self.yoagent_summary_worker_record is current:

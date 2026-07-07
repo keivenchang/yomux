@@ -272,10 +272,10 @@ class YoagentBackendsMixin:
     def ensure_yoagent_codex_app_server(self, settings: dict[str, Any] | None = None, session_id: str = "") -> tuple[str, str, dict[str, Any]]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", {"transport": "codex-app-server", "persistent": True}
-        target = self.deps.yoagent_codex_app_server_target(settings)
+        target = self.yoagent_codex_app_server_target(settings)
         if session_id:
             target["agent_session_id"] = session_id
-        key = self.deps.yoagent_codex_app_server_target_key(target)
+        key = self.yoagent_codex_app_server_target_key(target)
         started = time.monotonic()
         with self.yoagent_codex_app_server_lock:
             if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
@@ -286,7 +286,7 @@ class YoagentBackendsMixin:
             try:
                 thread_id, status = self.yoagent_codex_app_server.ensure_started(target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS)
             except (OSError, subprocess.SubprocessError) as exc:
-                self.deps.close_yoagent_codex_app_server()
+                self.close_yoagent_codex_app_server()
                 return "", str(exc), {"transport": "codex-app-server", "persistent": True}
         status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         return thread_id, "", status
@@ -303,10 +303,10 @@ class YoagentBackendsMixin:
     ) -> tuple[str, str, str, dict[str, Any]]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", "", {"transport": "codex-app-server", "persistent": True}
-        target = self.deps.yoagent_codex_app_server_target(settings)
+        target = self.yoagent_codex_app_server_target(settings)
         if resume and session_id:
             target["agent_session_id"] = session_id
-        key = self.deps.yoagent_codex_app_server_target_key(target)
+        key = self.yoagent_codex_app_server_target_key(target)
         started = time.monotonic()
         with self.yoagent_codex_app_server_lock:
             if self.yoagent_codex_app_server is None or self.yoagent_codex_app_server_key != key:
@@ -316,7 +316,7 @@ class YoagentBackendsMixin:
                 self.yoagent_codex_app_server_key = key
             if request_id:
                 session = self.yoagent_codex_app_server
-                self.deps.set_yoagent_chat_request_interrupt(request_id, session.interrupt)
+                self.set_yoagent_chat_request_interrupt(request_id, session.interrupt)
             result, status = self.yoagent_codex_app_server.send(prompt, target, timeout=YOAGENT_CLI_TIMEOUT_SECONDS, on_event=stream_callback)
             captured_session_id = self.yoagent_codex_app_server.thread_id
         status["elapsed_ms"] = round((time.monotonic() - started) * 1000)
@@ -338,11 +338,11 @@ class YoagentBackendsMixin:
         started = time.monotonic()
         current_settings = settings or self.yoagent_settings()
         if backend == "codex":
-            answer, error, _session_id = self.deps.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=current_settings)
+            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=current_settings)
         else:
             claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(current_settings.get("claude_effort") or "").strip()
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=claude_model, effort=claude_effort)
             tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
             permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE
         status = {
@@ -405,10 +405,10 @@ class YoagentBackendsMixin:
         if backend == "codex":
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
             if require_external_tools:
-                answer, error, captured_session_id = self.deps.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=settings, enable_search=True)
+                answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=settings, enable_search=True)
                 backend_status = {"transport": "codex-exec", "persistent": False, "external_tools_enabled": True, "web_search_enabled": True}
             elif stream_callback:
-                answer, error, captured_session_id, backend_status = self.deps.run_yoagent_codex_app_server(
+                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(
                     prompt,
                     session_id=session_id,
                     resume=not seed,
@@ -417,13 +417,13 @@ class YoagentBackendsMixin:
                     request_id=request_id,
                 )
             else:
-                answer, error, captured_session_id, backend_status = self.deps.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings, request_id=request_id)
+                answer, error, captured_session_id, backend_status = self.run_yoagent_codex_app_server(prompt, session_id=session_id, resume=not seed, settings=settings, request_id=request_id)
             next_session_id = captured_session_id or session_id
-            if request_id and self.deps.yoagent_chat_request_cancelled(request_id):
+            if request_id and self.yoagent_chat_request_cancelled(request_id):
                 backend_status["cancelled"] = True
                 error = "interrupted"
             elif error and not answer and not require_external_tools:
-                fallback_answer, fallback_error, fallback_session_id = self.deps.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
+                fallback_answer, fallback_error, fallback_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed, settings=settings)
                 backend_status["fast_backend_error"] = error
                 backend_status["fallback_transport"] = "codex-exec"
                 if fallback_answer:
@@ -438,10 +438,10 @@ class YoagentBackendsMixin:
             claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(settings.get("claude_effort") or "").strip()
             stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
-            cancel_event = self.deps.yoagent_chat_request_cancel_event(request_id) if request_id else None
+            cancel_event = self.yoagent_chat_request_cancel_event(request_id) if request_id else None
             tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
             permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE
-            answer, error = self.deps.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools, permission_mode=permission_mode)
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed, model=claude_model, effort=claude_effort, stream_callback=stream_callback, request_id=request_id, cancel_event=cancel_event, tools=tools, permission_mode=permission_mode)
             backend_status = {"transport": "claude-stream-json", "persistent": False, "model": claude_model, "effort": claude_effort or None, "external_tools_enabled": True, "tools": tools, "permission_mode": permission_mode}
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = yoagent_cli_fallback_reason(backend, error, locale)
@@ -568,7 +568,7 @@ class YoagentBackendsMixin:
             timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
             on_event=stream_callback,
             cancel_event=cancel_event,
-            process_callback=(lambda process: self.deps.set_yoagent_chat_request_interrupt(request_id, lambda: self.deps.interrupt_yoagent_claude_process(process))) if request_id else None,
+            process_callback=(lambda process: self.set_yoagent_chat_request_interrupt(request_id, lambda: self.interrupt_yoagent_claude_process(process))) if request_id else None,
         )
         if result.ok and result.text:
             return result.text, ""

@@ -59,16 +59,16 @@ def test_yoagent_chat_send_by_bare_number_executes_verified_send_without_refusal
     send_calls = []
     watchers = []
     install_chat_defaults(monkeypatch, webapp)
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: target_calls.append(session) or (idle_target(session), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: target_calls.append(session) or (idle_target(session), HTTPStatus.OK))
     monkeypatch.setattr(
         transport_module,
         "send_prompt",
         lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
     )
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True})
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "ask 1 what time it is"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "ask 1 what time it is"})
     finally:
         webapp.control_server.stop()
 
@@ -97,7 +97,7 @@ def test_yoagent_chat_wait_then_send_queues_while_busy_then_fires_when_idle(monk
         current["screen"] = {"key": state["screen"], "text": state["screen"]}
         return current, HTTPStatus.OK
 
-    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
     monkeypatch.setattr(
         transport_module,
         "send_prompt",
@@ -105,14 +105,14 @@ def test_yoagent_chat_wait_then_send_queues_while_busy_then_fires_when_idle(monk
     )
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "wait for session 1 to finish, then tell it to run date"})
-        queued_jobs, _queued_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "wait for session 1 to finish, then tell it to run date"})
+        queued_jobs, _queued_status = webapp.yoagent_controller.yoagent_jobs_payload()
         send_calls_before_idle = list(send_calls)
         with webapp.yoagent_job_lock:
             webapp.yoagent_jobs[queued_jobs["jobs"][0]["id"]]["predicate"]["quiet_seconds"] = 0
         state["screen"] = "idle"
-        fired = webapp.poll_yoagent_jobs_once()
-        fired_jobs, _fired_status = webapp.yoagent_jobs_payload()
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        fired_jobs, _fired_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -133,22 +133,22 @@ def test_yoagent_sequential_dependent_ask_waits_then_sends_computed_followup(mon
     send_calls = []
     watchers = []
     install_chat_defaults(monkeypatch, webapp)
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (idle_target(session), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (idle_target(session), HTTPStatus.OK))
     monkeypatch.setattr(
         transport_module,
         "send_prompt",
         lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
     )
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": f"watch-{len(watchers)}", "started": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": f"watch-{len(watchers)}", "started": True})
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "ask 1 what time it is, then add 5 minutes, then ask if that is correct."})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "ask 1 what time it is, then add 5 minutes, then ask if that is correct."})
         assert status == HTTPStatus.OK
         assert "I verified tmux session `1`" in payload["answer"]
         assert len(send_calls) == 1
         assert send_calls[0][1] == "what time is it?"
         assert len(watchers) == 1
-        webapp.finish_yoagent_action_result(watchers[0][0], "The time is 7:20 PM PDT.")
+        webapp.yoagent_controller.finish_yoagent_action_result(watchers[0][0], "The time is 7:20 PM PDT.")
     finally:
         webapp.control_server.stop()
 
@@ -169,10 +169,10 @@ def test_yoagent_prompt_answer_uses_selector_path_without_free_text_paste(monkey
     moved = []
     entered = []
     install_chat_defaults(monkeypatch, webapp)
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
     monkeypatch.setattr(controller_module, "tmux_move_to_option", lambda pane, option, selected_option=None: moved.append((pane, option, selected_option)))
     monkeypatch.setattr(controller_module, "tmux_send_enter", lambda pane: entered.append(pane))
-    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=False: "  1. Approve\n❯ 2. Reject\nEnter to select")
+    monkeypatch.setattr(webapp.yoagent_controller.deps, "tmux_capture_pane", lambda _target, visible_only=False: "  1. Approve\n❯ 2. Reject\nEnter to select")
     monkeypatch.setattr(
         transport_module,
         "send_prompt",
@@ -180,8 +180,8 @@ def test_yoagent_prompt_answer_uses_selector_path_without_free_text_paste(monkey
     )
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "2"})
-        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=False)
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "2"})
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=False)
     finally:
         webapp.control_server.stop()
 

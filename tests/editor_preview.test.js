@@ -4475,6 +4475,35 @@ async function runEditorPreviewSuite() {
     assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-restore'), 'YO!stats preferences persist browser-local chart visibility and restore markup');
   });
 
+  test('YO!stats series descriptors keep sampled zero distinct from missing data', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 310,
+      records: [{
+        start: Math.floor(now / 1000), duration: 1, sequence: 310,
+        cpu_total_percent: 0, cpu_count: 1,
+        system_cpu_total_percent: 0, system_cpu_count: 1,
+        host_metrics: {
+          system_memory_used_total_bytes: 0, system_memory_count: 1,
+          gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 0, memory_used_total_bytes: 0, samples: 1}},
+        },
+        ask_agent_total: 0, run_agent_total: 0, transition_agent_total: 0, idle_agent_total: 0, agent_activity_samples: 1,
+        tokens_per_agent_total: 0, agent_token_samples: 1,
+      }],
+    });
+    const byKey = new Map(api.debugGraphSeriesDataForTest(now).map(series => [series.key, series]));
+    for (const key of ['cpu', 'systemCpu', 'systemMemory', 'askAgents', 'workingAgents', 'transitionAgents', 'idleAgents', 'tokensPerAgent', 'gpu:gpuUtil:gpu:0', 'gpu:gpuMemory:gpu:0']) {
+      const series = byKey.get(key);
+      assert.equal(series?.values.at(-1), 0, `${key} preserves the explicit zero value`);
+      assert.equal(series?.hasDataValues.at(-1), true, `${key} marks the sampled zero as data`);
+    }
+    for (const key of ['api', 'sse', 'latency', 'bandwidth']) assert.equal(byKey.get(key)?.hasDataValues.at(-1), false, `${key} keeps an absent client sample distinct from zero-valued system metrics`);
+    const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.equal(/function debugGraphBucketValue|function debugGraphBucketHasSeriesData/.test(debugSource), false, 'one descriptor contract owns series value and presence classification');
+  });
+
   test('YO!stats graph renders server-shared agent status and token bars', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1', '2']);
     const now = Date.now();
@@ -5542,7 +5571,7 @@ async function runEditorPreviewSuite() {
       {startMs: 40_000, durationMs: 20_000, apiCount: 1},
       {startMs: 20_000, durationMs: 10_000, apiCount: 1},
     ];
-    const runs = canonical(api.debugGraphNoDataRunsForTest(buckets, domain, [{key: 'api'}]));
+    const runs = canonical(api.debugGraphNoDataRunsForTest(buckets, domain, [{key: 'api', hasData: bucket => Number(bucket.apiCount || 0) > 0}]));
     assert.deepStrictEqual(runs, [
       {startMs: 140_000, endMs: 150_000},
     ], 'only the portion after 30 seconds of a variable-duration no-data run is shaded; shorter and exactly-30-second gaps stay clear');
@@ -8798,7 +8827,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/data-yoagent-job-confirm/.test(src) && /data-yoagent-job-cancel/.test(src), 'YO!agent job rows expose confirm/cancel controls');
     assert.ok(/async function loadYoagentJobs\(options = \{\}\)[\s\S]*apiFetchJson\('\/api\/yoagent\/jobs'/.test(src), 'YO!agent hydrates jobs from the existing jobs API');
     assert.ok(/type === 'yoagent_jobs_changed'[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: yoagentPanelIsActive\(\)/.test(src), 'YO!agent job SSE refreshes the visible job list');
-    assert.ok(/\[data-yoagent-job-confirm\][\s\S]*confirmYoagentJob/.test(src) && /\[data-yoagent-job-cancel\][\s\S]*cancelYoagentJob/.test(src), 'YO!agent job controls are delegated from the YO!agent panel');
+    assert.ok(/bindActionDispatcher\(panel, \{[\s\S]*'yoagent-job-confirm': \(_event, target\) => confirmYoagentJob\(target\.dataset\.yoagentJobConfirm \|\| ''\),[\s\S]*'yoagent-job-cancel': \(_event, target\) => cancelYoagentJob\(target\.dataset\.yoagentJobCancel \|\| ''\)/.test(src), 'YO!agent job controls route through the shared panel action dispatcher');
     assert.ok(/function yoagentShouldScrollBottom\(options, scrollState\)[\s\S]*options\.scrollBottom === true[\s\S]*options\.scrollBottom === false[\s\S]*yoagentScrollbackLocked[\s\S]*scrollState\?\.nearBottom/.test(src), 'YO!agent chat auto-scrolls only when forced or already near the bottom and not manually scrollback-locked');
     assert.ok(/function yoagentChatScrollOwner\(node = document\.getElementById\('yoagent-content'\)\)\s*\{[\s\S]*return node\?\.querySelector\?\.\('\.yoagent-chat-history'\) \|\| node \|\| null;[\s\S]*function scrollYoagentChatToBottom/.test(src), 'YO!agent has one normal scroll owner with only the outer node as a fallback');
     assert.ok(/function scrollYoagentChatToBottom\(node = document\.getElementById\('yoagent-content'\)\)[\s\S]*const owner = yoagentChatScrollOwner\(node\);[\s\S]*owner\.scrollTop = owner\.scrollHeight[\s\S]*yoagentScrollbackLocked = false/.test(src), 'YO!agent bottom-scroll drives only the chosen scroll owner');
@@ -9951,9 +9980,9 @@ async function runEditorPreviewSuite() {
     assert.ok(/function hideDockviewInnerPaneTabs\(panel\)[\s\S]*panel\.classList\.add\('dockview-inner-head-collapsed'\)/.test(dockviewSrc), 'Dockview marks panels whose inner header was hidden so their content row still fills the pane');
     assert.ok(/function preserveDockviewDockedFileExplorerSplit[\s\S]*dockviewLayoutState\.reloadAfterAdoption = true/.test(dockviewSrc), 'Dockview adoption preserves and reapplies the docked Finder root split width');
     assert.ok(/function dockviewInstallFileDropBridge[\s\S]*dockviewHandleFileDragOver[\s\S]*dockviewHandleFileDrop/.test(dockviewSrc), 'Dockview panes bridge Finder/Differ file drags into the shared pane drop behavior');
-    assert.ok(/function dockviewHandleFileDrop[\s\S]*openDraggedFilesInEditor\(payload, \{targetSlot: intent\.targetSlot, targetZone: intent\.zone\}\)/.test(dockviewSrc), 'Dockview file drops open dragged files in the intended pane split');
-    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*paneDragPayload\(event\)[\s\S]*paneSwapIntentForEvent\(event, panePayload\.slot\)[\s\S]*showDropPreview\(intent\)/.test(dockviewSrc), 'Dockview host dragover handles whole-pane swap previews separately from tab drags');
-    assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*paneDragPayload\(event\)[\s\S]*swapPaneSlots\(intent\.sourceSlot, intent\.targetSlot\)/.test(dockviewSrc), 'Dockview host drops swap whole panes when the pane payload is accepted');
+    assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*applyLayoutDragIntent\(event, classifyLayoutDrag\(event, \{[\s\S]*intentForFile: dockviewFileDropIntentForEvent/.test(dockviewSrc), 'Dockview file drops route through the shared payload classifier and action executor');
+    assert.ok(/function classifyLayoutDrag\(event,[\s\S]*paneSwapIntentForEvent\(event, pane\.slot\)[\s\S]*fileDropIntentAllowsPayload\(file, intent\)[\s\S]*dropIntentAllowsSession\(session\.session, intent\)/.test(dockviewSrc + fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'one shared classifier preserves pane, file, and session acceptance rules');
+    assert.ok(/function applyLayoutDragIntent\(event, drag,[\s\S]*swapPaneSlots\(drag\.intent\.sourceSlot, drag\.intent\.targetSlot\)[\s\S]*openDraggedFilesInEditor\(drag\.payload, \{targetSlot: drag\.intent\.targetSlot, targetZone: drag\.intent\.zone\}\)[\s\S]*dropSessionWithIntent\(drag\.payload\.session, drag\.intent/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'one shared executor performs pane, file, and session drops');
     assert.ok(/function paneDragHandleHtml\(item\)[\s\S]*data-pane-drag=/.test(dockviewSrc), 'Dockview header actions include a dedicated pane-drag payload handle');
     assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.dv-tabs-and-actions-container[\s\S]*pane-drag-source[\s\S]*dockviewBeginPanePointerDrag\(event, sourceSlot\)/.test(dockviewSrc), 'Dockview tab-container background starts whole-pane drags without marking the tab container draggable');
     assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.pane-info-bar[\s\S]*\.panel-detail-row[\s\S]*syncDragSource\(infoBar\)/.test(dockviewSrc), 'Dockview pane Info Bars start the same whole-pane pointer drag as the tab-container background');
@@ -10072,7 +10101,7 @@ async function runEditorPreviewSuite() {
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     assert.ok(/canPopout:\s*true,[\s\S]*popoutRenderer:\s*item => panePopoutPanelSnapshot\(item\)/.test(bootstrapSource), 'YO!info and YO!stats declare snapshot popout support in TAB_TYPES');
-    assert.ok(/key:\s*'preferences'[\s\S]*popoutDisabledReason:\s*\(\) => t\('pane\.popout\.interactiveDisabled', \{name: t\('common\.preferences'\)\}\)/.test(bootstrapSource) && /key:\s*'files'[\s\S]*popoutDisabledReason:\s*\(\) => t\('pane\.popout\.interactiveDisabled', \{name: fileExplorerLabel\(\)\}\)/.test(bootstrapSource), 'interactive non-snapshot panes share the localized phase-1 disabled-reason owner');
+    assert.ok(/function virtualPanelTabType\(spec\)[\s\S]*popoutDisabledReason:\s*spec\.popoutDisabledReason \|\| \(\(\) => t\('pane\.popout\.interactiveDisabled'/.test(bootstrapSource), 'interactive virtual panes inherit one localized disabled-reason owner from the descriptor factory');
     assert.ok(/canPopout:\s*item =>[\s\S]*editorPreviewModeAvailable/.test(bootstrapSource) && /openPopout:\s*item =>[\s\S]*openFilePreviewPopout/.test(bootstrapSource), 'file editor popout capability routes through the existing preview popout');
     assert.ok(/dockviewHeaderActionsHtml\(item\)[\s\S]*popout:\s*paneCanPopout\(item\)/.test(dockviewSource), 'Dockview header actions show the popout control only for canPopout tab types');
     assert.ok(/button\.dataset\.panePopout[\s\S]*openPanePopout\(button\.dataset\.panePopout \|\| item\)/.test(dockviewSource), 'Dockview popout button dispatches through the shared openPanePopout helper');
@@ -10080,7 +10109,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/bindTabInteraction\(\{anchor: element, item, sourceSlot: \(\) => slotForItem\(item\)\}\)/.test(dockviewSource), 'Dockview tabs route context and touch actions through the shared tab interaction controller');
     assert.ok(/bindTabInteraction\(\{anchor: tab, item, sourceSlot: \(\) => side\}\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'pane tabs route context and touch actions through the shared tab interaction controller');
     assert.ok(/tabInteractionControllerForApp\(\)\.showActions\(\{[\s\S]*item: tabItem,[\s\S]*sourceSlot: \(\) => slotForItem\(tabItem\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Tabber rows route context actions through the shared tab interaction controller');
-    assert.ok(/function paneFrameControlsHtml\(session, options = \{\}\)[\s\S]*includePopout[\s\S]*data-pane-popout/.test(terminalBootSource), 'shared pane-frame controls own the popout button markup');
+    assert.ok(/function paneFrameControlsHtml\(session, options = \{\}\)[\s\S]*const add = spec => controls\.push\(toolbarButtonHtml[\s\S]*includePopout[\s\S]*panePopout: session/.test(terminalBootSource), 'shared pane-frame controls route popout markup through the toolbar builder');
     const layoutActionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     assert.ok(/function closePopoutsForLayoutItem\(item\)[\s\S]*closePanePopout\(item\)[\s\S]*closeFilePreviewPopout/.test(source), 'source pane cleanup routes generic and preview pop-outs through one shared close helper');
     assert.ok(/function removeSessionFromLayout\(item, options = \{\}\)[\s\S]*closePopoutsForLayoutItem\(item\)/.test(layoutActionsSource) && /function removePaneFromLayout\(item\)[\s\S]*moved\.forEach\(closePopoutsForLayoutItem\)/.test(layoutActionsSource), 'closing a tab or pane closes tracked pop-outs for those layout items');
@@ -10341,7 +10370,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/function sharedTreeParentRow\(rows, row\)[\s\S]*rows\.find\(item => sharedTreeRowId\(item\) === parent\)/.test(source), 'Left steps to the parent row through the shared parent');
     assert.ok(source.includes('function fileExplorerTypeaheadSelect('), 'type-ahead selection exists');
     assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead');
-    assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'repo-row hover popover anchors to the RIGHT of the cursor');
+    assert.ok(source.includes('Number(row.dataset.repoPopoverX || 0) + 14') && source.includes('onPointerMove: updatePointer'), 'repo-row hover popover keeps pointer-follow coordinates on its row/controller and anchors to the RIGHT of the cursor');
   });
 
   test('YO!chat uses the virtual-tab and shared conversation contracts', () => {
@@ -10485,14 +10514,14 @@ async function runEditorPreviewSuite() {
     assert.ok(!chat.includes('readingHistory'), 'historical browsing is not a permanent flag that can disable tail following after returning to the bottom');
     assert.ok(/options\.destroy === true[\s\S]*chatState\.timelineSignature = ''[\s\S]*resetChatSearchState\(\)/.test(chat), 'panel recreation invalidates stale timeline and search chrome before the next initial render');
     assert.ok(chat.includes('const chatEmojiOverlayController = createDismissableOverlayController({'), 'emoji dismissal, Escape, and focus containment reuse the shared overlay controller');
-    assert.ok(agent.includes('conversation-composer-controls yoagent-chat-controls') && chat.includes('conversation-composer-controls yoagent-chat-controls'), 'both conversation panels inherit one composer control-row owner');
+    assert.ok(shared.includes('function conversationComposerHtml(') && agent.includes('conversationComposerHtml(') && chat.includes('conversationComposerHtml('), 'both conversation panels inherit one composer control-row owner');
     assert.ok(shared.includes('function conversationAutosizeTextarea(') && chat.includes('conversationAutosizeTextarea(input'), 'chat and Preferences reuse one textarea autosize owner');
     assert.ok(shared.includes("textarea.style.height = '0px'"), 'shared textarea autosizing measures from a collapsed baseline instead of preserving a stretched grid height');
     assert.ok(/\.chat-pane\s*\{[\s\S]*grid-template-areas:[\s\S]*"timeline"[\s\S]*"composer"/.test(conversationCss), 'chat timeline and composer use stable named grid rows when optional rows hide or appear');
     assert.ok(/\.chat-panel > \.panel-head\s*\{\s*grid-row:\s*1/.test(conversationCss) && /\.chat-panel > \.chat-actions-bar\s*\{\s*grid-row:\s*2/.test(conversationCss) && /\.chat-panel > \.chat-pane\s*\{[^}]*grid-row:\s*3[^}]*align-self:\s*stretch/.test(conversationCss), 'the hidden search bar cannot shift the chat body out of the flexible panel row and lift the composer off the bottom');
     assert.ok(chat.includes('class="chat-history-search-split"') && /\.chat-history-search-split\s*\{[^}]*grid-template-rows:\s*fit-content\(calc\(50% - var\(--space-2\)\)\) minmax\(0, 1fr\)/.test(conversationCss), 'search results and history share one bounded split whose result region cannot exceed half');
     assert.ok(/\.chat-search-results\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss) && /\.chat-timeline\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/.test(conversationCss), 'search results and ordinary history retain independent scroll owners');
-    assert.ok(agent.includes('conversation-send conversation-send-primary yoagent-chat-send') && chat.includes('conversation-send conversation-send-primary yoagent-chat-send'), 'both conversation panels inherit one send-button owner');
+    assert.ok(shared.includes('function conversationSendButtonHtml(') && agent.includes('conversationSendButtonHtml(') && chat.includes('conversationSendButtonHtml('), 'both conversation panels inherit one send-button owner');
     assert.ok(!fs.readFileSync('static/yolomux.js', 'utf8').includes('YOLOMUX_EMOJI_DATA = ['), 'emoji data does not ride the main bundle');
     assert.ok(fs.readFileSync('static/emoji-data.js', 'utf8').includes('Unicode Emoji 16.0 and CLDR 47.0.0'));
   });

@@ -655,14 +655,14 @@ function preferenceControlHtml(item, query = '') {
   }
   const resetDisabled = preferencesReadOnlyVisual || (!item.alwaysEnableReset && JSON.stringify(value) === JSON.stringify(defaultValue)) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
-    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('common.open'))}</button>`
+    ? `<button type="button" class="preferences-inline-action" data-action="preferences-yolo-rule-open" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('common.open'))}</button>`
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const example = typeof item.exampleHtml === 'function' ? item.exampleHtml(value) : String(item.exampleHtml || '');
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
 function preferenceNumberDisplayValue(item, value) {
@@ -686,7 +686,7 @@ function preferenceAdvisoryHtml(item, value) {
   return `<div class="preferences-setting-advisory">
     <span>${esc(t('pref.advisory.upload', {size: formatFileSize(uploadRsyncRecommendationBytes)}))}</span>
     <code>${esc(command)}</code>
-    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
+    <button type="button" class="preferences-inline-action" data-action="preferences-copy-text" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
   </div>`;
 }
 
@@ -707,7 +707,7 @@ function preferencesPanelHtml() {
       const count = visibleItems.length;
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.id)}">
-          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+          <button type="button" class="preferences-section-toggle" data-action="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
             ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
@@ -723,9 +723,9 @@ function preferencesPanelHtml() {
     : t('pref.reset.warning', {name: fileExplorerLabel()});
   const resetAction = preferencesResetConfirmVisible ? `
       <div class="preferences-reset-confirm">
-        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
-        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('common.cancel'))}</button>
-      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
+        <button type="button" class="preferences-reset-continue" data-action="preferences-reset-confirm" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
+        <button type="button" class="preferences-reset-cancel" data-action="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('common.cancel'))}</button>
+      </div>` : `<button type="button" class="preferences-reset-all" data-action="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
   const resetBlock = `
     <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
@@ -737,7 +737,7 @@ function preferencesPanelHtml() {
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
-      <button type="button" class="preferences-search-button" data-preferences-search-action>${esc(t('common.search'))}</button>
+      <button type="button" class="preferences-search-button" data-action="preferences-search" data-preferences-search-action>${esc(t('common.search'))}</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>
@@ -747,22 +747,20 @@ function createPreferencesPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
   panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: prefsItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelControlsHtml(prefsItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body panel-overlay-root">
-        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'preferences-body',
+    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
   return panel;
@@ -824,7 +822,7 @@ function renderPreferencesPanels(options = {}) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
+        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
       if (options.focusSearch !== true) {
         const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
@@ -935,18 +933,13 @@ function bindPreferencesPanel(panel) {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  panel.addEventListener('click', async event => {
-    const searchAction = event.target.closest('[data-preferences-search-action]');
-    if (searchAction && panel.contains(searchAction)) {
-      event.preventDefault();
+  bindActionDispatcher(panel, {
+    'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
       focusPreferencesSearch(panel);
-      return;
-    }
-    const resetAll = event.target.closest('[data-preferences-reset-all]');
-    if (resetAll && panel.contains(resetAll)) {
-      event.preventDefault();
+    },
+    'preferences-reset-all': () => {
       preferencesResetConfirmVisible = true;
       renderPreferencesPanels({force: true});
       setTimeout(() => {
@@ -954,40 +947,25 @@ function bindPreferencesPanel(panel) {
         confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
         confirm?.focus?.();
       }, 0);
-      return;
-    }
-    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
-    if (resetConfirm && panel.contains(resetConfirm)) {
-      event.preventDefault();
+    },
+    'preferences-reset-confirm': () => {
       preferencesResetConfirmVisible = false;
       resetAllPreferences();
-      return;
-    }
-    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
-    if (resetCancel && panel.contains(resetCancel)) {
-      event.preventDefault();
+    },
+    'preferences-reset-cancel': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
-      return;
-    }
-    const copyText = event.target.closest('[data-copy-text]');
-    if (copyText && panel.contains(copyText)) {
-      event.preventDefault();
-      copyTextToClipboard(copyText.dataset.copyText || '')
+    },
+    'preferences-copy-text': (_event, target) => {
+      copyTextToClipboard(target.dataset.copyText || '')
         .then(() => { statusEl.textContent = t('status.copiedText'); })
         .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
-      return;
-    }
-    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
-    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
-      event.preventDefault();
+    },
+    'preferences-yolo-rule-open': () => {
       preferencesResetConfirmVisible = false;
       openYoloRuleFile();
-      return;
-    }
-    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
-    if (sectionToggle && panel.contains(sectionToggle)) {
-      event.preventDefault();
+    },
+    'preferences-section-toggle': (_event, sectionToggle) => {
       preferencesResetConfirmVisible = false;
       const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
       if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
@@ -1005,11 +983,7 @@ function bindPreferencesPanel(panel) {
         renderPreferencesPanels({force: true});
       }
       scheduleShareUiStatePublish();
-      return;
-    }
-    const reset = event.target.closest('[data-setting-reset]');
-    if (!reset || !panel.contains(reset)) return;
-    event.preventDefault();
-    resetPreference(reset.dataset.settingReset || '');
+    },
+    'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
   });
 }

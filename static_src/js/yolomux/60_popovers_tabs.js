@@ -262,6 +262,7 @@ function bindPopoverHover(anchor, popover, handlers) {
 function createHoverPopover(options) {
   const anchor = options.anchor;
   if (!anchor) return null;
+  if (typeof options.onPointerMove === 'function') anchor.addEventListener('pointermove', options.onPointerMove);
   const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
   let showTimer = null;
   let hideTimer = null;

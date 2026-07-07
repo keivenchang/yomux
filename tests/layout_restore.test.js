@@ -95,7 +95,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/id: 'dark', get label\(\) \{ return yolomuxEditorSchemeLabel\('dark'\); \}/.test(bootstrapSource)
       && /id: 'yolomux-light', get label\(\) \{ return yolomuxEditorSchemeLabel\('light'\); \}/.test(bootstrapSource), 'YOLOmux Dark/Light scheme labels resolve lazily while proper theme names stay stable');
     assert.ok(/popoutDisabledReason: item => t\(fileItemPath\(item\)[\s\S]*pane\.popout\.filePreviewRequired[\s\S]*pane\.popout\.filePathRequired/.test(bootstrapSource), 'file popout disabled reasons resolve lazily by capability');
-    assert.ok((bootstrapSource.match(/popoutDisabledReason: \(\) => t\('pane\.popout\.interactiveDisabled'/g) || []).length === 6, 'interactive tab types share one localized popout-disabled template');
+    assert.equal((bootstrapSource.match(/pane\.popout\.interactiveDisabled/g) || []).length, 1, 'interactive tab types inherit one localized popout-disabled template from virtualPanelTabType');
     assert.equal(/Hide tab metadata|Show tab metadata/.test(bootstrapSource), false, 'bootstrap does not initialize tab metadata controls with raw English');
     assert.ok(/function renderTabMetaToggle\(\)[\s\S]*labelOn: t\('menu\.view\.tabMeta\.hide'\)[\s\S]*labelOff: t\('menu\.view\.tabMeta\.show'\)/.test(coreSource), 'tab metadata tooltip and aria state reuse existing locale keys');
 
@@ -1692,7 +1692,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/scheduleToastRemoval\(id, node, options\.countdownMs \|\| toastDurationMs\)/.test(source), '#85: toast removal uses options.countdownMs through the shared scheduler');
     assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
     assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
-    assert.ok(/function scheduleRepoRowHoverPopover[\s\S]*?setTimeout\([\s\S]*?showRepoRowHoverPopover\(row, path\)/.test(source), '#87: repo directory hover popovers are delayed through the shared popover delay timer');
+    assert.ok(/function fileTreeRepoHoverController\(row, path\)[\s\S]*?createHoverPopover\([\s\S]*?onOpen: \(\) => \{ void showRepoRowHoverPopover\(row, path\); \}/.test(source), '#87: repo directory hover popovers use the shared delayed hover controller');
     assert.equal(source.includes('row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);'), false, '#87: repo directory hover must not open the popover immediately on mouseenter');
     assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
@@ -2724,12 +2724,12 @@ async function runLayoutRestoreSuite() {
     const editorCenterZoneIdx = editorToolbarTemplate.indexOf('file-editor-toolbar-center');
     const editorRightZoneIdx = editorToolbarTemplate.indexOf('file-editor-toolbar-right');
     const editorFrameActionsIdx = source.indexOf('file-editor-frame-actions');
-    const editorTabsIdx = source.indexOf('<div class="pane-tabs"', editorFrameActionsIdx);
+    const editorFrameControlsEnd = source.indexOf('afterHeadHtml: fileEditorToolbarHtml(item)', editorFrameActionsIdx);
     const editorGutterIdx = editorToolbarTemplate.indexOf("className: 'file-editor-gutter-panel'");
     assert.ok(editorToolbarIdx > -1, '#42: editor controls render on a dedicated .file-editor-toolbar line');
     assert.ok(editorGutterIdx > -1, '#42: the # / line-numbers control lives in the toolbar row, not the tab strip');
     assert.ok(editorLeftZoneIdx > -1 && editorLeftZoneIdx < editorCenterZoneIdx && editorCenterZoneIdx < editorRightZoneIdx, 'editor toolbar renders shared left/center/right parent zones');
-    assert.ok(source.includes('${fileEditorToolbarHtml(item)}'), 'createFileEditorPanel mounts the helper-built toolbar before the panel body');
+    assert.ok(/panelFrameHtml\(\{[\s\S]*afterHeadHtml: fileEditorToolbarHtml\(item\)/.test(source), 'createFileEditorPanel mounts the helper-built toolbar through the shared panel frame');
     assert.ok(source.includes('function createToolbarButton(') && source.includes('function createSegmentedControl(') && source.includes('function createActionRow('), 'R9: panel buttons, segmented controls, and rows share DOM builders');
     assert.ok(source.includes('function bindActionDispatcher(') && source.includes("bindActionDispatcher(panel, {"), 'R9: toolbar clicks use delegated data-action dispatch');
     const editorLeftTemplate = editorToolbarTemplate.slice(editorLeftZoneIdx, editorCenterZoneIdx);
@@ -2751,7 +2751,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(source.includes("cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'})"), false, 'editor theme button never falls back to two-state dark/light based on view mode');
     assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'editor theme button always cycles Bright/Dark/Vanilla');
     assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'editor theme button always renders the visible three-state label');
-    assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
+    assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorFrameControlsEnd)), '#42: only frame controls remain before the shared toolbar slot');
     assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
     assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');
     assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');

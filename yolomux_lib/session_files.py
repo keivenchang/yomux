@@ -33,6 +33,7 @@ from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
 from .common import positive_finite_number
+from .common import path_mtime_or_zero
 from .filesystem import git_root_for_path
 from .filesystem.git_ops import diff_refs
 from .filesystem.git_ops import git_ref_exists
@@ -126,11 +127,7 @@ def resolved_change_path(raw_path: str, cwd: str | None) -> Path | None:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+file_mtime = path_mtime_or_zero
 
 
 def file_size(path: Path) -> int | None:
@@ -281,14 +278,14 @@ def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, A
         bounded_tokens = list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:] if isinstance(tokens_by_id, dict) else []
         payload.update({
             "raw_changes": serialized_transcript_marker_map(state.get("raw_changes")),
-            "generated_tokens": numeric_token_value(state.get("generated_tokens")),
-            "usage_tokens_by_message_id": {str(key): numeric_token_value(value) for key, value in bounded_tokens},
+            "generated_tokens": positive_finite_number(state.get("generated_tokens")),
+            "usage_tokens_by_message_id": {str(key): positive_finite_number(value) for key, value in bounded_tokens},
         })
     elif provider == "codex":
         payload.update({
             "changes": serialized_transcript_marker_map(state.get("changes")),
-            "last_token_total": numeric_token_value(state.get("last_token_total")) if state.get("last_token_total") is not None else None,
-            "summed_last_generated_tokens": numeric_token_value(state.get("summed_last_generated_tokens")),
+            "last_token_total": positive_finite_number(state.get("last_token_total")) if state.get("last_token_total") is not None else None,
+            "summed_last_generated_tokens": positive_finite_number(state.get("summed_last_generated_tokens")),
         })
     return payload
 
@@ -307,17 +304,17 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
     provider = str(cache_key[0])
     if provider == "claude":
         state["raw_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("raw_changes")).items()}
-        state["generated_tokens"] = numeric_token_value(payload.get("generated_tokens"))
+        state["generated_tokens"] = positive_finite_number(payload.get("generated_tokens"))
         tokens_by_id = payload.get("usage_tokens_by_message_id")
         if isinstance(tokens_by_id, dict):
             state["usage_tokens_by_message_id"] = {
-                str(key): numeric_token_value(value)
+                str(key): positive_finite_number(value)
                 for key, value in list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]
             }
     elif provider == "codex":
         state["changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("changes")).items()}
-        state["last_token_total"] = numeric_token_value(payload.get("last_token_total")) if payload.get("last_token_total") is not None else None
-        state["summed_last_generated_tokens"] = numeric_token_value(payload.get("summed_last_generated_tokens"))
+        state["last_token_total"] = positive_finite_number(payload.get("last_token_total")) if payload.get("last_token_total") is not None else None
+        state["summed_last_generated_tokens"] = positive_finite_number(payload.get("summed_last_generated_tokens"))
     return state
 
 
@@ -541,7 +538,7 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
         if not isinstance(tokens_by_message_id, dict):
             tokens_by_message_id = {}
             state["usage_tokens_by_message_id"] = tokens_by_message_id
-        previous_tokens = numeric_token_value(tokens_by_message_id.get(message_id))
+        previous_tokens = positive_finite_number(tokens_by_message_id.get(message_id))
         if generated_tokens > previous_tokens:
             state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens - previous_tokens
             tokens_by_message_id[message_id] = generated_tokens
@@ -574,7 +571,7 @@ def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None)
             resolved = resolved_change_path(str(raw_path), cwd)
             if resolved is not None and isinstance(markers, set):
                 changes.setdefault(str(resolved), set()).update(markers)
-    return transcript_scan_details(changes, numeric_token_value(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
+    return transcript_scan_details(changes, positive_finite_number(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
 
 
 def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> None:
@@ -615,7 +612,7 @@ def codex_transcript_scan_state_details(state: dict[str, Any]) -> dict[str, Any]
     changes = state.get("changes") if isinstance(state, dict) else {}
     last_token_total = state.get("last_token_total") if isinstance(state, dict) else None
     summed_last_generated_tokens = float(state.get("summed_last_generated_tokens") or 0.0) if isinstance(state, dict) else 0.0
-    generated_tokens = numeric_token_value(last_token_total) if last_token_total is not None else summed_last_generated_tokens
+    generated_tokens = positive_finite_number(last_token_total) if last_token_total is not None else summed_last_generated_tokens
     return transcript_scan_details(changes if isinstance(changes, dict) else {}, generated_tokens)
 
 
@@ -634,11 +631,7 @@ def copy_transcript_scan_details(details: dict[str, Any]) -> dict[str, Any]:
     changes = details.get("changes") if isinstance(details, dict) else {}
     usage = details.get("usage") if isinstance(details, dict) else {}
     generated_tokens = usage.get("generated_tokens") if isinstance(usage, dict) else 0.0
-    return transcript_scan_details(changes if isinstance(changes, dict) else {}, numeric_token_value(generated_tokens))
-
-
-def numeric_token_value(value: Any) -> float:
-    return positive_finite_number(value)
+    return transcript_scan_details(changes if isinstance(changes, dict) else {}, positive_finite_number(generated_tokens))
 
 
 def generated_usage_tokens(usage: Any) -> float:
@@ -646,7 +639,7 @@ def generated_usage_tokens(usage: Any) -> float:
         return 0.0
     # Providers expose these names as aliases or nested subsets, not additive counters. In
     # particular, Codex reasoning_output_tokens is already included in output_tokens.
-    return max((numeric_token_value(usage.get(key)) for key in (
+    return max((positive_finite_number(usage.get(key)) for key in (
         "output_tokens",
         "outputTokens",
         "completion_tokens",
@@ -738,7 +731,7 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
     agent_kind = str(kind or "").strip().lower()
     if agent_kind == "claude":
         generated_tokens = sum(
-            numeric_token_value(
+            positive_finite_number(
                 scan_claude_transcript_details(transcript_path, cwd).get("usage", {}).get("generated_tokens")
             )
             for transcript_path in claude_transcript_family_paths(path)
@@ -748,7 +741,7 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
         if generated_tokens is None:
             details = scan_codex_transcript_details(path, cwd)
             usage = details.get("usage") if isinstance(details, dict) else {}
-            generated_tokens = numeric_token_value(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+            generated_tokens = positive_finite_number(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
     else:
         return None
     return generated_tokens if generated_tokens > 0 else None

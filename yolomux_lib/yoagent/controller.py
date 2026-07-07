@@ -220,7 +220,7 @@ class YoagentChatContext:
 
     def get_activity_payload(self) -> dict[str, Any]:
         if self.activity_payload_cache is None:
-            self.activity_payload_cache = self.controller.deps.yoagent_activity_payload(force=self.force_activity_context)
+            self.activity_payload_cache = self.controller.yoagent_activity_payload(force=self.force_activity_context)
         return self.activity_payload_cache
 
     def get_context_lines(self) -> list[str]:
@@ -260,7 +260,7 @@ class YoagentChatContext:
 
     def finish(self, response: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         controller = self.controller
-        if controller.deps.yoagent_chat_request_cancelled(self.request_id):
+        if controller.yoagent_chat_request_cancelled(self.request_id):
             return self.finish_cancelled()
         response.setdefault("answered_at", datetime.now(timezone.utc).isoformat())
         response.setdefault("request_id", self.request_id)
@@ -288,13 +288,13 @@ class YoagentChatContext:
                 **stream_fields,
             )
         response["conversation"] = controller.yoagent_conversation_payload()
-        controller.deps.complete_yoagent_chat_request(self.request_id)
+        controller.complete_yoagent_chat_request(self.request_id)
         return response, HTTPStatus.OK
 
     def finish_cancelled(self) -> tuple[dict[str, Any], HTTPStatus]:
         controller = self.controller
         controller.publish_yoagent_stream_delta(self.stream_id, "", phase="stopped", done=True, aborted=True, auxiliary_done=True)
-        controller.deps.complete_yoagent_chat_request(self.request_id)
+        controller.complete_yoagent_chat_request(self.request_id)
         return {
             "ok": True,
             "cancelled": True,
@@ -312,7 +312,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         return getattr(self.deps, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name == "deps" or name.startswith("_"):
+        if name == "deps" or name.startswith("_") or hasattr(type(self), name):
             object.__setattr__(self, name, value)
             return
         setattr(self.deps, name, value)
@@ -468,8 +468,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         predicate = value.get("predicate") if isinstance(value.get("predicate"), dict) else {}
         action = value.get("action") if isinstance(value.get("action"), dict) else {}
         result = value.get("result") if isinstance(value.get("result"), dict) else {}
-        prompt = truncate_text(str(value.get("prompt") or self.deps.yoagent_job_prompt_text(action)), YOAGENT_ACTION_TEXT_LIMIT)
-        result_marker = value.get("result_marker") if isinstance(value.get("result_marker"), dict) else self.deps.yoagent_job_result_marker_from_result(result)
+        prompt = truncate_text(str(value.get("prompt") or self.yoagent_job_prompt_text(action)), YOAGENT_ACTION_TEXT_LIMIT)
+        result_marker = value.get("result_marker") if isinstance(value.get("result_marker"), dict) else self.yoagent_job_result_marker_from_result(result)
         job = {
             "id": job_id,
             "job_id": str(value.get("job_id") or job_id),
@@ -477,13 +477,13 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "target": dict(target),
             "predicate": dict(predicate),
             "action": dict(action),
-            "transport": str(value.get("transport") or self.deps.yoagent_job_transport_id(target, action, result)),
+            "transport": str(value.get("transport") or self.yoagent_job_transport_id(target, action, result)),
             "prompt": prompt,
             "prompt_preview": redacted_action_preview(prompt),
             "public_text": redacted_action_text(prompt, 240),
             "started_at": str(value.get("started_at") or ""),
             "result_marker": dict(result_marker),
-            "result_source": str(value.get("result_source") or self.deps.yoagent_job_result_source_from_result(result)),
+            "result_source": str(value.get("result_source") or self.yoagent_job_result_source_from_result(result)),
             "created_at": str(value.get("created_at") or datetime.now(timezone.utc).isoformat()),
             "created_ts": self.float_value(value.get("created_ts"), time.time()),
             "created_by": str(value.get("created_by") or "yoagent"),
@@ -508,7 +508,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         items = raw.values() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
         jobs: dict[str, dict[str, Any]] = {}
         for item in items:
-            job = self.deps.sanitize_yoagent_job(item)
+            job = self.sanitize_yoagent_job(item)
             if job:
                 jobs[str(job["id"])] = job
         return jobs
@@ -523,7 +523,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
     def publish_yoagent_jobs_changed(self, reason: str, job: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"reason": reason}
         if job:
-            payload["job"] = self.deps.public_yoagent_job(job)
+            payload["job"] = self.public_yoagent_job(job)
             notification = job.get("notification") if isinstance(job.get("notification"), dict) else {}
             if notification:
                 payload["notification"] = notification
@@ -566,7 +566,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
     def yoagent_jobs_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         with self.yoagent_job_lock:
-            jobs = [self.deps.public_yoagent_job(job) for job in self.yoagent_jobs.values()]
+            jobs = [self.public_yoagent_job(job) for job in self.yoagent_jobs.values()]
         jobs.sort(key=lambda item: float(item.get("created_ts") or 0), reverse=True)
         return {"ok": True, "jobs": jobs}, HTTPStatus.OK
 
@@ -660,7 +660,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def create_yoagent_job(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        spec, status = self.deps.yoagent_job_spec_from_payload(payload)
+        spec, status = self.yoagent_job_spec_from_payload(payload)
         if status != HTTPStatus.OK:
             return spec, status
         job_type = str(spec["type"])
@@ -668,19 +668,19 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         predicate = spec["predicate"]
         action = spec["action"]
         locale = str(spec.get("locale") or normalize_locale(payload.get("locale")))
-        risk_labels = self.deps.yoagent_action_risk_labels(str(action.get("text") or "")) if action.get("type") == "send_prompt" else []
+        risk_labels = self.yoagent_action_risk_labels(str(action.get("text") or "")) if action.get("type") == "send_prompt" else []
         if risk_labels:
             action["risk_labels"] = risk_labels
         confirm_required = bool(payload.get("confirm_required") or payload.get("requires_confirmation") or risk_labels)
-        idempotency_key = str(payload.get("idempotency_key") or self.deps.yoagent_job_idempotency_key(job_type, target, predicate, action))
+        idempotency_key = str(payload.get("idempotency_key") or self.yoagent_job_idempotency_key(job_type, target, predicate, action))
         with self.yoagent_job_lock:
             for existing in self.yoagent_jobs.values():
                 if existing.get("idempotency_key") == idempotency_key and existing.get("status") in {"queued", "pending_confirmation"}:
-                    return {"ok": False, "duplicate": True, "job": self.deps.public_yoagent_job(existing)}, HTTPStatus.CONFLICT
+                    return {"ok": False, "duplicate": True, "job": self.public_yoagent_job(existing)}, HTTPStatus.CONFLICT
             now_ts = time.time()
             timeout_minutes = max(1.0, min(1440.0, self.float_value(payload.get("timeout_minutes"), YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES)))
             timeout_dt = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
-            prompt = self.deps.yoagent_job_prompt_text(action)
+            prompt = self.yoagent_job_prompt_text(action)
             job_id = f"yj_{uuid.uuid4().hex[:16]}"
             job = {
                 "id": job_id,
@@ -689,7 +689,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "target": target,
                 "predicate": predicate,
                 "action": action,
-                "transport": self.deps.yoagent_job_transport_id(target, action),
+                "transport": self.yoagent_job_transport_id(target, action),
                 "prompt": prompt,
                 "prompt_preview": redacted_action_preview(prompt),
                 "public_text": redacted_action_text(prompt, 240),
@@ -710,7 +710,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "audit_event_ids": [],
             }
             self.yoagent_jobs[job["id"]] = job
-            self.deps.persist_yoagent_jobs_locked()
+            self.persist_yoagent_jobs_locked()
         event = self.log_event(
             str(target.get("session") or ""),
             "yoagent_job_created",
@@ -732,10 +732,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             current = self.yoagent_jobs.get(job["id"])
             if current is not None:
                 current["audit_event_ids"].append(str(event.get("time") or ""))
-                self.deps.persist_yoagent_jobs_locked()
+                self.persist_yoagent_jobs_locked()
                 job = copy.deepcopy(current)
-        self.deps.publish_yoagent_jobs_changed("yoagent_job_created", job)
-        return {"ok": True, "job": self.deps.public_yoagent_job(job)}, HTTPStatus.OK
+        self.publish_yoagent_jobs_changed("yoagent_job_created", job)
+        return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
 
 
     def confirm_yoagent_job(self, job_id: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -745,10 +745,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 diagnostic = "job not found"
                 return user_message_payload("yoagent.error.jobNotFound", diagnostic), HTTPStatus.NOT_FOUND
             if job.get("status") != "pending_confirmation":
-                return {"ok": True, "job": self.deps.public_yoagent_job(job)}, HTTPStatus.OK
+                return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
             job["status"] = "queued"
             job["confirmed_at"] = datetime.now(timezone.utc).isoformat()
-            self.deps.persist_yoagent_jobs_locked()
+            self.persist_yoagent_jobs_locked()
             public = copy.deepcopy(job)
         self.log_event(
             str(public.get("target", {}).get("session") or ""),
@@ -758,9 +758,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             message_key="events.message.yoagent.jobConfirmed",
             message_params={"id": job_id},
         )
-        self.deps.publish_yoagent_jobs_changed("yoagent_job_confirmed", public)
+        self.publish_yoagent_jobs_changed("yoagent_job_confirmed", public)
         self.wake_client_event_watcher()
-        return {"ok": True, "job": self.deps.public_yoagent_job(public)}, HTTPStatus.OK
+        return {"ok": True, "job": self.public_yoagent_job(public)}, HTTPStatus.OK
 
 
     def cancel_yoagent_job(self, job_id: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -770,10 +770,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 diagnostic = "job not found"
                 return user_message_payload("yoagent.error.jobNotFound", diagnostic), HTTPStatus.NOT_FOUND
             if job.get("status") in {"fired", "cancelled", "failed", "timed_out"}:
-                return {"ok": True, "job": self.deps.public_yoagent_job(job)}, HTTPStatus.OK
+                return {"ok": True, "job": self.public_yoagent_job(job)}, HTTPStatus.OK
             job["status"] = "cancelled"
             job["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-            self.deps.persist_yoagent_jobs_locked()
+            self.persist_yoagent_jobs_locked()
             public = copy.deepcopy(job)
         self.log_event(
             str(public.get("target", {}).get("session") or ""),
@@ -783,8 +783,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             message_key="events.message.yoagent.jobCancelled",
             message_params={"id": job_id},
         )
-        self.deps.publish_yoagent_jobs_changed("yoagent_job_cancelled", public)
-        return {"ok": True, "job": self.deps.public_yoagent_job(public)}, HTTPStatus.OK
+        self.publish_yoagent_jobs_changed("yoagent_job_cancelled", public)
+        return {"ok": True, "job": self.public_yoagent_job(public)}, HTTPStatus.OK
 
 
     def cancel_yoagent_jobs_for_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -811,8 +811,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 job["cancelled_at"] = now_iso
                 cancelled.append(copy.deepcopy(job))
             if cancelled:
-                self.deps.persist_yoagent_jobs_locked()
-        public_jobs = [self.deps.public_yoagent_job(job) for job in cancelled]
+                self.persist_yoagent_jobs_locked()
+        public_jobs = [self.public_yoagent_job(job) for job in cancelled]
         if cancelled:
             self.log_event(
                 target_session,
@@ -830,13 +830,13 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else payload
         intent_type = str(intent.get("type") or "")
         if intent_type in {"send_prompt", "wait_then_send", "session_handoff"}:
-            preview, status = self.deps.create_yoagent_action_preview(intent)
+            preview, status = self.create_yoagent_action_preview(intent)
             risk = "mutating-send" if str(preview.get("status") or "") == "ready" else "waiting-target"
             return {"ok": status == HTTPStatus.OK, "intent": intent, "preview": preview, "risk": risk, "confirmation_required": bool(preview.get("requires_confirmation"))}, status
         if intent_type == "cancel_session_jobs":
-            response, status = self.deps.cancel_yoagent_jobs_for_session(str(intent.get("session") or ""))
+            response, status = self.cancel_yoagent_jobs_for_session(str(intent.get("session") or ""))
             return {"ok": status == HTTPStatus.OK, "intent": intent, **response}, status
-        job, status = self.deps.yoagent_job_spec_from_payload(intent)
+        job, status = self.yoagent_job_spec_from_payload(intent)
         return {"ok": status == HTTPStatus.OK, "intent": intent, "job_preview": job, "risk": "mutating-job" if (job.get("action") or {}).get("type") == "send_prompt" else "notify-only"}, status
 
 
@@ -849,7 +849,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             blockers: list[str] = []
             states: dict[str, str] = {}
             for session in roster:
-                current, status = self.deps.yoagent_action_target(session)
+                current, status = self.yoagent_action_target(session)
                 if status != HTTPStatus.OK:
                     states[session] = "missing"
                     blockers.append(session)
@@ -861,10 +861,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     blockers.append(session)
             return {"ready": not blockers and bool(roster), "state": "all_idle" if not blockers else "waiting", "states": states, "blockers": blockers}
         session = str(target.get("session") or "").strip()
-        current, status = self.deps.yoagent_action_target(session)
+        current, status = self.yoagent_action_target(session)
         if status != HTTPStatus.OK:
             return {"ready": False, "state": "missing", "error": current.get("error") or status.phrase}
-        accepting, acceptance_text = self.deps.yoagent_action_acceptance({**current, "locale": normalize_locale(job.get("locale"))})
+        accepting, acceptance_text = self.yoagent_action_acceptance({**current, "locale": normalize_locale(job.get("locale"))})
         screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
         prompt = current.get("prompt") if isinstance(current.get("prompt"), dict) else {}
         state_key = str(screen.get("key") or ("idle" if accepting else "waiting"))
@@ -913,7 +913,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "question_text": observed.get("question_text", ""),
                 "seen_working": seen_working,
             }
-            self.deps.persist_yoagent_jobs_locked()
+            self.persist_yoagent_jobs_locked()
             predicate_type = str(predicate.get("type") or "")
             ready_after_working = predicate_type != "session_done_after_working" or seen_working
             return copy.deepcopy(job), ready and ready_after_working and now - since >= quiet_seconds
@@ -932,20 +932,20 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 job["started_at"] = timestamp
             if result:
                 job["result"] = result
-                transport = self.deps.yoagent_job_transport_id(
+                transport = self.yoagent_job_transport_id(
                     job.get("target") if isinstance(job.get("target"), dict) else {},
                     job.get("action") if isinstance(job.get("action"), dict) else {},
                     result,
                 )
                 if transport:
                     job["transport"] = transport
-                marker = self.deps.yoagent_job_result_marker_from_result(result)
+                marker = self.yoagent_job_result_marker_from_result(result)
                 if marker:
                     job["result_marker"] = marker
-                result_source = self.deps.yoagent_job_result_source_from_result(result)
+                result_source = self.yoagent_job_result_source_from_result(result)
                 if result_source:
                     job["result_source"] = result_source
-            self.deps.persist_yoagent_jobs_locked()
+            self.persist_yoagent_jobs_locked()
             return copy.deepcopy(job)
 
 
@@ -973,7 +973,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 **body_fields,
                 "session": session,
             }
-            completed = self.deps.complete_yoagent_job(job_id, "fired", result_fields)
+            completed = self.complete_yoagent_job(job_id, "fired", result_fields)
             if completed:
                 completed["notification"] = notification
                 self.log_event(
@@ -984,7 +984,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     message_key=str(result_fields.get("message_key") or ""),
                     message_params=result_fields.get("message_params") if isinstance(result_fields.get("message_params"), dict) else {},
                 )
-                self.deps.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
+                self.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
             return
         if action_type == "send_prompt":
             intent = {
@@ -995,10 +995,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "return_result": bool(action.get("return_result")),
                 "locale": locale,
             }
-            preview, preview_status = self.deps.create_yoagent_action_preview(intent)
+            preview, preview_status = self.create_yoagent_action_preview(intent)
             if preview_status == HTTPStatus.OK and preview.get("status") == "ready":
-                result, result_status = self.deps.execute_yoagent_send_action({"preview_id": preview.get("id")}, persist_result=True, start_result_watch=bool(intent.get("return_result")))
-                completed = self.deps.complete_yoagent_job(job_id, "fired" if result_status == HTTPStatus.OK else "failed", {"action": preview, "send": result, "status": int(result_status)})
+                result, result_status = self.execute_yoagent_send_action({"preview_id": preview.get("id")}, persist_result=True, start_result_watch=bool(intent.get("return_result")))
+                completed = self.complete_yoagent_job(job_id, "fired" if result_status == HTTPStatus.OK else "failed", {"action": preview, "send": result, "status": int(result_status)})
                 if completed:
                     self.log_event(
                         str(intent.get("session") or ""),
@@ -1008,11 +1008,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                         message_key="events.message.yoagent.jobPromptSent",
                         message_params={"session": str(intent.get("session") or "")},
                     )
-                    self.deps.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
+                    self.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
                 return
             diagnostic = str(preview.get("error") or preview.get("acceptance_text") or "target is not ready")
             failure = {"action": preview, **user_message_payload("yoagent.error.targetNotReady", diagnostic)}
-            failed = self.deps.complete_yoagent_job(job_id, "failed", failure)
+            failed = self.complete_yoagent_job(job_id, "failed", failure)
             if failed:
                 reason = preview.get("user_message") if isinstance(preview.get("user_message"), dict) else message_descriptor(
                     "yoagent.error.targetNotReady",
@@ -1026,7 +1026,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     message_key="yoagent.job.notification.failed",
                     message_params={"id": job_id, "reason": reason},
                 )
-                self.deps.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
+                self.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
 
 
     def poll_yoagent_jobs_once(self) -> list[str]:
@@ -1038,7 +1038,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             job_id = str(job.get("id") or "")
             locale = normalize_locale(job.get("locale"))
             if self.float_value(job.get("timeout_ts"), 0.0) and now >= self.float_value(job.get("timeout_ts"), 0.0):
-                timed_out = self.deps.complete_yoagent_job(job_id, "timed_out", {"reason": "timeout"})
+                timed_out = self.complete_yoagent_job(job_id, "timed_out", {"reason": "timeout"})
                 if timed_out:
                     timed_out["notification"] = {
                         **message_fields("title", "brand.tab.agent", yoagent_text("en", "brand.tab.agent")),
@@ -1058,12 +1058,12 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                         message_key="yoagent.job.notification.timedOut",
                         message_params={"id": job_id},
                     )
-                    self.deps.publish_yoagent_jobs_changed("yoagent_job_timed_out", timed_out)
+                    self.publish_yoagent_jobs_changed("yoagent_job_timed_out", timed_out)
                 continue
-            observed = self.deps.yoagent_job_observed_state(job)
+            observed = self.yoagent_job_observed_state(job)
             if str(observed.get("state") or "") == "missing":
                 diagnostic = str(observed.get("error") or "target session is missing")
-                failed = self.deps.complete_yoagent_job(
+                failed = self.complete_yoagent_job(
                     job_id,
                     "failed",
                     {"observed": observed, **user_message_payload("yoagent.error.targetSessionMissing", diagnostic)},
@@ -1096,11 +1096,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                         message_key="yoagent.job.notification.failed",
                         message_params={"id": job_id, "reason": reason_descriptor},
                     )
-                    self.deps.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
+                    self.publish_yoagent_jobs_changed("yoagent_job_failed", failed)
                 continue
-            current, should_fire = self.deps.update_yoagent_job_observation(job_id, observed, now)
+            current, should_fire = self.update_yoagent_job_observation(job_id, observed, now)
             if current and should_fire:
-                self.deps.fire_yoagent_job(current, observed)
+                self.fire_yoagent_job(current, observed)
                 fired.append(job_id)
         return fired
 
@@ -1117,8 +1117,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         handoff = preview.get("handoff") if isinstance(preview.get("handoff"), dict) else {}
         target_session = str(handoff.get("session") or "").strip()
         if target_session:
-            source_regarding = self.deps.yoagent_wait_regarding_text(preview.get("text"), yoagent_text(locale, "yoagent.waiting.currentRequest"))
-            target_regarding = self.deps.yoagent_wait_regarding_text(handoff.get("instruction"), yoagent_text(locale, "yoagent.waiting.nextRequest"))
+            source_regarding = self.yoagent_wait_regarding_text(preview.get("text"), yoagent_text(locale, "yoagent.waiting.currentRequest"))
+            target_regarding = self.yoagent_wait_regarding_text(handoff.get("instruction"), yoagent_text(locale, "yoagent.waiting.nextRequest"))
             return yoagent_text(
                 locale,
                 "yoagent.waiting.handoff",
@@ -1137,7 +1137,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         pending = {
             "id": watch_id,
             "session": session,
-            "label": self.deps.yoagent_action_wait_label(preview),
+            "label": self.yoagent_action_wait_label(preview),
             "started_ts": time.time(),
             "wait_seconds": YOAGENT_ACTION_RESULT_WAIT_SECONDS,
             "transcript": str(marker.get("transcript") or ""),
@@ -1146,8 +1146,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             pending["handoff"] = {
                 "source_session": str(handoff.get("source_session") or session),
                 "session": str(handoff.get("session") or ""),
-                "source_regarding": self.deps.yoagent_wait_regarding_text(preview.get("text"), yoagent_text(normalize_locale(preview.get("locale")), "yoagent.waiting.currentRequest")),
-                "target_regarding": self.deps.yoagent_wait_regarding_text(handoff.get("instruction"), yoagent_text(normalize_locale(preview.get("locale")), "yoagent.waiting.nextRequest")),
+                "source_regarding": self.yoagent_wait_regarding_text(preview.get("text"), yoagent_text(normalize_locale(preview.get("locale")), "yoagent.waiting.currentRequest")),
+                "target_regarding": self.yoagent_wait_regarding_text(handoff.get("instruction"), yoagent_text(normalize_locale(preview.get("locale")), "yoagent.waiting.nextRequest")),
             }
         with self.yoagent_action_lock:
             self.yoagent_action_waits[watch_id] = pending
@@ -1179,7 +1179,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "conversation": self.deps.yoagent_conversation_payload(),
                 **user_message_payload("yoagent.error.waitNotFound", "wait not found"),
             }, HTTPStatus.NOT_FOUND
-        self.deps.finish_yoagent_action_wait(clean_id, "yoagent_wait_cleared")
+        self.finish_yoagent_action_wait(clean_id, "yoagent_wait_cleared")
         return {
             "ok": True,
             "id": clean_id,
@@ -1264,7 +1264,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if agent is None:
             agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
         target_pane = agent.pane_target if agent and agent.pane_target else (selected.target if selected else tmux_session_target(session))
-        prompt, screen = self.deps.yoagent_action_pane_status(session, target_pane, discovered_sessions=discovered)
+        prompt, screen = self.yoagent_action_pane_status(session, target_pane, discovered_sessions=discovered)
         target = {
             "session": session,
             "pane_target": target_pane,
@@ -1279,11 +1279,11 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "screen": screen,
             "errors": errors,
         }
-        managed_metadata = self.deps.yoagent_managed_target_metadata(session, agent)
+        managed_metadata = self.yoagent_managed_target_metadata(session, agent)
         if managed_metadata:
             target.update(managed_metadata)
             target["managed"] = managed_metadata.get("managed") is not False
-        return self.deps.yoagent_target_with_transport(target), HTTPStatus.OK
+        return self.yoagent_target_with_transport(target), HTTPStatus.OK
 
 
     def yoagent_action_pane_status(self, session: str, target_pane: str, discovered_sessions: dict[str, SessionInfo] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1495,16 +1495,16 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if not text:
             diagnostic = "missing prompt text"
             return {"session": session, **user_message_payload("yoagent.error.promptTextRequired", diagnostic)}, HTTPStatus.BAD_REQUEST
-        target, status = self.deps.yoagent_action_target(session)
+        target, status = self.yoagent_action_target(session)
         if status != HTTPStatus.OK:
             return target, status
-        accepting, acceptance_text = self.deps.yoagent_action_acceptance({**target, "locale": locale})
+        accepting, acceptance_text = self.yoagent_action_acceptance({**target, "locale": locale})
         prompt_answer = self.yoagent_prompt_answer_plan(text, target, locale) if not accepting and self.yoagent_target_prompt_visible(target) else {}
         prompt_answer_ready = bool(prompt_answer.get("ready"))
         if prompt_answer and not prompt_answer_ready:
             acceptance_text = str(prompt_answer.get("error") or acceptance_text)
         preview_id = f"ya_{secrets.token_urlsafe(12)}"
-        risk_labels = self.deps.yoagent_action_risk_labels(text)
+        risk_labels = self.yoagent_action_risk_labels(text)
         requires_confirmation = bool(intent.get("requires_confirmation") or risk_labels)
         if accepting:
             status_fields = message_fields("status_text", "yoagent.action.status.sendReady", "ready to send now")
@@ -1571,7 +1571,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             },
             message_key="yoagent.action.preview",
         )
-        return self.deps.public_yoagent_action_preview(preview), HTTPStatus.OK
+        return self.public_yoagent_action_preview(preview), HTTPStatus.OK
 
 
     def yoagent_action_answer(self, action: dict[str, Any], locale: str = "") -> str:
@@ -1770,8 +1770,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             visible_text = self.deps.tmux_capture_pane(pane_target, visible_only=True)
         except (OSError, subprocess.SubprocessError):
             return ""
-        composer_source = self.deps.yoagent_visible_composer_source(pane_target, str(visible_text or ""))
-        if self.deps.yoagent_visible_composer_text(composer_source):
+        composer_source = self.yoagent_visible_composer_source(pane_target, str(visible_text or ""))
+        if self.yoagent_visible_composer_text(composer_source):
             return ""
         lines = [line.rstrip() for line in str(visible_text or "").splitlines() if line.strip()]
         return truncate_text("\n".join(lines[-40:]), YOAGENT_ACTION_RESULT_MAX_CHARS)
@@ -1852,7 +1852,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_derived_handoff_prompt(self, instruction: str, text: str) -> str:
-        return self.deps.yoagent_handoff_time_add_prompt(instruction, text)
+        return self.yoagent_handoff_time_add_prompt(instruction, text)
 
 
     def yoagent_source_neutral_handoff_instruction(self, instruction: str) -> str:
@@ -1873,10 +1873,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         instruction = instruction.strip(" ,.")
         if not instruction:
             instruction = "answer the user's follow-up using that reply"
-        derived = self.deps.yoagent_derived_handoff_prompt(instruction, text)
+        derived = self.yoagent_derived_handoff_prompt(instruction, text)
         if derived:
             return truncate_text(derived, YOAGENT_ACTION_TEXT_LIMIT)
-        instruction = self.deps.yoagent_source_neutral_handoff_instruction(instruction)
+        instruction = self.yoagent_source_neutral_handoff_instruction(instruction)
         context = " ".join(text.strip().split())
         return truncate_text(
             f"Use this context: {context} Task: {instruction}.",
@@ -1892,14 +1892,14 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         intent = {
             "type": "send_prompt",
             "session": next_session,
-            "text": self.deps.yoagent_handoff_prompt(preview, text),
+            "text": self.yoagent_handoff_prompt(preview, text),
             "submit": True,
             "return_result": True,
             "locale": normalize_locale(preview.get("locale")),
         }
-        action, action_status = self.deps.create_yoagent_action_preview(intent)
+        action, action_status = self.create_yoagent_action_preview(intent)
         if action_status == HTTPStatus.OK and action.get("status") == "ready":
-            result, result_status = self.deps.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=True, start_result_watch=True)
+            result, result_status = self.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=True, start_result_watch=True)
             self.publish_yoagent_conversation_changed("yoagent_handoff")
             return {"ok": result_status == HTTPStatus.OK, "action": action, "result": result, "status": int(result_status)}
         locale = normalize_locale(preview.get("locale"))
@@ -1914,8 +1914,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def finish_yoagent_action_result(self, preview: dict[str, Any], text: str) -> None:
-        self.deps.record_yoagent_action_result(preview, text)
-        self.deps.continue_yoagent_handoff(preview, text)
+        self.record_yoagent_action_result(preview, text)
+        self.continue_yoagent_handoff(preview, text)
 
 
     def run_yoagent_action_result_watcher(
@@ -1941,9 +1941,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             pause = threading.Event()
             while time.monotonic() < deadline:
                 now = time.monotonic()
-                delta_text = self.deps.yoagent_transcript_delta_text(marker)
+                delta_text = self.yoagent_transcript_delta_text(marker)
                 delta_state = transcript_delta_result_state(delta_text)
-                text = self.deps.yoagent_action_result_text_from_transcript_delta(delta_text)
+                text = self.yoagent_action_result_text_from_transcript_delta(delta_text)
                 if text != last_text:
                     last_text = text
                     last_change = now
@@ -1951,12 +1951,12 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 if edited_text != last_edited_text:
                     last_edited_text = edited_text
                     last_change = now
-                _prompt, screen = self.deps.yoagent_action_pane_status(session, pane_target)
+                _prompt, screen = self.yoagent_action_pane_status(session, pane_target)
                 screen_key = str(screen.get("key") or "idle")
                 if screen_key == "working":
                     saw_work = True
                 if last_text and delta_state.get("complete") is True:
-                    self.deps.finish_yoagent_action_result(preview, last_text)
+                    self.finish_yoagent_action_result(preview, last_text)
                     return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
                 if (
                     last_text
@@ -1964,7 +1964,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     and delta_state.get("working") is not True
                     and screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS
                 ):
-                    self.deps.finish_yoagent_action_result(preview, last_text)
+                    self.finish_yoagent_action_result(preview, last_text)
                     return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
                 if (
                     last_text
@@ -1973,28 +1973,28 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     and delta_state.get("has_lifecycle") is not True
                     and delta_state.get("working") is not True
                 ):
-                    self.deps.finish_yoagent_action_result(preview, last_text)
+                    self.finish_yoagent_action_result(preview, last_text)
                     return {"ok": True, "session": session, "source": "transcript", "timed_out": False}
                 if last_edited_text and screen_key in YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS:
-                    self.deps.finish_yoagent_action_result(preview, last_edited_text)
+                    self.finish_yoagent_action_result(preview, last_edited_text)
                     return {"ok": True, "session": session, "source": "edited-files", "timed_out": False}
                 pause.wait(min(poll, max(0.0, deadline - time.monotonic())))
             if last_text:
-                self.deps.record_yoagent_action_result(preview, last_text, timed_out=True, partial=True)
+                self.record_yoagent_action_result(preview, last_text, timed_out=True, partial=True)
                 return {"ok": True, "session": session, "source": "transcript", "timed_out": True, "partial": True}
             if last_edited_text:
-                self.deps.record_yoagent_action_result(preview, last_edited_text, timed_out=True, partial=True)
+                self.record_yoagent_action_result(preview, last_edited_text, timed_out=True, partial=True)
                 return {"ok": True, "session": session, "source": "edited-files", "timed_out": True, "partial": True}
-            visible_text = self.deps.yoagent_action_visible_result_text(target)
-            self.deps.record_yoagent_action_result(preview, visible_text, timed_out=True, partial=bool(visible_text))
+            visible_text = self.yoagent_action_visible_result_text(target)
+            self.record_yoagent_action_result(preview, visible_text, timed_out=True, partial=bool(visible_text))
             return {"ok": bool(visible_text), "session": session, "source": "screen" if visible_text else "", "timed_out": True}
         finally:
-            self.deps.finish_yoagent_action_wait(watch_id, "yoagent_wait_finished")
+            self.finish_yoagent_action_wait(watch_id, "yoagent_wait_finished")
 
 
     def start_yoagent_action_result_watcher(self, preview: dict[str, Any], marker: dict[str, Any]) -> dict[str, Any]:
         watch_id = f"yar_{secrets.token_urlsafe(10)}"
-        pending = self.deps.register_yoagent_action_wait(watch_id, preview, marker)
+        pending = self.register_yoagent_action_wait(watch_id, preview, marker)
         worker = threading.Thread(
             target=self.run_yoagent_action_result_watcher,
             kwargs={"preview": copy.deepcopy(preview), "marker": copy.deepcopy(marker), "watch_id": watch_id},
@@ -2064,7 +2064,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "requires_confirmation": payload.get("requires_confirmation") is not False,
             "return_result": bool(payload.get("return_result")),
         }
-        return self.deps.create_yoagent_action_preview(intent)
+        return self.create_yoagent_action_preview(intent)
 
 
     def execute_yoagent_send_action(
@@ -2073,7 +2073,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         persist_result: bool = True,
         start_result_watch: bool = True,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        self.deps.prune_yoagent_action_previews()
+        self.prune_yoagent_action_previews()
         preview_id = str(payload.get("preview_id") or payload.get("id") or "").strip()
         if not preview_id:
             diagnostic = "missing preview_id"
@@ -2086,7 +2086,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if preview.get("status") != "ready":
             diagnostic = "action is not ready to send"
             return {"preview_id": preview_id, **user_message_payload("yoagent.error.actionNotReady", diagnostic)}, HTTPStatus.CONFLICT
-        current, status = self.deps.yoagent_action_target(str(preview.get("session") or ""))
+        current, status = self.yoagent_action_target(str(preview.get("session") or ""))
         if status != HTTPStatus.OK:
             return current, status
         target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
@@ -2128,7 +2128,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     self.record_yoagent_message("assistant", str(result.get("answer") or ""), created_at=datetime.now(timezone.utc).isoformat())
                     result["conversation"] = self.yoagent_conversation_payload()
             return result, result_status
-        accepting, acceptance_text = self.deps.yoagent_action_acceptance({**current, "locale": normalize_locale(preview.get("locale"))})
+        accepting, acceptance_text = self.yoagent_action_acceptance({**current, "locale": normalize_locale(preview.get("locale"))})
         if not accepting:
             return {
                 "preview_id": preview_id,
@@ -2149,7 +2149,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         transport_provider = self.yoagent_transports.get(transport)
         return_result = bool(preview.get("return_result") or payload.get("return_result"))
         screen = current.get("screen") if isinstance(current.get("screen"), dict) else {}
-        result_marker = self.deps.yoagent_action_result_marker(target) if return_result else {}
+        result_marker = self.yoagent_action_result_marker(target) if return_result else {}
         clear_existing = transport == TMUX_LEGACY_TRANSPORT_ID and str(screen.get("key") or "") == "input-draft"
         verify_submit = transport == TMUX_LEGACY_TRANSPORT_ID and preview.get("submit") is not False
         send_result = transport_provider.send(
@@ -2245,7 +2245,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if send_result.get("cleared"):
             response["cleared_input"] = True
             response["cleared_text_preview"] = redacted_action_preview(str(clear_result.get("detected_text") or ""))
-        response["answer"] = self.deps.yoagent_action_sent_answer(preview, response)
+        response["answer"] = self.yoagent_action_sent_answer(preview, response)
         if persist_result:
             self.record_yoagent_message(
                 "assistant",
@@ -2254,10 +2254,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             )
             response["conversation"] = self.yoagent_conversation_payload()
         if return_result and send_result.get("text"):
-            self.deps.record_yoagent_action_result(preview, str(send_result.get("text") or ""))
+            self.record_yoagent_action_result(preview, str(send_result.get("text") or ""))
             response["result_recorded"] = True
         elif return_result and start_result_watch:
-            response["result_watch"] = self.deps.start_yoagent_action_result_watcher(preview, result_marker)
+            response["result_watch"] = self.start_yoagent_action_result_watcher(preview, result_marker)
         return response, HTTPStatus.OK
 
 
@@ -2310,7 +2310,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             with self.yoagent_cli_lock:
                 self.yoagent_cli_sessions.clear()
                 yoagent_conversation.clear_cli_sessions()
-            self.deps.close_yoagent_codex_app_server()
+            self.close_yoagent_codex_app_server()
             with self.yoagent_action_lock:
                 self.yoagent_action_waits.clear()
             yoagent_conversation.clear_messages()
@@ -2335,7 +2335,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         def run_prewarm() -> None:
             status: dict[str, Any] = {"backend": backend, "reason": reason}
             try:
-                thread_id, raw_fallback_reason, cli_status = self.deps.ensure_yoagent_codex_app_server(settings)
+                thread_id, raw_fallback_reason, cli_status = self.ensure_yoagent_codex_app_server(settings)
                 cli_status = dict(cli_status)
                 if raw_fallback_reason:
                     cli_status.setdefault("error", raw_fallback_reason)
@@ -2371,9 +2371,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_startup_response(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
-        self.deps.maybe_start_yoagent_summary_worker()
+        self.maybe_start_yoagent_summary_worker()
         if yoagent_conversation.load_messages(limit=1):
-            warm_payload, _warm_status = self.deps.start_yoagent_backend_prewarm(payload, reason="startup_existing_conversation")
+            warm_payload, _warm_status = self.start_yoagent_backend_prewarm(payload, reason="startup_existing_conversation")
             return {
                 "ok": True,
                 "started": False,
@@ -2426,8 +2426,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         started = time.monotonic()
         self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
         try:
-            activity_payload = self.deps.yoagent_activity_payload()
-            answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(
+            activity_payload = self.yoagent_activity_payload()
+            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(
                 backend,
                 YOAGENT_STARTUP_QUESTION,
                 activity_payload,
@@ -2518,8 +2518,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
     def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
         if (payload or {}).get("visible"):
-            return self.deps.yoagent_startup_response(payload)
-        return self.deps.start_yoagent_backend_prewarm(payload, reason="client_prewarm")
+            return self.yoagent_startup_response(payload)
+        return self.start_yoagent_backend_prewarm(payload, reason="client_prewarm")
 
 
     def create_yoagent_chat_context(self, payload: dict[str, Any], access_role: str = "admin") -> tuple[YoagentChatContext | None, tuple[dict[str, Any], HTTPStatus] | None]:
@@ -2531,7 +2531,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         request_id = self.normalize_yoagent_chat_request_id(payload.get("request_id")) or f"chat-{uuid.uuid4().hex}"
         stream_id = self.normalize_yoagent_chat_request_id(payload.get("stream_id")) or request_id
         self.register_yoagent_chat_request(request_id, stream_id)
-        history = self.deps.yoagent_prompt_history(payload.get("history", []), question)
+        history = self.yoagent_prompt_history(payload.get("history", []), question)
         self.record_yoagent_message("user", question)
         settings = self.yoagent_settings()
         force_activity_context = yoagent_question_requests_session_list(question)
@@ -2563,18 +2563,18 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             if ctx.access_role != "admin":
                 return ctx.finish(ctx.base_response(yoagent_text(ctx.locale, "yoagent.chat.jobAdminRequired")))
             if job_intent.get("type") == "cancel_session_jobs":
-                cancel_payload, cancel_status = self.deps.cancel_yoagent_jobs_for_session(str(job_intent.get("session") or ""))
+                cancel_payload, cancel_status = self.cancel_yoagent_jobs_for_session(str(job_intent.get("session") or ""))
                 if cancel_status != HTTPStatus.OK:
-                    self.deps.complete_yoagent_chat_request(ctx.request_id)
+                    self.complete_yoagent_chat_request(ctx.request_id)
                     return cancel_payload, cancel_status
                 return ctx.finish(ctx.base_response(yoagent_text(ctx.locale, "yoagent.chat.cancelledJobs", count=cancel_payload.get("count", 0), session=cancel_payload.get("session"))))
-            job_payload, job_status = self.deps.create_yoagent_job({**job_intent, "locale": ctx.locale})
+            job_payload, job_status = self.create_yoagent_job({**job_intent, "locale": ctx.locale})
             if job_status not in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
-                self.deps.complete_yoagent_chat_request(ctx.request_id)
+                self.complete_yoagent_chat_request(ctx.request_id)
                 return job_payload, job_status
             job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
             duplicate = yoagent_text(ctx.locale, "yoagent.chat.reusedJob") if job_payload.get("duplicate") else ""
-            return ctx.finish(ctx.base_response(self.deps.yoagent_job_answer(job, ctx.locale) + duplicate))
+            return ctx.finish(ctx.base_response(self.yoagent_job_answer(job, ctx.locale) + duplicate))
         return None
 
     def yoagent_chat_action_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
@@ -2582,26 +2582,26 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if action_intent:
             if ctx.access_role != "admin":
                 return ctx.finish(ctx.base_response(yoagent_text(ctx.locale, "yoagent.chat.actionAdminRequired")))
-            action, action_status = self.deps.create_yoagent_action_preview({**action_intent, "locale": ctx.locale})
+            action, action_status = self.create_yoagent_action_preview({**action_intent, "locale": ctx.locale})
             if action_status != HTTPStatus.OK:
-                self.deps.complete_yoagent_chat_request(ctx.request_id)
+                self.complete_yoagent_chat_request(ctx.request_id)
                 return action, action_status
             confirmation_required = bool(action_intent.get("requires_confirmation") or action.get("requires_confirmation"))
             if action.get("status") == "ready" and not confirmation_required:
-                result, result_status = self.deps.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=False, start_result_watch=False)
+                result, result_status = self.execute_yoagent_send_action({"preview_id": action.get("id")}, persist_result=False, start_result_watch=False)
                 if result_status == HTTPStatus.OK:
                     if result.get("prompt_answer"):
-                        return ctx.finish(ctx.base_response(str(result.get("answer") or self.deps.yoagent_action_answer(action, ctx.locale))))
+                        return ctx.finish(ctx.base_response(str(result.get("answer") or self.yoagent_action_answer(action, ctx.locale))))
                     if action.get("return_result") and not result.get("result_recorded"):
-                        result["result_watch"] = self.deps.start_yoagent_action_result_watcher(
+                        result["result_watch"] = self.start_yoagent_action_result_watcher(
                             action,
                             result.get("result_marker") if isinstance(result.get("result_marker"), dict) else {},
                         )
-                    return ctx.finish(ctx.base_response(self.deps.yoagent_action_sent_answer(action, result, ctx.locale)))
+                    return ctx.finish(ctx.base_response(self.yoagent_action_sent_answer(action, result, ctx.locale)))
                 reason = yoagent_user_message_text(ctx.locale, result, "yoagent.error.actionNotReady")
                 return ctx.finish(ctx.base_response(yoagent_text(ctx.locale, "yoagent.chat.didNotSend", reason=reason)))
             if action_intent.get("type") == "wait_then_send" and not confirmation_required:
-                job_payload, job_status = self.deps.create_yoagent_job({
+                job_payload, job_status = self.create_yoagent_job({
                     "type": "wait_then_send",
                     "session": action_intent.get("session"),
                     "text": action_intent.get("text"),
@@ -2611,10 +2611,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 if job_status in {HTTPStatus.OK, HTTPStatus.CONFLICT}:
                     job = job_payload.get("job") if isinstance(job_payload.get("job"), dict) else {}
                     duplicate = yoagent_text(ctx.locale, "yoagent.chat.reusedJob") if job_payload.get("duplicate") else ""
-                    return ctx.finish(ctx.base_response(self.deps.yoagent_job_answer(job, ctx.locale) + duplicate))
+                    return ctx.finish(ctx.base_response(self.yoagent_job_answer(job, ctx.locale) + duplicate))
             if not confirmation_required:
-                return ctx.finish(ctx.base_response(self.deps.yoagent_action_answer(action, ctx.locale), details=self.deps.yoagent_action_preview_details(action, ctx.locale)))
-            return ctx.finish(ctx.base_response(self.deps.yoagent_action_answer(action, ctx.locale), actions=[action], details=self.deps.yoagent_action_preview_details(action, ctx.locale)))
+                return ctx.finish(ctx.base_response(self.yoagent_action_answer(action, ctx.locale), details=self.yoagent_action_preview_details(action, ctx.locale)))
+            return ctx.finish(ctx.base_response(self.yoagent_action_answer(action, ctx.locale), actions=[action], details=self.yoagent_action_preview_details(action, ctx.locale)))
         return None
 
     def yoagent_chat_work_next_response(self, ctx: YoagentChatContext) -> tuple[dict[str, Any], HTTPStatus] | None:
@@ -2671,9 +2671,9 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         activity_payload = ctx.get_activity_payload() if include_model_activity else {}
         if backend in {"codex", "claude"} and invocation == "cli":
             with self.yoagent_cli_lock:
-                if self.deps.yoagent_chat_request_cancelled(ctx.request_id):
+                if self.yoagent_chat_request_cancelled(ctx.request_id):
                     return ctx.finish_cancelled()
-                answer, fallback_reason, cli_status = self.deps.run_yoagent_cli_backend(
+                answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(
                     backend,
                     ctx.question,
                     activity_payload,
@@ -2685,7 +2685,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                     include_activity_context=include_model_activity,
                     require_external_tools=external_tool_request,
                 )
-            if self.deps.yoagent_chat_request_cancelled(ctx.request_id):
+            if self.yoagent_chat_request_cancelled(ctx.request_id):
                 return ctx.finish_cancelled()
             if answer:
                 backend_used = backend

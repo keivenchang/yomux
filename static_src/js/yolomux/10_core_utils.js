@@ -2371,7 +2371,19 @@ function fuzzySearchScore(query, fields) {
   return total;
 }
 
-function fuzzyHighlightHtml(query, text) {
+function sessionScopedId(key, create = randomShareViewerId) {
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = create();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return create();
+  }
+}
+
+function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   const value = String(text ?? '');
   // Highlight EVERY query token's subsequence match, not just the first — mirrors fuzzySearchScore, which
   // scores all tokens. So "pa exploration" highlights both "PA" and "exploration", not only "pa".
@@ -2393,7 +2405,7 @@ function fuzzyHighlightHtml(query, text) {
     }
     const start = index;
     while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="fuzzy-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+    parts.push(`<mark class="${esc(markClass)}">${esc(chars.slice(start, index).join(''))}</mark>`);
   }
   return parts.join('');
 }

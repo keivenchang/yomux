@@ -489,7 +489,7 @@ def get_yoagent_conversation(request: Any, parsed: Any, route: Route) -> None:
 
 def get_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    response, status = request.server.app.yoagent_jobs_payload()
+    response, status = request.server.app.yoagent_controller.yoagent_jobs_payload()
     request.write_json(response, status=status)
 
 
@@ -1108,7 +1108,7 @@ def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_chat(payload, access_role=request.auth_identity().role)
+    response, status = request.server.app.yoagent_controller.yoagent_chat(payload, access_role=request.auth_identity().role)
     request.write_json(response, status=status)
 
 
@@ -1117,7 +1117,7 @@ def post_yoagent_chat_cancel(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     request_id = unquote(parsed.path[len("/api/yoagent/chat/"):-len("/cancel")]).strip("/")
-    response, status = request.server.app.cancel_yoagent_chat(str(payload.get("request_id") or request_id))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_chat(str(payload.get("request_id") or request_id))
     request.write_json(response, status=status)
 
 
@@ -1126,7 +1126,7 @@ def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.preview_yoagent_send_action(payload)
+    response, status = request.server.app.yoagent_controller.preview_yoagent_send_action(payload)
     request.write_json(response, status=status)
 
 
@@ -1135,7 +1135,7 @@ def post_yoagent_execute_send(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.execute_yoagent_send_action(payload)
+    response, status = request.server.app.yoagent_controller.execute_yoagent_send_action(payload)
     request.write_json(response, status=status)
 
 
@@ -1144,7 +1144,7 @@ def post_yoagent_intent(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_intent(payload)
+    response, status = request.server.app.yoagent_controller.yoagent_intent(payload)
     request.write_json(response, status=status)
 
 
@@ -1153,7 +1153,7 @@ def post_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.create_yoagent_job(payload)
+    response, status = request.server.app.yoagent_controller.create_yoagent_job(payload)
     request.write_json(response, status=status)
 
 
@@ -1162,7 +1162,7 @@ def post_yoagent_job_confirm(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
-    response, status = request.server.app.confirm_yoagent_job(str(payload.get("id") or job_id))
+    response, status = request.server.app.yoagent_controller.confirm_yoagent_job(str(payload.get("id") or job_id))
     request.write_json(response, status=status)
 
 
@@ -1171,7 +1171,7 @@ def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
-    response, status = request.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_job(str(payload.get("id") or job_id))
     request.write_json(response, status=status)
 
 
@@ -1180,7 +1180,7 @@ def post_yoagent_jobs_cancel_session(request: Any, parsed: Any, route: Route) ->
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
     request.write_json(response, status=status)
 
 
@@ -1189,7 +1189,7 @@ def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     wait_id = unquote(parsed.path[len("/api/yoagent/waits/"):-len("/clear")]).strip("/")
-    response, status = request.server.app.clear_yoagent_action_wait(str(payload.get("id") or wait_id))
+    response, status = request.server.app.yoagent_controller.clear_yoagent_action_wait(str(payload.get("id") or wait_id))
     request.write_json(response, status=status)
 
 
@@ -1216,13 +1216,13 @@ def post_yoagent_prewarm(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_prewarm(payload)
+    response, status = request.server.app.yoagent_controller.yoagent_prewarm(payload)
     request.write_json(response, status=status)
 
 
 def post_yoagent_reset(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    request.write_json(request.server.app.reset_yoagent_chat())
+    request.write_json(request.server.app.yoagent_controller.reset_yoagent_chat())
 
 
 def post_yolo_rules_reload(request: Any, parsed: Any, route: Route) -> None:

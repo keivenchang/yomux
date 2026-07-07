@@ -830,8 +830,8 @@ async function runTabberSuite() {
     assert.ok(source.includes('bindPaneTabNativeDragSource(tab, item, () => side);'), 'createPaneTab uses the shared native tab drag binder');
     assert.ok(/function bindTabberRowDragSource\(row\)[\s\S]*bindPaneTabNativeDragSource\(row, \(\) => tabberRowDragItem\(row\)/.test(source), 'Tabber rows reuse the shared native tab drag binder');
     assert.ok(source.includes('dragImage: () => tabberNativeDragImageForRow(row)'), 'Tabber rows and inner session tabs preview only the dragged subtree');
-    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropIntentAllowsSession\(tabPayload\.session, intent\)[\s\S]*showDropPreview\(intent\)/.test(source), 'Dockview accepts external shared tab drags from Tabber rows');
-    assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*const tabPayload = dragPayload\(event\)[\s\S]*dropSessionWithIntent\(tabPayload\.session, intent/.test(source), 'Dockview drops external shared tab drags through the normal session intent path');
+    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*applyLayoutDragIntent\(event, classifyLayoutDrag\(event, \{[\s\S]*intentForSession: dockviewGroupDropIntentForEvent/.test(source), 'Dockview accepts external shared tab drags through the shared classifier');
+    assert.ok(/function applyLayoutDragIntent\(event, drag,[\s\S]*dropSessionWithIntent\(drag\.payload\.session, drag\.intent/.test(source), 'Dockview drops external shared tab drags through the normal session action executor');
 
     const api = loadYolomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
@@ -878,6 +878,40 @@ async function runTabberSuite() {
     assert.equal(event.dataTransfer.dragImage.y, 7);
     api.endSessionDrag(event);
     assert.equal(preview.removed, true, 'Tabber drag image preview is cleaned up at drag end');
+  });
+
+  test('grid and Dockview drag payloads share acceptance and action classification', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    const slot = new TestElement('slot-right');
+    slot.classList.add('drop-slot');
+    slot.dataset.slot = 'right';
+    slot.rect = {left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800};
+    api.setGridPreviewNodesForTest([slot]);
+    const intent = {sourceSlot: 'left', targetSlot: 'right', zone: 'left', previewNode: slot, targetRect: slot.rect};
+    const cases = [
+      {name: 'pane', event: dragEvent(20, '__pane__'), prepare(event) { event.target = slot; event.dataTransfer.types = ['application/x-yolomux-pane']; event.dataTransfer.getData = type => type === 'application/x-yolomux-pane' ? JSON.stringify({slot: 'left'}) : ''; }, effect: 'move', allowed: true},
+      {name: 'file', event: fileDragEvent(slot, {path: '/tmp/a.txt', paths: ['/tmp/a.txt'], kind: 'file'}, 20, 100), effect: 'copy', allowed: true},
+      {name: 'session', event: dragEvent(20, '1'), effect: 'move', allowed: true},
+    ];
+    for (const row of cases) {
+      row.prepare?.(row.event);
+      const drag = api.classifyLayoutDragForTest(row.event, {
+        intentForFile: () => intent,
+        intentForSession: () => intent,
+      });
+      assert.equal(drag.kind, row.name, `${row.name} selects its one shared classifier branch`);
+      assert.equal(drag.dropEffect, row.effect, `${row.name} retains its intended browser drop effect`);
+      assert.equal(drag.allowed, row.allowed, `${row.name} preserves its allowed/denied target policy`);
+    }
+    const deniedFile = api.classifyLayoutDragForTest(fileDragEvent(slot, {path: '/tmp/a.txt', paths: ['/tmp/a.txt'], kind: 'file'}, 20, 100), {
+      intentForFile: () => null,
+    });
+    assert.equal(deniedFile.allowed, false, 'an absent target intent is denied by the same file classifier');
   });
 
   test('t@8485', () => {

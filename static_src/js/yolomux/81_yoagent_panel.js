@@ -394,7 +394,7 @@ function yoagentActionCardHtml(action) {
   const transportLabel = yoagentActionTransportText(transport, target.transport_label);
   const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentChatState.busy;
   const button = canSend
-    ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
+    ? `<button type="button" class="yoagent-action-send" data-action="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
     : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
   const rows = [
     [t('common.sessionLabel'), target.session || action.session || ''],
@@ -541,7 +541,7 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-action="yoagent-wait-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
       <span class="yoagent-waiting-label yoagent-compact-label">${textWithMovingEllipsisHtml(label, 'yoagent-waiting-dots')}</span>
@@ -627,8 +627,8 @@ function yoagentJobRowsHtml() {
       error,
     ].filter(Boolean).join(' · ');
     const controls = [
-      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
-      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
+      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-action="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
+      canCancel ? `<button type="button" class="yoagent-job-cancel" data-action="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
     ].filter(Boolean).join('');
     return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
       <div class="yoagent-job-main">
@@ -660,7 +660,7 @@ function yoagentChatQueueHtml() {
     return `<li class="yoagent-chat-queue-item yoagent-compact-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
       <span class="yoagent-chat-queue-text yoagent-compact-label">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
+      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-action="yoagent-queued-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
@@ -877,7 +877,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!tmuxSignalAgentCommands.has(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
@@ -1157,25 +1157,15 @@ function yoagentChatHtml() {
     ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
-    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
+    ? `<button type="button" class="yoagent-chat-retry" data-action="yoagent-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
   const error = yoagentChatState.error ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
   const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
   const submitButton = yoagentChatState.busy
-    ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
-    : `<button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
-          <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>`;
-  const form = `<form class="yoagent-chat-form conversation-composer" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="conversation-composer-controls yoagent-chat-controls">
-        ${yoagentComposerControlsHtml(backendDisabled)}
-        <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
-        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>
-        ${submitButton}
-      </div>
-    </form>`;
+    ? `<button type="button" class="yoagent-chat-stop" data-action="yoagent-chat-cancel" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
+    : conversationSendButtonHtml({className: 'yoagent-chat-send', title: t('yoagent.ask'), disabled: !chatEnabled});
+  const form = conversationComposerHtml({formClassName: 'yoagent-chat-form', formAttributes: 'data-yoagent-chat-form', inputHtml: `<input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>`, leadingControlsHtml: yoagentComposerControlsHtml(backendDisabled), trailingControlsHtml: `<button type="button" class="yoagent-chat-clear" data-action="yoagent-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>`, sendHtml: submitButton});
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>

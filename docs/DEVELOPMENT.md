@@ -51,6 +51,31 @@ Frontend source for the interactive UI lives in ordered partials under `static_s
 
 Detached pane pop-outs are owned by `static_src/js/yolomux/96_pane_popout.js` and the `/pane-popout` placeholder route. Add support through `TAB_TYPES.canPopout`, `openPopout`, or `popoutRenderer`; do not create per-pane popout registries or document writers. Phase-1 popouts are rendered snapshots, so live terminal/transcript and interactive command panes must remain disabled with an explicit `popoutDisabledReason` until they have a live bridge design.
 
+## Shared UI Ownership Map
+
+Before adding UI behavior, find and extend the owner below. A consumer may add only its domain-specific data or rendering slot; it must not create a second state map, classifier, timer, or event route for the same fact.
+
+| Behavior | Source/classifier owner | Builder/renderer and consumers | Canonical coverage |
+| --- | --- | --- | --- |
+| Virtual/file tabs and pane capability | `TAB_TYPES` / `filePanelTabType()` | `tabTypeForItem()`, pane tabs, Dockview, Quick Open, popouts | `tests/layout_url.test.js`, `tests/test_browser_dockview.py` |
+| Panel shell, pane tabs, focus, generic frame actions | `bindPanelShell()` / `paneTabInnerHtml()` | normal grid and Dockview panels | `tests/editor_preview.test.js`, `tests/test_browser_layout.py` |
+| Buttons and delegated panel actions | `makeButton()` / `setDomBuilderOptions()` | `toolbarButtonHtml()`, `actionRowHtml()`, `bindActionDispatcher()` | `tests/test_static_build.py`, `tests/editor_preview.test.js` |
+| Agent-window status and activity counts | `sessionAgentWindowStatusSummary()` / `agentWindowActivityOptionsForStatus()` | `agentWindowActivityIconForStatusItem()` feeds panes, Tabber, Info Bar, popovers, and topbar | `tests/layout_url.test.js`, `tests/test_browser_layout.py` |
+| Finder/Differ shared trees | `createSharedTreeInteractionController()` | Finder, Differ, selection/keyboard/expand state | `tests/layout_url.test.js`, `tests/test_browser_finder.py` |
+| Hover popovers | `createHoverPopover()` / `clampToViewport()` | tabs, file preview, panels, menus, replay | `tests/test_browser_share.py`, `tests/test_browser_layout.py` |
+| Notifications and toasts | `notificationEventDefinitions` / `emitNotification()` | scoped session/global routing, in-app and browser delivery | `tests/layout_url.test.js`, `tests/test_browser_layout.py` |
+| Conversations | `conversationMessageShellHtml()` | shared wrapping, insertion, autosizing for YO!agent and YO!chat | `tests/layout_url.test.js`, `tests/test_browser_layout.py` |
+| YO!stats charts | `jsDebugGraphChartGroups` / series descriptors | `debugGraphChartHtml()` and shared plot helpers | `tests/editor_preview.test.js`, `tests/test_browser_layout.py` |
+| Layout drag/drop | `dragPayload()` / `paneSwapIntentForEvent()` | grid/Dockview drop helpers, preview, `dropSessionWithIntent()` | `tests/layout_url.test.js`, `tests/test_browser_dockview.py` |
+| YO!agent backend lifecycle | `YoagentController` and `YoagentStreamPublisher` | app routes and streaming adapters | `tests/test_yoagent_*.py`, `tests/test_app.py` |
+| Server history/files/activity/watch state | `StatsHistoryService`, `SessionFilesService`, `ActivityTranscriptService`, `ClientWatchService` | `TmuxWebtermApp` orchestrates HTTP/tmux work only | `tests/test_app.py`, `tests/test_background_owner.py` |
+
+### Central State Containers
+
+`agentWindowActivityRecords` owns per-agent-window transition state; `sessionStatusRecords` owns per-session status and notification state; `toastRecords` owns toast nodes/timers; `dragState` owns one active drag; `paneViewState` owns durable pane scroll; `layoutUrlState` owns URL application; `clientEventTransportState` owns the browser SSE lifecycle; `fileExplorerDirectoryRecords` owns directory-observation signatures; `fileExplorerFsResourceRecords` owns filesystem resource cache records; `shareHostConnectionRecords` owns share host sockets/queues; `StatsHistoryService`, `SessionFilesService`, `ActivityTranscriptService`, and `ClientWatchService` own their server locks/cache/work/watcher records; and `TmuxWebtermApp.auto_worker_records` owns auto-approve workers. Readers use their named selectors/helpers and lifecycle owners; consumer-local mirrors of the same keyed fact are forbidden.
+
+For every refactor or new UI behavior, record `Existing parent checked: <symbol>` or `New shared parent: <symbol and reason>` plus the exact searches used. A DONE note or handoff also records the negative search proving retired copies are gone and the net non-generated line change.
+
 The approval-prompt detection pipeline lives in `yolomux_lib/approvals.py` (one shared owner: `app.py`'s read-path, the `AutoApproveWorker` act-path in `yolomux_lib/auto_approve_worker.py`, and the standalone `auto_approve_tmux.py` CLI all call it; the CLI re-exports it). `agent_tui.py` is the public owner for combining that pure detector state with tmux captures, cursor facts, composer draft/ghost state, transcript activity upgrades, clear, paste-submit, and submit verification. An enabled session may have one worker per detected agent-pane target; `TmuxWebtermApp.auto_worker_records` is the single target-keyed owner of each worker and its session association.
 
 ## Specs

@@ -205,7 +205,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
         sent: dict[str, tuple[dict, dict]] = {}
         for agent, session in sessions.items():
-            preview, preview_status = app.create_yoagent_action_preview({
+            preview, preview_status = app.yoagent_controller.create_yoagent_action_preview({
                 "type": "send_prompt",
                 "session": session,
                 "text": "date",
@@ -215,14 +215,14 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
             assert preview_status == 200
             assert preview["status"] == "ready", preview
             assert preview["target"]["agent_kind"] == agent
-            result, result_status = app.execute_yoagent_send_action(
+            result, result_status = app.yoagent_controller.execute_yoagent_send_action(
                 {"preview_id": preview["id"]},
                 persist_result=True,
                 start_result_watch=False,
             )
             assert result_status == 200, result
             assert result["sent"] is True
-            app.register_yoagent_action_wait(f"wait-{agent}", preview, result["result_marker"])
+            app.yoagent_controller.register_yoagent_action_wait(f"wait-{agent}", preview, result["result_marker"])
             sent[agent] = (preview, result["result_marker"])
 
         waiting = app.yoagent_conversation_payload()["pending_waits"]
@@ -242,7 +242,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
             assert completed, f"{agent}.py --mock did not show date output after approval:\n{pane}"
 
         for agent, (preview, marker) in sent.items():
-            result = app.run_yoagent_action_result_watcher(
+            result = app.yoagent_controller.run_yoagent_action_result_watcher(
                 preview,
                 marker,
                 watch_id=f"wait-{agent}",

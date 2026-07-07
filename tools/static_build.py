@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter, defaultdict
+import hashlib
 import json
 import math
 import re
@@ -32,6 +33,24 @@ SOURCE_LOCALE = FALLBACK_LOCALE
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES: set[str] = set()
 RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
+SHARED_UI_OWNERSHIP_REQUIREMENTS = {
+    "static_src/js/yolomux/99_terminal_boot.js": (
+        ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
+    ),
+    "static_src/js/yolomux/20_layout_state.js": (
+        ("editor state", "function applyEditorStateFields", "applyEditorStateFields("),
+    ),
+    "static_src/js/yolomux/97_share_replay.js": (
+        ("shared editor replay", "applyEditorStateFields("),
+    ),
+    "static_src/js/yolomux/83_debug_panel.js": (
+        ("graph series descriptor", "function debugGraphSeriesData", ".value(", ".hasData("),
+    ),
+}
+# Exact normalized production clones are rare; each reviewed exception must name why the two
+# surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
+# normalized block digest emitted by lint_normalized_production_clones().
+NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {}
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
 STANDARD_BORDER_RADIUS_TOKENS = {
@@ -1768,6 +1787,82 @@ def lint_direct_button_construction() -> list[str]:
     return errors
 
 
+def lint_shared_ui_ownership() -> list[str]:
+    """Reject a second owner for the refactored panel/control/editor/chart contracts."""
+    errors: list[str] = []
+    for part, requirements in SHARED_UI_OWNERSHIP_REQUIREMENTS.items():
+        path = repo_path(part)
+        try:
+            source = read_text(path)
+        except FileNotFoundError:
+            continue
+        for requirement in requirements:
+            label, *needles = requirement
+            missing = [needle for needle in needles if needle not in source]
+            if missing:
+                errors.append(f"{part}: shared {label} owner is missing {', '.join(repr(needle) for needle in missing)}")
+    terminal_boot = repo_path("static_src/js/yolomux/99_terminal_boot.js")
+    if terminal_boot.exists():
+        source = read_text(terminal_boot)
+        frame_start = source.find("function paneFrameControlsHtml")
+        frame_end = source.find("\nfunction ", frame_start + 1)
+        frame_body = source[frame_start:frame_end if frame_end >= 0 else len(source)]
+        if "<button" in frame_body:
+            errors.append("static_src/js/yolomux/99_terminal_boot.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates")
+    for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
+        source = read_text(path)
+        if "return self.yoagent_controller." in source:
+            errors.append(f"{path.relative_to(REPO_ROOT)}: YO!agent forwarding wrappers must call the controller at the caller, not return through the app")
+    return errors
+
+
+def normalized_production_lines(source: str) -> list[str]:
+    """Keep statement shape while removing comments, literal values, and incidental whitespace."""
+    result: list[str] = []
+    for raw in source.splitlines():
+        line = re.sub(r"//.*$|#.*$", "", raw).strip()
+        if not line or line in {"{", "}", "};"}:
+            continue
+        # Signatures, export lists, and argument continuations are structural scaffolding, not
+        # copied behavior.  Ignoring them keeps the ratchet focused on executable owners.
+        if line.startswith(("def ", "class ", "@", "__all__")) or line.endswith(","):
+            continue
+        line = re.sub(r"(['\"]).*?\1", "<str>", line)
+        line = re.sub(r"\b\d+(?:\.\d+)?\b", "<num>", line)
+        line = re.sub(r"\s+", " ", line)
+        result.append(line)
+    return result
+
+
+def lint_normalized_production_clones(window: int = 8) -> list[str]:
+    """Ratchet meaningful cross-file copy/paste blocks without scanning generated/test assets."""
+    windows: dict[str, set[str]] = defaultdict(set)
+    sources = [*ASSETS.get("yolomux.js", [])]
+    sources += [str(path.relative_to(REPO_ROOT)) for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py"))]
+    for part in sources:
+        try:
+            lines = normalized_production_lines(read_text(repo_path(part)))
+        except FileNotFoundError:
+            continue
+        for index in range(max(0, len(lines) - window + 1)):
+            block = lines[index:index + window]
+            # Generic guards/returns are not an ownership problem; a clone must carry a call,
+            # assignment, or property access in addition to its shared structural shape.
+            if not any("(" in line or "=" in line or "." in line for line in block):
+                continue
+            digest = hashlib.sha1("\n".join(block).encode("utf-8")).hexdigest()[:12]
+            windows[digest].add(part)
+    errors: list[str] = []
+    for digest, parts in sorted(windows.items()):
+        if len(parts) < 2:
+            continue
+        files = ", ".join(sorted(parts))
+        key = f"{files}:{digest}"
+        if key not in NORMALIZED_PRODUCTION_CLONE_ALLOWLIST:
+            errors.append(f"normalized production clone {digest} across {files}; route both copies through one owner or add a reviewed allowlist reason")
+    return errors
+
+
 def lint_source_control_characters() -> list[str]:
     """Static source partials must remain normal UTF-8 text that grep, editors, and linters can inspect."""
     errors: list[str] = []
@@ -2111,6 +2206,8 @@ def main(argv: list[str] | None = None) -> int:
             lint_errors = (
                 lint_duplicate_functions()
                 + lint_direct_button_construction()
+                + lint_shared_ui_ownership()
+                + lint_normalized_production_clones()
                 + lint_source_control_characters()
                 + lint_css_structure()
                 + lint_identical_theme_restatements()

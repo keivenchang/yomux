@@ -20,7 +20,7 @@ def test_yoagent_stream_hidden_thinking_is_not_exposed():
 def test_yoagent_stream_callback_uses_extracted_stream_owner(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     stream_events = []
-    monkeypatch.setattr(webapp, "publish_yoagent_stream_delta", lambda *args, **kwargs: stream_events.append((args, kwargs)))
+    monkeypatch.setattr(webapp.yoagent_streams, "publish_stream_delta", lambda *args, **kwargs: stream_events.append((args, kwargs)))
     try:
         callback = webapp.yoagent_stream_callback("stream-owner", "codex")
         callback({"kind": "hidden_work_delta", "text": "Checking stream owner"})

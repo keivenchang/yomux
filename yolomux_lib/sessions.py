@@ -18,6 +18,7 @@ from .common import SessionInfo
 from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import tail_file_lines
+from .common import path_mtime_or_zero
 from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
@@ -419,11 +420,7 @@ def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CO
     return unique
 
 
-def path_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+path_mtime = path_mtime_or_zero
 
 
 def newest_codex_transcript(paths: list[Path]) -> Path | None:

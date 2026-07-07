@@ -1,6 +1,27 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
+
+def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
+    css = app_css()
+    page = tmp_path / "preview-frame-sizing.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><style>
+        #host {{ display:flex; width:900px; height:600px; }}
+        </style></head><body class="theme-dark editor-theme-dark"><div id="host"><iframe id="html" class="file-editor-html-preview"></iframe><iframe id="pdf" class="file-editor-pdf-preview"></iframe></div></body></html>""",
+    )
+    metrics = browser.execute_script(
+        """const get = id => { const node = document.getElementById(id); const style = getComputedStyle(node); return {display: style.display, flex: style.flex, width: style.width, border: style.borderTopWidth, background: style.backgroundColor, colorScheme: style.colorScheme, minHeight: style.minHeight, height: style.height}; }; return {html: get('html'), pdf: get('pdf')};"""
+    )
+    for key in ("display", "flex", "width", "border", "background", "colorScheme"):
+        assert metrics["html"][key] == metrics["pdf"][key], metrics
+    assert metrics["html"]["minHeight"] == "0px", metrics
+    assert metrics["pdf"]["minHeight"] == "420px", metrics
+    assert metrics["html"]["height"] != metrics["pdf"]["height"], metrics
+
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     css = app_css()
     page = tmp_path / "diff-active-line-fill.html"

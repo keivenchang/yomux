@@ -915,7 +915,7 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"messages": []})]
 
-    app = SimpleNamespace(yoagent_jobs_payload=lambda: ({"jobs": []}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(yoagent_jobs_payload=lambda: ({"jobs": []}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "admin")]
@@ -1229,7 +1229,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "action": "server-info"})]
 
-    app = SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/actions/preview-send", app)
     handler.read_json_body = lambda limit: {"session": "6", "text": "date"}
 
@@ -1238,7 +1238,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview": "6"})]
 
-    app = SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/actions/execute-send", app)
     handler.read_json_body = lambda limit: {"preview_id": "ya_1"}
 
@@ -1247,7 +1247,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview_id": "ya_1"})]
 
-    app = SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/intent", app)
     handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
 
@@ -1256,7 +1256,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "intent": "notify_session_idle"})]
 
-    app = SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs", app)
     handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
 
@@ -1265,7 +1265,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "job": "notify_session_idle"})]
 
-    app = SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/confirm", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1274,7 +1274,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
-    app = SimpleNamespace(cancel_yoagent_jobs_for_session=lambda session: ({"ok": True, "session": session, "count": 2}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_jobs_for_session=lambda session: ({"ok": True, "session": session, "count": 2}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/cancel-session", app)
     handler.read_json_body = lambda limit: {"session": "6"}
 
@@ -1283,7 +1283,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "session": "6", "count": 2})]
 
-    app = SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/cancel", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1292,7 +1292,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
-    app = SimpleNamespace(cancel_yoagent_chat=lambda request_id: ({"ok": True, "request_id": request_id, "cancelled": True}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_chat=lambda request_id: ({"ok": True, "request_id": request_id, "cancelled": True}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/chat/chat-abc/cancel", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1301,7 +1301,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "request_id": "chat-abc", "cancelled": True})]
 
-    app = SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/waits/yw_1/clear", app)
     handler.read_json_body = lambda limit: {}
 

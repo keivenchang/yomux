@@ -177,6 +177,17 @@ from .types import RunHistoryEntry
 from .types import RunHistoryPayload
 from .types import SearchResult
 from .types import SessionFilesPayload
+from .state_services import ActivityTranscriptService
+from .state_services import ClientEventWatcherRecord
+from .state_services import ClientWatchFileRecord
+from .state_services import ClientWatchService
+from .state_services import SessionFilesDiskPruneRecord
+from .state_services import SessionFilesGitSnapshotRecord
+from .state_services import SessionFilesService
+from .state_services import SessionFilesWorkRecord
+from .state_services import StatsHistorySamplerRecord
+from .state_services import StatsHistoryService
+from .state_services import TabberActivityWarmerRecord
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .web import bootstrap_agent_auth_status as cached_agent_auth_status_snapshot
@@ -316,107 +327,6 @@ class AgentWindowAttentionInstance:
     def cooldown_state(self) -> tuple[int, float]:
         stopped_at = self.cooldown_stopped_at if self.cooldown_cancelled_generation < self.cooldown_generation else 0.0
         return self.cooldown_generation, stopped_at
-
-
-@dataclass
-class ClientWatchFileRecord:
-    expires_at: float
-    background: bool
-
-
-@dataclass
-class ClientEventWatcherRecord:
-    worker: threading.Thread | None = None
-    directory_poll_worker: threading.Thread | None = None
-    snapshot_worker: threading.Thread | None = None
-    wake_event: threading.Event = field(default_factory=threading.Event)
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    next_signature_poll_at: float = 0.0
-    next_file_poll_at: float = 0.0
-    next_background_file_poll_at: float = 0.0
-    next_auto_poll_at: float = 0.0
-    next_attention_ack_poll_at: float = 0.0
-    next_tmux_signal_poll_at: float = 0.0
-    next_watched_pr_poll_at: float = 0.0
-    next_yoagent_job_poll_at: float = 0.0
-
-
-@dataclass
-class StatsSampleRecord:
-    last_monotonic: float | None = None
-    last_process_time: float | None = None
-    last_system_cpu_times: tuple[float, float] | None = None
-    cached_monotonic: float | None = None
-    cached_payload: dict[str, Any] | None = None
-
-
-@dataclass
-class StatsProcessHistoryWriteRecord:
-    pending_samples: list[dict[str, Any]] = field(default_factory=list)
-    next_write_at: float = 0.0
-    retry_requires_reload: bool = False
-
-
-@dataclass
-class StatsClientHistoryMergeRecord:
-    shared_rev: int = -1
-    shared_signature: tuple[int, int, int, int] | None = None
-    migrated_versions: set[int] = field(default_factory=set)
-
-
-@dataclass
-class TranscriptsPayloadCacheRecord:
-    stored_at: float | None = None
-    payload: dict[str, Any] | None = None
-    generation: int = 0
-    worker: object | None = None
-
-
-@dataclass
-class TabberActivityCacheRecord:
-    stored_at: float | None = None
-    payload: dict[str, Any] | None = None
-    source_signature: str = ""
-    refresh_worker: threading.Thread | None = None
-    session_signatures: dict[str, str] = field(default_factory=dict)
-    session_rows: dict[str, dict[str, Any]] = field(default_factory=dict)
-    inflight_by_key: dict[tuple[float, str], Future[dict[str, Any]]] = field(default_factory=dict)
-    session_scope: str = ""
-    session_file_hours: float = 0.0
-
-
-@dataclass
-class SessionFilesWorkRecord:
-    future: Future[tuple[SessionFilesPayload, HTTPStatus, bool, float]] = field(default_factory=Future)
-    owner_thread_id: int | None = None
-
-
-@dataclass
-class SessionFilesGitSnapshotRecord:
-    future: Future[tuple[tuple[Any, ...], dict[str, Any]]] = field(default_factory=Future)
-    snapshot: dict[str, Any] | None = None
-
-
-@dataclass
-class SessionFilesDiskPruneRecord:
-    next_at: float = 0.0
-    running: bool = False
-    last_result: dict[str, Any] = field(default_factory=dict)
-    worker: threading.Thread | None = None
-
-
-@dataclass
-class TabberActivityWarmerRecord:
-    thread: threading.Thread | None = None
-    running: bool = False
-    consumer_until: float = 0.0
-
-
-@dataclass
-class StatsHistorySamplerRecord:
-    thread: threading.Thread | None = None
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    running: bool = False
 
 
 @dataclass
@@ -854,10 +764,6 @@ def stats_history_client_id(value: Any = "") -> str:
     return cleaned[:STATS_HISTORY_CLIENT_ID_MAX_LENGTH]
 
 
-def stats_history_positive_number(value: Any) -> float:
-    return positive_finite_number(value)
-
-
 def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, dict):
         source = [{"key": key, **item} if isinstance(item, dict) else {"key": key, "total": item} for key, item in value.items()]
@@ -873,10 +779,10 @@ def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
         if not key:
             continue
         label = str(item.get("label") or key).strip() or key
-        total = stats_history_positive_number(item.get("total", item.get("rate", item.get("value"))))
-        samples = stats_history_positive_number(item.get("samples"))
-        tokens = stats_history_positive_number(item.get("tokens", item.get("token_total")))
-        seconds = stats_history_positive_number(item.get("seconds", item.get("duration_seconds")))
+        total = positive_finite_number(item.get("total", item.get("rate", item.get("value"))))
+        samples = positive_finite_number(item.get("samples"))
+        tokens = positive_finite_number(item.get("tokens", item.get("token_total")))
+        seconds = positive_finite_number(item.get("seconds", item.get("duration_seconds")))
         source_label = str(item.get("source") or "").strip()
         if tokens and not total:
             total = tokens
@@ -1577,47 +1483,57 @@ def requires_known_session(refresh: bool = False, maintenance: bool = True) -> C
     return decorator
 
 
+class YoagentAppField:
+    def __init__(self, name: str):
+        self.name = name
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        if instance is None:
+            return self
+        return getattr(instance._app, self.name)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        setattr(instance._app, self.name, value)
+
+
+class YoagentGlobal:
+    def __init__(self, name: str):
+        self.name = name
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        if instance is None:
+            return self
+        return globals()[self.name]
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        globals()[self.name] = value
+
+
 class YoagentAppDeps:
+    app_fields = """activity_summary_payload auto_approve_prompt_source client_event_payload_signature float_value log_event
+    publish_client_event publish_yoagent_conversation_changed publish_yoagent_stream_delta record_yoagent_message require_known_session
+    run_yoagent_direct_prompt_backend save_settings sessions settings_payload tmux_recency_ordered_sessions wake_client_event_watcher
+    yoagent_action_lock yoagent_action_previews yoagent_action_waits yoagent_chat_request_lock yoagent_chat_requests yoagent_cli_lock
+    yoagent_cli_sessions yoagent_codex_app_server yoagent_codex_app_server_key yoagent_codex_app_server_lock yoagent_conversation_payload
+    yoagent_job_lock yoagent_jobs yoagent_managed_targets yoagent_prewarm_lock yoagent_prewarm_record yoagent_session_summaries
+    yoagent_session_summary_lock yoagent_settings yoagent_skill_file_answer yoagent_skills_payload yoagent_stream_auxiliary_message_fields
+    yoagent_stream_callback yoagent_summary_worker_lock yoagent_summary_worker_record yoagent_transports""".split()
+    global_callables = """agent_screen_state codex_event_session_id discover_sessions hybrid_approval_prompt_state normalized_prompt_state
+    read_yolomux_state resolve_yoagent_backend tmux_capture_pane tmux_capture_pane_styled tmux_clear_input tmux_paste_text
+    transcript_activity_is_recent update_yolomux_state yoagent_activity_payload_signature yoagent_cli_auth_failure
+    strip_yoagent_hidden_thinking strip_yoagent_stream_hidden_thinking yoagent_cli_fallback_reason yoagent_language_directive""".split()
+
     def __init__(self, app: Any):
-        object.__setattr__(self, "_app", app)
+        # The controller gets only these explicit app/global capabilities. Its own operations are
+        # called on the controller directly, so dependency lookup cannot silently cross ownership.
+        self._app = app
 
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return getattr(self._app, name)
-        except AttributeError:
-            if name in globals():
-                return globals()[name]
-            raise
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        setattr(self._app, name, value)
-
-    def normalized_prompt_state(self, prompt: dict[str, Any] | None = None) -> dict[str, Any]:
-        return normalized_prompt_state(prompt)
-
-    def yoagent_cli_auth_failure(self, text: str) -> bool:
-        return yoagent_cli_auth_failure(text)
-
-    def strip_yoagent_hidden_thinking(self, text: str) -> tuple[str, bool]:
-        return strip_yoagent_hidden_thinking(text)
-
-    def strip_yoagent_stream_hidden_thinking(self, text: str) -> tuple[str, bool]:
-        return strip_yoagent_stream_hidden_thinking(text)
-
-    def yoagent_cli_fallback_reason(self, backend: str, error: str) -> str:
-        return yoagent_cli_fallback_reason(backend, error)
-
-    def yoagent_language_directive(self, locale: str) -> str:
-        return yoagent_language_directive(locale)
-
-    def resolve_yoagent_backend(self, backend: str) -> str:
-        return resolve_yoagent_backend(backend)
-
-    def codex_event_session_id(self, event: dict[str, Any]) -> str:
-        return codex_event_session_id(event)
-
-    def yoagent_activity_payload_signature(self, activity_payload: dict[str, Any]) -> str:
-        return yoagent_activity_payload_signature(activity_payload)
+for _yoagent_app_field in YoagentAppDeps.app_fields:
+    setattr(YoagentAppDeps, _yoagent_app_field, YoagentAppField(_yoagent_app_field))
+for _yoagent_global_callable in YoagentAppDeps.global_callables:
+    setattr(YoagentAppDeps, _yoagent_global_callable, YoagentGlobal(_yoagent_global_callable))
+del _yoagent_app_field, _yoagent_global_callable
 
 
 class TmuxWebtermApp:
@@ -1641,20 +1557,14 @@ class TmuxWebtermApp:
         self.activity_ledger.load()
         self.activity_heartbeat_next_rotate_at = 0.0
         self.input_heartbeat_record = InputHeartbeatRecord()
-        self.session_files_cache_lock = threading.RLock()
-        self.session_files_cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = {}
-        self.session_files_work_records: dict[tuple[Any, ...], SessionFilesWorkRecord] = {}
-        self.session_files_git_snapshot_records: dict[tuple[Any, ...], SessionFilesGitSnapshotRecord] = {}
-        self.session_files_disk_prune_lock = threading.Lock()
-        self.session_files_disk_prune_record = SessionFilesDiskPruneRecord()
-        self.tabber_activity_cache_lock = threading.RLock()
-        self.tabber_activity_cache_record = TabberActivityCacheRecord()
-        self.tabber_activity_warmer_record = TabberActivityWarmerRecord()
+        self.session_files_service = SessionFilesService()
+        self.activity_transcript_service = ActivityTranscriptService()
+        self.client_watch_service = ClientWatchService()
         self.auto_approve_cache_condition = threading.Condition(threading.RLock())
         self.auto_approve_cache_record = AutoApproveCacheRecord()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
-        self.client_watch_tmux_signal_payload: dict[str, Any] | None = None
+        self.client_watch_service.tmux_signal_payload: dict[str, Any] | None = None
         self.tmux_snapshot_history_lock = threading.RLock()
         self.tmux_snapshot_history_signatures: dict[tuple[str, str, int], tuple[int, int]] = {}
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
@@ -1663,74 +1573,19 @@ class TmuxWebtermApp:
         self.metadata_warm_record = MetadataWarmRecord()
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
-        self.stats_sample_lock = threading.Lock()
-        self.stats_sample_record = StatsSampleRecord()
-        self.stats_process_history_lock = threading.Lock()
-        self.stats_process_history_write_record = StatsProcessHistoryWriteRecord()
-        self.stats_history_sampler_lock = threading.Lock()
-        self.stats_history_sampler_record = StatsHistorySamplerRecord()
-        self.stats_history_lock = threading.RLock()
-        self.stats_history_raw_buckets: dict[tuple[int, int], dict[str, Any]] = {}
-        self.stats_history_rollup_buckets: dict[tuple[int, int], dict[str, Any]] = {}
-        self.stats_history_sequence = 0
-        self.stats_history_shared_rev = -1
-        self.stats_history_shared_loaded = False
-        self.stats_history_shared_host_metrics_available = False
-        self.stats_history_shared_write_lock = threading.Lock()
-        self.stats_history_shared_next_write_at = 0.0
-        self.stats_client_history_merge_lock = threading.Lock()
-        self.stats_client_history_merge_record = StatsClientHistoryMergeRecord()
+        self.stats_history_service = StatsHistoryService()
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
-        self.stats_agent_token_lock = threading.Lock()
-        self.stats_agent_token_state: dict[str, dict[str, Any]] = {}
-        self.stats_agent_activity_state: dict[str, dict[str, Any]] = {}
         self.agent_window_transition_lock = threading.RLock()
         self.agent_window_transition_state: dict[str, dict[str, float | str]] = {}
-        self.stats_agent_token_next_sample_at = 0.0
-        self.stats_agent_token_consumer_until = 0.0
-        self.stats_agent_token_bootstrap_pending = True
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
         self.client_events = ClientEventBroker()
-        self.client_watch_lock = threading.RLock()
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
         self.watch_root_index = SharedWatchRootIndex(WATCH_INDEX_PATH, owner_id=self.watch_root_owner_id)
-        self.client_watch_file_records: dict[str, ClientWatchFileRecord] = {}
-        self.client_watch_context_items: list[dict[str, Any]] = []
-        self.client_watch_session_files: list[dict[str, Any]] = []
-        self.client_watch_activity_summary: dict[str, Any] = {}
-        self.client_watch_initialized = False
-        self.client_watch_settings_signature: tuple[Any, ...] | None = None
-        self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
-        self.client_watch_transcript_content_signature: tuple[Any, ...] | None = None
-        self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
-        self.client_watch_file_signature: tuple[Any, ...] | None = None
-        self.client_watch_background_file_signature: tuple[Any, ...] | None = None
-        self.client_watch_auto_approve_signature: str = ""
-        self.client_watch_attention_ack_rev: int = -1
-        self.client_watch_tmux_signal_signature: str = ""
-        self.client_watch_tmux_signal_removal_event: dict[str, Any] = {}
-        self.client_watch_watched_prs_signature: str = ""
-        self.client_watch_context_item_payload_signatures: dict[str, str] = {}
-        self.client_watch_session_file_payload_signatures: dict[str, str] = {}
-        self.client_watch_transcripts_payload_signature: str = ""
-        self.client_watch_activity_summary_signature: str = ""
-        self.client_watch_filesystem_payload_signature: str = ""
-        self.client_watch_filesystem_history: list[dict[str, Any]] = []
-        self.client_watch_filesystem_last_full_at = 0.0
         self.tmux_theme_color = ""
-        self.client_event_watcher_record = ClientEventWatcherRecord()
-        self.activity_summary_lock = threading.RLock()
-        self.activity_summary_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self.transcripts_payload_cache_lock = threading.RLock()
-        self.transcripts_payload_cache_record = TranscriptsPayloadCacheRecord()
-        self.transcript_tail_cache_lock = threading.RLock()
-        self.transcript_tail_cache: dict[tuple[Any, ...], tuple[float, str]] = {}
-        self.context_items_cache_lock = threading.RLock()
-        self.context_items_cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
         self.yoagent_cli_lock = threading.RLock()
         self.yoagent_cli_sessions: dict[str, dict[str, Any]] = yoagent_conversation.load_cli_sessions(monotonic_now=time.monotonic())
         self.yoagent_transports = default_yoagent_transport_registry()
@@ -1738,7 +1593,7 @@ class TmuxWebtermApp:
         self.yoagent_managed_targets: dict[str, dict[str, Any]] = {}
         self.yoagent_streams = YoagentStreamPublisher(
             publish_client_event=lambda *args, **kwargs: self.publish_client_event(*args, **kwargs),
-            publish_stream_delta=lambda *args, **kwargs: self.publish_yoagent_stream_delta(*args, **kwargs),
+            publish_stream_delta=self.publish_yoagent_stream_delta,
         )
         self.yoagent_stream_lock = self.yoagent_streams.store.lock
         self.yoagent_stream_states = self.yoagent_streams.store.states
@@ -1748,7 +1603,7 @@ class TmuxWebtermApp:
         self.yoagent_action_previews: dict[str, dict[str, Any]] = {}
         self.yoagent_action_waits: dict[str, dict[str, Any]] = {}
         self.yoagent_job_lock = threading.RLock()
-        self.yoagent_jobs: dict[str, dict[str, Any]] = self.load_yoagent_jobs()
+        self.yoagent_jobs: dict[str, dict[str, Any]] = self.yoagent_controller.load_yoagent_jobs()
         self.yoagent_prewarm_lock = threading.Lock()
         self.yoagent_prewarm_record = YoagentPrewarmRecord()
         self.yoagent_codex_app_server_lock = threading.RLock()
@@ -1761,7 +1616,7 @@ class TmuxWebtermApp:
         self.update_check_thread: threading.Thread | None = None
         self._update_last_target: str | None = None
         self.load_metadata_badge_state()
-        self.load_yoagent_session_summaries()
+        self.yoagent_controller.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
@@ -1780,17 +1635,13 @@ class TmuxWebtermApp:
             return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         return None
 
-    def stats_history_next_sequence_locked(self) -> int:
-        self.stats_history_sequence += 1
-        return self.stats_history_sequence
-
     def stats_history_mark_server_changed_locked(self, bucket: dict[str, Any]) -> None:
-        sequence = self.stats_history_next_sequence_locked()
+        sequence = self.stats_history_service.next_sequence_locked()
         bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
         bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), sequence)
 
     def stats_history_mark_client_changed_locked(self, bucket: dict[str, Any], client_bucket: dict[str, Any]) -> None:
-        sequence = self.stats_history_next_sequence_locked()
+        sequence = self.stats_history_service.next_sequence_locked()
         bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
         client_bucket["sequence"] = max(int(client_bucket.get("sequence") or 0), sequence)
 
@@ -2000,7 +1851,7 @@ class TmuxWebtermApp:
         changed = False
         if client_id is None:
             for key in fields:
-                value = stats_history_positive_number(record.get(key))
+                value = positive_finite_number(record.get(key))
                 if value:
                     bucket[key] = float(bucket.get(key) or 0.0) + value
                     changed = True
@@ -2011,7 +1862,7 @@ class TmuxWebtermApp:
             return
         client_bucket = self.stats_history_client_bucket_locked(bucket, stats_history_client_id(client_id))
         for key in fields:
-            value = stats_history_positive_number(record.get(key))
+            value = positive_finite_number(record.get(key))
             if value:
                 client_bucket[key] = float(client_bucket.get(key) or 0.0) + value
                 changed = True
@@ -2050,7 +1901,7 @@ class TmuxWebtermApp:
                 target["sequence"] = max(int(target.get("sequence") or 0), int(target_process.get("sequence") or 0))
 
     def stats_history_bucket_map_locked(self, duration: int) -> dict[tuple[int, int], dict[str, Any]]:
-        return self.stats_history_raw_buckets if duration == STATS_HISTORY_RAW_BUCKET_SECONDS else self.stats_history_rollup_buckets
+        return self.stats_history_service.raw_buckets if duration == STATS_HISTORY_RAW_BUCKET_SECONDS else self.stats_history_service.rollup_buckets
 
     @staticmethod
     def stats_history_bucket_seconds(sample_time: float, now: float) -> int:
@@ -2071,7 +1922,7 @@ class TmuxWebtermApp:
 
     def stats_history_compact_locked(self, now: float) -> None:
         retention_cutoff = now - STATS_HISTORY_RETENTION_SECONDS
-        for buckets in (self.stats_history_raw_buckets, self.stats_history_rollup_buckets):
+        for buckets in (self.stats_history_service.raw_buckets, self.stats_history_service.rollup_buckets):
             for key, bucket in list(buckets.items()):
                 start = float(bucket.get("start") or 0.0)
                 if start < retention_cutoff:
@@ -2199,7 +2050,7 @@ class TmuxWebtermApp:
         include_agent_tokens: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         sources = sorted(
-            [*self.stats_history_rollup_buckets.values(), *self.stats_history_raw_buckets.values()],
+            [*self.stats_history_service.rollup_buckets.values(), *self.stats_history_service.raw_buckets.values()],
             key=lambda item: (int(item.get("start") or 0), int(item.get("duration") or 0)),
         )
         available_start = min((int(item.get("start") or 0) for item in sources), default=0)
@@ -2274,7 +2125,7 @@ class TmuxWebtermApp:
             covered_start = 0
             covered_end = 0
         bounded_older = requested_end > 0
-        safe_sequence = max(0, int(since or 0)) if bounded_older else self.stats_history_sequence
+        safe_sequence = max(0, int(since or 0)) if bounded_older else self.stats_history_service.sequence
         coverage = {
             "mode": "older" if bounded_older else "live",
             "requested_start": requested_start,
@@ -2292,7 +2143,7 @@ class TmuxWebtermApp:
             "source_records": len(scoped_sources),
             "returned_records": len(records),
             "cursor": safe_sequence,
-            "latest_cursor": self.stats_history_sequence,
+            "latest_cursor": self.stats_history_service.sequence,
         }
         return records, coverage
 
@@ -2364,7 +2215,7 @@ class TmuxWebtermApp:
         )
         payload = {
             "sequence": coverage["cursor"],
-            "latest_sequence": self.stats_history_sequence,
+            "latest_sequence": self.stats_history_service.sequence,
             "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
             "records": records,
             "coverage": coverage,
@@ -2390,7 +2241,7 @@ class TmuxWebtermApp:
             )
             payload["agent_token_history"] = {
                 "sequence": token_coverage["cursor"],
-                "latest_sequence": self.stats_history_sequence,
+                "latest_sequence": self.stats_history_service.sequence,
                 "records": [
                     {
                         key: record[key]
@@ -2603,19 +2454,19 @@ class TmuxWebtermApp:
         self.stats_history_compact_locked(now)
         raw_buckets = [
             self.stats_client_history_bucket_snapshot(bucket)
-            for bucket in self.stats_history_raw_buckets.values()
+            for bucket in self.stats_history_service.raw_buckets.values()
             if bucket.get("clients") or bucket.get("servers")
         ]
         rollup_buckets = [
             self.stats_client_history_bucket_snapshot(bucket)
-            for bucket in self.stats_history_rollup_buckets.values()
+            for bucket in self.stats_history_service.rollup_buckets.values()
             if bucket.get("clients") or bucket.get("servers")
         ]
         return {
             "version": STATS_CLIENT_HISTORY_VERSION,
             "updated_at": now,
-            "sequence": self.stats_history_sequence,
-            "migrated_versions": sorted(self.stats_client_history_merge_record.migrated_versions),
+            "sequence": self.stats_history_service.sequence,
+            "migrated_versions": sorted(self.stats_history_service.client_merge_record.migrated_versions),
             "raw_buckets": sorted(raw_buckets, key=lambda item: (item[0], item[1])),
             "rollup_buckets": sorted(rollup_buckets, key=lambda item: (item[0], item[1])),
         }
@@ -2679,7 +2530,7 @@ class TmuxWebtermApp:
     def stats_client_history_clear_rows_locked(self) -> None:
         # The client-history file owns client and process rows. Server-global fields share these
         # buckets but come from tmux-AI-status, so a reload must preserve them.
-        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+        for bucket in [*self.stats_history_service.raw_buckets.values(), *self.stats_history_service.rollup_buckets.values()]:
             bucket["clients"] = {}
             bucket["servers"] = {}
             self.stats_history_refresh_bucket_sequence_locked(bucket)
@@ -2708,9 +2559,9 @@ class TmuxWebtermApp:
                 except (TypeError, ValueError):
                     continue
                 if 0 < migrated_version < STATS_CLIENT_HISTORY_VERSION:
-                    self.stats_client_history_merge_record.migrated_versions.add(migrated_version)
+                    self.stats_history_service.client_merge_record.migrated_versions.add(migrated_version)
         try:
-            self.stats_history_sequence = max(self.stats_history_sequence, int(snapshot.get("sequence") or 0))
+            self.stats_history_service.sequence = max(self.stats_history_service.sequence, int(snapshot.get("sequence") or 0))
         except (TypeError, ValueError):
             pass
 
@@ -2845,7 +2696,7 @@ class TmuxWebtermApp:
             if not isinstance(legacy, dict):
                 continue
             version = self.stats_client_history_snapshot_version(legacy)
-            if not 0 < version < STATS_CLIENT_HISTORY_VERSION or version in self.stats_client_history_merge_record.migrated_versions:
+            if not 0 < version < STATS_CLIENT_HISTORY_VERSION or version in self.stats_history_service.client_merge_record.migrated_versions:
                 continue
             snapshots.append((version, legacy))
             try:
@@ -2875,16 +2726,16 @@ class TmuxWebtermApp:
                 newer_min = bounds[0] if newer_min is None else min(newer_min, bounds[0])
                 newer_max = bounds[1] if newer_max is None else max(newer_max, bounds[1])
             try:
-                self.stats_history_sequence = max(self.stats_history_sequence, int(legacy.get("sequence") or 0))
+                self.stats_history_service.sequence = max(self.stats_history_service.sequence, int(legacy.get("sequence") or 0))
             except (TypeError, ValueError):
                 pass
-            self.stats_client_history_merge_record.migrated_versions.add(version)
+            self.stats_history_service.client_merge_record.migrated_versions.add(version)
         self.stats_history_compact_locked(now)
         return True, max_rev
 
     def sync_shared_stats_client_history_locked(self, force_reload: bool = False) -> tuple[dict[str, Any], bool, bool]:
         signature = self.stats_client_history_file_signature()
-        merge_record = self.stats_client_history_merge_record
+        merge_record = self.stats_history_service.client_merge_record
         if not force_reload and signature is not None and signature == merge_record.shared_signature:
             return {"rev": merge_record.shared_rev}, False, False
         try:
@@ -2897,7 +2748,7 @@ class TmuxWebtermApp:
             rev = max(0, int(snapshot.get("rev") or 0))
         except (TypeError, ValueError):
             rev = 0
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             if force_reload and not self.stats_client_history_snapshot_compatible(snapshot):
                 self.stats_client_history_clear_rows_locked()
             self.stats_client_history_apply_snapshot_locked(snapshot)
@@ -2913,11 +2764,11 @@ class TmuxWebtermApp:
 
     def merge_shared_stats_client_history(self) -> None:
         signature = self.stats_client_history_file_signature()
-        if signature is not None and signature == self.stats_client_history_merge_record.shared_signature:
+        if signature is not None and signature == self.stats_history_service.client_merge_record.shared_signature:
             return
-        with self.stats_client_history_merge_lock:
+        with self.stats_history_service.client_merge_lock:
             signature = self.stats_client_history_file_signature()
-            if signature is not None and signature == self.stats_client_history_merge_record.shared_signature:
+            if signature is not None and signature == self.stats_history_service.client_merge_record.shared_signature:
                 return
             with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
                 snapshot, _changed, migrating = self.sync_shared_stats_client_history_locked()
@@ -2925,7 +2776,7 @@ class TmuxWebtermApp:
                     self.write_shared_stats_client_history_locked(snapshot, time.time())
 
     def write_shared_stats_client_history_locked(self, previous: dict[str, Any], now: float) -> int:
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             snapshot = self.stats_client_history_snapshot_locked(now)
         try:
             rev = max(0, int(previous.get("rev") or 0)) + 1
@@ -2937,23 +2788,23 @@ class TmuxWebtermApp:
             json.dumps(snapshot, sort_keys=True, separators=(",", ":")) + "\n",
             mode=0o600,
         )
-        self.stats_client_history_merge_record.shared_rev = rev
-        self.stats_client_history_merge_record.shared_signature = self.stats_client_history_file_signature()
+        self.stats_history_service.client_merge_record.shared_rev = rev
+        self.stats_history_service.client_merge_record.shared_signature = self.stats_client_history_file_signature()
         return rev
 
     def update_shared_stats_client_history(self, now: float, update: Callable[[], None], force_reload: bool = False) -> None:
-        with self.stats_client_history_merge_lock:
+        with self.stats_history_service.client_merge_lock:
             with file_lock(common.STATS_CLIENT_HISTORY_PATH, dir_mode=0o700):
                 previous, _changed, _migrating = self.sync_shared_stats_client_history_locked(force_reload=force_reload)
-                with self.stats_history_lock:
+                with self.stats_history_service.lock:
                     update()
                     self.stats_history_compact_locked(now)
                 self.write_shared_stats_client_history_locked(previous, now)
 
     def record_stats_process_sample(self, sample: dict[str, Any]) -> None:
         now = float(sample.get("time") or time.time())
-        with self.stats_process_history_lock:
-            write_record = self.stats_process_history_write_record
+        with self.stats_history_service.process_history_lock:
+            write_record = self.stats_history_service.process_history_write_record
             write_record.pending_samples.append(dict(sample))
             if now < write_record.next_write_at:
                 return
@@ -2976,7 +2827,7 @@ class TmuxWebtermApp:
             process_bucket["started_at"] = float(persisted_sample.get("started_at") or SERVER_STARTED_AT)
             process_bucket["cpu_total_percent"] = float(process_bucket.get("cpu_total_percent") or 0.0) + clamp_cpu_percent(float(persisted_sample.get("cpu_percent") or 0.0))
             process_bucket["cpu_count"] = float(process_bucket.get("cpu_count") or 0.0) + 1.0
-            sequence = self.stats_history_next_sequence_locked()
+            sequence = self.stats_history_service.next_sequence_locked()
             process_bucket["sequence"] = sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), sequence)
 
@@ -2988,14 +2839,14 @@ class TmuxWebtermApp:
             try:
                 self.update_shared_stats_client_history(now, merge_pending_samples, force_reload=retry_requires_reload)
             except Exception:
-                with self.stats_process_history_lock:
-                    write_record = self.stats_process_history_write_record
+                with self.stats_history_service.process_history_lock:
+                    write_record = self.stats_history_service.process_history_write_record
                     write_record.pending_samples[0:0] = pending_samples
                     write_record.next_write_at = min(write_record.next_write_at, now)
                     write_record.retry_requires_reload = True
                 raise
             return
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             merge_pending_samples()
             self.stats_history_compact_locked(now)
 
@@ -3020,24 +2871,24 @@ class TmuxWebtermApp:
 
     def stats_history_shared_snapshot(self, sample: dict[str, Any]) -> dict[str, Any]:
         now = float(sample.get("time") or time.time())
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             self.stats_history_compact_locked(now)
             raw_buckets = [
                 self.stats_history_shared_bucket_snapshot(bucket)
-                for bucket in self.stats_history_raw_buckets.values()
+                for bucket in self.stats_history_service.raw_buckets.values()
                 if self.stats_history_bucket_has_server_data(bucket)
             ]
             rollup_buckets = [
                 self.stats_history_shared_bucket_snapshot(bucket)
-                for bucket in self.stats_history_rollup_buckets.values()
+                for bucket in self.stats_history_service.rollup_buckets.values()
                 if self.stats_history_bucket_has_server_data(bucket)
             ]
-            sequence = self.stats_history_sequence
-        with self.stats_agent_token_lock:
-            token_state = self.stats_history_shared_agent_state_snapshot(self.stats_agent_token_state)
-            activity_state = self.stats_history_shared_agent_state_snapshot(self.stats_agent_activity_state)
-            token_next_sample_at = self.stats_agent_token_next_sample_at
-            token_consumer_until = self.stats_agent_token_consumer_until
+            sequence = self.stats_history_service.sequence
+        with self.stats_history_service.agent_token_lock:
+            token_state = self.stats_history_shared_agent_state_snapshot(self.stats_history_service.agent_token_state)
+            activity_state = self.stats_history_shared_agent_state_snapshot(self.stats_history_service.agent_activity_state)
+            token_next_sample_at = self.stats_history_service.agent_token_next_sample_at
+            token_consumer_until = self.stats_history_service.agent_token_consumer_until
         return {
             "updated_at": now,
             "sequence": sequence,
@@ -3055,7 +2906,7 @@ class TmuxWebtermApp:
 
     def write_shared_stats_history(self, sample: dict[str, Any]) -> int:
         if not self.stats_history_uses_shared_status():
-            return self.stats_history_shared_rev
+            return self.stats_history_service.shared_rev
         with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
             existing = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
@@ -3064,11 +2915,11 @@ class TmuxWebtermApp:
 
     def write_shared_stats_history_if_due(self, sample: dict[str, Any]) -> bool:
         now = float(sample.get("time") or time.time())
-        with self.stats_history_shared_write_lock:
-            if now < self.stats_history_shared_next_write_at:
+        with self.stats_history_service.shared_write_lock:
+            if now < self.stats_history_service.shared_next_write_at:
                 return False
             self.write_shared_stats_history(sample)
-            self.stats_history_shared_next_write_at = now + STATS_SHARED_HISTORY_WRITE_SECONDS
+            self.stats_history_service.shared_next_write_at = now + STATS_SHARED_HISTORY_WRITE_SECONDS
             return True
 
     def write_shared_stats_history_locked(self, status: dict[str, Any], sample: dict[str, Any]) -> int:
@@ -3081,8 +2932,8 @@ class TmuxWebtermApp:
         snapshot["rev"] = stats_rev
         status["stats_history"] = snapshot
         self._write_shared_tmux_ai_status_locked(status)
-        self.stats_history_shared_rev = stats_rev
-        self.stats_history_shared_loaded = True
+        self.stats_history_service.shared_rev = stats_rev
+        self.stats_history_service.shared_loaded = True
         return stats_rev
 
     def write_shared_stats_token_consumer_until(self, consumer_until: float) -> None:
@@ -3123,7 +2974,7 @@ class TmuxWebtermApp:
         bucket["sequence"] = sequence
 
     def stats_history_clear_server_fields_locked(self) -> None:
-        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+        for bucket in [*self.stats_history_service.raw_buckets.values(), *self.stats_history_service.rollup_buckets.values()]:
             for key in STATS_HISTORY_SERVER_FIELDS:
                 bucket[key] = 0.0
             bucket["agent_token_rates"] = {}
@@ -3131,7 +2982,7 @@ class TmuxWebtermApp:
             self.stats_history_refresh_bucket_sequence_locked(bucket)
 
     def stats_history_has_host_metrics_locked(self) -> bool:
-        for bucket in [*self.stats_history_raw_buckets.values(), *self.stats_history_rollup_buckets.values()]:
+        for bucket in [*self.stats_history_service.raw_buckets.values(), *self.stats_history_service.rollup_buckets.values()]:
             metrics = bucket.get("host_metrics")
             if not isinstance(metrics, dict):
                 continue
@@ -3142,15 +2993,15 @@ class TmuxWebtermApp:
         return False
 
     def stats_local_host_metrics_needed(self) -> bool:
-        if self.stats_history_shared_host_metrics_available:
+        if self.stats_history_service.shared_host_metrics_available:
             return False
-        with self.stats_agent_token_lock:
-            return self.stats_agent_token_consumer_until > time.time()
+        with self.stats_history_service.agent_token_lock:
+            return self.stats_history_service.agent_token_consumer_until > time.time()
 
     def record_stats_local_host_sample(self, sample: dict[str, Any]) -> bool:
         metrics = stats_host_resource_metrics()
         now = float(sample.get("time") or time.time())
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             bucket = self.stats_history_bucket_locked(now, now)
             if bucket is None or not self.stats_history_record_host_metrics_locked(bucket, metrics):
                 return False
@@ -3223,45 +3074,45 @@ class TmuxWebtermApp:
         include_agent_tokens = self.stats_history_agent_tokens_compatible(stats_history)
         raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
         rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
-        self.stats_history_shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
-        with self.stats_history_lock:
+        self.stats_history_service.shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
+        with self.stats_history_service.lock:
             for bucket in [*rollup_buckets, *raw_buckets]:
                 self.stats_history_merge_shared_bucket_locked(bucket, include_agent_tokens=include_agent_tokens)
             try:
-                self.stats_history_sequence = max(self.stats_history_sequence, int(stats_history.get("sequence") or 0))
+                self.stats_history_service.sequence = max(self.stats_history_service.sequence, int(stats_history.get("sequence") or 0))
             except (TypeError, ValueError):
                 pass
 
     def stats_history_apply_shared_agent_state(self, stats_history: dict[str, Any], include_agent_tokens: bool = True) -> None:
-        with self.stats_agent_token_lock:
+        with self.stats_history_service.agent_token_lock:
             token_state = stats_history.get("agent_token_state")
             if include_agent_tokens and isinstance(token_state, dict):
-                self.stats_agent_token_state = self.stats_history_shared_agent_state_snapshot(token_state)
+                self.stats_history_service.agent_token_state = self.stats_history_shared_agent_state_snapshot(token_state)
             elif not include_agent_tokens:
-                self.stats_agent_token_state = {}
-                self.stats_agent_token_next_sample_at = 0.0
-                self.stats_agent_token_bootstrap_pending = True
+                self.stats_history_service.agent_token_state = {}
+                self.stats_history_service.agent_token_next_sample_at = 0.0
+                self.stats_history_service.agent_token_bootstrap_pending = True
             activity_state = stats_history.get("agent_activity_state")
             if isinstance(activity_state, dict):
-                self.stats_agent_activity_state = self.stats_history_shared_agent_state_snapshot(activity_state)
+                self.stats_history_service.agent_activity_state = self.stats_history_shared_agent_state_snapshot(activity_state)
             if include_agent_tokens:
                 try:
-                    self.stats_agent_token_next_sample_at = max(self.stats_agent_token_next_sample_at, float(stats_history.get("agent_token_next_sample_at") or 0.0))
+                    self.stats_history_service.agent_token_next_sample_at = max(self.stats_history_service.agent_token_next_sample_at, float(stats_history.get("agent_token_next_sample_at") or 0.0))
                 except (TypeError, ValueError):
                     pass
             try:
-                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, float(stats_history.get("agent_token_consumer_until") or 0.0))
+                self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, float(stats_history.get("agent_token_consumer_until") or 0.0))
             except (TypeError, ValueError):
                 pass
 
     def merge_shared_stats_history(self, max_age_seconds: float | None = None) -> dict[str, Any]:
         if not self.stats_history_uses_shared_status():
-            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_shared_rev}
+            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_service.shared_rev}
         with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
         stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
         if not stats_history:
-            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_shared_rev}
+            return {"ok": False, "fresh": False, "sample": {}, "updated_at": 0.0, "rev": self.stats_history_service.shared_rev}
         try:
             rev = max(0, int(stats_history.get("rev", 0)))
         except (TypeError, ValueError):
@@ -3272,23 +3123,23 @@ class TmuxWebtermApp:
             updated_at = 0.0
         now = time.time()
         fresh = bool(updated_at and (max_age_seconds is None or now - updated_at <= max_age_seconds))
-        if rev != self.stats_history_shared_rev:
+        if rev != self.stats_history_service.shared_rev:
             include_agent_tokens = self.stats_history_agent_tokens_compatible(stats_history)
             raw_buckets = stats_history.get("raw_buckets") if isinstance(stats_history.get("raw_buckets"), list) else []
             rollup_buckets = stats_history.get("rollup_buckets") if isinstance(stats_history.get("rollup_buckets"), list) else []
-            self.stats_history_shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
-            with self.stats_history_lock:
+            self.stats_history_service.shared_host_metrics_available = self.stats_history_shared_snapshots_have_host_metrics([*rollup_buckets, *raw_buckets])
+            with self.stats_history_service.lock:
                 self.stats_history_clear_server_fields_locked()
                 for bucket in [*rollup_buckets, *raw_buckets]:
                     self.stats_history_apply_shared_bucket_locked(bucket, include_agent_tokens=include_agent_tokens)
                 try:
-                    self.stats_history_sequence = max(self.stats_history_sequence, int(stats_history.get("sequence") or 0))
+                    self.stats_history_service.sequence = max(self.stats_history_service.sequence, int(stats_history.get("sequence") or 0))
                 except (TypeError, ValueError):
                     pass
                 self.stats_history_compact_locked(now)
             self.stats_history_apply_shared_agent_state(stats_history, include_agent_tokens=include_agent_tokens)
-            self.stats_history_shared_rev = rev
-            self.stats_history_shared_loaded = True
+            self.stats_history_service.shared_rev = rev
+            self.stats_history_service.shared_loaded = True
         sample = stats_history.get("sample") if isinstance(stats_history.get("sample"), dict) else {}
         return {"ok": True, "fresh": fresh, "sample": dict(sample), "updated_at": updated_at, "rev": rev}
 
@@ -3317,9 +3168,9 @@ class TmuxWebtermApp:
 
         def merge_records() -> None:
             if payload.get("clear") is True:
-                self.stats_history_raw_buckets.clear()
-                self.stats_history_rollup_buckets.clear()
-                self.stats_history_next_sequence_locked()
+                self.stats_history_service.raw_buckets.clear()
+                self.stats_history_service.rollup_buckets.clear()
+                self.stats_history_service.next_sequence_locked()
             for record in records:
                 if isinstance(record, dict):
                     self.stats_history_merge_record_locked(record, now, client_id=client_id)
@@ -3327,15 +3178,15 @@ class TmuxWebtermApp:
         if self.stats_history_uses_shared_status():
             self.update_shared_stats_client_history(now, merge_records)
         else:
-            with self.stats_history_lock:
+            with self.stats_history_service.lock:
                 merge_records()
                 self.stats_history_compact_locked(now)
 
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             # The browser's POST only submits its local deltas; its regular GET poll receives the
             # server history. Returning the whole 24-hour aggregate here turns a small upload into
             # a multi-megabyte response on every reload.
-            response_since = self.stats_history_sequence if payload.get("ack_only") is True else max(0, since)
+            response_since = self.stats_history_service.sequence if payload.get("ack_only") is True else max(0, since)
             return {"ok": True, "history": self.stats_history_payload_locked(response_since, client_id=client_id)}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
@@ -3422,23 +3273,23 @@ class TmuxWebtermApp:
         return STATS_AGENT_TOKEN_SAMPLE_SECONDS
 
     def stats_agent_token_sampling_due(self, sample_time: float, token_consumer: bool = False) -> bool:
-        with self.stats_agent_token_lock:
+        with self.stats_history_service.agent_token_lock:
             if token_consumer:
-                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, sample_time + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS)
-            consumer_active = sample_time <= self.stats_agent_token_consumer_until
+                self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, sample_time + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS)
+            consumer_active = sample_time <= self.stats_history_service.agent_token_consumer_until
             sample_seconds = self.stats_agent_token_sample_seconds() if consumer_active else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-            if self.stats_agent_token_bootstrap_pending:
+            if self.stats_history_service.agent_token_bootstrap_pending:
                 sample_seconds = STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS
-            elif sample_time < self.stats_agent_token_next_sample_at:
-                if not consumer_active or self.stats_agent_token_next_sample_at - sample_time <= sample_seconds:
+            elif sample_time < self.stats_history_service.agent_token_next_sample_at:
+                if not consumer_active or self.stats_history_service.agent_token_next_sample_at - sample_time <= sample_seconds:
                     return False
-            self.stats_agent_token_next_sample_at = sample_time + sample_seconds
-            self.stats_agent_token_bootstrap_pending = False
+            self.stats_history_service.agent_token_next_sample_at = sample_time + sample_seconds
+            self.stats_history_service.agent_token_bootstrap_pending = False
             return True
 
     def stats_agent_activity_kind_locked(self, row: dict[str, Any], key: str, sample_time: float, transition_seconds: float) -> str:
         state = str(row.get("state") or "").strip().lower()
-        previous = self.stats_agent_activity_state.get(key) if key else None
+        previous = self.stats_history_service.agent_activity_state.get(key) if key else None
         previous_kind = str(previous.get("kind") or "") if isinstance(previous, dict) else ""
         previous_transition_started = self.float_value(previous.get("transition_started") if isinstance(previous, dict) else 0.0, 0.0)
         transition_started = 0.0
@@ -3466,7 +3317,7 @@ class TmuxWebtermApp:
             else:
                 transition_started = 0.0
         if key:
-            self.stats_agent_activity_state[key] = {
+            self.stats_history_service.agent_activity_state[key] = {
                 "state": state,
                 "kind": kind,
                 "time": sample_time,
@@ -3810,7 +3661,7 @@ class TmuxWebtermApp:
             status["stats_history"] = stats_history
             self._write_shared_tmux_ai_status_locked(status)
         self.stats_history_merge_shared_snapshot(stats_history)
-        self.stats_history_shared_rev = max(self.stats_history_shared_rev, int(stats_history["rev"]))
+        self.stats_history_service.shared_rev = max(self.stats_history_service.shared_rev, int(stats_history["rev"]))
         return changed
 
     def stats_agent_token_claim_shared_delta_records_locked(
@@ -3832,7 +3683,7 @@ class TmuxWebtermApp:
             raw_state = stats_history.get("agent_token_state") if compatible else {}
             state = self.stats_history_shared_agent_state_snapshot(raw_state if isinstance(raw_state, dict) else {})
             if compatible or not migrate_incompatible_history:
-                for key, item in self.stats_agent_token_state.items():
+                for key, item in self.stats_history_service.agent_token_state.items():
                     if key not in state and isinstance(item, dict):
                         state[key] = dict(item)
             records = self.stats_agent_token_delta_records_from_state_locked(token_measurements, seen_keys, sample_time, state)
@@ -3844,19 +3695,19 @@ class TmuxWebtermApp:
             self._write_shared_tmux_ai_status_locked(status)
         if migrate_incompatible_history:
             self.stats_history_merge_shared_snapshot(stats_history)
-        self.stats_agent_token_state = state
-        self.stats_history_shared_rev = max(self.stats_history_shared_rev, int(stats_history["rev"]))
+        self.stats_history_service.agent_token_state = state
+        self.stats_history_service.shared_rev = max(self.stats_history_service.shared_rev, int(stats_history["rev"]))
         return records
 
     def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
         rows = self.stats_agent_window_rows()
         if not rows:
-            with self.stats_agent_token_lock:
-                self.stats_agent_token_state.clear()
-                self.stats_agent_activity_state.clear()
-                self.stats_agent_token_next_sample_at = 0.0
-                self.stats_agent_token_consumer_until = 0.0
-                self.stats_agent_token_bootstrap_pending = True
+            with self.stats_history_service.agent_token_lock:
+                self.stats_history_service.agent_token_state.clear()
+                self.stats_history_service.agent_activity_state.clear()
+                self.stats_history_service.agent_token_next_sample_at = 0.0
+                self.stats_history_service.agent_token_consumer_until = 0.0
+                self.stats_history_service.agent_token_bootstrap_pending = True
             return None
         ask_agents = 0
         run_agents = 0
@@ -3869,7 +3720,7 @@ class TmuxWebtermApp:
         transition_seconds = self.notification_transition_seconds()
         if include_token_rates:
             self.stats_history_recover_agent_token_history(rows, sample_time)
-        with self.stats_agent_token_lock:
+        with self.stats_history_service.agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
                 if key in seen_keys:
@@ -3897,10 +3748,10 @@ class TmuxWebtermApp:
                 if self.stats_history_uses_shared_status():
                     agent_token_records = self.stats_agent_token_claim_shared_delta_records_locked(token_measurements, seen_keys, sample_time)
                 else:
-                    agent_token_records = self.stats_agent_token_delta_records_from_state_locked(token_measurements, seen_keys, sample_time, self.stats_agent_token_state)
-            for key in list(self.stats_agent_activity_state):
+                    agent_token_records = self.stats_agent_token_delta_records_from_state_locked(token_measurements, seen_keys, sample_time, self.stats_history_service.agent_token_state)
+            for key in list(self.stats_history_service.agent_activity_state):
                 if key not in seen_keys:
-                    self.stats_agent_activity_state.pop(key, None)
+                    self.stats_history_service.agent_activity_state.pop(key, None)
         active_agents = max(0, len(seen_keys) - inactive_agents)
         record: dict[str, Any] = {
             "time": sample_time,
@@ -3919,8 +3770,8 @@ class TmuxWebtermApp:
     def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
         now = time.time()
         monotonic_now = time.monotonic()
-        with self.stats_sample_lock:
-            record = self.stats_sample_record
+        with self.stats_history_service.sample_lock:
+            record = self.stats_history_service.sample_record
             cached = record.cached_payload
             cached_monotonic = record.cached_monotonic
             use_cached = cached is not None and cached_monotonic is not None and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
@@ -3980,7 +3831,7 @@ class TmuxWebtermApp:
         # The elected sampler is the only writer of server-owned stats. It merges durable history
         # during startup/ownership transitions, then must not deserialize that same full snapshot
         # again every second before writing its next local sample.
-        if shared_enabled and not self.stats_history_shared_loaded:
+        if shared_enabled and not self.stats_history_service.shared_loaded:
             self.merge_shared_stats_history(max_age_seconds=None)
             phase_ms["shared_read_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
             phase_started = time.perf_counter()
@@ -4004,7 +3855,7 @@ class TmuxWebtermApp:
         agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
         now = float(sample.get("time") or time.time())
         phase_started = time.perf_counter()
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             if record_cpu_sample:
                 record = {
                     "time": sample["time"],
@@ -4066,13 +3917,13 @@ class TmuxWebtermApp:
                 if record.stop_event.wait(max(0.1, STATS_HISTORY_SAMPLER_SECONDS - elapsed)):
                     return
         finally:
-            with self.stats_history_sampler_lock:
-                if self.stats_history_sampler_record is record:
+            with self.stats_history_service.sampler_lock:
+                if self.stats_history_service.sampler_record is record:
                     record.running = False
 
     def start_stats_history_sampler(self) -> bool:
-        with self.stats_history_sampler_lock:
-            current = self.stats_history_sampler_record
+        with self.stats_history_service.sampler_lock:
+            current = self.stats_history_service.sampler_record
             if current.running:
                 thread = current.thread
                 if thread is not None and thread.is_alive():
@@ -4080,11 +3931,11 @@ class TmuxWebtermApp:
             record = StatsHistorySamplerRecord(running=True)
             worker = threading.Thread(target=self.stats_history_sampler_loop, args=(record,), name="stats-history-sampler", daemon=True)
             record.thread = worker
-            self.stats_history_sampler_record = record
+            self.stats_history_service.sampler_record = record
 
         def rollback() -> None:
-            with self.stats_history_sampler_lock:
-                if self.stats_history_sampler_record is record and record.thread is worker:
+            with self.stats_history_service.sampler_lock:
+                if self.stats_history_service.sampler_record is record and record.thread is worker:
                     record.thread = None
                     record.running = False
 
@@ -4092,8 +3943,8 @@ class TmuxWebtermApp:
         return True
 
     def stop_stats_history_sampler(self) -> None:
-        with self.stats_history_sampler_lock:
-            record = self.stats_history_sampler_record
+        with self.stats_history_service.sampler_lock:
+            record = self.stats_history_service.sampler_record
             record.stop_event.set()
             thread = record.thread
         if thread is not None and thread.is_alive():
@@ -4123,8 +3974,8 @@ class TmuxWebtermApp:
         phase_started = time.perf_counter()
         if token_consumer:
             consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
-            with self.stats_agent_token_lock:
-                self.stats_agent_token_consumer_until = max(self.stats_agent_token_consumer_until, consumer_until)
+            with self.stats_history_service.agent_token_lock:
+                self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, consumer_until)
             if shared_enabled:
                 self.write_shared_stats_token_consumer_until(consumer_until)
         endpoint_profile["stats_token_consumer_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
@@ -4149,12 +4000,12 @@ class TmuxWebtermApp:
                 "enabled": shared_enabled,
                 "fresh": True,
                 "updated_at": float(sample.get("time") or time.time()),
-                "rev": self.stats_history_shared_rev,
+                "rev": self.stats_history_service.shared_rev,
                 "role": "owner" if shared_enabled else "local",
             }
         endpoint_profile["stats_sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         compact_started = time.perf_counter()
-        with self.stats_history_lock:
+        with self.stats_history_service.lock:
             self.stats_history_compact_locked(float(sample.get("time") or time.time()))
             endpoint_profile["stats_history_compact_ms"] = round((time.perf_counter() - compact_started) * 1000, 3)
             encode_started = time.perf_counter()
@@ -4253,11 +4104,11 @@ class TmuxWebtermApp:
     def demote_background_owner(self) -> None:
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
-        with self.tabber_activity_cache_lock:
-            self.tabber_activity_warmer_record = TabberActivityWarmerRecord()
-            self.tabber_activity_cache_record.refresh_worker = None
-        with self.session_files_cache_lock:
-            self.session_files_work_records.clear()
+        with self.activity_transcript_service.tabber_cache_lock:
+            self.activity_transcript_service.tabber_warmer_record = TabberActivityWarmerRecord()
+            self.activity_transcript_service.tabber_cache_record.refresh_worker = None
+        with self.session_files_service.cache_lock:
+            self.session_files_service.work_records.clear()
         file_index.clear_memory_indexes()
         self.publish_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
 
@@ -4363,7 +4214,7 @@ class TmuxWebtermApp:
             self.sessions = sessions
             if not maintenance:
                 return []
-            self.prune_yoagent_session_summaries(set(sessions))
+            self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
             self.activity_ledger.prune(set(sessions))
             self.rotate_activity_heartbeats_if_due()
             self.activity_ledger.flush()
@@ -5428,7 +5279,7 @@ class TmuxWebtermApp:
         typing_thread = threading.Thread(target=refresh_typing, name=f"yochat-typing-{source.id}", daemon=True)
         typing_thread.start()
         try:
-            response, _status = self.yoagent_chat(
+            response, _status = self.yoagent_controller.yoagent_chat(
                 {"message": query, "locale": locale, "request_id": f"yochat-{source.id}"},
                 access_role=access_role,
             )
@@ -5674,8 +5525,8 @@ class TmuxWebtermApp:
         return self.stable_client_event_signature_payload(payload)
 
     def recent_tmux_signal_removal_event(self, generated_at: Any = None) -> dict[str, Any]:
-        with self.client_watch_lock:
-            event = dict(self.client_watch_tmux_signal_removal_event)
+        with self.client_watch_service.lock:
+            event = dict(self.client_watch_service.tmux_signal_removal_event)
         event_time = float(event.get("time") or 0.0)
         if event_time <= 0:
             return {}
@@ -6108,26 +5959,26 @@ class TmuxWebtermApp:
         if not visible:
             return False
         until = time.monotonic() + max(TABBER_ACTIVITY_CONSUMER_TTL_SECONDS, self.tabber_activity_refresh_seconds() * 2.0)
-        with self.tabber_activity_cache_lock:
-            record = self.tabber_activity_warmer_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_warmer_record
             record.consumer_until = max(record.consumer_until, until)
         return True
 
     def tabber_activity_has_recent_consumer(self) -> bool:
         now = time.monotonic()
-        with self.tabber_activity_cache_lock:
-            return self.tabber_activity_warmer_record.consumer_until > now
+        with self.activity_transcript_service.tabber_cache_lock:
+            return self.activity_transcript_service.tabber_warmer_record.consumer_until > now
 
     def tabber_activity_idle_refresh_seconds(self) -> float:
         return max(TABBER_ACTIVITY_IDLE_REFRESH_SECONDS, self.tabber_activity_refresh_seconds() * 4.0)
 
     def wake_client_event_watcher(self) -> None:
-        with self.client_watch_lock:
-            record = self.client_event_watcher_record
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
         record.wake_event.set()
 
     def client_event_watch_sleep_seconds(self, now: float, record: ClientEventWatcherRecord | None = None) -> float:
-        current = record or self.client_event_watcher_record
+        current = record or self.client_watch_service.event_watcher_record
         channels = self.client_events.aggregate_channels()
         deadlines: list[float] = []
         if not channels.isdisjoint({"files", "transcripts", "activity"}):
@@ -6187,15 +6038,15 @@ class TmuxWebtermApp:
             cache_status="updated",
             count=len(unique),
         )
-        with self.client_watch_lock:
+        with self.client_watch_service.lock:
             expires_at = now + CLIENT_WATCH_ROOT_TTL_SECONDS
-            self.client_watch_file_records = {
+            self.client_watch_service.file_records = {
                 **{path: ClientWatchFileRecord(expires_at=expires_at, background=False) for path in unique_files},
                 **{path: ClientWatchFileRecord(expires_at=expires_at, background=True) for path in unique_background_files},
             }
-            self.client_watch_context_items = context_items
-            self.client_watch_session_files = session_files_requests
-            self.client_watch_activity_summary = activity_summary
+            self.client_watch_service.context_items = context_items
+            self.client_watch_service.session_files = session_files_requests
+            self.client_watch_service.activity_summary = activity_summary
         self.wake_client_event_watcher()
         with self.client_events.lock:
             has_client_event_subscribers = bool(self.client_events.subscribers)
@@ -6270,24 +6121,16 @@ class TmuxWebtermApp:
         hours = session_files.bounded_session_files_hours(self.float_value(value.get("hours"), 24.0))
         return {"locale": locale, "visible": visible, "scope": scope, "hours": hours}
 
-    def client_watch_state_snapshot(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-        with self.client_watch_lock:
-            return (
-                [dict(item) for item in self.client_watch_context_items],
-                [dict(item) for item in self.client_watch_session_files],
-                dict(self.client_watch_activity_summary),
-            )
-
     def client_watch_roots_snapshot(self) -> list[str]:
         return self.watch_root_index.snapshot()
 
     def client_watch_file_paths(self, *, background: bool) -> list[str]:
         now = time.monotonic()
-        with self.client_watch_lock:
-            expired = [path for path, record in self.client_watch_file_records.items() if record.expires_at <= now]
+        with self.client_watch_service.lock:
+            expired = [path for path, record in self.client_watch_service.file_records.items() if record.expires_at <= now]
             for path in expired:
-                self.client_watch_file_records.pop(path, None)
-            return sorted(path for path, record in self.client_watch_file_records.items() if record.background is background)
+                self.client_watch_service.file_records.pop(path, None)
+            return sorted(path for path, record in self.client_watch_service.file_records.items() if record.background is background)
 
     def client_watch_files_snapshot(self) -> list[str]:
         return self.client_watch_file_paths(background=False)
@@ -6383,8 +6226,8 @@ class TmuxWebtermApp:
     def follower_filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         roots = self.filesystem_roots_for_watch(sessions)
         self.request_watch_roots_owner_refresh(roots, "poll")
-        with self.client_watch_lock:
-            return self.client_watch_filesystem_signature or (("watch-roots", "follower"),)
+        with self.client_watch_service.lock:
+            return self.client_watch_service.filesystem_signature or (("watch-roots", "follower"),)
 
     def files_for_watch(self) -> list[str]:
         return self.client_watch_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
@@ -6424,21 +6267,21 @@ class TmuxWebtermApp:
 
     def record_filesystem_watch_snapshot(self, signature: tuple[Any, ...]) -> str:
         now = time.time()
-        with self.client_watch_lock:
-            if self.client_watch_filesystem_history and self.client_watch_filesystem_history[-1]["signature"] == signature:
-                return str(self.client_watch_filesystem_history[-1]["token"])
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_history and self.client_watch_service.filesystem_history[-1]["signature"] == signature:
+                return str(self.client_watch_service.filesystem_history[-1]["token"])
             signature_text = self.client_event_payload_signature(signature)
             digest = hashlib.sha1(signature_text.encode("utf-8")).hexdigest()[:16]
             token = f"{int(now * 1000)}-{digest}"
-            self.client_watch_filesystem_history.append({
+            self.client_watch_service.filesystem_history.append({
                 "token": token,
                 "created_at": now,
                 "signature": copy.deepcopy(signature),
             })
             min_created_at = now - FILESYSTEM_WATCH_HISTORY_SECONDS
-            self.client_watch_filesystem_history = [
+            self.client_watch_service.filesystem_history = [
                 record
-                for record in self.client_watch_filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+                for record in self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
                 if float(record.get("created_at") or 0.0) >= min_created_at
             ]
             return token
@@ -6447,16 +6290,16 @@ class TmuxWebtermApp:
         clean_token = str(token or "").strip()
         if not clean_token:
             return None
-        with self.client_watch_lock:
-            for record in self.client_watch_filesystem_history:
+        with self.client_watch_service.lock:
+            for record in self.client_watch_service.filesystem_history:
                 if record.get("token") == clean_token:
                     return copy.deepcopy(record)
         return None
 
     def latest_filesystem_watch_record(self, refresh: bool = False) -> dict[str, Any] | None:
-        with self.client_watch_lock:
-            if self.client_watch_filesystem_history and not refresh:
-                return copy.deepcopy(self.client_watch_filesystem_history[-1])
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_history and not refresh:
+                return copy.deepcopy(self.client_watch_service.filesystem_history[-1])
         sessions, _errors = discover_sessions(self.sessions)
         signature = self.filesystem_roots_watch_signature(sessions)
         if not signature:
@@ -6468,12 +6311,12 @@ class TmuxWebtermApp:
         return tuple((root, filesystem_watch_signature(root)) for root in roots[:CLIENT_WATCH_ROOT_LIMIT])
 
     def filesystem_watch_full_due(self) -> bool:
-        with self.client_watch_lock:
-            return self.client_watch_filesystem_last_full_at <= 0.0 or time.monotonic() - self.client_watch_filesystem_last_full_at >= FILESYSTEM_WATCH_KEYFRAME_SECONDS
+        with self.client_watch_service.lock:
+            return self.client_watch_service.filesystem_last_full_at <= 0.0 or time.monotonic() - self.client_watch_service.filesystem_last_full_at >= FILESYSTEM_WATCH_KEYFRAME_SECONDS
 
     def mark_filesystem_watch_full_sent(self) -> None:
-        with self.client_watch_lock:
-            self.client_watch_filesystem_last_full_at = time.monotonic()
+        with self.client_watch_service.lock:
+            self.client_watch_service.filesystem_last_full_at = time.monotonic()
 
     def filesystem_watch_full_payload(self, record: dict[str, Any], reason: str = "full") -> dict[str, Any]:
         signature = record.get("signature")
@@ -6526,9 +6369,9 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         filesystem_signature = current_signature or self.filesystem_watch_signature_for_roots(roots)
         token = self.record_filesystem_watch_snapshot(filesystem_signature)
-        with self.client_watch_lock:
-            previous_signature = self.client_watch_filesystem_payload_signature
-            self.client_watch_filesystem_payload_signature = token
+        with self.client_watch_service.lock:
+            previous_signature = self.client_watch_service.filesystem_payload_signature
+            self.client_watch_service.filesystem_payload_signature = token
         if previous_signature == token:
             return []
         full = force_full or trigger != "watch" or self.filesystem_watch_full_due()
@@ -6592,15 +6435,15 @@ class TmuxWebtermApp:
         }
 
     def clear_transcript_content_caches(self) -> None:
-        with self.transcript_tail_cache_lock:
-            self.transcript_tail_cache.clear()
-        with self.context_items_cache_lock:
-            self.context_items_cache.clear()
+        with self.activity_transcript_service.transcript_tail_cache_lock:
+            self.activity_transcript_service.transcript_tail_cache.clear()
+        with self.activity_transcript_service.context_items_cache_lock:
+            self.activity_transcript_service.context_items_cache.clear()
 
     def clear_transcript_caches(self) -> None:
         self.clear_transcript_content_caches()
-        with self.transcripts_payload_cache_lock:
-            record = self.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
             record.generation += 1
             record.worker = None
             record.stored_at = None
@@ -6609,8 +6452,8 @@ class TmuxWebtermApp:
     def start_client_watch_snapshot_publish(self) -> bool:
         generation = 0
         worker: threading.Thread | None = None
-        with self.client_watch_lock:
-            watcher_record = self.client_event_watcher_record
+        with self.client_watch_service.lock:
+            watcher_record = self.client_watch_service.event_watcher_record
             if watcher_record.snapshot_worker is not None:
                 return False
             def run() -> None:
@@ -6622,17 +6465,17 @@ class TmuxWebtermApp:
         try:
             worker.start()
         except RuntimeError:
-            with self.client_watch_lock:
-                if self.client_event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
                     watcher_record.snapshot_worker = None
             self.finish_transcripts_payload_work(generation, worker, invalidate=True)
             raise
         return True
 
     def client_watch_snapshot_is_current(self, record: ClientEventWatcherRecord, worker: threading.Thread) -> bool:
-        with self.client_watch_lock:
+        with self.client_watch_service.lock:
             return (
-                self.client_event_watcher_record is record
+                self.client_watch_service.event_watcher_record is record
                 and record.snapshot_worker is worker
                 and not record.stop_event.is_set()
             )
@@ -6654,15 +6497,15 @@ class TmuxWebtermApp:
             if not self.commit_transcripts_payload_cache(payload, generation):
                 return
             signature = self.transcripts_payload_event_signature(payload)
-            with self.client_watch_lock:
+            with self.client_watch_service.lock:
                 if guarded and (
-                    self.client_event_watcher_record is not record
+                    self.client_watch_service.event_watcher_record is not record
                     or record.snapshot_worker is not worker
                     or record.stop_event.is_set()
                 ):
                     return
-                previous_signature = self.client_watch_transcripts_payload_signature
-                self.client_watch_transcripts_payload_signature = signature
+                previous_signature = self.client_watch_service.transcripts_payload_signature
+                self.client_watch_service.transcripts_payload_signature = signature
             if previous_signature != signature:
                 self.publish_client_event(
                     "transcripts_changed",
@@ -6689,8 +6532,8 @@ class TmuxWebtermApp:
             self.publish_session_files_ready_events(trigger="watch_state")
         finally:
             self.finish_transcripts_payload_work(generation, worker)
-            with self.client_watch_lock:
-                if guarded and self.client_event_watcher_record is record and record.snapshot_worker is worker:
+            with self.client_watch_service.lock:
+                if guarded and self.client_watch_service.event_watcher_record is record and record.snapshot_worker is worker:
                     record.snapshot_worker = None
 
     def poll_client_events_once(self) -> list[str]:
@@ -6703,18 +6546,18 @@ class TmuxWebtermApp:
         else:
             filesystem_signature = self.follower_filesystem_roots_watch_signature(sessions)
         events: list[str] = []
-        with self.client_watch_lock:
-            initialized = self.client_watch_initialized
-            previous_filesystem_signature = self.client_watch_filesystem_signature
-            settings_changed = initialized and self.client_watch_settings_signature != settings_signature
-            transcripts_changed = initialized and self.client_watch_transcripts_signature != transcripts_signature
-            transcript_content_changed = initialized and self.client_watch_transcript_content_signature != transcript_content_signature
+        with self.client_watch_service.lock:
+            initialized = self.client_watch_service.initialized
+            previous_filesystem_signature = self.client_watch_service.filesystem_signature
+            settings_changed = initialized and self.client_watch_service.settings_signature != settings_signature
+            transcripts_changed = initialized and self.client_watch_service.transcripts_signature != transcripts_signature
+            transcript_content_changed = initialized and self.client_watch_service.transcript_content_signature != transcript_content_signature
             filesystem_changed = initialized and previous_filesystem_signature != filesystem_signature
-            self.client_watch_initialized = True
-            self.client_watch_settings_signature = settings_signature
-            self.client_watch_transcripts_signature = transcripts_signature
-            self.client_watch_transcript_content_signature = transcript_content_signature
-            self.client_watch_filesystem_signature = filesystem_signature
+            self.client_watch_service.initialized = True
+            self.client_watch_service.settings_signature = settings_signature
+            self.client_watch_service.transcripts_signature = transcripts_signature
+            self.client_watch_service.transcript_content_signature = transcript_content_signature
+            self.client_watch_service.filesystem_signature = filesystem_signature
         if settings_changed:
             started = time.perf_counter()
             payload = self.settings_payload()
@@ -6754,10 +6597,10 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         files_signature = self.files_watch_signature()
         compute_ms = (time.perf_counter() - started) * 1000
-        with self.client_watch_lock:
-            initialized = self.client_watch_file_signature is not None
-            previous = self.client_watch_file_signature
-            self.client_watch_file_signature = files_signature
+        with self.client_watch_service.lock:
+            initialized = self.client_watch_service.file_signature is not None
+            previous = self.client_watch_service.file_signature
+            self.client_watch_service.file_signature = files_signature
         if not initialized:
             return []
         return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
@@ -6766,16 +6609,16 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         files_signature = self.background_files_watch_signature()
         compute_ms = (time.perf_counter() - started) * 1000
-        with self.client_watch_lock:
-            initialized = self.client_watch_background_file_signature is not None
-            previous = self.client_watch_background_file_signature
-            self.client_watch_background_file_signature = files_signature
+        with self.client_watch_service.lock:
+            initialized = self.client_watch_service.background_file_signature is not None
+            previous = self.client_watch_service.background_file_signature
+            self.client_watch_service.background_file_signature = files_signature
         if not initialized:
             return []
         return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
 
     def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
-        context_items, _session_files, _activity = self.client_watch_state_snapshot()
+        context_items, _session_files, _activity = self.client_watch_service.snapshot()
         events: list[str] = []
         for item in context_items:
             started = time.perf_counter()
@@ -6783,9 +6626,9 @@ class TmuxWebtermApp:
             event_payload = {"session": item["session"], "messages": item["messages"], "status": int(status), "data": payload}
             signature = self.client_event_payload_signature(event_payload)
             key = self.client_event_payload_signature({"session": item["session"], "messages": item["messages"]})
-            with self.client_watch_lock:
-                previous_signature = self.client_watch_context_item_payload_signatures.get(key)
-                self.client_watch_context_item_payload_signatures[key] = signature
+            with self.client_watch_service.lock:
+                previous_signature = self.client_watch_service.context_item_payload_signatures.get(key)
+                self.client_watch_service.context_item_payload_signatures[key] = signature
             if previous_signature == signature:
                 continue
             self.publish_client_event(
@@ -6801,7 +6644,7 @@ class TmuxWebtermApp:
     def publish_activity_summary_ready_events(self, trigger: str = "watch") -> list[str]:
         if str(trigger or "") not in ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS:
             return []
-        _context_items, _session_files, activity_summary = self.client_watch_state_snapshot()
+        _context_items, _session_files, activity_summary = self.client_watch_service.snapshot()
         if activity_summary.get("visible") is not True:
             return []
         started = time.perf_counter()
@@ -6811,9 +6654,9 @@ class TmuxWebtermApp:
             hours=activity_summary.get("hours"),
         )
         signature = self.stable_client_event_payload_signature(payload)
-        with self.client_watch_lock:
-            previous_signature = self.client_watch_activity_summary_signature
-            self.client_watch_activity_summary_signature = signature
+        with self.client_watch_service.lock:
+            previous_signature = self.client_watch_service.activity_summary_signature
+            self.client_watch_service.activity_summary_signature = signature
         if previous_signature == signature:
             return []
         self.publish_client_event(
@@ -6826,7 +6669,7 @@ class TmuxWebtermApp:
         return ["activity_summary_ready"]
 
     def publish_session_files_ready_events(self, trigger: str = "watch") -> list[str]:
-        _context_items, session_files_requests, _activity = self.client_watch_state_snapshot()
+        _context_items, session_files_requests, _activity = self.client_watch_service.snapshot()
         events: list[str] = []
         for item in session_files_requests:
             started = time.perf_counter()
@@ -6844,9 +6687,9 @@ class TmuxWebtermApp:
                 stable_event_payload["data"].pop("cache", None)
             signature = self.client_event_payload_signature(stable_event_payload)
             key = self.client_event_payload_signature(item)
-            with self.client_watch_lock:
-                previous_signature = self.client_watch_session_file_payload_signatures.get(key)
-                self.client_watch_session_file_payload_signatures[key] = signature
+            with self.client_watch_service.lock:
+                previous_signature = self.client_watch_service.session_file_payload_signatures.get(key)
+                self.client_watch_service.session_file_payload_signatures[key] = signature
             if previous_signature == signature:
                 continue
             self.publish_client_event(
@@ -6869,9 +6712,9 @@ class TmuxWebtermApp:
         signature = self.stable_client_event_payload_signature(signature_payload)
         timings = copy.deepcopy(payload.get("timings")) if isinstance(payload, dict) and isinstance(payload.get("timings"), dict) else {}
         add_phase_timing(timings, "serialization", serialization_started)
-        with self.client_watch_lock:
-            previous = self.client_watch_auto_approve_signature
-            self.client_watch_auto_approve_signature = signature
+        with self.client_watch_service.lock:
+            previous = self.client_watch_service.auto_approve_signature
+            self.client_watch_service.auto_approve_signature = signature
         if not previous:
             return []
         if previous == signature:
@@ -6894,11 +6737,11 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         payload = self.tmux_signal_snapshot(force=True)
         signature = self.stable_client_event_payload_signature(self.tmux_signal_signature_payload(payload))
-        with self.client_watch_lock:
-            previous = self.client_watch_tmux_signal_signature
-            previous_payload = copy.deepcopy(self.client_watch_tmux_signal_payload) if self.client_watch_tmux_signal_payload is not None else None
-            self.client_watch_tmux_signal_signature = signature
-            self.client_watch_tmux_signal_payload = copy.deepcopy(payload)
+        with self.client_watch_service.lock:
+            previous = self.client_watch_service.tmux_signal_signature
+            previous_payload = copy.deepcopy(self.client_watch_service.tmux_signal_payload) if self.client_watch_service.tmux_signal_payload is not None else None
+            self.client_watch_service.tmux_signal_signature = signature
+            self.client_watch_service.tmux_signal_payload = copy.deepcopy(payload)
         if not previous:
             return []
         if previous == signature:
@@ -6917,8 +6760,8 @@ class TmuxWebtermApp:
         event_type = str(event.get("type") or event.get("event") or "")
         if event_type in {"output", "extended-output"}:
             output_snapshot_at = time.monotonic() + TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
-            with self.client_watch_lock:
-                record = self.client_event_watcher_record
+            with self.client_watch_service.lock:
+                record = self.client_watch_service.event_watcher_record
                 next_snapshot_at = record.next_tmux_signal_poll_at
                 schedule_snapshot = next_snapshot_at <= time.monotonic() or next_snapshot_at > output_snapshot_at
                 if schedule_snapshot:
@@ -6931,11 +6774,11 @@ class TmuxWebtermApp:
             return
         if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
             event_time = float(event.get("time") or time.time())
-            with self.client_watch_lock:
-                self.client_watch_tmux_signal_removal_event = {"type": event_type, "time": event_time}
+            with self.client_watch_service.lock:
+                self.client_watch_service.tmux_signal_removal_event = {"type": event_type, "time": event_time}
         self.tmux_signal_cache.clear()
-        with self.client_watch_lock:
-            record = self.client_event_watcher_record
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
             record.next_tmux_signal_poll_at = 0.0
         record.wake_event.set()
 
@@ -6949,7 +6792,7 @@ class TmuxWebtermApp:
         )
 
     def start_tmux_signal_event_watcher(self) -> bool:
-        with self.client_watch_lock:
+        with self.client_watch_service.lock:
             if self.tmux_signal_event_watcher is not None:
                 return False
             watcher = TmuxSignalEventWatcher(lambda: list(self.sessions), self.handle_tmux_signal_event, self.log_tmux_signal_event_error)
@@ -6957,7 +6800,7 @@ class TmuxWebtermApp:
         return watcher.start()
 
     def stop_tmux_signal_event_watcher(self) -> None:
-        with self.client_watch_lock:
+        with self.client_watch_service.lock:
             watcher = self.tmux_signal_event_watcher
             self.tmux_signal_event_watcher = None
         if watcher is not None:
@@ -6967,9 +6810,9 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         payload = self.watched_prs_payload()
         signature = self.client_event_payload_signature(payload)
-        with self.client_watch_lock:
-            previous = self.client_watch_watched_prs_signature
-            self.client_watch_watched_prs_signature = signature
+        with self.client_watch_service.lock:
+            previous = self.client_watch_service.watched_prs_signature
+            self.client_watch_service.watched_prs_signature = signature
         if not previous:
             return []
         if previous == signature:
@@ -6985,8 +6828,8 @@ class TmuxWebtermApp:
 
     def start_client_event_watcher(self) -> None:
         now = time.monotonic()
-        with self.client_watch_lock:
-            current = self.client_event_watcher_record
+        with self.client_watch_service.lock:
+            current = self.client_watch_service.event_watcher_record
             if current.worker is not None and current.worker.is_alive():
                 return
             record = ClientEventWatcherRecord(
@@ -6996,15 +6839,15 @@ class TmuxWebtermApp:
             )
             worker = threading.Thread(target=self.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
             record.worker = worker
-            self.client_event_watcher_record = record
+            self.client_watch_service.event_watcher_record = record
 
         def rollback() -> None:
             owned = False
-            with self.client_watch_lock:
-                if self.client_event_watcher_record is record and record.worker is worker:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.worker is worker:
                     record.stop_event.set()
                     record.wake_event.set()
-                    self.client_event_watcher_record = ClientEventWatcherRecord()
+                    self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
                     owned = True
             if owned:
                 self.stop_tmux_signal_event_watcher()
@@ -7018,24 +6861,24 @@ class TmuxWebtermApp:
 
     def stop_client_event_watcher(self) -> None:
         self.stop_tmux_signal_event_watcher()
-        with self.client_watch_lock:
-            record = self.client_event_watcher_record
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
             record.stop_event.set()
             record.wake_event.set()
             thread = record.worker
             snapshot_worker = record.snapshot_worker
             record.snapshot_worker = None
         if snapshot_worker is not None:
-            with self.transcripts_payload_cache_lock:
-                cache_record = self.transcripts_payload_cache_record
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                cache_record = self.activity_transcript_service.transcripts_payload_cache_record
                 snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
             if snapshot_generation:
                 self.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
-        with self.client_watch_lock:
-            if self.client_event_watcher_record is record:
-                self.client_event_watcher_record = ClientEventWatcherRecord()
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is record:
+                self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
 
     def stop_client_event_watcher_if_idle(self) -> bool:
         with self.client_events.lock:
@@ -7045,9 +6888,9 @@ class TmuxWebtermApp:
         return True
 
     def start_client_directory_poll(self, record: ClientEventWatcherRecord | None = None) -> bool:
-        with self.client_watch_lock:
-            current = record or self.client_event_watcher_record
-            if self.client_event_watcher_record is not current or current.stop_event.is_set():
+        with self.client_watch_service.lock:
+            current = record or self.client_watch_service.event_watcher_record
+            if self.client_watch_service.event_watcher_record is not current or current.stop_event.is_set():
                 return False
             worker = current.directory_poll_worker
             if worker is not None and worker.is_alive():
@@ -7056,15 +6899,15 @@ class TmuxWebtermApp:
             current.directory_poll_worker = worker
 
         def rollback() -> None:
-            with self.client_watch_lock:
-                if self.client_event_watcher_record is current and current.directory_poll_worker is worker:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is current and current.directory_poll_worker is worker:
                     current.directory_poll_worker = None
 
         common.start_thread_with_rollback(worker, rollback)
         return True
 
     def run_client_directory_poll_once(self, record: ClientEventWatcherRecord | None = None) -> None:
-        current = record or self.client_event_watcher_record
+        current = record or self.client_watch_service.event_watcher_record
         worker = threading.current_thread()
         try:
             self.poll_client_events_once()
@@ -7077,12 +6920,12 @@ class TmuxWebtermApp:
                 message_key="events.message.clientEvent.directoryWatchFailed",
             )
         finally:
-            with self.client_watch_lock:
-                if self.client_event_watcher_record is current and current.directory_poll_worker is worker:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is current and current.directory_poll_worker is worker:
                     current.directory_poll_worker = None
 
     def client_event_watch_loop(self, record: ClientEventWatcherRecord | None = None) -> None:
-        current = record or self.client_event_watcher_record
+        current = record or self.client_watch_service.event_watcher_record
         worker = threading.current_thread()
         try:
             while not current.stop_event.is_set():
@@ -7113,7 +6956,7 @@ class TmuxWebtermApp:
                         self.poll_watched_prs_client_event_once()
                         current.next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
                     if (self.client_events.has_demand("yoagent") or notification_demand) and now >= current.next_yoagent_job_poll_at:
-                        self.poll_yoagent_jobs_once()
+                        self.yoagent_controller.poll_yoagent_jobs_once()
                         current.next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(
@@ -7126,8 +6969,8 @@ class TmuxWebtermApp:
                 if current.wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic(), current)):
                     current.wake_event.clear()
         finally:
-            with self.client_watch_lock:
-                if self.client_event_watcher_record is current and current.worker is worker:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is current and current.worker is worker:
                     current.worker = None
 
     def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
@@ -7306,14 +7149,14 @@ class TmuxWebtermApp:
         }
 
     def run_session_files_disk_cache_prune(self, record: SessionFilesDiskPruneRecord | None = None) -> None:
-        active_record = record or self.session_files_disk_prune_record
+        active_record = record or self.session_files_service.disk_prune_record
         try:
             result = self.prune_session_files_disk_cache()
         except (OSError, RuntimeError, ValueError) as exc:
             result = {"error": str(exc)}
             logger.warning("session-files disk cache prune failed: %s", exc)
-        with self.session_files_disk_prune_lock:
-            if self.session_files_disk_prune_record is active_record:
+        with self.session_files_service.disk_prune_lock:
+            if self.session_files_service.disk_prune_record is active_record:
                 active_record.last_result = result
                 active_record.running = False
                 active_record.worker = None
@@ -7328,8 +7171,8 @@ class TmuxWebtermApp:
 
     def request_session_files_disk_cache_prune(self, reason: str = "") -> bool:
         now = time.monotonic()
-        with self.session_files_disk_prune_lock:
-            record = self.session_files_disk_prune_record
+        with self.session_files_service.disk_prune_lock:
+            record = self.session_files_service.disk_prune_record
             if record.running or now < record.next_at:
                 return False
             record.running = True
@@ -7338,8 +7181,8 @@ class TmuxWebtermApp:
             record.worker = worker
 
         def rollback() -> None:
-            with self.session_files_disk_prune_lock:
-                if self.session_files_disk_prune_record is record and record.worker is worker:
+            with self.session_files_service.disk_prune_lock:
+                if self.session_files_service.disk_prune_record is record and record.worker is worker:
                     record.worker = None
                     record.running = False
                     record.next_at = 0.0
@@ -7358,9 +7201,9 @@ class TmuxWebtermApp:
         status: HTTPStatus,
         stored_at: float | None = None,
     ) -> None:
-        with self.session_files_cache_lock:
+        with self.session_files_service.cache_lock:
             self.cache_set_limited(
-                self.session_files_cache,
+                self.session_files_service.cache,
                 key,
                 (time.monotonic() if stored_at is None else stored_at, (copy.deepcopy(payload), status)),
                 SESSION_FILES_CACHE_MAX_ITEMS,
@@ -7494,8 +7337,8 @@ class TmuxWebtermApp:
             cache_status="computed",
             details={"repo": str(repo)},
         )
-        with self.session_files_cache_lock:
-            record = self.session_files_git_snapshot_records.get(snapshot_identity)
+        with self.session_files_service.cache_lock:
+            record = self.session_files_service.git_snapshot_records.get(snapshot_identity)
             if record is not None and record.snapshot is not None:
                 self.record_performance_sample(
                     BACKGROUND_ROLE_SESSION_FILES,
@@ -7511,7 +7354,7 @@ class TmuxWebtermApp:
                 return copy.deepcopy(record.snapshot)
             if record is None:
                 record = SessionFilesGitSnapshotRecord()
-                self.session_files_git_snapshot_records[snapshot_identity] = record
+                self.session_files_service.git_snapshot_records[snapshot_identity] = record
                 owner = True
             else:
                 owner = False
@@ -7548,39 +7391,26 @@ class TmuxWebtermApp:
                 details={"repo": str(repo)},
             )
             record.future.set_result((final_identity, copy.deepcopy(snapshot)))
-            with self.session_files_cache_lock:
+            with self.session_files_service.cache_lock:
                 if final_identity == snapshot_identity:
                     record.snapshot = copy.deepcopy(snapshot)
-                    while len(self.session_files_git_snapshot_records) > SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS:
-                        oldest_key = next(iter(self.session_files_git_snapshot_records))
-                        if oldest_key == snapshot_identity and len(self.session_files_git_snapshot_records) > 1:
-                            oldest_key = next(key for key in self.session_files_git_snapshot_records if key != snapshot_identity)
-                        self.session_files_git_snapshot_records.pop(oldest_key, None)
-                elif self.session_files_git_snapshot_records.get(snapshot_identity) is record:
-                    self.session_files_git_snapshot_records.pop(snapshot_identity, None)
+                    while len(self.session_files_service.git_snapshot_records) > SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS:
+                        oldest_key = next(iter(self.session_files_service.git_snapshot_records))
+                        if oldest_key == snapshot_identity and len(self.session_files_service.git_snapshot_records) > 1:
+                            oldest_key = next(key for key in self.session_files_service.git_snapshot_records if key != snapshot_identity)
+                        self.session_files_service.git_snapshot_records.pop(oldest_key, None)
+                elif self.session_files_service.git_snapshot_records.get(snapshot_identity) is record:
+                    self.session_files_service.git_snapshot_records.pop(snapshot_identity, None)
             if final_identity != snapshot_identity:
                 return self.shared_session_files_git_snapshot(repo, from_ref, to_ref)
             return copy.deepcopy(snapshot)
         except Exception as exc:
             if not record.future.done():
                 record.future.set_exception(exc)
-            with self.session_files_cache_lock:
-                if self.session_files_git_snapshot_records.get(snapshot_identity) is record:
-                    self.session_files_git_snapshot_records.pop(snapshot_identity, None)
+            with self.session_files_service.cache_lock:
+                if self.session_files_service.git_snapshot_records.get(snapshot_identity) is record:
+                    self.session_files_service.git_snapshot_records.pop(snapshot_identity, None)
             raise
-
-    def claim_session_files_work(self, key: tuple[Any, ...], reserved: bool = False) -> tuple[SessionFilesWorkRecord, bool]:
-        thread_id = threading.get_ident()
-        with self.session_files_cache_lock:
-            record = self.session_files_work_records.get(key)
-            if record is None:
-                record = SessionFilesWorkRecord(owner_thread_id=thread_id)
-                self.session_files_work_records[key] = record
-                return record, True
-            if reserved and record.owner_thread_id is None:
-                record.owner_thread_id = thread_id
-                return record, True
-            return record, record.owner_thread_id == thread_id
 
     def complete_session_files_work(
         self,
@@ -7593,9 +7423,9 @@ class TmuxWebtermApp:
             record.future.set_exception(error)
         elif result is not None and not record.future.done():
             record.future.set_result((copy.deepcopy(result[0]), result[1], result[2], result[3]))
-        with self.session_files_cache_lock:
-            if self.session_files_work_records.get(key) is record:
-                self.session_files_work_records.pop(key, None)
+        with self.session_files_service.cache_lock:
+            if self.session_files_service.work_records.get(key) is record:
+                self.session_files_service.work_records.pop(key, None)
 
     def compute_session_files_cache_entry(
         self,
@@ -7604,7 +7434,7 @@ class TmuxWebtermApp:
         *,
         reserved: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
-        work_record, owner = self.claim_session_files_work(key, reserved=reserved)
+        work_record, owner = self.session_files_service.claim_work(key, threading.get_ident(), reserved=reserved)
         if not owner:
             payload, status, cache_hit, age_seconds = work_record.future.result()
             self.record_performance_sample(
@@ -7710,8 +7540,8 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         now = time.monotonic()
         stale_cached: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None
-        with self.session_files_cache_lock:
-            cached = self.session_files_cache.get(key)
+        with self.session_files_service.cache_lock:
+            cached = self.session_files_service.cache.get(key)
             if cached:
                 stored_at, value = cached
                 age_seconds = max(0.0, now - stored_at)
@@ -7775,9 +7605,9 @@ class TmuxWebtermApp:
         self.write_session_files_disk_cache(key, payload, status)
 
     def clear_session_files_cache(self) -> None:
-        with self.session_files_cache_lock:
-            self.session_files_cache.clear()
-            self.session_files_git_snapshot_records.clear()
+        with self.session_files_service.cache_lock:
+            self.session_files_service.cache.clear()
+            self.session_files_service.git_snapshot_records.clear()
 
     def session_files_git_identity_for_cache_key(self, cache_key: tuple[Any, ...] | None, repo: Path) -> tuple[Any, ...] | None:
         if not cache_key or not isinstance(cache_key[-1], tuple):
@@ -7789,6 +7619,11 @@ class TmuxWebtermApp:
             return item[1] if isinstance(item[1], tuple) else None
         return None
 
+    def session_files_git_snapshot_provider(self, cache_key: tuple[Any, ...] | None) -> Callable[[Path, str | None, str | None], dict[str, Any]]:
+        def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
+            return self.shared_session_files_git_snapshot(repo, repo_from, repo_to, identity=self.session_files_git_identity_for_cache_key(cache_key, repo))
+        return provider
+
     def compute_session_files_payload_for_info(
         self,
         info: SessionInfo,
@@ -7798,21 +7633,13 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
         cache_key: tuple[Any, ...] | None = None,
     ) -> SessionFilesPayload:
-        def snapshot_provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
-            return self.shared_session_files_git_snapshot(
-                repo,
-                repo_from,
-                repo_to,
-                identity=self.session_files_git_identity_for_cache_key(cache_key, repo),
-            )
-
         return session_files.session_files_payload_for_info(
             info,
             hours=hours,
             from_ref=from_ref,
             to_ref=to_ref,
             repo_refs=repo_refs,
-            git_snapshot_provider=snapshot_provider,
+            git_snapshot_provider=self.session_files_git_snapshot_provider(cache_key),
             phase_recorder=self.record_session_files_phase,
         )
 
@@ -7826,14 +7653,6 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None,
         cache_key: tuple[Any, ...] | None = None,
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        def snapshot_provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
-            return self.shared_session_files_git_snapshot(
-                repo,
-                repo_from,
-                repo_to,
-                identity=self.session_files_git_identity_for_cache_key(cache_key, repo),
-            )
-
         return session_files.session_files_payload(
             session,
             infos,
@@ -7842,7 +7661,7 @@ class TmuxWebtermApp:
             to_ref=to_ref,
             repo_refs=repo_refs,
             include_cross_session_attribution=not bool(session),
-            git_snapshot_provider=snapshot_provider,
+            git_snapshot_provider=self.session_files_git_snapshot_provider(cache_key),
             phase_recorder=self.record_session_files_phase,
         )
 
@@ -7938,11 +7757,11 @@ class TmuxWebtermApp:
                 request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
             self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
             return False
-        with self.session_files_cache_lock:
-            if cache_key in self.session_files_work_records:
+        with self.session_files_service.cache_lock:
+            if cache_key in self.session_files_service.work_records:
                 return False
             record = SessionFilesWorkRecord(owner_thread_id=None)
-            self.session_files_work_records[cache_key] = record
+            self.session_files_service.work_records[cache_key] = record
         worker = threading.Thread(target=target, args=(cache_key, *args), daemon=True)
         try:
             worker.start()
@@ -8192,8 +8011,8 @@ class TmuxWebtermApp:
 
     def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
         now = time.monotonic()
-        with self.transcripts_payload_cache_lock:
-            record = self.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
             if record.stored_at is None or record.payload is None:
                 return None
             age_seconds = max(0.0, now - record.stored_at)
@@ -8203,8 +8022,8 @@ class TmuxWebtermApp:
             return copy.deepcopy(record.payload), fresh, age_seconds
 
     def begin_transcripts_payload_work(self, worker: object | None, *, replace: bool = False) -> int:
-        with self.transcripts_payload_cache_lock:
-            record = self.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
             if record.worker is not None and not replace:
                 return 0
             record.generation += 1
@@ -8212,8 +8031,8 @@ class TmuxWebtermApp:
             return record.generation
 
     def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
-        with self.transcripts_payload_cache_lock:
-            record = self.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
             if generation <= 0 or record.generation != generation:
                 return False
             record.stored_at = time.monotonic()
@@ -8227,8 +8046,8 @@ class TmuxWebtermApp:
         *,
         invalidate: bool = False,
     ) -> bool:
-        with self.transcripts_payload_cache_lock:
-            record = self.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
             if record.generation != generation or record.worker is not worker:
                 return False
             if invalidate:
@@ -8277,8 +8096,8 @@ class TmuxWebtermApp:
                 return
             if publish:
                 payload_signature = self.transcripts_payload_event_signature(payload)
-                with self.client_watch_lock:
-                    self.client_watch_transcripts_payload_signature = payload_signature
+                with self.client_watch_service.lock:
+                    self.client_watch_service.transcripts_payload_signature = payload_signature
                 self.publish_client_event(
                     "transcripts_changed",
                     {"data": payload},
@@ -8373,15 +8192,15 @@ class TmuxWebtermApp:
         errors = [*scope_errors, *errors]
         ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
         self.warm_metadata_cache_async(sessions)
-        self.prune_yoagent_session_summaries(set(sessions))
+        self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
         session_files_by_session: dict[str, SessionFilesPayload] = {}
         session_info: dict[str, Any] = {}
         recent_events_by_session = self.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
-        with self.activity_summary_lock:
+        with self.activity_transcript_service.activity_summary_lock:
             if force:
-                self.activity_summary_cache.clear()
+                self.activity_transcript_service.activity_summary_cache.clear()
                 self.clear_session_files_cache()
             for session in ordered_sessions:
                 info = sessions.get(session)
@@ -8392,14 +8211,14 @@ class TmuxWebtermApp:
                 session_files_by_session[session] = files_payload
                 signature = activity_signature(info, project, files_payload)
                 cache_key = (locale, session)
-                cached = self.activity_summary_cache.get(cache_key)
+                cached = self.activity_transcript_service.activity_summary_cache.get(cache_key)
                 if cached and cached.get("signature") == signature:
                     summary = dict(cached["summary"])
                 else:
                     summary = build_session_activity_summary(info, project, files_payload, locale=locale)
-                    self.activity_summary_cache[cache_key] = {"signature": signature, "summary": summary}
+                    self.activity_transcript_service.activity_summary_cache[cache_key] = {"signature": signature, "summary": summary}
                     summary = dict(summary)
-                self.attach_yoagent_session_summary(session, summary)
+                self.yoagent_controller.attach_yoagent_session_summary(session, summary)
                 summaries[session] = summary
                 ordered_summaries.append(summary)
                 session_info[session] = self.activity_session_info_payload(
@@ -8411,11 +8230,11 @@ class TmuxWebtermApp:
                     recent_events=recent_events_by_session.get(session, []),
                     locale=locale,
                 )
-            for cache_key in list(self.activity_summary_cache):
+            for cache_key in list(self.activity_transcript_service.activity_summary_cache):
                 if cache_key[1] not in sessions:
-                    self.activity_summary_cache.pop(cache_key, None)
+                    self.activity_transcript_service.activity_summary_cache.pop(cache_key, None)
         generated = datetime.now(timezone.utc)
-        rolling_updated = self.latest_yoagent_session_summary_updated_ts()
+        rolling_updated = self.yoagent_controller.latest_yoagent_session_summary_updated_ts()
         with self.yoagent_summary_worker_lock:
             summary_worker = self.yoagent_summary_worker_record
             summary_worker_status = {
@@ -8442,67 +8261,11 @@ class TmuxWebtermApp:
                 "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
             },
         }
-
-    def sanitized_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.sanitized_yoagent_session_summaries(*args, **kwargs)
-
-    def load_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.load_yoagent_session_summaries(*args, **kwargs)
-
-    def persist_yoagent_session_summaries_locked(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.persist_yoagent_session_summaries_locked(*args, **kwargs)
-
-    def prune_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.prune_yoagent_session_summaries(*args, **kwargs)
-
-    def attach_yoagent_session_summary(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.attach_yoagent_session_summary(*args, **kwargs)
-
-    def latest_yoagent_session_summary_updated_ts(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.latest_yoagent_session_summary_updated_ts(*args, **kwargs)
-
     def float_value(self, value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
         except (TypeError, ValueError):
             return default
-
-    def build_yoagent_session_summary_update_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.build_yoagent_session_summary_update_prompt(*args, **kwargs)
-
-    def parse_yoagent_session_summary_response(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.parse_yoagent_session_summary_response(*args, **kwargs)
-
-    def yoagent_codex_app_server_target(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_codex_app_server_target(*args, **kwargs)
-
-    def yoagent_codex_app_server_target_key(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_codex_app_server_target_key(*args, **kwargs)
-
-    def close_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.close_yoagent_codex_app_server(*args, **kwargs)
-
-    def ensure_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.ensure_yoagent_codex_app_server(*args, **kwargs)
-
-    def run_yoagent_codex_app_server(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_codex_app_server(*args, **kwargs)
-
-    def run_yoagent_direct_prompt_backend(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_direct_prompt_backend(*args, **kwargs)
-
-    def update_yoagent_session_summary(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.update_yoagent_session_summary(*args, **kwargs)
-
-    def tick_yoagent_session_summaries(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.tick_yoagent_session_summaries(*args, **kwargs)
-
-    def maybe_start_yoagent_summary_worker(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.maybe_start_yoagent_summary_worker(*args, **kwargs)
-
-    def yoagent_summary_worker_loop(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_summary_worker_loop(*args, **kwargs)
-
     def yoagent_settings(self) -> dict[str, Any]:
         settings = settings_payload().get("settings", {}).get("yoagent", {})
         return settings if isinstance(settings, dict) else {}
@@ -8803,235 +8566,6 @@ class TmuxWebtermApp:
 
     def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
         return self.yoagent_streams.callback_for(stream_id, backend)
-
-    def yoagent_job_prompt_text(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_prompt_text(*args, **kwargs)
-
-    def yoagent_job_transport_id(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_transport_id(*args, **kwargs)
-
-    def yoagent_job_result_marker_from_result(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_result_marker_from_result(*args, **kwargs)
-
-    def yoagent_job_result_source_from_result(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_result_source_from_result(*args, **kwargs)
-
-    def sanitize_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.sanitize_yoagent_job(*args, **kwargs)
-
-    def load_yoagent_jobs(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.load_yoagent_jobs(*args, **kwargs)
-
-    def persist_yoagent_jobs_locked(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.persist_yoagent_jobs_locked(*args, **kwargs)
-
-    def publish_yoagent_jobs_changed(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.publish_yoagent_jobs_changed(*args, **kwargs)
-
-    def public_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.public_yoagent_job(*args, **kwargs)
-
-    def public_yoagent_action_preview(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.public_yoagent_action_preview(*args, **kwargs)
-
-    def yoagent_jobs_payload(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_jobs_payload(*args, **kwargs)
-
-    def yoagent_job_idempotency_key(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_idempotency_key(*args, **kwargs)
-
-    def yoagent_job_spec_from_payload(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_spec_from_payload(*args, **kwargs)
-
-    def create_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.create_yoagent_job(*args, **kwargs)
-
-    def confirm_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.confirm_yoagent_job(*args, **kwargs)
-
-    def cancel_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.cancel_yoagent_job(*args, **kwargs)
-
-    def cancel_yoagent_jobs_for_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.cancel_yoagent_jobs_for_session(*args, **kwargs)
-
-    def yoagent_intent(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_intent(*args, **kwargs)
-
-    def yoagent_job_observed_state(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_observed_state(*args, **kwargs)
-
-    def update_yoagent_job_observation(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.update_yoagent_job_observation(*args, **kwargs)
-
-    def complete_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.complete_yoagent_job(*args, **kwargs)
-
-    def fire_yoagent_job(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.fire_yoagent_job(*args, **kwargs)
-
-    def poll_yoagent_jobs_once(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.poll_yoagent_jobs_once(*args, **kwargs)
-
-    def yoagent_wait_regarding_text(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_wait_regarding_text(*args, **kwargs)
-
-    def yoagent_action_wait_label(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_wait_label(*args, **kwargs)
-
-    def register_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.register_yoagent_action_wait(*args, **kwargs)
-
-    def finish_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.finish_yoagent_action_wait(*args, **kwargs)
-
-    def clear_yoagent_action_wait(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.clear_yoagent_action_wait(*args, **kwargs)
-
-    def yoagent_prompt_history(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_prompt_history(*args, **kwargs)
-
-    def yoagent_activity_payload(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_activity_payload(*args, **kwargs)
-
-    def prune_yoagent_action_previews(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.prune_yoagent_action_previews(*args, **kwargs)
-
-    def yoagent_managed_target_metadata(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_managed_target_metadata(*args, **kwargs)
-
-    def yoagent_target_with_transport(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_target_with_transport(*args, **kwargs)
-
-    @requires_known_session(refresh=True)
-    def yoagent_action_target(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_target(*args, **kwargs)
-
-    def yoagent_action_pane_status(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_pane_status(*args, **kwargs)
-
-    def yoagent_action_acceptance(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_acceptance(*args, **kwargs)
-
-    def yoagent_action_risk_labels(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_risk_labels(*args, **kwargs)
-
-    def create_yoagent_action_preview(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.create_yoagent_action_preview(*args, **kwargs)
-
-    def yoagent_action_answer(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_answer(*args, **kwargs)
-
-    def yoagent_action_preview_details(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_preview_details(*args, **kwargs)
-
-    def yoagent_action_sent_answer(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_sent_answer(*args, **kwargs)
-
-    def yoagent_job_answer(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_job_answer(*args, **kwargs)
-
-    def yoagent_action_result_marker(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_result_marker(*args, **kwargs)
-
-    def yoagent_transcript_delta_text(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_transcript_delta_text(*args, **kwargs)
-
-    def yoagent_action_result_text_from_transcript_delta(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_result_text_from_transcript_delta(*args, **kwargs)
-
-    def yoagent_action_visible_result_text(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_action_visible_result_text(*args, **kwargs)
-
-    def record_yoagent_action_result(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.record_yoagent_action_result(*args, **kwargs)
-
-    def yoagent_handoff_time_add_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_handoff_time_add_prompt(*args, **kwargs)
-
-    def yoagent_derived_handoff_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_derived_handoff_prompt(*args, **kwargs)
-
-    def yoagent_source_neutral_handoff_instruction(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_source_neutral_handoff_instruction(*args, **kwargs)
-
-    def yoagent_handoff_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_handoff_prompt(*args, **kwargs)
-
-    def continue_yoagent_handoff(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.continue_yoagent_handoff(*args, **kwargs)
-
-    def finish_yoagent_action_result(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.finish_yoagent_action_result(*args, **kwargs)
-
-    def run_yoagent_action_result_watcher(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_action_result_watcher(*args, **kwargs)
-
-    def start_yoagent_action_result_watcher(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.start_yoagent_action_result_watcher(*args, **kwargs)
-
-    def yoagent_composer_text_is_idle_placeholder(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_composer_text_is_idle_placeholder(*args, **kwargs)
-
-    def yoagent_visible_composer_text(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_visible_composer_text(*args, **kwargs)
-
-    def yoagent_visible_composer_source(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_visible_composer_source(*args, **kwargs)
-
-    def yoagent_text_still_in_composer(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_text_still_in_composer(*args, **kwargs)
-
-    def yoagent_clear_target_composer(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_clear_target_composer(*args, **kwargs)
-
-    def preview_yoagent_send_action(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.preview_yoagent_send_action(*args, **kwargs)
-
-    def execute_yoagent_send_action(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.execute_yoagent_send_action(*args, **kwargs)
-
-    def reset_yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.reset_yoagent_chat(*args, **kwargs)
-
-    def start_yoagent_backend_prewarm(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.start_yoagent_backend_prewarm(*args, **kwargs)
-
-    def yoagent_startup_response(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_startup_response(*args, **kwargs)
-
-    def yoagent_prewarm(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_prewarm(*args, **kwargs)
-
-    def yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_chat(*args, **kwargs)
-
-    def cancel_yoagent_chat(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.cancel_yoagent_chat(*args, **kwargs)
-
-    def set_yoagent_chat_request_interrupt(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.set_yoagent_chat_request_interrupt(*args, **kwargs)
-
-    def yoagent_chat_request_cancel_event(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_chat_request_cancel_event(*args, **kwargs)
-
-    def yoagent_chat_request_cancelled(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.yoagent_chat_request_cancelled(*args, **kwargs)
-
-    def complete_yoagent_chat_request(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.complete_yoagent_chat_request(*args, **kwargs)
-
-    def interrupt_yoagent_claude_process(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.interrupt_yoagent_claude_process(*args, **kwargs)
-
-    def run_yoagent_cli_backend(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_cli_backend(*args, **kwargs)
-
-    def run_yoagent_codex_cli(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_codex_cli(*args, **kwargs)
-
-    def run_yoagent_claude_cli(self, *args: Any, **kwargs: Any) -> Any:
-        return self.yoagent_controller.run_yoagent_claude_cli(*args, **kwargs)
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         previous_retention_days = settings_payload().get("settings", {}).get("chat", {}).get("retention_days", 7)
@@ -9478,13 +9012,13 @@ class TmuxWebtermApp:
         return background_rows[:12]
 
     def runtime_refresh_state(self, background_status: dict[str, Any]) -> dict[str, Any]:
-        with self.session_files_cache_lock:
-            session_files_refreshing_count = len(self.session_files_work_records)
-        with self.tabber_activity_cache_lock:
-            tabber_activity_refreshing = self.tabber_activity_cache_record.refresh_worker is not None
-            tabber_warmer_running = self.tabber_activity_warmer_record.running
-        with self.transcripts_payload_cache_lock:
-            transcripts_payload_refreshing = self.transcripts_payload_cache_record.worker is not None
+        with self.session_files_service.cache_lock:
+            session_files_refreshing_count = len(self.session_files_service.work_records)
+        with self.activity_transcript_service.tabber_cache_lock:
+            tabber_activity_refreshing = self.activity_transcript_service.tabber_cache_record.refresh_worker is not None
+            tabber_warmer_running = self.activity_transcript_service.tabber_warmer_record.running
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            transcripts_payload_refreshing = self.activity_transcript_service.transcripts_payload_cache_record.worker is not None
         return {
             "roles": background_status.get("roles", {}) if isinstance(background_status, dict) else {},
             "counters": background_status.get("counters", {}) if isinstance(background_status, dict) else {},
@@ -9702,8 +9236,8 @@ class TmuxWebtermApp:
         clean_session = str(session or "").strip()
         if not clean_session:
             return None
-        with self.transcripts_payload_cache_lock:
-            payload = self.transcripts_payload_cache_record.payload
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            payload = self.activity_transcript_service.transcripts_payload_cache_record.payload
             info = (payload.get("sessions") or {}).get(clean_session) if isinstance(payload, dict) else None
             panes = info.get("panes") if isinstance(info, dict) else None
             if isinstance(panes, list):
@@ -9906,8 +9440,8 @@ class TmuxWebtermApp:
         session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
         activity_snapshot = self.activity_snapshot_with_recency()
         self.merge_shared_attention_acks()
-        with self.client_watch_lock:
-            attention_ack_rev = self.client_watch_attention_ack_rev
+        with self.client_watch_service.lock:
+            attention_ack_rev = self.client_watch_service.attention_ack_rev
         preclassified_by_session: dict[str, dict[str, dict[str, Any]]] = {}
         session_signatures: dict[str, str] = {}
         for session, info in agent_infos.items():
@@ -9924,8 +9458,8 @@ class TmuxWebtermApp:
                 screens,
                 attention_ack_rev,
             )
-        with self.tabber_activity_cache_lock:
-            record = self.tabber_activity_cache_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
             can_reuse = record.session_scope == scope and record.session_file_hours == bounded_hours
             previous_signatures = dict(record.session_signatures) if can_reuse else {}
             previous_rows = copy.deepcopy(record.session_rows) if can_reuse else {}
@@ -9967,8 +9501,8 @@ class TmuxWebtermApp:
             for session in ordered_sessions
             if session in session_rows
         }
-        with self.tabber_activity_cache_lock:
-            record = self.tabber_activity_cache_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
             record.session_scope = scope
             record.session_file_hours = bounded_hours
             record.session_signatures = dict(session_signatures)
@@ -9996,8 +9530,8 @@ class TmuxWebtermApp:
         # transcript identity below. Fold the durable revision into this cache key so every
         # server stops serving an earlier unacknowledged Tabber snapshot immediately.
         self.merge_shared_attention_acks()
-        with self.client_watch_lock:
-            attention_ack_rev = self.client_watch_attention_ack_rev
+        with self.client_watch_service.lock:
+            attention_ack_rev = self.client_watch_service.attention_ack_rev
         session_names, _scope_errors, scope = self.activity_session_names(session_scope)
         sessions, _errors = discover_sessions(session_names)
         tmux_signature = self.stable_client_event_payload_signature(
@@ -10154,10 +9688,10 @@ class TmuxWebtermApp:
     def set_tabber_activity_cache(self, payload: dict[str, Any], stored_at: float | None = None, write_disk: bool = True, source_signature: str = "") -> None:
         if write_disk and not source_signature:
             source_signature = self.tabber_activity_source_signature()
-        with self.tabber_activity_cache_lock:
-            self.tabber_activity_cache_record.stored_at = time.monotonic() if stored_at is None else stored_at
-            self.tabber_activity_cache_record.payload = copy.deepcopy(payload)
-            self.tabber_activity_cache_record.source_signature = source_signature
+        with self.activity_transcript_service.tabber_cache_lock:
+            self.activity_transcript_service.tabber_cache_record.stored_at = time.monotonic() if stored_at is None else stored_at
+            self.activity_transcript_service.tabber_cache_record.payload = copy.deepcopy(payload)
+            self.activity_transcript_service.tabber_cache_record.source_signature = source_signature
         if write_disk:
             self.write_tabber_activity_disk_cache(payload, source_signature=source_signature)
 
@@ -10166,8 +9700,8 @@ class TmuxWebtermApp:
         now = time.monotonic()
         bounded_hours = session_files.bounded_session_files_hours(24.0 if hours is None else hours)
         stale_cached: tuple[dict[str, Any], bool, float] | None = None
-        with self.tabber_activity_cache_lock:
-            record = self.tabber_activity_cache_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
             if record.stored_at is not None and record.payload is not None:
                 stored_at = record.stored_at
                 payload = record.payload
@@ -10231,11 +9765,11 @@ class TmuxWebtermApp:
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
         source_signature = self.tabber_activity_source_signature()
         inflight_key = (bounded_hours, source_signature)
-        with self.tabber_activity_cache_lock:
-            future = self.tabber_activity_cache_record.inflight_by_key.get(inflight_key)
+        with self.activity_transcript_service.tabber_cache_lock:
+            future = self.activity_transcript_service.tabber_cache_record.inflight_by_key.get(inflight_key)
             if future is None:
                 future = Future()
-                self.tabber_activity_cache_record.inflight_by_key[inflight_key] = future
+                self.activity_transcript_service.tabber_cache_record.inflight_by_key[inflight_key] = future
                 owner = True
             else:
                 owner = False
@@ -10261,9 +9795,9 @@ class TmuxWebtermApp:
             future.set_exception(exc)
             raise
         finally:
-            with self.tabber_activity_cache_lock:
-                if self.tabber_activity_cache_record.inflight_by_key.get(inflight_key) is future:
-                    self.tabber_activity_cache_record.inflight_by_key.pop(inflight_key, None)
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.inflight_by_key.get(inflight_key) is future:
+                    self.activity_transcript_service.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
 
     def refresh_tabber_activity_cache_owner(self, bounded_hours: float, source_signature: str) -> dict[str, Any]:
         started = time.perf_counter()
@@ -10295,8 +9829,8 @@ class TmuxWebtermApp:
                 cache_hit=False,
             )
             return payload
-        with self.tabber_activity_cache_lock:
-            record = self.tabber_activity_cache_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
             current_payload = copy.deepcopy(record.payload) if record.payload is not None else None
             current_signature = record.source_signature
         if current_payload is not None and current_signature == source_signature:
@@ -10353,16 +9887,16 @@ class TmuxWebtermApp:
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_TABBER_ACTIVITY, {"compute_ms": compute_ms})
         finally:
-            with self.tabber_activity_cache_lock:
-                if self.tabber_activity_cache_record.refresh_worker is worker:
-                    self.tabber_activity_cache_record.refresh_worker = None
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.refresh_worker is worker:
+                    self.activity_transcript_service.tabber_cache_record.refresh_worker = None
 
     def start_tabber_activity_cache_refresh(self) -> bool:
         if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
             return False
-        with self.tabber_activity_cache_lock:
-            if self.tabber_activity_cache_record.refresh_worker is not None:
+        with self.activity_transcript_service.tabber_cache_lock:
+            if self.activity_transcript_service.tabber_cache_record.refresh_worker is not None:
                 return False
             worker: threading.Thread
 
@@ -10370,11 +9904,11 @@ class TmuxWebtermApp:
                 self.run_tabber_activity_cache_refresh(worker)
 
             worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
-            self.tabber_activity_cache_record.refresh_worker = worker
+            self.activity_transcript_service.tabber_cache_record.refresh_worker = worker
         def rollback() -> None:
-            with self.tabber_activity_cache_lock:
-                if self.tabber_activity_cache_record.refresh_worker is worker:
-                    self.tabber_activity_cache_record.refresh_worker = None
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.refresh_worker is worker:
+                    self.activity_transcript_service.tabber_cache_record.refresh_worker = None
 
         common.start_thread_with_rollback(worker, rollback)
         return True
@@ -10383,18 +9917,18 @@ class TmuxWebtermApp:
         if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warmer"})
             return False
-        with self.tabber_activity_cache_lock:
-            current = self.tabber_activity_warmer_record
+        with self.activity_transcript_service.tabber_cache_lock:
+            current = self.activity_transcript_service.tabber_warmer_record
             if current.running and current.thread is not None and current.thread.is_alive():
                 return False
             record = TabberActivityWarmerRecord(running=True, consumer_until=current.consumer_until)
             worker = threading.Thread(target=self.tabber_activity_cache_warmer_loop, args=(record,), name="tabber-activity-cache", daemon=True)
             record.thread = worker
-            self.tabber_activity_warmer_record = record
+            self.activity_transcript_service.tabber_warmer_record = record
 
         def rollback() -> None:
-            with self.tabber_activity_cache_lock:
-                if self.tabber_activity_warmer_record is record and record.thread is worker:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_warmer_record is record and record.thread is worker:
                     record.thread = None
                     record.running = False
 
@@ -10404,8 +9938,8 @@ class TmuxWebtermApp:
     def tabber_activity_cache_warmer_loop(self, record: TabberActivityWarmerRecord) -> None:
         try:
             while True:
-                with self.tabber_activity_cache_lock:
-                    if self.tabber_activity_warmer_record is not record or not record.running:
+                with self.activity_transcript_service.tabber_cache_lock:
+                    if self.activity_transcript_service.tabber_warmer_record is not record or not record.running:
                         return
                 if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     return
@@ -10435,8 +9969,8 @@ class TmuxWebtermApp:
                 elapsed = max(0.0, time.monotonic() - started)
                 time.sleep(max(0.1, interval - elapsed))
         finally:
-            with self.tabber_activity_cache_lock:
-                if self.tabber_activity_warmer_record is record:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_warmer_record is record:
                     record.running = False
 
     def empty_tabber_activity_payload(self, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
@@ -11188,8 +10722,8 @@ class TmuxWebtermApp:
             agent.session_id or "",
             agent.status or "",
         )
-        with self.transcript_tail_cache_lock:
-            cached_text = self.transcript_tail_cache.get(cache_key)
+        with self.activity_transcript_service.transcript_tail_cache_lock:
+            cached_text = self.activity_transcript_service.transcript_tail_cache.get(cache_key)
             text = cached_text[1] if cached_text else None
         if text is None:
             try:
@@ -11201,8 +10735,8 @@ class TmuxWebtermApp:
                     "agent": asdict(agent),
                     **user_message_payload("transcript.error.readFailed", diagnostic, error=diagnostic),
                 }, HTTPStatus.INTERNAL_SERVER_ERROR
-            with self.transcript_tail_cache_lock:
-                self.cache_set_limited(self.transcript_tail_cache, cache_key, (time.monotonic(), text), TRANSCRIPT_TAIL_CACHE_MAX_ITEMS)
+            with self.activity_transcript_service.transcript_tail_cache_lock:
+                self.cache_set_limited(self.activity_transcript_service.transcript_tail_cache, cache_key, (time.monotonic(), text), TRANSCRIPT_TAIL_CACHE_MAX_ITEMS)
         return {
             "session": session,
             "agent": asdict(agent),
@@ -11246,14 +10780,14 @@ class TmuxWebtermApp:
         except OSError:
             stat_signature = (path, 0, 0)
         cache_key = (session, safe_messages, stat_signature)
-        with self.context_items_cache_lock:
-            cached_items = self.context_items_cache.get(cache_key)
+        with self.activity_transcript_service.context_items_cache_lock:
+            cached_items = self.activity_transcript_service.context_items_cache.get(cache_key)
             items = copy.deepcopy(cached_items[1]) if cached_items else None
         if items is None:
             items = compact_transcript_items(text, safe_messages)
-            with self.context_items_cache_lock:
+            with self.activity_transcript_service.context_items_cache_lock:
                 self.cache_set_limited(
-                    self.context_items_cache,
+                    self.activity_transcript_service.context_items_cache,
                     cache_key,
                     (time.monotonic(), copy.deepcopy(items)),
                     CONTEXT_ITEMS_CACHE_MAX_ITEMS,
@@ -12817,8 +12351,8 @@ class TmuxWebtermApp:
                 self._write_shared_tmux_ai_status_locked(status)
         with self.attention_ack_lock:
             self.attention_ack_keys = dict(merged)
-        with self.client_watch_lock:
-            self.client_watch_attention_ack_rev = rev
+        with self.client_watch_service.lock:
+            self.client_watch_service.attention_ack_rev = rev
         return rev, newly_acknowledged
 
     def merge_shared_attention_acks(self) -> bool:
@@ -12831,10 +12365,10 @@ class TmuxWebtermApp:
         # changed compares the key set so a timestamp-only re-ack does not trigger a client refetch.
         with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
             file_keys, rev = self._read_shared_attention_acks_locked()
-            with self.client_watch_lock:
-                if rev <= self.client_watch_attention_ack_rev:
+            with self.client_watch_service.lock:
+                if rev <= self.client_watch_service.attention_ack_rev:
                     return False
-                self.client_watch_attention_ack_rev = rev
+                self.client_watch_service.attention_ack_rev = rev
             with self.attention_ack_lock:
                 changed = set(self.attention_ack_keys) != set(file_keys)
                 self.attention_ack_keys = dict(file_keys)
@@ -13368,5 +12902,5 @@ class TmuxWebtermApp:
                 record.worker.stop()
             self.auto_worker_records.clear()
         self.background_owner.stop()
-        self.close_yoagent_codex_app_server()
+        self.yoagent_controller.close_yoagent_codex_app_server()
         self.control_server.stop()

@@ -34,6 +34,10 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   if (tree) grid.appendChild(renderLayoutRoot(tree));
 
   bindDropTargets();
+  finishPanelLayoutRender(previousActive, options, {updateInactiveOverlays: true});
+}
+
+function finishPanelLayoutRender(previousActive = [], options = {}, {updateInactiveOverlays = false} = {}) {
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
   scheduleAgentWindowActivityAnimationSync();
@@ -42,10 +46,8 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
       clearTimeout(responsiveLayoutPruneTimer);
       responsiveLayoutPruneTimer = null;
     }
-  } else {
-    scheduleResponsiveLayoutPrune();
-  }
-  updatePanelInactiveOverlays();
+  } else scheduleResponsiveLayoutPrune();
+  if (updateInactiveOverlays) updatePanelInactiveOverlays();
 }
 
 function movePanelsToPool() {
@@ -588,6 +590,24 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
   return html;
+}
+
+// Virtual panels differ in their toolbars and bodies, but their frame is one contract. Keep the
+// head/tablist, overlay root, and toast identity here so a new panel cannot quietly omit one.
+function panelToastStackHtml(item, contentHtml = '') {
+  return `<div id="panel-toasts-${esc(item)}" class="panel-toast-stack">${contentHtml}</div>`;
+}
+
+function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsHtml = '', afterHeadHtml = '', bodyClass = '', bodyHtml = '', toastStack = true, toastContentHtml = '', bodyAttributes = '', afterBodyHtml = ''} = {}) {
+  const classes = ['panel-overlay-root', bodyClass].filter(Boolean).join(' ');
+  return `<div class="panel-head ${esc(headClass)}">
+    ${controlsHtml}
+    <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
+    ${headAfterTabsHtml}
+  </div>
+  ${afterHeadHtml}
+  <div class="${classes}"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
+  ${afterBodyHtml}`;
 }
 
 function paneTabDragSourceItem(itemOrGetter, event) {
@@ -2430,22 +2450,20 @@ function createSearchHistoryPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel search-history-panel';
   panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = `
-      <div class="panel-head search-history-panel-head">
-        ${virtualPanelControlsHtml(searchHistoryItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: searchHistoryItemId,
+    headClass: 'search-history-panel-head',
+    controlsHtml: virtualPanelControlsHtml(searchHistoryItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="search-history-body info-pane panel-overlay-root">
-        <div id="panel-toasts-${searchHistoryItemId}" class="panel-toast-stack"></div>
-        <div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'search-history-body info-pane',
+    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, searchHistoryItemId);
   bindSearchHistoryPanel(panel);
   return panel;

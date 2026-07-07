@@ -88,30 +88,14 @@ function randomShareViewerId() {
 const shareViewerId = (() => {
   if (!shareViewMode) return '';
   const key = `yolomux.share.viewer.${shareBootstrap?.id || 'current'}`;
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 const shareClientId = (() => {
   if (shareViewMode && shareViewerId) return shareViewerId;
   const key = shareViewMode
     ? `yolomux.share.client.${shareBootstrap?.id || 'current'}`
     : 'yolomux.share.hostClient';
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 function shareBootstrapFinderState() {
   return shareViewMode && shareBootstrap?.finder && typeof shareBootstrap.finder === 'object'
@@ -695,7 +679,6 @@ const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'build
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
-let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
@@ -1115,13 +1098,23 @@ function fileEditorCopyItemPath(item) {
   return path.startsWith('/') ? path : null;
 }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
+const virtualPanelTabDefaults = Object.freeze({
+  aliases: [], sortRank: 0, detail: () => '', rowHtml: (item, options) => paneInfoTabHtml(item, options), canPopout: false, popoutRenderer: null, openPopout: null, renderAttached: null,
+  cleanup: null, relocalize: null, focusSearch: null, icon: 'document', minWidth: () => minSplitPaneWidthPx(), prunePriority: () => 0});
+function virtualPanelTabType(spec) {
+  const prefixes = Array.isArray(spec.prefixes) && spec.prefixes.length ? spec.prefixes : [spec.prefix].filter(Boolean), aliases = spec.aliases || (prefixes.length ? [] : [spec.key, ...(spec.id ? [spec.id] : [])]), label = spec.label;
+  return {...virtualPanelTabDefaults, ...spec, aliases, prefixes,
+    match: spec.match || (spec.id ? item => item === spec.id : item => typeof item === 'string' && prefixes.some(prefix => item.startsWith(prefix))), shortLabel: spec.shortLabel || label,
+    terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
+    popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
+}
 function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
-  const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
-  return {
+  const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
+  return virtualPanelTabType({
     key,
     prefix,
-    prefixes: matchPrefixes,
-    match: item => typeof item === 'string' && matchPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
+    prefixes: itemPrefixes,
+    match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
     label: item => basenameOf(fileItemPath(item)),
     shortLabel,
     terminalTitle,
@@ -1144,13 +1137,12 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     },
     focusSearch,
     className,
-    icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 1,
-  };
+  });
 }
 const TAB_TYPES = [
-  {
+  virtualPanelTabType({
     // YO!info and YO!agent are independent virtual tabs. Legacy yoagent/yosup aliases
     // resolve to the standalone YO!agent item below.
     key: 'info',
@@ -1158,12 +1150,8 @@ const TAB_TYPES = [
     aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
     match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
-    shortLabel: () => infoTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
-    param: () => 'info',
     detail: () => t('menu.file.info.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     canPopout: true,
     popoutRenderer: item => panePopoutPanelSnapshot(item),
@@ -1178,20 +1166,15 @@ const TAB_TYPES = [
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'yoagent',
     id: yoagentItemId,
     aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === yoagentItemId || item === legacyYosupItemId,
     label: () => yoagentTabLabel(),
-    shortLabel: () => yoagentTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: yoagentTabLabel()}),
     sortRank: 0.1,
-    param: () => 'yoagent',
     detail: () => t('menu.file.yoagent.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createYoagentPanel(),
     renderAttached: () => {
       renderYoagentPanel({preserveDraft: true, scrollBottom: true});
@@ -1206,22 +1189,15 @@ const TAB_TYPES = [
     },
     className: () => 'yoagent',
     icon: 'yoagent',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: yoagentTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'chat',
     id: chatItemId,
     aliases: ['chat', 'yochat', 'yo!chat', 'yo-chat', chatItemId],
-    match: item => item === chatItemId,
     label: () => chatTabLabel(),
-    shortLabel: () => chatTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: chatTabLabel()}),
     sortRank: 0.2,
-    param: () => 'chat',
     detail: () => t('menu.file.chat.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createChatPanel(),
     renderAttached: () => mountChatPanel(),
     cleanup: () => clearChatLifecycle({destroy: true, keepalive: true}),
@@ -1229,59 +1205,42 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
     icon: 'chat',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: chatTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'chat-media',
     prefix: chatMediaItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(chatMediaItemPrefix),
     label: item => chatMediaLabel(chatMediaUrlForItem(item)),
     shortLabel: () => t('popover.kind.image'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.21,
     param: item => item,
     detail: item => chatMediaUrlForItem(item),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: item => createChatMediaPanel(item),
     relocalize: (item, panel) => relocalizeChatMediaPanel(panel, item),
     className: () => 'chat-media',
     icon: 'image',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('popover.kind.image')}),
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'files',
     id: fileExplorerItemId,
-    aliases: ['files', fileExplorerItemId],
-    match: item => item === fileExplorerItemId,
     label: () => fileExplorerLabel(),
-    shortLabel: () => fileExplorerLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: fileExplorerLabel()}),
     sortRank: 0.5,
-    param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
     createPanel: () => createFileExplorerPanel(),
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer',
     icon: 'finder',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: fileExplorerLabel()}),
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'search-history',
     id: searchHistoryItemId,
     aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
-    match: item => item === searchHistoryItemId,
     label: () => searchHistoryTabLabel(),
     shortLabel: () => t('common.search'),
-    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
     sortRank: 0.6,
-    param: () => 'search-history',
     detail: () => t('searchHistory.detail'),
     rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
     createPanel: () => createSearchHistoryPanel(),
@@ -1290,18 +1249,14 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true}),
     className: () => 'search-history-item',
     icon: 'document',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'preferences',
     id: prefsItemId,
     aliases: ['prefs', 'preferences', prefsItemId],
-    match: item => item === prefsItemId,
     label: () => t('common.preferences'),
     shortLabel: () => t('tab.preferences.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('common.preferences')}),
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
@@ -1309,22 +1264,17 @@ const TAB_TYPES = [
     createPanel: () => createPreferencesPanel(),
     relocalize: () => renderPreferencesPanels({force: true}),
     focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true}),
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('common.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
-    match: item => item === debugPaneItemId,
     label: () => t('tab.debug'),
     shortLabel: () => t('tab.debug.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.debug')}),
     sortRank: 0.7,
-    param: () => 'debug',
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
@@ -1341,8 +1291,7 @@ const TAB_TYPES = [
     className: () => 'debug-item',
     icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,

@@ -1488,6 +1488,12 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 ## 2026-07-06 Work Queue Drain
 
+## 2026-07-07 UI architecture refactor
+
+- Completed the panel/control/state ownership refactor and removed `DOIT.ui_architecture_refactor.md`. Shared panel frames, buttons/actions, virtual tab descriptors, drag/drop, editor state, conversation composer, Finder hover, YO!stats descriptors, and YO!agent controller routing now have one named owner, guarded by `static_build.py --check` ownership and normalized-clone lints.
+- `TmuxWebtermApp` no longer owns stats-history, session-file, activity/transcript, or client-watch cache/work/watcher fields directly. `StatsHistoryService`, `SessionFilesService`, `ActivityTranscriptService`, and `ClientWatchService` own them, with standalone ownership coverage and the existing app/background-owner characterization suite migrated to those explicit services.
+- The Node launcher keeps nine distinct behavior shards, a terminal pass/fail summary, a nonzero failure exit, and a real-node watchdog against hung suite tails. Static ownership tests cover raw pane-control rejection, unreviewed production clones, and shard integrity. Generated assets were rebuilt and the final canonical gate plus live server restart are recorded by the landing change.
+
 ### Shared agent-window status ownership
 
 - Completed and removed `DOIT.audit_shared_agent_status.md`. Regular Tabs, Tabber, and YO!info now resolve visible Claude/Codex state from the same canonical `/api/auto-approve` row. Tabber/transcript data supplies only explicitly allowed identity, path, git, and process enrichment; it cannot restore a stale green/red/yellow state when the canonical row is absent.

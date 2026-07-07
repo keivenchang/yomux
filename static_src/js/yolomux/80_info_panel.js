@@ -139,21 +139,18 @@ function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel info-tree-panel';
   panel.id = panelDomId(infoItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="info-actions-bar info-tree-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: infoItemId,
+    controlsHtml: virtualPanelControlsHtml(infoItemId),
+    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div id="info-content" class="info-list info-tree-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+  });
   bindPanelShell(panel, infoItemId);
   bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
@@ -164,20 +161,17 @@ function createYoagentPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel yoagent-panel';
   panel.id = panelDomId(yoagentItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(yoagentItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="info-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: yoagentItemId,
+    controlsHtml: virtualPanelControlsHtml(yoagentItemId),
+    afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+          <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
-        <div id="yoagent-content" class="info-list yoagent-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+  });
   bindPanelShell(panel, yoagentItemId);
   bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
@@ -190,11 +184,24 @@ function createYoagentPanel() {
 }
 
 function bindYoagentPanel(panel) {
-  panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
-    event.preventDefault();
-    loadYoagentConversation({force: true, silent: true, scrollBottom: false});
-    loadYoagentJobs({silent: true, scrollBottom: false});
-    refreshActivitySummary({force: true});
+  bindActionDispatcher(panel, {
+    'yoagent-refresh': () => {
+      loadYoagentConversation({force: true, silent: true, scrollBottom: false});
+      loadYoagentJobs({silent: true, scrollBottom: false});
+      refreshActivitySummary({force: true});
+    },
+    'yoagent-clear': () => clearYoagentConversation(),
+    'yoagent-retry': () => {
+      const input = panel.querySelector('[data-yoagent-chat-input]');
+      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
+    },
+    'yoagent-chat-cancel': () => cancelActiveYoagentChatRequest(),
+    'yoagent-queued-cancel': (_event, target) => cancelQueuedYoagentChatMessage(target.dataset.yoagentQueuedCancel || ''),
+    'yoagent-agent-restart': (_event, target) => createNextSession(target.dataset.yolomuxAgentRestart || 'claude'),
+    'yoagent-action-send': (_event, target) => executeYoagentActionSend(target.dataset.yoagentActionSend || ''),
+    'yoagent-job-confirm': (_event, target) => confirmYoagentJob(target.dataset.yoagentJobConfirm || ''),
+    'yoagent-job-cancel': (_event, target) => cancelYoagentJob(target.dataset.yoagentJobCancel || ''),
+    'yoagent-wait-clear': (_event, target) => clearYoagentPendingWait(target.dataset.yoagentWaitClear || ''),
   });
   panel.addEventListener('submit', event => {
     const form = event.target.closest('[data-yoagent-chat-form]');
@@ -206,62 +213,6 @@ function bindYoagentPanel(panel) {
     yoagentChatState.draft = '';
     resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
-  });
-  panel.addEventListener('click', event => {
-    const clear = event.target.closest('[data-yoagent-clear]');
-    if (clear && panel.contains(clear)) {
-      event.preventDefault();
-      clearYoagentConversation();
-      return;
-    }
-    const retry = event.target.closest('[data-yoagent-retry]');
-    if (retry && panel.contains(retry)) {
-      event.preventDefault();
-      const input = panel.querySelector('[data-yoagent-chat-input]');
-      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
-      return;
-    }
-    const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
-    if (activeCancel && panel.contains(activeCancel)) {
-      event.preventDefault();
-      cancelActiveYoagentChatRequest();
-      return;
-    }
-    const queuedCancel = event.target.closest('[data-yoagent-queued-cancel]');
-    if (queuedCancel && panel.contains(queuedCancel)) {
-      event.preventDefault();
-      cancelQueuedYoagentChatMessage(queuedCancel.dataset.yoagentQueuedCancel || '');
-      return;
-    }
-    const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
-    if (agentRestart && panel.contains(agentRestart)) {
-      event.preventDefault();
-      createNextSession(agentRestart.dataset.yolomuxAgentRestart || 'claude');
-      return;
-    }
-    const actionSend = event.target.closest('[data-yoagent-action-send]');
-    if (actionSend && panel.contains(actionSend)) {
-      event.preventDefault();
-      executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
-      return;
-    }
-    const jobConfirm = event.target.closest('[data-yoagent-job-confirm]');
-    if (jobConfirm && panel.contains(jobConfirm)) {
-      event.preventDefault();
-      confirmYoagentJob(jobConfirm.dataset.yoagentJobConfirm || '');
-      return;
-    }
-    const jobCancel = event.target.closest('[data-yoagent-job-cancel]');
-    if (jobCancel && panel.contains(jobCancel)) {
-      event.preventDefault();
-      cancelYoagentJob(jobCancel.dataset.yoagentJobCancel || '');
-      return;
-    }
-    const waitClear = event.target.closest('[data-yoagent-wait-clear]');
-    if (waitClear && panel.contains(waitClear)) {
-      event.preventDefault();
-      clearYoagentPendingWait(waitClear.dataset.yoagentWaitClear || '');
-    }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');

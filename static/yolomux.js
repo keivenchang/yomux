@@ -89,30 +89,14 @@ function randomShareViewerId() {
 const shareViewerId = (() => {
   if (!shareViewMode) return '';
   const key = `yolomux.share.viewer.${shareBootstrap?.id || 'current'}`;
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 const shareClientId = (() => {
   if (shareViewMode && shareViewerId) return shareViewerId;
   const key = shareViewMode
     ? `yolomux.share.client.${shareBootstrap?.id || 'current'}`
     : 'yolomux.share.hostClient';
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 function shareBootstrapFinderState() {
   return shareViewMode && shareBootstrap?.finder && typeof shareBootstrap.finder === 'object'
@@ -696,7 +680,6 @@ const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'build
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
-let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
@@ -1116,13 +1099,23 @@ function fileEditorCopyItemPath(item) {
   return path.startsWith('/') ? path : null;
 }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
+const virtualPanelTabDefaults = Object.freeze({
+  aliases: [], sortRank: 0, detail: () => '', rowHtml: (item, options) => paneInfoTabHtml(item, options), canPopout: false, popoutRenderer: null, openPopout: null, renderAttached: null,
+  cleanup: null, relocalize: null, focusSearch: null, icon: 'document', minWidth: () => minSplitPaneWidthPx(), prunePriority: () => 0});
+function virtualPanelTabType(spec) {
+  const prefixes = Array.isArray(spec.prefixes) && spec.prefixes.length ? spec.prefixes : [spec.prefix].filter(Boolean), aliases = spec.aliases || (prefixes.length ? [] : [spec.key, ...(spec.id ? [spec.id] : [])]), label = spec.label;
+  return {...virtualPanelTabDefaults, ...spec, aliases, prefixes,
+    match: spec.match || (spec.id ? item => item === spec.id : item => typeof item === 'string' && prefixes.some(prefix => item.startsWith(prefix))), shortLabel: spec.shortLabel || label,
+    terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
+    popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
+}
 function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
-  const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
-  return {
+  const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
+  return virtualPanelTabType({
     key,
     prefix,
-    prefixes: matchPrefixes,
-    match: item => typeof item === 'string' && matchPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
+    prefixes: itemPrefixes,
+    match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
     label: item => basenameOf(fileItemPath(item)),
     shortLabel,
     terminalTitle,
@@ -1145,13 +1138,12 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     },
     focusSearch,
     className,
-    icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 1,
-  };
+  });
 }
 const TAB_TYPES = [
-  {
+  virtualPanelTabType({
     // YO!info and YO!agent are independent virtual tabs. Legacy yoagent/yosup aliases
     // resolve to the standalone YO!agent item below.
     key: 'info',
@@ -1159,12 +1151,8 @@ const TAB_TYPES = [
     aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
     match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
-    shortLabel: () => infoTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
-    param: () => 'info',
     detail: () => t('menu.file.info.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     canPopout: true,
     popoutRenderer: item => panePopoutPanelSnapshot(item),
@@ -1179,20 +1167,15 @@ const TAB_TYPES = [
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'yoagent',
     id: yoagentItemId,
     aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === yoagentItemId || item === legacyYosupItemId,
     label: () => yoagentTabLabel(),
-    shortLabel: () => yoagentTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: yoagentTabLabel()}),
     sortRank: 0.1,
-    param: () => 'yoagent',
     detail: () => t('menu.file.yoagent.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createYoagentPanel(),
     renderAttached: () => {
       renderYoagentPanel({preserveDraft: true, scrollBottom: true});
@@ -1207,22 +1190,15 @@ const TAB_TYPES = [
     },
     className: () => 'yoagent',
     icon: 'yoagent',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: yoagentTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'chat',
     id: chatItemId,
     aliases: ['chat', 'yochat', 'yo!chat', 'yo-chat', chatItemId],
-    match: item => item === chatItemId,
     label: () => chatTabLabel(),
-    shortLabel: () => chatTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: chatTabLabel()}),
     sortRank: 0.2,
-    param: () => 'chat',
     detail: () => t('menu.file.chat.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createChatPanel(),
     renderAttached: () => mountChatPanel(),
     cleanup: () => clearChatLifecycle({destroy: true, keepalive: true}),
@@ -1230,59 +1206,42 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
     icon: 'chat',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: chatTabLabel()}),
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'chat-media',
     prefix: chatMediaItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(chatMediaItemPrefix),
     label: item => chatMediaLabel(chatMediaUrlForItem(item)),
     shortLabel: () => t('popover.kind.image'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.21,
     param: item => item,
     detail: item => chatMediaUrlForItem(item),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: item => createChatMediaPanel(item),
     relocalize: (item, panel) => relocalizeChatMediaPanel(panel, item),
     className: () => 'chat-media',
     icon: 'image',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('popover.kind.image')}),
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'files',
     id: fileExplorerItemId,
-    aliases: ['files', fileExplorerItemId],
-    match: item => item === fileExplorerItemId,
     label: () => fileExplorerLabel(),
-    shortLabel: () => fileExplorerLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: fileExplorerLabel()}),
     sortRank: 0.5,
-    param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
     createPanel: () => createFileExplorerPanel(),
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer',
     icon: 'finder',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: fileExplorerLabel()}),
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'search-history',
     id: searchHistoryItemId,
     aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
-    match: item => item === searchHistoryItemId,
     label: () => searchHistoryTabLabel(),
     shortLabel: () => t('common.search'),
-    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
     sortRank: 0.6,
-    param: () => 'search-history',
     detail: () => t('searchHistory.detail'),
     rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
     createPanel: () => createSearchHistoryPanel(),
@@ -1291,18 +1250,14 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true}),
     className: () => 'search-history-item',
     icon: 'document',
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: searchHistoryTabLabel()}),
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'preferences',
     id: prefsItemId,
     aliases: ['prefs', 'preferences', prefsItemId],
-    match: item => item === prefsItemId,
     label: () => t('common.preferences'),
     shortLabel: () => t('tab.preferences.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('common.preferences')}),
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
@@ -1310,22 +1265,17 @@ const TAB_TYPES = [
     createPanel: () => createPreferencesPanel(),
     relocalize: () => renderPreferencesPanels({force: true}),
     focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true}),
-    popoutDisabledReason: () => t('pane.popout.interactiveDisabled', {name: t('common.preferences')}),
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
-    match: item => item === debugPaneItemId,
     label: () => t('tab.debug'),
     shortLabel: () => t('tab.debug.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.debug')}),
     sortRank: 0.7,
-    param: () => 'debug',
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
@@ -1342,8 +1292,7 @@ const TAB_TYPES = [
     className: () => 'debug-item',
     icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -4445,7 +4394,19 @@ function fuzzySearchScore(query, fields) {
   return total;
 }
 
-function fuzzyHighlightHtml(query, text) {
+function sessionScopedId(key, create = randomShareViewerId) {
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = create();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return create();
+  }
+}
+
+function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   const value = String(text ?? '');
   // Highlight EVERY query token's subsequence match, not just the first — mirrors fuzzySearchScore, which
   // scores all tokens. So "pa exploration" highlights both "PA" and "exploration", not only "pa".
@@ -4467,7 +4428,7 @@ function fuzzyHighlightHtml(query, text) {
     }
     const start = index;
     while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="fuzzy-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+    parts.push(`<mark class="${esc(markClass)}">${esc(chars.slice(start, index).join(''))}</mark>`);
   }
   return parts.join('');
 }
@@ -7104,7 +7065,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
 }
 
-function applyLayoutUrlEditorSeed(editor = {}) {
+function applyEditorStateFields(editor = {}, {applyModeEntry = null} = {}) {
   if (!editor || typeof editor !== 'object') return;
   if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
   if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
@@ -7115,9 +7076,7 @@ function applyLayoutUrlEditorSeed(editor = {}) {
   if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
   if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
   if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
-    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
-  }
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) applyModeEntry?.(entry);
 }
 
 function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
@@ -7133,7 +7092,7 @@ function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
 function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
-  applyLayoutUrlEditorSeed(state.editor || {});
+  applyEditorStateFields(state.editor || {}, {applyModeEntry: typeof shareApplyEditorModeEntry === 'function' ? shareApplyEditorModeEntry : null});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;
@@ -15056,60 +15015,24 @@ function fileTreeRepoPopoverNode() {
   return node;
 }
 
-let fileTreeRepoPopoverTimer = null;
-let fileTreeRepoPopoverHoverToken = 0;
-let fileTreeRepoPopoverCursor = {x: 0, y: 0};   // last pointer pos over the hovered repo row; popover anchors to its RIGHT
-
-function cancelFileTreeRepoPopoverTimer() {
-  if (fileTreeRepoPopoverTimer) {
-    clearTimeout(fileTreeRepoPopoverTimer);
-    fileTreeRepoPopoverTimer = null;
-  }
-  fileTreeRepoPopoverHoverToken += 1;
-}
-
 function showFileTreeRepoPopover(row, repo) {
   if (!repo?.root) return;
   const node = fileTreeRepoPopoverNode();
   node.innerHTML = repoInfoPopoverHtml(repo);
   node.hidden = false;
-  // Anchor to the RIGHT of the cursor (like a tooltip following the pointer), not centered under the row.
-  // Clamp to the viewport so it stays fully on-screen near the right/bottom edge.
-  const popRect = node.getBoundingClientRect?.();
-  const pos = clampToViewport(
-    Math.round(fileTreeRepoPopoverCursor.x + 14),
-    Math.round(fileTreeRepoPopoverCursor.y + 4),
-    Math.ceil(popRect?.width || 0),
-    Math.ceil(popRect?.height || 0),
+  const popRect = node.getBoundingClientRect?.(), pos = clampToViewport(
+    Math.round(Number(row.dataset.repoPopoverX || 0) + 14), Math.round(Number(row.dataset.repoPopoverY || 0) + 4),
+    Math.ceil(popRect?.width || 0), Math.ceil(popRect?.height || 0),
   );
-  node.style.left = `${Math.round(pos.left)}px`;
-  node.style.top = `${Math.round(pos.top)}px`;
+  Object.assign(node.style, {left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px`});
 }
 
-function hideFileTreeRepoPopover() {
-  cancelFileTreeRepoPopoverTimer();
-  fileTreeRepoPopoverPath = null;
-  const node = document.getElementById('fileTreeRepoPopover');
-  if (node) node.hidden = true;
-}
-
-function scheduleRepoRowHoverPopover(row, path) {
-  cancelFileTreeRepoPopoverTimer();
-  const token = fileTreeRepoPopoverHoverToken;
-  const delay = Math.max(0, Number(popoverShowDelayMs) || 0);
-  fileTreeRepoPopoverTimer = setTimeout(() => {
-    fileTreeRepoPopoverTimer = null;
-    if (token !== fileTreeRepoPopoverHoverToken || !row?.isConnected) return;
-    showRepoRowHoverPopover(row, path);
-  }, delay);
-}
+function hideFileTreeRepoPopover() { document.getElementById('fileTreeRepoPopover')?.setAttribute('hidden', ''); }
 
 async function showRepoRowHoverPopover(row, path) {
-  const normalized = normalizeDirectoryPath(path);
-  fileTreeRepoPopoverPath = normalized;
+  const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
-  showFileTreeRepoPopover(row, fileExplorerRepoInfoCache.get(normalized));
-  const cached = fileExplorerRepoInfoCache.get(normalized);
+  showFileTreeRepoPopover(row, cached);
   if (cached && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
@@ -15118,9 +15041,28 @@ async function showRepoRowHoverPopover(row, path) {
     if (info.repo) {
       cacheFileExplorerRepoInfo(normalized, info.repo);
       updateFileTreeGitStatusRows();
-      if (fileTreeRepoPopoverPath === normalized) showFileTreeRepoPopover(row, info.repo);
+      if (row.dataset.popoverHoverState === 'open') showFileTreeRepoPopover(row, info.repo);
     }
   } catch (_) {}
+}
+
+function fileTreeRepoHoverController(row, path) {
+  if (row.__yolomuxRepoHoverController) return row.__yolomuxRepoHoverController;
+  const updatePointer = event => Object.assign(row.dataset, {repoPopoverX: String(event?.clientX || row.dataset.repoPopoverX || 0), repoPopoverY: String(event?.clientY || row.dataset.repoPopoverY || 0)});
+  return row.__yolomuxRepoHoverController = createHoverPopover({
+    anchor: row,
+    popover: fileTreeRepoPopoverNode,
+    stateClass: null,
+    canOpen: () => row.dataset.isRepo === 'true',
+    position: event => {
+      updatePointer(event);
+      const repo = fileExplorerRepoInfoCache.get(normalizeDirectoryPath(path));
+      if (repo) showFileTreeRepoPopover(row, repo);
+    },
+    onPointerMove: updatePointer,
+    onOpen: () => { void showRepoRowHoverPopover(row, path); },
+    onClose: hideFileTreeRepoPopover,
+  });
 }
 
 async function commitFileExplorerPathInput(input) {
@@ -16268,13 +16210,9 @@ function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
-    row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
-    row.onmousemove = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; };
-    row.onmouseleave = () => hideFileTreeRepoPopover();
+    fileTreeRepoHoverController(row, fullPath);
   } else if (!differMode) {
-    cancelFileTreeRepoPopoverTimer();
     row.onmouseenter = null;
-    row.onmousemove = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
     if (entry.is_symlink === true && entry.symlink_target) {
@@ -25114,6 +25052,7 @@ function bindPopoverHover(anchor, popover, handlers) {
 function createHoverPopover(options) {
   const anchor = options.anchor;
   if (!anchor) return null;
+  if (typeof options.onPointerMove === 'function') anchor.addEventListener('pointermove', options.onPointerMove);
   const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
   let showTimer = null;
   let hideTimer = null;
@@ -30146,92 +30085,60 @@ function showDropPreview(intent) {
   applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
 }
 
-function dropSessionAtEvent(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    clearDropPreview();
-    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-    return;
+// Grid and Dockview use different hit testing, not different drag semantics. Classify the payload
+// once, then let each surface supply only its target-intent resolver.
+function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSession = () => false, ignoreMissingIntent = false} = {}) {
+  const pane = paneDragPayload(event);
+  if (pane?.slot) {
+    const intent = paneSwapIntentForEvent(event, pane.slot);
+    return {kind: 'pane', payload: pane, intent, allowed: paneSwapIntentAllowed(intent), dropEffect: 'move'};
   }
-  const filePayload = fileDragPayload(event);
-  if (filePayload?.path) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = dropIntentForEvent(event, {allowBoundary: false});
-    clearDropPreview();
-    if (!intent?.targetSlot || !fileDropIntentAllowsPayload(filePayload, intent)) return;
-    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
-    return;
+  const file = fileDragPayload(event);
+  if (file?.path) {
+    const intent = intentForFile?.(event) || null;
+    if (ignoreMissingIntent && !intent) return null;
+    return {kind: 'file', payload: file, intent, allowed: Boolean(intent?.targetSlot && fileDropIntentAllowsPayload(file, intent)), dropEffect: 'copy'};
   }
-  const payload = dragPayload(event);
-  if (!payload?.session) return;
-  if (event.target?.closest?.('.panel-head')) {
-    event.preventDefault();
-    event.stopPropagation();
-    clearDropPreview();
-    return;
-  }
+  const session = dragPayload(event);
+  if (!session?.session) return null;
+  if (suppressSession(event)) return {kind: 'session', payload: session, intent: null, allowed: false, dropEffect: 'none'};
+  const intent = intentForSession?.(event) || null;
+  if (ignoreMissingIntent && !intent) return null;
+  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
+}
+
+function applyLayoutDragIntent(event, drag, {phase = 'over'} = {}) {
+  if (!drag) return false;
   event.preventDefault();
   event.stopPropagation();
-  const intent = dropIntentForEvent(event, {allowBoundary: true});
+  if (phase === 'over') {
+    event.dataTransfer.dropEffect = drag.allowed ? drag.dropEffect : 'none';
+    if (drag.allowed) showDropPreview(drag.intent);
+    else clearDropPreview();
+    return true;
+  }
   clearDropPreview();
-  if (!dropIntentAllowsSession(payload.session, intent)) return;
-  dropSessionWithIntent(payload.session, intent, payload.sourceSlot || slotForSession(payload.session));
+  if (!drag.allowed) return true;
+  if (drag.kind === 'pane') swapPaneSlots(drag.intent.sourceSlot, drag.intent.targetSlot);
+  else if (drag.kind === 'file') openDraggedFilesInEditor(drag.payload, {targetSlot: drag.intent.targetSlot, targetZone: drag.intent.zone});
+  else dropSessionWithIntent(drag.payload.session, drag.intent, drag.payload.sourceSlot || slotForSession(drag.payload.session));
+  return true;
+}
+
+function dropSessionAtEvent(event) {
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: candidate => dropIntentForEvent(candidate, {allowBoundary: false}),
+    intentForSession: candidate => dropIntentForEvent(candidate, {allowBoundary: true}),
+    suppressSession: candidate => Boolean(candidate.target?.closest?.('.panel-head')),
+  }), {phase: 'drop'});
 }
 
 function handleDropDragOver(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    event.preventDefault();
-    event.stopPropagation();
-    if (!paneSwapIntentAllowed(intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'move';
-    showDropPreview(intent);
-    return;
-  }
-  const filePayload = fileDragPayload(event);
-  if (filePayload?.path) {
-    const intent = dropIntentForEvent(event, {allowBoundary: false});
-    if (!fileDropIntentAllowsPayload(filePayload, intent)) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    showDropPreview(intent);
-    return;
-  }
-  const payload = dragPayload(event);
-  if (!payload?.session) return;
-  if (event.target?.closest?.('.panel-head')) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  const intent = dropIntentForEvent(event, {allowBoundary: true});
-  event.preventDefault();
-  event.stopPropagation();
-  if (!dropIntentAllowsSession(payload.session, intent)) {
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  event.dataTransfer.dropEffect = 'move';
-  showDropPreview(intent);
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: candidate => dropIntentForEvent(candidate, {allowBoundary: false}),
+    intentForSession: candidate => dropIntentForEvent(candidate, {allowBoundary: true}),
+    suppressSession: candidate => Boolean(candidate.target?.closest?.('.panel-head')),
+  }));
 }
 
 function handleDropDragLeave(event) {
@@ -30926,80 +30833,19 @@ function dockviewFileDropIntentForEvent(event) {
 }
 
 function dockviewHandleFileDragOver(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    event.preventDefault();
-    event.stopPropagation();
-    if (!paneSwapIntentAllowed(intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'move';
-    showDropPreview(intent);
-    return;
-  }
-  const payload = fileDragPayload(event);
-  if (payload?.path) {
-    const intent = dockviewFileDropIntentForEvent(event);
-    if (!intent) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (!fileDropIntentAllowsPayload(payload, intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'copy';
-    showDropPreview(intent);
-    return;
-  }
-  const tabPayload = dragPayload(event);
-  if (!tabPayload?.session) return;
-  const intent = dockviewGroupDropIntentForEvent(event);
-  if (!intent) return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (!dropIntentAllowsSession(tabPayload.session, intent)) {
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  event.dataTransfer.dropEffect = 'move';
-  showDropPreview(intent);
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: dockviewFileDropIntentForEvent,
+    intentForSession: dockviewGroupDropIntentForEvent,
+    ignoreMissingIntent: true,
+  }));
 }
 
 function dockviewHandleFileDrop(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    clearDropPreview();
-    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-    return;
-  }
-  const payload = fileDragPayload(event);
-  if (payload?.path) {
-    const intent = dockviewFileDropIntentForEvent(event);
-    if (!intent) return;
-    event.preventDefault();
-    event.stopPropagation();
-    clearDropPreview();
-    if (!fileDropIntentAllowsPayload(payload, intent)) return;
-    openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
-    return;
-  }
-  const tabPayload = dragPayload(event);
-  if (!tabPayload?.session) return;
-  const intent = dockviewGroupDropIntentForEvent(event);
-  if (!intent) return;
-  event.preventDefault();
-  event.stopPropagation();
-  clearDropPreview();
-  if (!dropIntentAllowsSession(tabPayload.session, intent)) return;
-  dropSessionWithIntent(tabPayload.session, intent, tabPayload.sourceSlot || slotForSession(tabPayload.session));
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: dockviewFileDropIntentForEvent,
+    intentForSession: dockviewGroupDropIntentForEvent,
+    ignoreMissingIntent: true,
+  }), {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -31385,17 +31231,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   }
   dockviewRefreshTabs();
   dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
-  syncPanelVisibility(previousActive);
-  renderAutoApproveButtons();
-  scheduleAgentWindowActivityAnimationSync();
-  if (options.prune === false) {
-    if (responsiveLayoutPruneTimer) {
-      clearTimeout(responsiveLayoutPruneTimer);
-      responsiveLayoutPruneTimer = null;
-    }
-  } else {
-    scheduleResponsiveLayoutPrune();
-  }
+  finishPanelLayoutRender(previousActive, options);
   return true;
 }
 
@@ -32333,6 +32169,10 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   if (tree) grid.appendChild(renderLayoutRoot(tree));
 
   bindDropTargets();
+  finishPanelLayoutRender(previousActive, options, {updateInactiveOverlays: true});
+}
+
+function finishPanelLayoutRender(previousActive = [], options = {}, {updateInactiveOverlays = false} = {}) {
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
   scheduleAgentWindowActivityAnimationSync();
@@ -32341,10 +32181,8 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
       clearTimeout(responsiveLayoutPruneTimer);
       responsiveLayoutPruneTimer = null;
     }
-  } else {
-    scheduleResponsiveLayoutPrune();
-  }
-  updatePanelInactiveOverlays();
+  } else scheduleResponsiveLayoutPrune();
+  if (updateInactiveOverlays) updatePanelInactiveOverlays();
 }
 
 function movePanelsToPool() {
@@ -32887,6 +32725,24 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
   return html;
+}
+
+// Virtual panels differ in their toolbars and bodies, but their frame is one contract. Keep the
+// head/tablist, overlay root, and toast identity here so a new panel cannot quietly omit one.
+function panelToastStackHtml(item, contentHtml = '') {
+  return `<div id="panel-toasts-${esc(item)}" class="panel-toast-stack">${contentHtml}</div>`;
+}
+
+function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsHtml = '', afterHeadHtml = '', bodyClass = '', bodyHtml = '', toastStack = true, toastContentHtml = '', bodyAttributes = '', afterBodyHtml = ''} = {}) {
+  const classes = ['panel-overlay-root', bodyClass].filter(Boolean).join(' ');
+  return `<div class="panel-head ${esc(headClass)}">
+    ${controlsHtml}
+    <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
+    ${headAfterTabsHtml}
+  </div>
+  ${afterHeadHtml}
+  <div class="${classes}"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
+  ${afterBodyHtml}`;
 }
 
 function paneTabDragSourceItem(itemOrGetter, event) {
@@ -34729,22 +34585,20 @@ function createSearchHistoryPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel search-history-panel';
   panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = `
-      <div class="panel-head search-history-panel-head">
-        ${virtualPanelControlsHtml(searchHistoryItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: searchHistoryItemId,
+    headClass: 'search-history-panel-head',
+    controlsHtml: virtualPanelControlsHtml(searchHistoryItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="search-history-body info-pane panel-overlay-root">
-        <div id="panel-toasts-${searchHistoryItemId}" class="panel-toast-stack"></div>
-        <div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'search-history-body info-pane',
+    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, searchHistoryItemId);
   bindSearchHistoryPanel(panel);
   return panel;
@@ -34763,6 +34617,14 @@ function conversationMessageShellHtml(options = {}) {
     <div class="conversation-message-role yoagent-message-role"><span>${esc(options.author || '')}</span>${timestamp}</div>
     ${body}${extras}
   </article>`;
+}
+
+function conversationSendButtonHtml({className = '', title = '', ariaLabel = title, disabled = false} = {}) {
+  return `<button type="submit" class="conversation-send conversation-send-primary ${esc(className)}"${disabled ? ' disabled' : ''} title="${esc(title)}" aria-label="${esc(ariaLabel)}"><svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+}
+
+function conversationComposerHtml({formClassName = '', formAttributes = '', inputHtml = '', leadingControlsHtml = '', trailingControlsHtml = '', sendHtml = ''} = {}) {
+  return `<form class="conversation-composer ${esc(formClassName)}"${formAttributes ? ` ${formAttributes}` : ''}>${inputHtml}<div class="conversation-composer-controls yoagent-chat-controls">${leadingControlsHtml}<span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>${trailingControlsHtml}${sendHtml}</div></form>`;
 }
 
 function conversationGraphemeBoundaries(text) {
@@ -34951,21 +34813,18 @@ function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel info-tree-panel';
   panel.id = panelDomId(infoItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="info-actions-bar info-tree-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: infoItemId,
+    controlsHtml: virtualPanelControlsHtml(infoItemId),
+    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div id="info-content" class="info-list info-tree-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+  });
   bindPanelShell(panel, infoItemId);
   bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
@@ -34976,20 +34835,17 @@ function createYoagentPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel yoagent-panel';
   panel.id = panelDomId(yoagentItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(yoagentItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="info-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: yoagentItemId,
+    controlsHtml: virtualPanelControlsHtml(yoagentItemId),
+    afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+          <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
-        <div id="yoagent-content" class="info-list yoagent-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+  });
   bindPanelShell(panel, yoagentItemId);
   bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
@@ -35002,11 +34858,24 @@ function createYoagentPanel() {
 }
 
 function bindYoagentPanel(panel) {
-  panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
-    event.preventDefault();
-    loadYoagentConversation({force: true, silent: true, scrollBottom: false});
-    loadYoagentJobs({silent: true, scrollBottom: false});
-    refreshActivitySummary({force: true});
+  bindActionDispatcher(panel, {
+    'yoagent-refresh': () => {
+      loadYoagentConversation({force: true, silent: true, scrollBottom: false});
+      loadYoagentJobs({silent: true, scrollBottom: false});
+      refreshActivitySummary({force: true});
+    },
+    'yoagent-clear': () => clearYoagentConversation(),
+    'yoagent-retry': () => {
+      const input = panel.querySelector('[data-yoagent-chat-input]');
+      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
+    },
+    'yoagent-chat-cancel': () => cancelActiveYoagentChatRequest(),
+    'yoagent-queued-cancel': (_event, target) => cancelQueuedYoagentChatMessage(target.dataset.yoagentQueuedCancel || ''),
+    'yoagent-agent-restart': (_event, target) => createNextSession(target.dataset.yolomuxAgentRestart || 'claude'),
+    'yoagent-action-send': (_event, target) => executeYoagentActionSend(target.dataset.yoagentActionSend || ''),
+    'yoagent-job-confirm': (_event, target) => confirmYoagentJob(target.dataset.yoagentJobConfirm || ''),
+    'yoagent-job-cancel': (_event, target) => cancelYoagentJob(target.dataset.yoagentJobCancel || ''),
+    'yoagent-wait-clear': (_event, target) => clearYoagentPendingWait(target.dataset.yoagentWaitClear || ''),
   });
   panel.addEventListener('submit', event => {
     const form = event.target.closest('[data-yoagent-chat-form]');
@@ -35018,62 +34887,6 @@ function bindYoagentPanel(panel) {
     yoagentChatState.draft = '';
     resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
-  });
-  panel.addEventListener('click', event => {
-    const clear = event.target.closest('[data-yoagent-clear]');
-    if (clear && panel.contains(clear)) {
-      event.preventDefault();
-      clearYoagentConversation();
-      return;
-    }
-    const retry = event.target.closest('[data-yoagent-retry]');
-    if (retry && panel.contains(retry)) {
-      event.preventDefault();
-      const input = panel.querySelector('[data-yoagent-chat-input]');
-      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
-      return;
-    }
-    const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
-    if (activeCancel && panel.contains(activeCancel)) {
-      event.preventDefault();
-      cancelActiveYoagentChatRequest();
-      return;
-    }
-    const queuedCancel = event.target.closest('[data-yoagent-queued-cancel]');
-    if (queuedCancel && panel.contains(queuedCancel)) {
-      event.preventDefault();
-      cancelQueuedYoagentChatMessage(queuedCancel.dataset.yoagentQueuedCancel || '');
-      return;
-    }
-    const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
-    if (agentRestart && panel.contains(agentRestart)) {
-      event.preventDefault();
-      createNextSession(agentRestart.dataset.yolomuxAgentRestart || 'claude');
-      return;
-    }
-    const actionSend = event.target.closest('[data-yoagent-action-send]');
-    if (actionSend && panel.contains(actionSend)) {
-      event.preventDefault();
-      executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
-      return;
-    }
-    const jobConfirm = event.target.closest('[data-yoagent-job-confirm]');
-    if (jobConfirm && panel.contains(jobConfirm)) {
-      event.preventDefault();
-      confirmYoagentJob(jobConfirm.dataset.yoagentJobConfirm || '');
-      return;
-    }
-    const jobCancel = event.target.closest('[data-yoagent-job-cancel]');
-    if (jobCancel && panel.contains(jobCancel)) {
-      event.preventDefault();
-      cancelYoagentJob(jobCancel.dataset.yoagentJobCancel || '');
-      return;
-    }
-    const waitClear = event.target.closest('[data-yoagent-wait-clear]');
-    if (waitClear && panel.contains(waitClear)) {
-      event.preventDefault();
-      clearYoagentPendingWait(waitClear.dataset.yoagentWaitClear || '');
-    }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
@@ -35642,7 +35455,7 @@ function yoagentActionCardHtml(action) {
   const transportLabel = yoagentActionTransportText(transport, target.transport_label);
   const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentChatState.busy;
   const button = canSend
-    ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
+    ? `<button type="button" class="yoagent-action-send" data-action="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
     : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
   const rows = [
     [t('common.sessionLabel'), target.session || action.session || ''],
@@ -35789,7 +35602,7 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-action="yoagent-wait-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
     return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
       <span class="yoagent-waiting-label yoagent-compact-label">${textWithMovingEllipsisHtml(label, 'yoagent-waiting-dots')}</span>
@@ -35875,8 +35688,8 @@ function yoagentJobRowsHtml() {
       error,
     ].filter(Boolean).join(' · ');
     const controls = [
-      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
-      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
+      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-action="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
+      canCancel ? `<button type="button" class="yoagent-job-cancel" data-action="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
     ].filter(Boolean).join('');
     return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
       <div class="yoagent-job-main">
@@ -35908,7 +35721,7 @@ function yoagentChatQueueHtml() {
     return `<li class="yoagent-chat-queue-item yoagent-compact-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
       <span class="yoagent-chat-queue-text yoagent-compact-label">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
+      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-action="yoagent-queued-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
@@ -36125,7 +35938,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!tmuxSignalAgentCommands.has(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
@@ -36405,25 +36218,15 @@ function yoagentChatHtml() {
     ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
   const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
-    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
+    ? `<button type="button" class="yoagent-chat-retry" data-action="yoagent-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
   const error = yoagentChatState.error ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
   const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
   const submitButton = yoagentChatState.busy
-    ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
-    : `<button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
-          <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>`;
-  const form = `<form class="yoagent-chat-form conversation-composer" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="conversation-composer-controls yoagent-chat-controls">
-        ${yoagentComposerControlsHtml(backendDisabled)}
-        <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
-        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>
-        ${submitButton}
-      </div>
-    </form>`;
+    ? `<button type="button" class="yoagent-chat-stop" data-action="yoagent-chat-cancel" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
+    : conversationSendButtonHtml({className: 'yoagent-chat-send', title: t('yoagent.ask'), disabled: !chatEnabled});
+  const form = conversationComposerHtml({formClassName: 'yoagent-chat-form', formAttributes: 'data-yoagent-chat-form', inputHtml: `<input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>`, leadingControlsHtml: yoagentComposerControlsHtml(backendDisabled), trailingControlsHtml: `<button type="button" class="yoagent-chat-clear" data-action="yoagent-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>`, sendHtml: submitButton});
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
@@ -36871,18 +36674,7 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // One global YO!chat timeline. SQLite and the authenticated API remain authoritative.
 
-const chatBrowserInstanceId = (() => {
-  const key = 'yolomux.chat.browserInstance';
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
-})();
+const chatBrowserInstanceId = sessionScopedId('yolomux.chat.browserInstance');
 const chatReaderId = chatBrowserInstanceId;
 const chatIntroductionGreetingKeys = Object.freeze([
   'chat.intro.greeting.hiThere',
@@ -37180,7 +36972,7 @@ function chatMessageMetadataHtml(message, timestamp, options = {}) {
 
 function chatMessageHtml(message, authorTones = new Map()) {
   const self = message.pending === true || String(message.username || '') === String(authUsername || '');
-  const state = message.failed ? `<button type="button" class="chat-message-retry" data-chat-retry="${esc(message.client_message_uuid)}">${esc(t('common.retry'))}</button>`
+  const state = message.failed ? `<button type="button" class="chat-message-retry" data-action="chat-retry" data-chat-retry="${esc(message.client_message_uuid)}">${esc(t('common.retry'))}</button>`
     : message.pending ? `<span class="chat-message-pending">${esc(t('yoagent.action.state.sending'))}</span>` : '';
   const timestamp = chatMessageTimestamp(message.created_at_utc);
   const agentMessage = chatMessageIsYoagent(message);
@@ -37458,11 +37250,13 @@ function createChatMediaPanel(item) {
   panel.className = 'panel info-panel chat-media-panel';
   panel.id = panelDomId(item);
   panel.dataset.chatMediaUrl = url;
-  panel.innerHTML = `<div class="panel-head">
-      ${virtualPanelControlsHtml(item)}
-      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-    </div>
-    <div class="info-pane panel-overlay-root yochat-media-pane">${chatMediaPanelBodyHtml(url)}</div>`;
+  panel.innerHTML = panelFrameHtml({
+    item,
+    controlsHtml: virtualPanelControlsHtml(item),
+    bodyClass: 'info-pane yochat-media-pane',
+    bodyHtml: chatMediaPanelBodyHtml(url),
+    toastStack: false,
+  });
   bindPanelShell(panel, item);
   installLinkContextMenu(panel);
   panel.addEventListener('click', event => {
@@ -37858,7 +37652,7 @@ function chatEmojiGridMove(grid, current, key) {
 function chatEmojiCategoriesHtml() {
   return chatEmojiCategories.map(([category, glyph]) => {
     const label = category === 'recent' ? t('palette.group.recent') : t(`chat.emoji.category.${category}`);
-    return `<button type="button" data-chat-emoji-category="${esc(category)}" class="${category === chatState.emojiCategory ? 'active' : ''}" aria-pressed="${category === chatState.emojiCategory ? 'true' : 'false'}" title="${esc(label)}" aria-label="${esc(label)}">${esc(glyph)}</button>`;
+    return `<button type="button" data-action="chat-emoji-category" data-chat-emoji-category="${esc(category)}" class="${category === chatState.emojiCategory ? 'active' : ''}" aria-pressed="${category === chatState.emojiCategory ? 'true' : 'false'}" title="${esc(label)}" aria-label="${esc(label)}">${esc(glyph)}</button>`;
   }).join('');
 }
 
@@ -37871,7 +37665,7 @@ function chatSearchResultsHtml() {
     const before = (context.before || []).at(-1);
     const after = (context.after || [])[0];
     const surrounding = [before, after].filter(Boolean).map(item => `<span>${esc(chatNotificationSnippet(item.body, 80))}</span>`).join('');
-    return `<button type="button" class="chat-search-result" data-chat-search-result="${esc(message.id)}">
+    return `<button type="button" class="chat-search-result" data-action="chat-search-result" data-chat-search-result="${esc(message.id)}">
       <span class="chat-search-result-head"><strong>${esc(message.username || '')}</strong><time data-chat-created-at="${esc(message.created_at_utc)}">${esc(chatMessageTimestamp(message.created_at_utc))}</time></span>
       <span>${body}</span><span class="chat-search-context">${surrounding}</span>
     </button>`;
@@ -37975,6 +37769,22 @@ function resetChatSearchState() {
 }
 
 function bindChatPanel(panel) {
+  bindActionDispatcher(panel, {
+    'chat-emoji-category': (_event, target) => {
+      chatState.emojiCategory = target.dataset.chatEmojiCategory || 'recent';
+      panel.querySelector('[data-chat-emoji-categories]').innerHTML = chatEmojiCategoriesHtml();
+      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, panel.querySelector('[data-chat-emoji-search]')?.value || ''));
+    },
+    'chat-emoji-picker-open': () => openChatEmojiPicker(),
+    'chat-emoji-picker-close': () => closeChatEmojiPicker(),
+    'chat-new-messages': () => chatScrollTimelineToBottom(panel),
+    'chat-search-close': () => closeChatSearch(),
+    'chat-search-result': (_event, target) => openChatMessageContext(target.dataset.chatSearchResult),
+    'chat-retry': (_event, target) => {
+      const pending = chatState.pending.get(target.dataset.chatRetry || '');
+      if (pending) sendChatPending(pending);
+    },
+  });
   panel.addEventListener('submit', event => {
     if (event.target.matches('[data-chat-form]')) {
       event.preventDefault();
@@ -38009,30 +37819,15 @@ function bindChatPanel(panel) {
       insertChatEmoji(cell.dataset.chatEmoji || '');
     }
   });
+  panel.addEventListener('click', () => chatAcknowledge());
   panel.addEventListener('click', event => {
-    chatAcknowledge();
     const media = event.target.closest('[data-chat-media-url]');
     if (media) {
       event.preventDefault();
       showChatMediaActions(media, event.clientX, event.clientY);
-      return;
     }
     const emoji = event.target.closest('[data-chat-emoji]');
     if (emoji) insertChatEmoji(emoji.dataset.chatEmoji || '');
-    else if (event.target.closest('[data-chat-emoji-category]')) {
-      chatState.emojiCategory = event.target.closest('[data-chat-emoji-category]').dataset.chatEmojiCategory || 'recent';
-      panel.querySelector('[data-chat-emoji-categories]').innerHTML = chatEmojiCategoriesHtml();
-      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, panel.querySelector('[data-chat-emoji-search]')?.value || ''));
-    }
-    else if (event.target.closest('[data-chat-emoji-button]')) openChatEmojiPicker();
-    else if (event.target.closest('[data-chat-emoji-close]')) closeChatEmojiPicker();
-    else if (event.target.closest('[data-chat-new-messages]')) chatScrollTimelineToBottom(panel);
-    else if (event.target.closest('[data-chat-search-close]')) closeChatSearch();
-    else if (event.target.closest('[data-chat-search-result]')) openChatMessageContext(event.target.closest('[data-chat-search-result]').dataset.chatSearchResult);
-    else if (event.target.closest('[data-chat-retry]')) {
-      const pending = chatState.pending.get(event.target.closest('[data-chat-retry]').dataset.chatRetry || '');
-      if (pending) sendChatPending(pending);
-    }
   });
   panel.addEventListener('contextmenu', event => {
     const media = event.target.closest('[data-chat-media-url]');
@@ -38114,40 +37909,28 @@ function createChatPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel chat-panel';
   panel.id = panelDomId(chatItemId);
-  panel.innerHTML = `
-    <div class="panel-head">
-      ${virtualPanelControlsHtml(chatItemId)}
-      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-    </div>
-    <div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+  panel.innerHTML = panelFrameHtml({
+    item: chatItemId,
+    controlsHtml: virtualPanelControlsHtml(chatItemId),
+    afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
-      <button type="button" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
-    </div>
-    <div class="info-pane panel-overlay-root chat-pane">
-      <div id="panel-toasts-${chatItemId}" class="panel-toast-stack"></div>
-      <div class="chat-history-search-split">
+      <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
+    </div>`,
+    bodyClass: 'info-pane chat-pane',
+    bodyHtml: `<div class="chat-history-search-split">
         <div class="chat-search-results" data-chat-search-results hidden></div>
         <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
       </div>
       <div class="a11y-only" data-chat-live role="status" aria-live="polite" aria-atomic="true"></div>
-      <button type="button" class="chat-new-messages" data-chat-new-messages hidden>${esc(t('chat.newMessages'))}</button>
+      <button type="button" class="chat-new-messages" data-action="chat-new-messages" data-chat-new-messages hidden>${esc(t('chat.newMessages'))}</button>
       <div class="chat-typing" data-chat-typing role="status" aria-live="polite" hidden></div>
-      <form class="conversation-composer yochat-composer" data-chat-form>
-        <textarea class="conversation-composer-input yochat-input" data-chat-input rows="2" placeholder="${esc(t('common.message'))}" aria-label="${esc(t('common.message'))}"></textarea>
-        <div class="conversation-composer-controls yoagent-chat-controls">
-          <button type="button" class="chat-emoji-button" data-chat-emoji-button aria-haspopup="dialog" aria-expanded="false" title="${esc(t('chat.emoji.open'))}" aria-label="${esc(t('chat.emoji.open'))}">☺</button>
-          <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
-          <button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send" title="${esc(t('yoagent.action.send'))}" aria-label="${esc(t('yoagent.action.send'))}">
-            <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </form>
+      ${conversationComposerHtml({formClassName: 'yochat-composer', formAttributes: 'data-chat-form', inputHtml: `<textarea class="conversation-composer-input yochat-input" data-chat-input rows="2" placeholder="${esc(t('common.message'))}" aria-label="${esc(t('common.message'))}"></textarea>`, leadingControlsHtml: `<button type="button" class="chat-emoji-button" data-action="chat-emoji-picker-open" data-chat-emoji-button aria-haspopup="dialog" aria-expanded="false" title="${esc(t('chat.emoji.open'))}" aria-label="${esc(t('chat.emoji.open'))}">☺</button>`, sendHtml: conversationSendButtonHtml({className: 'yoagent-chat-send', title: t('yoagent.action.send')})})}
       <div class="chat-emoji-picker" data-chat-emoji-picker role="dialog" aria-modal="true" aria-label="${esc(t('chat.emoji.label'))}" hidden>
-        <div class="chat-emoji-head"><input type="search" class="search-history-input" data-chat-emoji-search placeholder="${esc(t('common.search'))}" aria-label="${esc(t('common.search'))}"><button type="button" data-chat-emoji-close aria-label="${esc(t('common.close'))}">×</button></div>
+        <div class="chat-emoji-head"><input type="search" class="search-history-input" data-chat-emoji-search placeholder="${esc(t('common.search'))}" aria-label="${esc(t('common.search'))}"><button type="button" data-action="chat-emoji-picker-close" data-chat-emoji-close aria-label="${esc(t('common.close'))}">×</button></div>
         <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
         <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
-      </div>
-    </div>`;
+      </div>`,
+  });
   bindPanelShell(panel, chatItemId);
   bindChatPanel(panel);
   return panel;
@@ -38888,14 +38671,14 @@ function preferenceControlHtml(item, query = '') {
   }
   const resetDisabled = preferencesReadOnlyVisual || (!item.alwaysEnableReset && JSON.stringify(value) === JSON.stringify(defaultValue)) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
-    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('common.open'))}</button>`
+    ? `<button type="button" class="preferences-inline-action" data-action="preferences-yolo-rule-open" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('common.open'))}</button>`
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const example = typeof item.exampleHtml === 'function' ? item.exampleHtml(value) : String(item.exampleHtml || '');
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
 function preferenceNumberDisplayValue(item, value) {
@@ -38919,7 +38702,7 @@ function preferenceAdvisoryHtml(item, value) {
   return `<div class="preferences-setting-advisory">
     <span>${esc(t('pref.advisory.upload', {size: formatFileSize(uploadRsyncRecommendationBytes)}))}</span>
     <code>${esc(command)}</code>
-    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
+    <button type="button" class="preferences-inline-action" data-action="preferences-copy-text" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
   </div>`;
 }
 
@@ -38940,7 +38723,7 @@ function preferencesPanelHtml() {
       const count = visibleItems.length;
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.id)}">
-          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+          <button type="button" class="preferences-section-toggle" data-action="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
             ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
@@ -38956,9 +38739,9 @@ function preferencesPanelHtml() {
     : t('pref.reset.warning', {name: fileExplorerLabel()});
   const resetAction = preferencesResetConfirmVisible ? `
       <div class="preferences-reset-confirm">
-        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
-        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('common.cancel'))}</button>
-      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
+        <button type="button" class="preferences-reset-continue" data-action="preferences-reset-confirm" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
+        <button type="button" class="preferences-reset-cancel" data-action="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('common.cancel'))}</button>
+      </div>` : `<button type="button" class="preferences-reset-all" data-action="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
   const resetBlock = `
     <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
@@ -38970,7 +38753,7 @@ function preferencesPanelHtml() {
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
-      <button type="button" class="preferences-search-button" data-preferences-search-action>${esc(t('common.search'))}</button>
+      <button type="button" class="preferences-search-button" data-action="preferences-search" data-preferences-search-action>${esc(t('common.search'))}</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>
@@ -38980,22 +38763,20 @@ function createPreferencesPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
   panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: prefsItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelControlsHtml(prefsItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body panel-overlay-root">
-        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'preferences-body',
+    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
   return panel;
@@ -39057,7 +38838,7 @@ function renderPreferencesPanels(options = {}) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
+        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
       if (options.focusSearch !== true) {
         const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
@@ -39168,18 +38949,13 @@ function bindPreferencesPanel(panel) {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  panel.addEventListener('click', async event => {
-    const searchAction = event.target.closest('[data-preferences-search-action]');
-    if (searchAction && panel.contains(searchAction)) {
-      event.preventDefault();
+  bindActionDispatcher(panel, {
+    'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
       focusPreferencesSearch(panel);
-      return;
-    }
-    const resetAll = event.target.closest('[data-preferences-reset-all]');
-    if (resetAll && panel.contains(resetAll)) {
-      event.preventDefault();
+    },
+    'preferences-reset-all': () => {
       preferencesResetConfirmVisible = true;
       renderPreferencesPanels({force: true});
       setTimeout(() => {
@@ -39187,40 +38963,25 @@ function bindPreferencesPanel(panel) {
         confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
         confirm?.focus?.();
       }, 0);
-      return;
-    }
-    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
-    if (resetConfirm && panel.contains(resetConfirm)) {
-      event.preventDefault();
+    },
+    'preferences-reset-confirm': () => {
       preferencesResetConfirmVisible = false;
       resetAllPreferences();
-      return;
-    }
-    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
-    if (resetCancel && panel.contains(resetCancel)) {
-      event.preventDefault();
+    },
+    'preferences-reset-cancel': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
-      return;
-    }
-    const copyText = event.target.closest('[data-copy-text]');
-    if (copyText && panel.contains(copyText)) {
-      event.preventDefault();
-      copyTextToClipboard(copyText.dataset.copyText || '')
+    },
+    'preferences-copy-text': (_event, target) => {
+      copyTextToClipboard(target.dataset.copyText || '')
         .then(() => { statusEl.textContent = t('status.copiedText'); })
         .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
-      return;
-    }
-    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
-    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
-      event.preventDefault();
+    },
+    'preferences-yolo-rule-open': () => {
       preferencesResetConfirmVisible = false;
       openYoloRuleFile();
-      return;
-    }
-    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
-    if (sectionToggle && panel.contains(sectionToggle)) {
-      event.preventDefault();
+    },
+    'preferences-section-toggle': (_event, sectionToggle) => {
       preferencesResetConfirmVisible = false;
       const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
       if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
@@ -39238,12 +38999,8 @@ function bindPreferencesPanel(panel) {
         renderPreferencesPanels({force: true});
       }
       scheduleShareUiStatePublish();
-      return;
-    }
-    const reset = event.target.closest('[data-setting-reset]');
-    if (!reset || !panel.contains(reset)) return;
-    event.preventDefault();
-    resetPreference(reset.dataset.settingReset || '');
+    },
+    'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -39397,7 +39154,6 @@ const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'latency', labelKey: 'common.clientLatency', unit: 'ms', value: bucket => bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0, hasData: bucket => Number(bucket.latencyCount || 0) > 0},
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
-const jsDebugGraphClientMetricByKey = new Map(jsDebugGraphClientMetrics.map(metric => [metric.key, metric]));
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
@@ -39413,6 +39169,15 @@ const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
   idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
 });
+function debugGraphAgentStatusSeriesDef(key) {
+  return {
+    key,
+    labelKey: jsDebugAgentStatusSeriesLabelKeys[key],
+    unit: 'count',
+    value: bucket => jsDebugAgentStatusBucketValueGetters[key](bucket),
+    hasData: bucket => Number(bucket?.agentActivitySamples || 0) > 0,
+  };
+}
 const jsDebugGraphAgentTokenColors = Object.freeze([
   'var(--js-debug-agent-token-cyan)',
   'var(--js-debug-agent-token-orange)',
@@ -39454,11 +39219,11 @@ const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
-  ...jsDebugGraphClientMetrics.map(metric => ({...metric, labelKey: 'debug.graph.series.thisClient', metricLabelKey: metric.labelKey, clientMetric: true, metricKey: metric.key, clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
-  ...jsDebugAgentStatusSeriesKeys.map(key => ({key, labelKey: jsDebugAgentStatusSeriesLabelKeys[key], unit: 'count'})),
-  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute'},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid'},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid'},
+  ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
+  ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
+  {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
@@ -41022,24 +40787,6 @@ function debugGraphDisplayedSummary(group, buckets) {
   };
 }
 
-function debugGraphBucketValue(bucket, key) {
-  if (key === 'api') return debugGraphBucketRate(bucket, bucket.apiCount);
-  if (key === 'sse') return debugGraphBucketRate(bucket, bucket.sseCount);
-  if (key === 'latency') return bucket.latencyCount ? bucket.latencyTotalMs / bucket.latencyCount : 0;
-  if (key === 'bandwidth') return debugGraphBucketRate(bucket, bucket.bandwidthBytes);
-  if (jsDebugAgentStatusBucketValueGetters[key]) return jsDebugAgentStatusBucketValueGetters[key](bucket);
-  if (key === 'tokensPerAgent') return bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0;
-  if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
-    const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
-    const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return item ? debugGraphAgentTokenBucketValue(bucket, item) : 0;
-  }
-  if (key === 'cpu') return bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0;
-  if (key === 'systemCpu') return bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0;
-  if (key === 'systemMemory') return bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0;
-  return 0;
-}
-
 function debugGraphThisClientMetricBucket(bucket, metric) {
   if (!bucket || !metric) return null;
   if (bucket.clients instanceof Map) {
@@ -41066,6 +40813,16 @@ function debugGraphOtherClientMetricAverage(bucket, metric) {
   return clientBuckets.reduce((sum, clientBucket) => sum + metric.value(clientBucket), 0) / clientBuckets.length;
 }
 
+function debugGraphClientSeriesDef(metric, {key = metric.key, labelKey, clientId, clientAggregate, clientLinePattern, color = ''}) {
+  const otherClients = clientAggregate === jsDebugGraphOtherClientsAverageAggregate;
+  return {
+    ...metric, key, labelKey, metricLabelKey: metric.labelKey, cssKey: metric.key, clientMetric: true, metricKey: metric.key, clientId, clientAggregate, clientLinePattern,
+    ...(color ? {color} : {}),
+    value: bucket => otherClients ? debugGraphOtherClientMetricAverage(bucket, metric) : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return clientBucket ? metric.value(clientBucket) : 0; })(),
+    hasData: bucket => otherClients ? debugGraphOtherClientMetricBuckets(bucket, metric).length > 0 : (() => { const clientBucket = debugGraphThisClientMetricBucket(bucket, metric); return Boolean(clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket))); })(),
+  };
+}
+
 function debugGraphProcessCpuBucketValue(bucket, processId) {
   const process = bucket?.servers instanceof Map ? bucket.servers.get(processId) : null;
   return Number(process?.cpuCount || 0) > 0
@@ -41073,69 +40830,29 @@ function debugGraphProcessCpuBucketValue(bucket, processId) {
     : 0;
 }
 
+function debugGraphProcessCpuBucketHasData(bucket, processId) {
+  return Number(bucket?.servers instanceof Map ? bucket.servers.get(processId)?.cpuCount : 0) > 0;
+}
+
+function debugGraphHostMetricBucketItem(bucket, series) {
+  const mapName = series.hostProcessId
+    ? (series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses')
+    : 'gpuDevices';
+  return bucket?.hostMetrics?.[mapName] instanceof Map ? bucket.hostMetrics[mapName].get(series.hostProcessId || series.gpuDeviceId) : null;
+}
+
 function debugGraphHostMetricBucketValue(bucket, series) {
-  const host = bucket?.hostMetrics;
-  if (!host) return 0;
+  const item = debugGraphHostMetricBucketItem(bucket, series);
   if (series.hostProcessId) {
-    const mapName = series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
-    const item = host[mapName] instanceof Map ? host[mapName].get(series.hostProcessId) : null;
-    const total = series.hostMetric === 'memory' || series.hostMetric === 'gpuMemory'
-      ? Number(item?.totalBytes || 0)
-      : Number(item?.totalPercent || 0);
+    const total = series.hostMetric === 'memory' || series.hostMetric === 'gpuMemory' ? Number(item?.totalBytes || 0) : Number(item?.totalPercent || 0);
     return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
   }
-  const item = host.gpuDevices instanceof Map ? host.gpuDevices.get(series.gpuDeviceId) : null;
   const total = series.hostMetric === 'gpuUtil' ? Number(item?.utilTotalPercent || 0) : Number(item?.memoryUsedTotalBytes || 0);
   return Number(item?.samples || 0) > 0 ? total / Number(item.samples || 1) : 0;
 }
 
-function debugGraphSeriesBucketValue(bucket, series) {
-  if (series?.clientMetric === true) {
-    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return metric ? debugGraphOtherClientMetricAverage(bucket, metric) : 0;
-    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
-    return metric && clientBucket ? metric.value(clientBucket) : 0;
-  }
-  if (series?.processCpu === true) return debugGraphProcessCpuBucketValue(bucket, series.processId);
-  if (series?.hostMetric) return debugGraphHostMetricBucketValue(bucket, series);
-  return debugGraphBucketValue(bucket, series?.key);
-}
-
-function debugGraphBucketHasSeriesData(bucket, key) {
-  if (!bucket) return false;
-  if (key === 'latency') return Number(bucket.latencyCount || 0) > 0;
-  if (jsDebugAgentStatusSeriesKeys.includes(key)) return Number(bucket.agentActivitySamples || 0) > 0;
-  if (key === 'tokensPerAgent') return Number(bucket.agentTokenSamples || 0) > 0;
-  if (String(key || '').startsWith(jsDebugGraphAgentTokenSeriesPrefix)) {
-    const tokenKey = String(key).slice(jsDebugGraphAgentTokenSeriesPrefix.length);
-    const item = bucket.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(tokenKey) : null;
-    return Number(item?.samples || 0) > 0 || Number(item?.tokens || 0) > 0;
-  }
-  if (key === 'cpu') return Number(bucket.cpuCount || 0) > 0;
-  if (key === 'systemCpu') return Number(bucket.systemCpuCount || 0) > 0;
-  if (key === 'systemMemory') return Number(bucket.hostMetrics?.systemMemoryCount || 0) > 0;
-  return debugGraphBucketValue(bucket, key) > 0;
-}
-
-function debugGraphSeriesBucketHasData(bucket, series) {
-  if (series?.clientMetric === true) {
-    const metric = jsDebugGraphClientMetricByKey.get(series.metricKey);
-    if (series.clientAggregate === jsDebugGraphOtherClientsAverageAggregate) return debugGraphOtherClientMetricBuckets(bucket, metric).length > 0;
-    const clientBucket = debugGraphThisClientMetricBucket(bucket, metric);
-    return Boolean(metric && clientBucket && (metric.key !== 'latency' || metric.hasData(clientBucket)));
-  }
-  if (series?.processCpu === true) {
-    const process = bucket?.servers instanceof Map ? bucket.servers.get(series.processId) : null;
-    return Number(process?.cpuCount || 0) > 0;
-  }
-  if (series?.hostMetric) {
-    if (series.hostProcessId) {
-      const mapName = series.hostMetric === 'cpu' ? 'cpuProcesses' : series.hostMetric === 'memory' ? 'memoryProcesses' : series.hostMetric === 'gpuUtil' ? 'gpuUtilProcesses' : 'gpuMemoryProcesses';
-      return Number(bucket?.hostMetrics?.[mapName] instanceof Map ? bucket.hostMetrics[mapName].get(series.hostProcessId)?.samples : 0) > 0;
-    }
-    return Number(bucket?.hostMetrics?.gpuDevices instanceof Map ? bucket.hostMetrics.gpuDevices.get(series.gpuDeviceId)?.samples : 0) > 0;
-  }
-  return debugGraphBucketHasSeriesData(bucket, series?.key);
+function debugGraphHostMetricBucketHasData(bucket, series) {
+  return Number(debugGraphHostMetricBucketItem(bucket, series)?.samples || 0) > 0;
 }
 
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
@@ -41420,6 +41137,14 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
       agentTokenKey: key,
       agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
+      value: bucket => {
+        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+        return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+      },
+      hasData: bucket => {
+        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+        return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+      },
     }));
   return agentSeries;
 }
@@ -41427,14 +41152,9 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
 function debugGraphClientMetricSeriesDefs(buckets) {
   return jsDebugGraphClientMetrics
     .filter(metric => buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, metric).length > 0))
-    .map(metric => ({
-      ...metric,
+    .map(metric => debugGraphClientSeriesDef(metric, {
       key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
       labelKey: 'debug.graph.series.otherClientsAverage',
-      metricLabelKey: metric.labelKey,
-      cssKey: metric.key,
-      clientMetric: true,
-      metricKey: metric.key,
       clientId: jsDebugGraphOtherClientsAverageId,
       clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
       clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
@@ -41453,7 +41173,11 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current};
+  const fallbackSelf = {
+    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
+    value: bucket => bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0,
+    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
+  };
   if (!processes.size) return [fallbackSelf];
   let peerIndex = 0;
   const definitions = [...processes.entries()]
@@ -41474,6 +41198,8 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         processId,
         linePattern: current ? 'solid' : 'dot',
         color,
+        value: bucket => debugGraphProcessCpuBucketValue(bucket, processId),
+        hasData: bucket => debugGraphProcessCpuBucketHasData(bucket, processId),
       };
     });
   return processes.has(currentProcessId) ? definitions : [fallbackSelf, ...definitions];
@@ -41498,6 +41224,8 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       hostMetric: metric,
       gpuDeviceId: deviceId,
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
+      value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
+      hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
     }));
 }
 
@@ -41514,8 +41242,8 @@ function debugGraphSeriesData(buckets) {
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const values = buckets.map(bucket => debugGraphSeriesBucketValue(bucket, def));
-    const hasDataValues = buckets.map(bucket => debugGraphSeriesBucketHasData(bucket, def));
+    const values = buckets.map(bucket => def.value(bucket));
+    const hasDataValues = buckets.map(bucket => def.hasData(bucket));
     const sampleValues = values.filter((_value, index) => hasDataValues[index]);
     const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
     const samples = sampleValues.length;
@@ -41778,7 +41506,7 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
     const dataRanges = debugGraphBucketRanges(buckets)
       .filter(item => hasCurrentClientHeartbeat
         ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
-        : items.some(series => debugGraphSeriesBucketHasData(item.bucket, series)))
+        : items.some(series => series.hasData(item.bucket)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
     return debugGraphComplementTimeRanges([...dataRanges, ...disconnectedRanges], domain)
@@ -42730,22 +42458,20 @@ function createDebugPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel js-debug-panel';
   panel.id = panelDomId(debugPaneItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(debugPaneItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: debugPaneItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelControlsHtml(debugPaneItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body js-debug-body panel-overlay-root">
-        <div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'preferences-body js-debug-body',
+    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, debugPaneItemId);
   bindDebugPanel(panel);
   return panel;
@@ -42757,7 +42483,7 @@ function renderDebugPanels(options = {}) {
     const body = panel.querySelector('.js-debug-body');
     refreshDebugPanelFromEvents(panel, options);
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      body.innerHTML = `<div id="panel-toasts-${debugPaneItemId}" class="panel-toast-stack"></div><div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
       refreshDebugPanelFromEvents(panel, {force: true});
     }
     bindDebugPanel(panel);
@@ -45873,10 +45599,10 @@ function createFileExplorerPanel() {
   panel.id = panelDomId(fileExplorerItemId);
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerLabel();
-  panel.innerHTML = `
-      <div class="panel-head file-explorer-head">
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-        <div class="file-explorer-toolbar">
+  panel.innerHTML = panelFrameHtml({
+    item: fileExplorerItemId,
+    headClass: 'file-explorer-head',
+    headAfterTabsHtml: `<div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             ${fileExplorerModeSwitcherHtml()}
             ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
@@ -45909,14 +45635,12 @@ function createFileExplorerPanel() {
               <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>
             </span>
           </div>
-        </div>
-      </div>
-      <div class="file-explorer-pane panel-overlay-root">
-        <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
-        <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+        </div>`,
+    bodyClass: 'file-explorer-pane',
+    bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
-        <div class="file-explorer-changes-panel" data-file-explorer-changes></div>
-      </div>`;
+        <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
+  });
   bindPanelShell(panel, fileExplorerItemId);
   bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
@@ -46384,9 +46108,10 @@ function createFileEditorPanel(item) {
   panel.className = 'panel file-editor-panel';
   panel.dataset.filePath = path;
   panel.dataset.layoutItem = item;
-  panel.innerHTML = `
-      <div class="panel-head file-editor-panel-head">
-        <div class="file-editor-panel-actions file-editor-frame-actions">
+  panel.innerHTML = panelFrameHtml({
+    item,
+    headClass: 'file-editor-panel-head',
+    controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -46397,13 +46122,10 @@ function createFileEditorPanel(item) {
             closeTitle: t('editor.closePane'),
             closeLabel: t('editor.closePane'),
           })}
-        </div>
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      ${fileEditorToolbarHtml(item)}
-      <div class="file-editor-panel-body panel-overlay-root">
-        <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
-        <div class="file-editor-content">
+        </div>`,
+    afterHeadHtml: fileEditorToolbarHtml(item),
+    bodyClass: 'file-editor-panel-body',
+    bodyHtml: `<div class="file-editor-content">
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
@@ -46417,8 +46139,8 @@ function createFileEditorPanel(item) {
           </form>
           <div class="file-editor-image-panel" hidden></div>
         </div>
-        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>
-      </div>`;
+        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>`,
+  });
   bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
@@ -47317,17 +47039,7 @@ function markdownImageFallbackNode(path, label = '') {
   const text = document.createElement('span');
   text.textContent = label || t('preview.markdown.imageUnavailable', {path});
   node.appendChild(text);
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = t('common.open');
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = t('common.download');
-    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
-  }
+  node.append(...previewFileActionLinks(path, {leadingSeparator: ' '}));
   return node;
 }
 
@@ -48945,17 +48657,27 @@ function renderPdfPreviewInto(container, path) {
   title.textContent = t('preview.pdf.title');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
+  detail.append(...previewFileActionLinks(path));
+  fallback.append(title, detail);
+  container.replaceChildren(frame, fallback);
+}
+
+function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = '', target = '_blank'} = {}) {
+  if (!path) return [];
   const open = document.createElement('a');
   open.href = rawFileUrl(path);
-  open.target = '_blank';
+  open.target = target;
   open.rel = 'noopener noreferrer';
   open.textContent = t('common.open');
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
   download.textContent = t('common.download');
-  detail.append(open, document.createTextNode(' · '), download);
-  fallback.append(title, detail);
-  container.replaceChildren(frame, fallback);
+  return [
+    ...(leadingSeparator ? [document.createTextNode(leadingSeparator)] : []),
+    open,
+    document.createTextNode(separator),
+    download,
+  ];
 }
 
 function previewActionFallbackNode(titleText, detailText, path) {
@@ -48967,17 +48689,7 @@ function previewActionFallbackNode(titleText, detailText, path) {
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
   detail.append(document.createTextNode(detailText || ''));
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = t('common.open');
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = t('common.download');
-    detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
-  }
+  detail.append(...previewFileActionLinks(path, {leadingSeparator: detailText ? ' · ' : ''}));
   fallback.append(title, detail);
   return fallback;
 }
@@ -55581,18 +55293,7 @@ function applyShareTerminalDimensionsState(value = []) {
 }
 
 function applyShareEditorState(editor = {}) {
-  if (!editor || typeof editor !== 'object') return;
-  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
-  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
-  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
-  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
-  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
-  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
-  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
-  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
-  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  const modes = Array.isArray(editor.modes) ? editor.modes : [];
-  for (const entry of modes) shareApplyEditorModeEntry(entry);
+  applyEditorStateFields(editor, {applyModeEntry: shareApplyEditorModeEntry});
   applyCssSettings();
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true, refreshEditors: true});
   applyEditorThemeMode({refreshEditors: true});
@@ -57917,48 +57618,43 @@ function installShareReadonlyInteractionBlocker() {
 function paneFrameControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"`;
+  const unavailableTitle = t('tab.unavailableFor', {name: unavailableLabel});
   const controls = [];
+  const add = spec => controls.push(toolbarButtonHtml({
+    className: ['tab', spec.className, spec.platformKind ? platformWindowControlClass(spec.platformKind) : '', spec.active ? 'active' : ''].filter(Boolean).join(' '),
+    dataset: disabled ? {} : spec.dataset,
+    disabled,
+    hidden: spec.hidden === true,
+    title: disabled ? unavailableTitle : spec.title,
+    ariaLabel: spec.label,
+    pressed: spec.pressed,
+    html: spec.html,
+  }));
   const includeActions = options.actions ?? isTmuxSession(session);
   const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = options.expand !== false;
   const includePopout = options.popout === true;
   if (includeActions) {
-    controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs(t('common.sessionActions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('common.sessionActions'))}" aria-label="${esc(t('common.sessionActions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+    add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
   }
   if (includeDetails) {
     const detailsLabel = t('pane.details.hide');
-    controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+    add({className: 'panel-detail-toggle pane-detail-toggle', platformKind: 'minimize', dataset: {detailToggle: session}, title: detailsLabel, label: detailsLabel, pressed: true, active: true});
   }
   if (includePopout) {
-    controls.push(disabled
-      ? `<button class="tab pane-popout" ${disabledAttrs(t('tab.popout'))}></button>`
-      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="${esc(t('tab.popout'))}" aria-label="${esc(t('tab.popout'))}"></button>`);
+    add({className: 'pane-popout', dataset: {panePopout: session}, title: t('tab.popout'), label: t('tab.popout')});
   }
   if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
-      : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
+    add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
   if (includeMinimize) {
-    controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
   }
   if (options.close) {
     const closeLabel = options.closeLabel || t('pane.closeTab');
     const closeTitle = options.closeTitle || closeLabel;
-    const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = `data-pane-close="${esc(session)}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
-      : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+    add({className: ['pane-close', options.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
   }
   return controls.join('');
 }
@@ -58554,12 +58250,10 @@ function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
   panel.id = panelDomId(session);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: session,
+    controlsHtml: panelControlsHtml(session),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
@@ -58568,15 +58262,12 @@ function createPanel(session) {
         ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMetadataState.payload.sessions?.[session], {infoBar: true}) : ''}
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
-      </div>
-      <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
-        <div id="term-${session}" class="terminal"></div>
-        ${terminalMobileAccessoryHtml(session)}
-        <div id="panel-toasts-${session}" class="panel-toast-stack">
-          <div id="upload-${session}" class="upload-result toast" hidden></div>
-        </div>
-      </div>
-      <div id="transcript-pane-${session}" class="tab-pane">
+      </div>`,
+    bodyClass: 'tab-pane active',
+    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
@@ -58595,7 +58286,8 @@ function createPanel(session) {
           <div class="transcript-head">${esc(t('events.title'))}</div>
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
-      </div>`;
+      </div>`,
+  });
   bindPanelShell(panel, session);
   bindPanelControls(panel, session);
   return panel;
@@ -59591,29 +59283,7 @@ function infoFilteredRecords(records = [], query = infoSearch) {
 }
 
 function infoSearchHighlightHtml(value, query = infoSearch) {
-  const text = String(value ?? '');
-  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return esc(text);
-  const indexes = new Set();
-  for (const token of tokens) {
-    const match = fuzzySubsequenceMatch(token, text);
-    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
-  }
-  if (!indexes.size) return esc(text);
-  const chars = Array.from(text);
-  const parts = [];
-  let index = 0;
-  while (index < chars.length) {
-    if (!indexes.has(index)) {
-      parts.push(esc(chars[index]));
-      index += 1;
-      continue;
-    }
-    const start = index;
-    while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="info-tree-search-match">${esc(chars.slice(start, index).join(''))}</mark>`);
-  }
-  return parts.join('');
+  return fuzzyHighlightHtml(query, value, {markClass: 'info-tree-search-match'});
 }
 
 function infoRecordSearchValueHtml(record = {}, kind = '', value = '', query = infoSearch) {

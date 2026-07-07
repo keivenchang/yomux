@@ -462,17 +462,7 @@ function markdownImageFallbackNode(path, label = '') {
   const text = document.createElement('span');
   text.textContent = label || t('preview.markdown.imageUnavailable', {path});
   node.appendChild(text);
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = t('common.open');
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = t('common.download');
-    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
-  }
+  node.append(...previewFileActionLinks(path, {leadingSeparator: ' '}));
   return node;
 }
 

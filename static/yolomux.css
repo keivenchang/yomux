@@ -2338,20 +2338,27 @@ body.app-topbar-touch-compact .app-menu-command-row .app-menu-command,
 body.app-topbar-touch-compact .app-menu-command-row-label {
   min-height: 44px;
 }
-/* Shell choices are peers, not full menu rows. Keep the explicit command names compact and let a
-   narrow phone scroll this one row horizontally instead of clipping the final choices. */
+/* Shell choices are explicit commands, not a second toolbar. Keep their desktop treatment close to
+   text so the launch row does not spend width on pill borders; the touch override below restores
+   a usable hit target without bringing back separators. */
 .app-menu-command-row--shells {
-  gap: var(--space-3);
-  padding-block: var(--space-1);
+  gap: var(--space-2);
   scrollbar-width: thin;
+}
+.app-menu-command-row--shells .app-menu-command-row-label {
+  gap: var(--space-2);
+  padding-inline: var(--space-3);
+}
+.app-menu-command-row--shells .app-menu-command-row-label .app-menu-icon {
+  min-width: auto;
 }
 .app-menu-command-row--shells .app-menu-command {
   min-width: 0;
-  min-height: 26px;
-  padding-inline: var(--space-4);
-  border-color: var(--sep-muted);
-  border-radius: var(--radius-pill);
-  background: var(--panel2);
+  min-height: 24px;
+  padding-inline: var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
 .app-menu-command-row--shells .app-menu-command:hover:not(:disabled),
 .app-menu-command-row--shells .app-menu-command:focus-visible {
@@ -12388,25 +12395,22 @@ body.theme-light .file-tree-children::before {
   --editor-toolbar-control-hover-bg: color-mix(in srgb, var(--editor-scheme-line) 38%, var(--editor-toolbar-control-bg));
   --editor-toolbar-control-hover-border: color-mix(in srgb, var(--editor-scheme-muted) 70%, var(--editor-toolbar-control-border));
 }
-.file-editor-html-preview {
-  display: block;
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-  height: 100%;
-  border: 0;
-  background: var(--document-preview-bg);
-  color-scheme: light;
-}
+.file-editor-html-preview,
 .file-editor-pdf-preview {
   display: block;
   flex: 1 1 auto;
   width: 100%;
-  min-height: 420px;
-  height: min(72vh, 100%);
   border: 0;
   background: var(--document-preview-bg);
   color-scheme: light;
+}
+.file-editor-html-preview {
+  min-height: 0;
+  height: 100%;
+}
+.file-editor-pdf-preview {
+  min-height: 420px;
+  height: min(72vh, 100%);
 }
 .html-preview-body,
 .pdf-preview-body {

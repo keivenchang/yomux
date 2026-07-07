@@ -14,6 +14,14 @@ function conversationMessageShellHtml(options = {}) {
   </article>`;
 }
 
+function conversationSendButtonHtml({className = '', title = '', ariaLabel = title, disabled = false} = {}) {
+  return `<button type="submit" class="conversation-send conversation-send-primary ${esc(className)}"${disabled ? ' disabled' : ''} title="${esc(title)}" aria-label="${esc(ariaLabel)}"><svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+}
+
+function conversationComposerHtml({formClassName = '', formAttributes = '', inputHtml = '', leadingControlsHtml = '', trailingControlsHtml = '', sendHtml = ''} = {}) {
+  return `<form class="conversation-composer ${esc(formClassName)}"${formAttributes ? ` ${formAttributes}` : ''}>${inputHtml}<div class="conversation-composer-controls yoagent-chat-controls">${leadingControlsHtml}<span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>${trailingControlsHtml}${sendHtml}</div></form>`;
+}
+
 function conversationGraphemeBoundaries(text) {
   const value = String(text || '');
   if (typeof Intl?.Segmenter !== 'function') return Array.from({length: value.length + 1}, (_item, index) => index);

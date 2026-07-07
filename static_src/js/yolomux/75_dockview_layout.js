@@ -685,80 +685,19 @@ function dockviewFileDropIntentForEvent(event) {
 }
 
 function dockviewHandleFileDragOver(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    event.preventDefault();
-    event.stopPropagation();
-    if (!paneSwapIntentAllowed(intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'move';
-    showDropPreview(intent);
-    return;
-  }
-  const payload = fileDragPayload(event);
-  if (payload?.path) {
-    const intent = dockviewFileDropIntentForEvent(event);
-    if (!intent) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (!fileDropIntentAllowsPayload(payload, intent)) {
-      event.dataTransfer.dropEffect = 'none';
-      clearDropPreview();
-      return;
-    }
-    event.dataTransfer.dropEffect = 'copy';
-    showDropPreview(intent);
-    return;
-  }
-  const tabPayload = dragPayload(event);
-  if (!tabPayload?.session) return;
-  const intent = dockviewGroupDropIntentForEvent(event);
-  if (!intent) return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (!dropIntentAllowsSession(tabPayload.session, intent)) {
-    event.dataTransfer.dropEffect = 'none';
-    clearDropPreview();
-    return;
-  }
-  event.dataTransfer.dropEffect = 'move';
-  showDropPreview(intent);
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: dockviewFileDropIntentForEvent,
+    intentForSession: dockviewGroupDropIntentForEvent,
+    ignoreMissingIntent: true,
+  }));
 }
 
 function dockviewHandleFileDrop(event) {
-  const panePayload = paneDragPayload(event);
-  if (panePayload?.slot) {
-    event.preventDefault();
-    event.stopPropagation();
-    const intent = paneSwapIntentForEvent(event, panePayload.slot);
-    clearDropPreview();
-    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-    return;
-  }
-  const payload = fileDragPayload(event);
-  if (payload?.path) {
-    const intent = dockviewFileDropIntentForEvent(event);
-    if (!intent) return;
-    event.preventDefault();
-    event.stopPropagation();
-    clearDropPreview();
-    if (!fileDropIntentAllowsPayload(payload, intent)) return;
-    openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
-    return;
-  }
-  const tabPayload = dragPayload(event);
-  if (!tabPayload?.session) return;
-  const intent = dockviewGroupDropIntentForEvent(event);
-  if (!intent) return;
-  event.preventDefault();
-  event.stopPropagation();
-  clearDropPreview();
-  if (!dropIntentAllowsSession(tabPayload.session, intent)) return;
-  dropSessionWithIntent(tabPayload.session, intent, tabPayload.sourceSlot || slotForSession(tabPayload.session));
+  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+    intentForFile: dockviewFileDropIntentForEvent,
+    intentForSession: dockviewGroupDropIntentForEvent,
+    ignoreMissingIntent: true,
+  }), {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -1144,17 +1083,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   }
   dockviewRefreshTabs();
   dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
-  syncPanelVisibility(previousActive);
-  renderAutoApproveButtons();
-  scheduleAgentWindowActivityAnimationSync();
-  if (options.prune === false) {
-    if (responsiveLayoutPruneTimer) {
-      clearTimeout(responsiveLayoutPruneTimer);
-      responsiveLayoutPruneTimer = null;
-    }
-  } else {
-    scheduleResponsiveLayoutPrune();
-  }
+  finishPanelLayoutRender(previousActive, options);
   return true;
 }
 

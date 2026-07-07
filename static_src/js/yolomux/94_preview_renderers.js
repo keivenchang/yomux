@@ -869,17 +869,27 @@ function renderPdfPreviewInto(container, path) {
   title.textContent = t('preview.pdf.title');
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
+  detail.append(...previewFileActionLinks(path));
+  fallback.append(title, detail);
+  container.replaceChildren(frame, fallback);
+}
+
+function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = '', target = '_blank'} = {}) {
+  if (!path) return [];
   const open = document.createElement('a');
   open.href = rawFileUrl(path);
-  open.target = '_blank';
+  open.target = target;
   open.rel = 'noopener noreferrer';
   open.textContent = t('common.open');
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
   download.textContent = t('common.download');
-  detail.append(open, document.createTextNode(' · '), download);
-  fallback.append(title, detail);
-  container.replaceChildren(frame, fallback);
+  return [
+    ...(leadingSeparator ? [document.createTextNode(leadingSeparator)] : []),
+    open,
+    document.createTextNode(separator),
+    download,
+  ];
 }
 
 function previewActionFallbackNode(titleText, detailText, path) {
@@ -891,17 +901,7 @@ function previewActionFallbackNode(titleText, detailText, path) {
   const detail = document.createElement('div');
   detail.className = 'file-editor-empty-detail';
   detail.append(document.createTextNode(detailText || ''));
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = t('common.open');
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = t('common.download');
-    detail.append(document.createTextNode(detailText ? ' · ' : ''), open, document.createTextNode(' · '), download);
-  }
+  detail.append(...previewFileActionLinks(path, {leadingSeparator: detailText ? ' · ' : ''}));
   fallback.append(title, detail);
   return fallback;
 }

@@ -2,18 +2,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // One global YO!chat timeline. SQLite and the authenticated API remain authoritative.
 
-const chatBrowserInstanceId = (() => {
-  const key = 'yolomux.chat.browserInstance';
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
-})();
+const chatBrowserInstanceId = sessionScopedId('yolomux.chat.browserInstance');
 const chatReaderId = chatBrowserInstanceId;
 const chatIntroductionGreetingKeys = Object.freeze([
   'chat.intro.greeting.hiThere',
@@ -311,7 +300,7 @@ function chatMessageMetadataHtml(message, timestamp, options = {}) {
 
 function chatMessageHtml(message, authorTones = new Map()) {
   const self = message.pending === true || String(message.username || '') === String(authUsername || '');
-  const state = message.failed ? `<button type="button" class="chat-message-retry" data-chat-retry="${esc(message.client_message_uuid)}">${esc(t('common.retry'))}</button>`
+  const state = message.failed ? `<button type="button" class="chat-message-retry" data-action="chat-retry" data-chat-retry="${esc(message.client_message_uuid)}">${esc(t('common.retry'))}</button>`
     : message.pending ? `<span class="chat-message-pending">${esc(t('yoagent.action.state.sending'))}</span>` : '';
   const timestamp = chatMessageTimestamp(message.created_at_utc);
   const agentMessage = chatMessageIsYoagent(message);
@@ -589,11 +578,13 @@ function createChatMediaPanel(item) {
   panel.className = 'panel info-panel chat-media-panel';
   panel.id = panelDomId(item);
   panel.dataset.chatMediaUrl = url;
-  panel.innerHTML = `<div class="panel-head">
-      ${virtualPanelControlsHtml(item)}
-      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-    </div>
-    <div class="info-pane panel-overlay-root yochat-media-pane">${chatMediaPanelBodyHtml(url)}</div>`;
+  panel.innerHTML = panelFrameHtml({
+    item,
+    controlsHtml: virtualPanelControlsHtml(item),
+    bodyClass: 'info-pane yochat-media-pane',
+    bodyHtml: chatMediaPanelBodyHtml(url),
+    toastStack: false,
+  });
   bindPanelShell(panel, item);
   installLinkContextMenu(panel);
   panel.addEventListener('click', event => {
@@ -989,7 +980,7 @@ function chatEmojiGridMove(grid, current, key) {
 function chatEmojiCategoriesHtml() {
   return chatEmojiCategories.map(([category, glyph]) => {
     const label = category === 'recent' ? t('palette.group.recent') : t(`chat.emoji.category.${category}`);
-    return `<button type="button" data-chat-emoji-category="${esc(category)}" class="${category === chatState.emojiCategory ? 'active' : ''}" aria-pressed="${category === chatState.emojiCategory ? 'true' : 'false'}" title="${esc(label)}" aria-label="${esc(label)}">${esc(glyph)}</button>`;
+    return `<button type="button" data-action="chat-emoji-category" data-chat-emoji-category="${esc(category)}" class="${category === chatState.emojiCategory ? 'active' : ''}" aria-pressed="${category === chatState.emojiCategory ? 'true' : 'false'}" title="${esc(label)}" aria-label="${esc(label)}">${esc(glyph)}</button>`;
   }).join('');
 }
 
@@ -1002,7 +993,7 @@ function chatSearchResultsHtml() {
     const before = (context.before || []).at(-1);
     const after = (context.after || [])[0];
     const surrounding = [before, after].filter(Boolean).map(item => `<span>${esc(chatNotificationSnippet(item.body, 80))}</span>`).join('');
-    return `<button type="button" class="chat-search-result" data-chat-search-result="${esc(message.id)}">
+    return `<button type="button" class="chat-search-result" data-action="chat-search-result" data-chat-search-result="${esc(message.id)}">
       <span class="chat-search-result-head"><strong>${esc(message.username || '')}</strong><time data-chat-created-at="${esc(message.created_at_utc)}">${esc(chatMessageTimestamp(message.created_at_utc))}</time></span>
       <span>${body}</span><span class="chat-search-context">${surrounding}</span>
     </button>`;
@@ -1106,6 +1097,22 @@ function resetChatSearchState() {
 }
 
 function bindChatPanel(panel) {
+  bindActionDispatcher(panel, {
+    'chat-emoji-category': (_event, target) => {
+      chatState.emojiCategory = target.dataset.chatEmojiCategory || 'recent';
+      panel.querySelector('[data-chat-emoji-categories]').innerHTML = chatEmojiCategoriesHtml();
+      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, panel.querySelector('[data-chat-emoji-search]')?.value || ''));
+    },
+    'chat-emoji-picker-open': () => openChatEmojiPicker(),
+    'chat-emoji-picker-close': () => closeChatEmojiPicker(),
+    'chat-new-messages': () => chatScrollTimelineToBottom(panel),
+    'chat-search-close': () => closeChatSearch(),
+    'chat-search-result': (_event, target) => openChatMessageContext(target.dataset.chatSearchResult),
+    'chat-retry': (_event, target) => {
+      const pending = chatState.pending.get(target.dataset.chatRetry || '');
+      if (pending) sendChatPending(pending);
+    },
+  });
   panel.addEventListener('submit', event => {
     if (event.target.matches('[data-chat-form]')) {
       event.preventDefault();
@@ -1140,30 +1147,15 @@ function bindChatPanel(panel) {
       insertChatEmoji(cell.dataset.chatEmoji || '');
     }
   });
+  panel.addEventListener('click', () => chatAcknowledge());
   panel.addEventListener('click', event => {
-    chatAcknowledge();
     const media = event.target.closest('[data-chat-media-url]');
     if (media) {
       event.preventDefault();
       showChatMediaActions(media, event.clientX, event.clientY);
-      return;
     }
     const emoji = event.target.closest('[data-chat-emoji]');
     if (emoji) insertChatEmoji(emoji.dataset.chatEmoji || '');
-    else if (event.target.closest('[data-chat-emoji-category]')) {
-      chatState.emojiCategory = event.target.closest('[data-chat-emoji-category]').dataset.chatEmojiCategory || 'recent';
-      panel.querySelector('[data-chat-emoji-categories]').innerHTML = chatEmojiCategoriesHtml();
-      loadChatEmojiCatalog().then(catalog => renderChatEmojiGrid(panel, catalog, panel.querySelector('[data-chat-emoji-search]')?.value || ''));
-    }
-    else if (event.target.closest('[data-chat-emoji-button]')) openChatEmojiPicker();
-    else if (event.target.closest('[data-chat-emoji-close]')) closeChatEmojiPicker();
-    else if (event.target.closest('[data-chat-new-messages]')) chatScrollTimelineToBottom(panel);
-    else if (event.target.closest('[data-chat-search-close]')) closeChatSearch();
-    else if (event.target.closest('[data-chat-search-result]')) openChatMessageContext(event.target.closest('[data-chat-search-result]').dataset.chatSearchResult);
-    else if (event.target.closest('[data-chat-retry]')) {
-      const pending = chatState.pending.get(event.target.closest('[data-chat-retry]').dataset.chatRetry || '');
-      if (pending) sendChatPending(pending);
-    }
   });
   panel.addEventListener('contextmenu', event => {
     const media = event.target.closest('[data-chat-media-url]');
@@ -1245,40 +1237,28 @@ function createChatPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel chat-panel';
   panel.id = panelDomId(chatItemId);
-  panel.innerHTML = `
-    <div class="panel-head">
-      ${virtualPanelControlsHtml(chatItemId)}
-      <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
-    </div>
-    <div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+  panel.innerHTML = panelFrameHtml({
+    item: chatItemId,
+    controlsHtml: virtualPanelControlsHtml(chatItemId),
+    afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
-      <button type="button" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
-    </div>
-    <div class="info-pane panel-overlay-root chat-pane">
-      <div id="panel-toasts-${chatItemId}" class="panel-toast-stack"></div>
-      <div class="chat-history-search-split">
+      <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
+    </div>`,
+    bodyClass: 'info-pane chat-pane',
+    bodyHtml: `<div class="chat-history-search-split">
         <div class="chat-search-results" data-chat-search-results hidden></div>
         <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
       </div>
       <div class="a11y-only" data-chat-live role="status" aria-live="polite" aria-atomic="true"></div>
-      <button type="button" class="chat-new-messages" data-chat-new-messages hidden>${esc(t('chat.newMessages'))}</button>
+      <button type="button" class="chat-new-messages" data-action="chat-new-messages" data-chat-new-messages hidden>${esc(t('chat.newMessages'))}</button>
       <div class="chat-typing" data-chat-typing role="status" aria-live="polite" hidden></div>
-      <form class="conversation-composer yochat-composer" data-chat-form>
-        <textarea class="conversation-composer-input yochat-input" data-chat-input rows="2" placeholder="${esc(t('common.message'))}" aria-label="${esc(t('common.message'))}"></textarea>
-        <div class="conversation-composer-controls yoagent-chat-controls">
-          <button type="button" class="chat-emoji-button" data-chat-emoji-button aria-haspopup="dialog" aria-expanded="false" title="${esc(t('chat.emoji.open'))}" aria-label="${esc(t('chat.emoji.open'))}">☺</button>
-          <span class="conversation-composer-controls-spacer yoagent-chat-controls-spacer"></span>
-          <button type="submit" class="conversation-send conversation-send-primary yoagent-chat-send" title="${esc(t('yoagent.action.send'))}" aria-label="${esc(t('yoagent.action.send'))}">
-            <svg class="conversation-send-icon yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </form>
+      ${conversationComposerHtml({formClassName: 'yochat-composer', formAttributes: 'data-chat-form', inputHtml: `<textarea class="conversation-composer-input yochat-input" data-chat-input rows="2" placeholder="${esc(t('common.message'))}" aria-label="${esc(t('common.message'))}"></textarea>`, leadingControlsHtml: `<button type="button" class="chat-emoji-button" data-action="chat-emoji-picker-open" data-chat-emoji-button aria-haspopup="dialog" aria-expanded="false" title="${esc(t('chat.emoji.open'))}" aria-label="${esc(t('chat.emoji.open'))}">☺</button>`, sendHtml: conversationSendButtonHtml({className: 'yoagent-chat-send', title: t('yoagent.action.send')})})}
       <div class="chat-emoji-picker" data-chat-emoji-picker role="dialog" aria-modal="true" aria-label="${esc(t('chat.emoji.label'))}" hidden>
-        <div class="chat-emoji-head"><input type="search" class="search-history-input" data-chat-emoji-search placeholder="${esc(t('common.search'))}" aria-label="${esc(t('common.search'))}"><button type="button" data-chat-emoji-close aria-label="${esc(t('common.close'))}">×</button></div>
+        <div class="chat-emoji-head"><input type="search" class="search-history-input" data-chat-emoji-search placeholder="${esc(t('common.search'))}" aria-label="${esc(t('common.search'))}"><button type="button" data-action="chat-emoji-picker-close" data-chat-emoji-close aria-label="${esc(t('common.close'))}">×</button></div>
         <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
         <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
-      </div>
-    </div>`;
+      </div>`,
+  });
   bindPanelShell(panel, chatItemId);
   bindChatPanel(panel);
   return panel;

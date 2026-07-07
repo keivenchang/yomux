@@ -16,6 +16,7 @@ import yaml
 
 from yolomux_lib import app as app_module
 from yolomux_lib import common
+from yolomux_lib import state_services
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
@@ -46,6 +47,21 @@ class StatsRoleOwner:
         self.follower_stale_reads.append(role)
 
 
+def test_state_services_own_independent_cache_and_watcher_records_without_app():
+    session_files = state_services.SessionFilesService()
+    first, first_owner = session_files.claim_work(("session", "1"), 10)
+    second, second_owner = session_files.claim_work(("session", "1"), 11)
+    activity = state_services.ActivityTranscriptService()
+    activity.activity_summary_cache[("configured", "en")] = {"sessions": []}
+    watch = state_services.ClientWatchService(context_items=[{"id": "context"}], session_files=[{"session": "1"}], activity_summary={"ok": True})
+    stats = state_services.StatsHistoryService()
+
+    assert first_owner is True and second_owner is False and second is first
+    assert activity.activity_summary_cache[("configured", "en")]["sessions"] == []
+    assert watch.snapshot() == ([{"id": "context"}], [{"session": "1"}], {"ok": True})
+    assert stats.raw_buckets == {} and stats.rollup_buckets == {} and stats.sequence == 0
+
+
 def test_session_http_guards_use_shared_decorator():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
@@ -54,6 +70,29 @@ def test_session_http_guards_use_shared_decorator():
     assert "@requires_known_session(refresh=True)\n    def rename_session" in source
     assert "@requires_known_session()\n    def tmux_snapshot" in source
     assert source.count("@requires_known_session(") >= 10
+
+
+def test_yoagent_controller_facade_allows_only_declared_dependencies(monkeypatch):
+    app = SimpleNamespace(sessions=["1"])
+    deps = app_module.YoagentAppDeps(app)
+
+    assert deps.sessions == ["1"]
+    deps.sessions = ["2"]
+    assert app.sessions == ["2"]
+    with pytest.raises(AttributeError):
+        _ = deps.undeclared_app_capability
+    monkeypatch.setattr(app_module, "normalized_prompt_state", lambda _prompt=None: {"source": "patched"})
+    assert deps.normalized_prompt_state() == {"source": "patched"}
+
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+    facade_source = app_source[app_source.index("class YoagentAppDeps:"):app_source.index("class TmuxWebtermApp:")]
+    route_source = (Path(app_module.__file__).parent / "http_routes.py").read_text(encoding="utf-8")
+    assert "def __getattr__" not in facade_source
+    assert "return self.yoagent_controller." not in app_source
+    assert "self.yoagent_controller.poll_yoagent_jobs_once()" in app_source
+    assert "self.poll_yoagent_jobs_once()" not in app_source
+    assert "request.server.app.yoagent_chat(" not in route_source
+    assert "request.server.app.yoagent_controller.yoagent_chat(" in route_source
 
 
 def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch):
@@ -148,9 +187,9 @@ def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypa
 def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     sample = {"time": time.time()}
-    webapp.stats_history_shared_host_metrics_available = False
-    with webapp.stats_agent_token_lock:
-        webapp.stats_agent_token_consumer_until = time.time() + 60
+    webapp.stats_history_service.shared_host_metrics_available = False
+    with webapp.stats_history_service.agent_token_lock:
+        webapp.stats_history_service.agent_token_consumer_until = time.time() + 60
     monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {
         "system_memory_used_bytes": 45 * 1024,
         "system_memory_capacity_bytes": 64 * 1024,
@@ -163,8 +202,8 @@ def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(mo
     try:
         assert webapp.stats_local_host_metrics_needed() is True
         assert webapp.record_stats_local_host_sample(sample) is True
-        with webapp.stats_history_lock:
-            bucket = next(iter(webapp.stats_history_raw_buckets.values()))
+        with webapp.stats_history_service.lock:
+            bucket = next(iter(webapp.stats_history_service.raw_buckets.values()))
             metrics = bucket["host_metrics"]
     finally:
         webapp.control_server.stop()
@@ -241,7 +280,7 @@ def test_stats_history_sampler_record_reuses_worker_and_stops_same_generation(mo
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
     try:
         assert webapp.start_stats_history_sampler() is True
-        record = webapp.stats_history_sampler_record
+        record = webapp.stats_history_service.sampler_record
         assert record.thread.args == (record,)
         assert webapp.start_stats_history_sampler() is False
         webapp.stop_stats_history_sampler()
@@ -256,11 +295,11 @@ def test_stats_history_sampler_old_loop_cannot_clear_replacement():
     old_record = app_module.StatsHistorySamplerRecord(running=True)
     old_record.stop_event.set()
     replacement = app_module.StatsHistorySamplerRecord(running=True)
-    webapp.stats_history_sampler_record = replacement
+    webapp.stats_history_service.sampler_record = replacement
     try:
         webapp.stats_history_sampler_loop(old_record)
         assert replacement.running is True
-        webapp.stats_history_sampler_record = old_record
+        webapp.stats_history_service.sampler_record = old_record
         webapp.stats_history_sampler_loop(old_record)
         assert old_record.running is False
     finally:
@@ -278,7 +317,7 @@ def test_stats_history_sampler_parallel_state_is_retired():
 def test_stats_history_payload_limits_records_to_requested_visible_range():
     webapp = app_module.TmuxWebtermApp([])
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for sample_time in (900.0, 960.0, 1000.0):
                 webapp.stats_history_merge_record_locked({
                     "time": sample_time,
@@ -396,7 +435,7 @@ def test_stats_client_history_migrates_and_compacts_previous_schema(monkeypatch,
     reader.background_owner = StatsRoleOwner(owner=False, port=9102)
     try:
         reader.merge_shared_stats_client_history()
-        with reader.stats_history_lock:
+        with reader.stats_history_service.lock:
             history = reader.stats_history_payload_locked(client_id="client-a")
     finally:
         reader.control_server.stop()
@@ -475,7 +514,7 @@ def test_stats_client_history_combines_v2_v3_v4_without_overlap_or_corrupt_rows(
     try:
         reader.merge_shared_stats_client_history()
         restarted.merge_shared_stats_client_history()
-        with restarted.stats_history_lock:
+        with restarted.stats_history_service.lock:
             history = restarted.stats_history_payload_locked(client_id="client-a")
     finally:
         reader.control_server.stop()
@@ -509,14 +548,14 @@ def test_stats_client_snapshot_rejects_an_incompatible_bucket_schema():
         }}, {}]],
     }
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             webapp.stats_client_history_apply_snapshot_locked(incompatible)
             history = webapp.stats_history_payload_locked(client_id="client-a")
     finally:
         webapp.control_server.stop()
 
     assert history["records"] == []
-    assert webapp.stats_history_sequence == 0
+    assert webapp.stats_history_service.sequence == 0
 
 
 def test_stats_client_snapshot_rejects_unexpected_duration_with_current_version():
@@ -569,7 +608,7 @@ def test_stats_client_snapshot_replaces_fine_rows_before_applying_compacted_rows
         }}, {}]],
     }
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             webapp.stats_client_history_apply_snapshot_locked(fine_snapshot)
             webapp.stats_client_history_apply_snapshot_locked(coarse_snapshot)
             webapp.stats_history_compact_locked(now)
@@ -586,7 +625,7 @@ def test_stats_history_wide_token_history_is_server_aggregated(monkeypatch):
     now = 200000.0
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for offset in range(0, 60 * 60, 60):
                 webapp.stats_history_merge_record_locked({
                     "start": now - (2 * 60 * 60) + offset,
@@ -612,14 +651,14 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
     start = int(now) - 30
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for offset in range(30):
                 webapp.stats_history_merge_record_locked(
                     {"start": start + offset, "api_count": 1},
                     now,
                     client_id="client-a",
                 )
-            latest_sequence = webapp.stats_history_sequence
+            latest_sequence = webapp.stats_history_service.sequence
             older = webapp.stats_history_payload_locked(
                 0,
                 client_id="client-a",
@@ -667,7 +706,7 @@ def test_stats_history_compact_tokens_ignore_a_bounded_normal_history_window(mon
     start = int(now) - 30
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for offset in range(30):
                 webapp.stats_history_merge_record_locked(
                     {
@@ -707,7 +746,7 @@ def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_
     start = int(now) - 120
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for offset in range(120):
                 sample_time = start + offset
                 webapp.stats_history_merge_record_locked(
@@ -786,13 +825,13 @@ def test_stats_history_display_encoder_sends_wide_mixed_duration_input_at_the_co
     end = 1_036_800
     start = end - (24 * 60 * 60)
     tier_specs = (
-        (start, 1320, 60, webapp.stats_history_rollup_buckets),
-        (start + (22 * 60 * 60), 360, 10, webapp.stats_history_rollup_buckets),
-        (start + (23 * 60 * 60), 3600, 1, webapp.stats_history_raw_buckets),
+        (start, 1320, 60, webapp.stats_history_service.rollup_buckets),
+        (start + (22 * 60 * 60), 360, 10, webapp.stats_history_service.rollup_buckets),
+        (start + (23 * 60 * 60), 3600, 1, webapp.stats_history_service.raw_buckets),
     )
     sequence = 0
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for tier_start, count, duration, destination in tier_specs:
                 for index in range(count):
                     sequence += 1
@@ -819,7 +858,7 @@ def test_stats_history_display_encoder_sends_wide_mixed_duration_input_at_the_co
                     process.update({"sequence": sequence, "label": "yolomux.py :9101", "port": 9101, "cpu_total_percent": 25.0, "cpu_count": 1.0})
                     bucket["servers"]["port:9101"] = process
                     destination[(bucket_start, duration)] = bucket
-            webapp.stats_history_sequence = sequence
+            webapp.stats_history_service.sequence = sequence
             preserved = webapp.stats_history_payload_locked(
                 0,
                 client_id="client-a",
@@ -865,7 +904,7 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
     now = 200000.0
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     try:
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             webapp.stats_history_merge_record_locked(
                 {
                     "start": now,
@@ -892,7 +931,7 @@ def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared
             "client_id": "client-b",
             "records": [{"start": now, "api_count": 7, "sse_count": 3, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
         })
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history_a = webapp.stats_history_payload_locked(0, client_id="client-a")
             history_b = webapp.stats_history_payload_locked(0, client_id="client-b")
             history_a_after_b = webapp.stats_history_payload_locked(client_a["history"]["sequence"], client_id="client-a")
@@ -940,7 +979,7 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
         first = webapp.record_stats_global_sample()
         clock.update({"wall": 1002.0, "monotonic": 52.0, "process": 10.5})
         second = webapp.record_stats_global_sample()
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history = webapp.stats_history_payload_locked(0, client_id="client-a")
     finally:
         webapp.control_server.stop()
@@ -1071,7 +1110,7 @@ def test_shared_stats_history_keeps_cpu_for_every_yolomux_server(monkeypatch, tm
                 "cpu_percent": float(port - 9090),
             })
         reader.merge_shared_stats_client_history()
-        with reader.stats_history_lock:
+        with reader.stats_history_service.lock:
             history = reader.stats_history_payload_locked()
     finally:
         for server in [*servers, reader]:
@@ -1098,13 +1137,13 @@ def test_shared_stats_history_merges_missing_process_rows_when_bucket_is_already
     try:
         first_writer.record_stats_process_sample({"time": sample_time, "pid": 9101, "started_at": sample_time - 1, "cpu_percent": 10.0})
         reader.merge_shared_stats_client_history()
-        with reader.stats_history_lock:
-            bucket = next(iter(reader.stats_history_raw_buckets.values()))
+        with reader.stats_history_service.lock:
+            bucket = next(iter(reader.stats_history_service.raw_buckets.values()))
             bucket["servers"]["port:9101"]["sequence"] = 999
             reader.stats_history_refresh_bucket_sequence_locked(bucket)
         second_writer.record_stats_process_sample({"time": sample_time, "pid": 9102, "started_at": sample_time - 2, "cpu_percent": 20.0})
         reader.merge_shared_stats_client_history()
-        with reader.stats_history_lock:
+        with reader.stats_history_service.lock:
             history = reader.stats_history_payload_locked()
     finally:
         first_writer.control_server.stop()
@@ -1156,7 +1195,7 @@ def test_stats_process_history_batches_disk_writes_without_losing_one_second_cpu
     try:
         for offset, cpu_percent in enumerate((10.0, *([40.0] * 30))):
             webapp.record_stats_process_sample({"time": 1000.0 + offset, "pid": 1, "cpu_percent": cpu_percent})
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history = webapp.stats_history_payload_locked()
     finally:
         webapp.control_server.stop()
@@ -1190,13 +1229,13 @@ def test_stats_process_history_requeues_failed_shared_write_without_double_count
         with pytest.raises(OSError, match="injected stats history write failure"):
             webapp.record_stats_process_sample({"time": sample_time, "pid": 9101, "cpu_percent": 10.0})
 
-        write_record = webapp.stats_process_history_write_record
+        write_record = webapp.stats_history_service.process_history_write_record
         assert [sample["cpu_percent"] for sample in write_record.pending_samples] == [10.0]
         assert write_record.next_write_at <= sample_time
         assert write_record.retry_requires_reload is True
 
         webapp.record_stats_process_sample({"time": sample_time + 1.0, "pid": 9101, "cpu_percent": 20.0})
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history = webapp.stats_history_payload_locked()
     finally:
         webapp.control_server.stop()
@@ -1242,7 +1281,7 @@ def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch
     sample_time = time.time()
     sample = {"time": sample_time, "pid": 8003, "cpu_percent": 12.0, "system_cpu_percent": 24.0}
     try:
-        with writer.stats_history_lock:
+        with writer.stats_history_service.lock:
             writer.stats_history_merge_record_locked({
                 "time": sample_time,
                 "cpu_total_percent": 12.0,
@@ -1251,8 +1290,8 @@ def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch
                 "agent_token_samples": 1,
                 "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 600.0, "samples": 1, "tokens": 600.0, "seconds": 60.0, "source": "transcript"}],
             }, sample_time, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
-        with writer.stats_agent_token_lock:
-            writer.stats_agent_token_state = {"1|0|codex": {"tokens": 600.0, "time": sample_time, "label": "1:0:codex", "source": "transcript", "identity": "old-transcript"}}
+        with writer.stats_history_service.agent_token_lock:
+            writer.stats_history_service.agent_token_state = {"1|0|codex": {"tokens": 600.0, "time": sample_time, "label": "1:0:codex", "source": "transcript", "identity": "old-transcript"}}
         old_snapshot = writer.stats_history_shared_snapshot(sample)
         old_snapshot.pop("agent_token_schema_version")
         old_snapshot["rev"] = 1
@@ -1261,10 +1300,10 @@ def test_shared_stats_discards_agent_token_history_from_older_schema(monkeypatch
         common.TMUX_AI_STATUS_PATH.write_text(json.dumps(status), encoding="utf-8")
 
         assert reader.merge_shared_stats_history(max_age_seconds=None)["ok"] is True
-        with reader.stats_history_lock:
+        with reader.stats_history_service.lock:
             history = reader.stats_history_payload_locked()
-        with reader.stats_agent_token_lock:
-            token_state = dict(reader.stats_agent_token_state)
+        with reader.stats_history_service.agent_token_lock:
+            token_state = dict(reader.stats_history_service.agent_token_state)
     finally:
         writer.control_server.stop()
         reader.control_server.stop()
@@ -1321,14 +1360,14 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
     try:
         follower.stats_sample_payload(token_consumer=True)
         owner.merge_shared_stats_history(max_age_seconds=None)
-        with owner.stats_agent_token_lock:
-            assert owner.stats_agent_token_consumer_until >= sample_time
-            owner.stats_agent_token_state = {
+        with owner.stats_history_service.agent_token_lock:
+            assert owner.stats_history_service.agent_token_consumer_until >= sample_time
+            owner.stats_history_service.agent_token_state = {
                 "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript", "identity": "codex:dev:inode:digest:/tmp/codex.jsonl"}
             }
-            owner.stats_agent_token_next_sample_at = 0.0
+            owner.stats_history_service.agent_token_next_sample_at = 0.0
         owner.record_stats_global_sample(trigger="sampler", token_consumer=False)
-        with owner.stats_history_lock:
+        with owner.stats_history_service.lock:
             history = owner.stats_history_payload_locked(0, client_id="client-a")
     finally:
         owner.control_server.stop()
@@ -1637,7 +1676,7 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
     try:
         first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
         second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history = webapp.stats_history_payload_locked(0, client_id="client-a")
     finally:
         webapp.control_server.stop()
@@ -1728,7 +1767,7 @@ def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch):
     monkeypatch.setattr(webapp, "stats_agent_token_count", lambda _row: token_scans.append(True) or 100.0)
     try:
         payload = webapp.record_stats_global_sample(trigger="sampler")
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             history = webapp.stats_history_payload_locked(0, client_id="client-a")
     finally:
         webapp.control_server.stop()
@@ -1742,15 +1781,15 @@ def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch):
 def test_stats_token_sampling_uses_idle_cadence_and_accelerates_for_consumer():
     webapp = app_module.TmuxWebtermApp([])
     try:
-        with webapp.stats_agent_token_lock:
-            webapp.stats_agent_token_bootstrap_pending = False
-            webapp.stats_agent_token_next_sample_at = 0.0
-            webapp.stats_agent_token_consumer_until = 0.0
+        with webapp.stats_history_service.agent_token_lock:
+            webapp.stats_history_service.agent_token_bootstrap_pending = False
+            webapp.stats_history_service.agent_token_next_sample_at = 0.0
+            webapp.stats_history_service.agent_token_consumer_until = 0.0
         assert webapp.stats_agent_token_sampling_due(1000.0) is True
-        assert webapp.stats_agent_token_next_sample_at == 1000.0 + app_module.STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+        assert webapp.stats_history_service.agent_token_next_sample_at == 1000.0 + app_module.STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
         assert webapp.stats_agent_token_sampling_due(1001.0) is False
         assert webapp.stats_agent_token_sampling_due(1001.0, token_consumer=True) is True
-        assert webapp.stats_agent_token_next_sample_at == 1001.0 + app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS
+        assert webapp.stats_history_service.agent_token_next_sample_at == 1001.0 + app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS
     finally:
         webapp.control_server.stop()
 
@@ -1770,7 +1809,7 @@ def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch):
         started = time.monotonic()
         payload = webapp.stats_sample_payload(token_consumer=True)
         response_elapsed = time.monotonic() - started
-        webapp.stats_sample_record.cached_monotonic = None
+        webapp.stats_history_service.sample_record.cached_monotonic = None
         webapp.record_stats_global_sample(trigger="sampler")
     finally:
         webapp.control_server.stop()
@@ -1809,8 +1848,8 @@ def test_stats_token_sampling_bootstraps_rate_before_steady_consumer_cadence(mon
 
     assert first["time"] == 1000.0
     assert second["time"] == 1001.0
-    assert webapp.stats_agent_token_next_sample_at == 1011.0
-    with webapp.stats_history_lock:
+    assert webapp.stats_history_service.agent_token_next_sample_at == 1011.0
+    with webapp.stats_history_service.lock:
         history = webapp.stats_history_payload_locked(0, client_id="client-a")
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
     assert len(token_records) == 1
@@ -2022,7 +2061,7 @@ def test_stats_agent_token_delta_records_accumulate_actual_overlap_seconds():
             *webapp.stats_agent_token_delta_records("1|0|codex", "1:0:codex", 1000.0, 1010.0, 100.0),
             *webapp.stats_agent_token_delta_records("1|0|codex", "1:0:codex", 1010.0, 1020.0, 100.0),
         ]
-        with webapp.stats_history_lock:
+        with webapp.stats_history_service.lock:
             for record in records:
                 webapp.stats_history_merge_record_locked(record, 1020.0, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
             history = webapp.stats_history_payload_locked()
@@ -2174,7 +2213,7 @@ def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
-        with webapp.stats_agent_token_lock:
+        with webapp.stats_history_service.agent_token_lock:
             active_kind = webapp.stats_agent_activity_kind_locked({"state": "active"}, "active-agent", 1000.0, 60.0)
             settled_kind = webapp.stats_agent_activity_kind_locked({"state": "settled"}, "settled-agent", 1000.0, 60.0)
             ask_kind = webapp.stats_agent_activity_kind_locked({"state": "needs-input"}, "ask-agent", 1000.0, 60.0)
@@ -2497,7 +2536,7 @@ def test_stats_agent_window_rows_uses_briefly_stale_cache_while_refreshing(monke
 def test_stats_owner_does_not_remerge_its_own_loaded_shared_history(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     webapp.background_owner = StatsRoleOwner(owner=True, port=8001)
-    webapp.stats_history_shared_loaded = True
+    webapp.stats_history_service.shared_loaded = True
     sample = {"time": 1000.0, "pid": 8001, "cpu_percent": 1.0, "system_cpu_percent": 2.0}
     monkeypatch.setattr(webapp, "current_stats_sample", lambda: (dict(sample), True))
     monkeypatch.setattr(webapp, "record_stats_process_sample", lambda _sample: None)
@@ -3251,7 +3290,7 @@ def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
             webapp.client_event({"session": "missing", "type": "test", "message": "message"}),
             webapp.acknowledge_attention({}),
             webapp.build_auto_approve_status("missing"),
-            webapp.cancel_yoagent_chat(""),
+            webapp.yoagent_controller.cancel_yoagent_chat(""),
             webapp.tmux_session_exists_payload("1"),
         ]
     finally:
@@ -3276,9 +3315,9 @@ def test_session_files_memory_cache_is_bounded():
     try:
         for index in range(app_module.SESSION_FILES_CACHE_MAX_ITEMS + 3):
             webapp.set_session_files_memory_cache((index,), {"files": [index]}, HTTPStatus.OK)
-        assert len(webapp.session_files_cache) == app_module.SESSION_FILES_CACHE_MAX_ITEMS
-        assert (0,) not in webapp.session_files_cache
-        assert (app_module.SESSION_FILES_CACHE_MAX_ITEMS + 2,) in webapp.session_files_cache
+        assert len(webapp.session_files_service.cache) == app_module.SESSION_FILES_CACHE_MAX_ITEMS
+        assert (0,) not in webapp.session_files_service.cache
+        assert (app_module.SESSION_FILES_CACHE_MAX_ITEMS + 2,) in webapp.session_files_service.cache
     finally:
         webapp.control_server.stop()
 
@@ -3292,7 +3331,7 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
             "settings_payload",
             lambda: {"settings": {"performance": {"server_event_poll_ms": 250}}},
         )
-        record = webapp.client_event_watcher_record
+        record = webapp.client_watch_service.event_watcher_record
         record.next_file_poll_at = 100.5
         record.next_background_file_poll_at = 100.75
         record.next_signature_poll_at = 100.25
@@ -3430,7 +3469,7 @@ def test_activity_summary_ready_signature_ignores_generated_timestamps(monkeypat
         {"locale": "en", "generated_at": "first", "generated_ts": 1.0, "global": {"headline": "same"}, "sessions": {}},
         {"locale": "en", "generated_at": "second", "generated_ts": 2.0, "global": {"headline": "same"}, "sessions": {}},
     ]
-    monkeypatch.setattr(webapp, "client_watch_state_snapshot", lambda: ([], [], {"visible": True, "locale": "en", "hours": 24}))
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [], {"visible": True, "locale": "en", "hours": 24}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: payloads.pop(0))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
@@ -3520,7 +3559,7 @@ def test_tmux_signal_full_snapshot_keeps_removed_window_origin(monkeypatch):
 def test_tmux_signal_event_does_not_force_auto_approve_poll():
     webapp = app_module.TmuxWebtermApp([])
     try:
-        record = webapp.client_event_watcher_record
+        record = webapp.client_watch_service.event_watcher_record
         record.next_auto_poll_at = 123.0
         record.next_tmux_signal_poll_at = 456.0
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
@@ -3540,7 +3579,7 @@ def test_tmux_output_events_share_one_debounced_metadata_refresh(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
     try:
-        record = webapp.client_event_watcher_record
+        record = webapp.client_watch_service.event_watcher_record
         record.next_tmux_signal_poll_at = 456.0
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
 
@@ -3588,7 +3627,7 @@ def test_save_settings_active_color_syncs_existing_tmux_theme(monkeypatch):
     assert calls == [("blue", app_module.tmux)]
     assert webapp.tmux_theme_color == "blue"
     assert events[0][0] == "settings_changed"
-    assert webapp.client_event_watcher_record.wake_event.is_set()
+    assert webapp.client_watch_service.event_watcher_record.wake_event.is_set()
 
 
 def test_save_settings_retention_reduction_prunes_chat_immediately(monkeypatch):
@@ -3674,7 +3713,7 @@ def test_chat_yoagent_delegates_to_existing_controller_and_publishes_reply(monke
     webapp = SimpleNamespace(
         chat_service=service,
         chat_typing=lambda username, instance, active: calls.append(("typing", username, instance, active)),
-        yoagent_chat=fake_yoagent,
+        yoagent_controller=SimpleNamespace(yoagent_chat=fake_yoagent),
         publish_background_client_event=lambda *args, **kwargs: calls.append(("publish", args, kwargs)),
     )
 
@@ -3865,7 +3904,7 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     try:
         webapp.start_client_event_watcher()
         assert started == ["client-event-watch"]
-        record = webapp.client_event_watcher_record
+        record = webapp.client_watch_service.event_watcher_record
         assert record.next_auto_poll_at == pytest.approx(110.0)
         assert record.next_attention_ack_poll_at == pytest.approx(112.0)
         assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
@@ -3889,8 +3928,8 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
             old_polled.set()
             assert release_old.wait(timeout=2.0)
             return
-        with webapp.client_watch_lock:
-            record = webapp.client_event_watcher_record
+        with webapp.client_watch_service.lock:
+            record = webapp.client_watch_service.event_watcher_record
             record.stop_event.set()
             record.wake_event.set()
         new_polled.set()
@@ -3901,13 +3940,13 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
     monkeypatch.setattr(webapp, "poll_attention_acks_client_event_once", lambda: None)
     monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: None)
     monkeypatch.setattr(webapp, "poll_watched_prs_client_event_once", lambda: None)
-    monkeypatch.setattr(webapp, "poll_yoagent_jobs_once", lambda: None)
+    monkeypatch.setattr(webapp.yoagent_controller, "poll_yoagent_jobs_once", lambda: None)
     monkeypatch.setattr(webapp, "start_client_directory_poll", lambda record=None: False)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
     try:
         webapp.start_client_event_watcher()
-        old_record = webapp.client_event_watcher_record
+        old_record = webapp.client_watch_service.event_watcher_record
         old_worker = old_record.worker
         assert old_worker is not None
         assert old_polled.wait(timeout=1.0)
@@ -3915,10 +3954,10 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         old_worker.join = lambda timeout=None: None
         webapp.stop_client_event_watcher()
         assert old_record.stop_event.is_set()
-        assert webapp.client_event_watcher_record is not old_record
+        assert webapp.client_watch_service.event_watcher_record is not old_record
 
         webapp.start_client_event_watcher()
-        replacement = webapp.client_event_watcher_record
+        replacement = webapp.client_watch_service.event_watcher_record
         replacement_worker = replacement.worker
         assert replacement is not old_record
         assert replacement_worker is not None and replacement_worker is not old_worker
@@ -3931,7 +3970,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         threading.Thread.join(old_worker, timeout=1.0)
         assert old_worker.is_alive() is False
         assert replacement_worker.is_alive() is False
-        assert webapp.client_event_watcher_record is replacement
+        assert webapp.client_watch_service.event_watcher_record is replacement
         assert replacement.worker is None
         assert poll_threads == [old_worker, replacement_worker]
     finally:
@@ -3973,20 +4012,20 @@ def test_client_directory_poll_old_generation_cannot_clear_replacement(monkeypat
 
     monkeypatch.setattr(webapp, "poll_client_events_once", blocked_poll)
     try:
-        old_record = webapp.client_event_watcher_record
+        old_record = webapp.client_watch_service.event_watcher_record
         assert webapp.start_client_directory_poll(old_record) is True
         old_worker = old_record.directory_poll_worker
         assert old_worker is not None
         assert entered.wait(timeout=1.0)
 
         replacement = app_module.ClientEventWatcherRecord(directory_poll_worker=threading.current_thread())
-        with webapp.client_watch_lock:
-            webapp.client_event_watcher_record = replacement
+        with webapp.client_watch_service.lock:
+            webapp.client_watch_service.event_watcher_record = replacement
         release.set()
         old_worker.join(timeout=1.0)
 
         assert old_worker.is_alive() is False
-        assert webapp.client_event_watcher_record is replacement
+        assert webapp.client_watch_service.event_watcher_record is replacement
         assert replacement.directory_poll_worker is threading.current_thread()
     finally:
         release.set()
@@ -4687,8 +4726,8 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
             updated.append(session)
             return {"session": session, "updated": False, "reason": "test"}
 
-        webapp.update_yoagent_session_summary = fake_update_summary
-        tick = webapp.tick_yoagent_session_summaries({"backend": "codex", "invocation": "cli"})
+        webapp.yoagent_controller.update_yoagent_session_summary = fake_update_summary
+        tick = webapp.yoagent_controller.tick_yoagent_session_summaries({"backend": "codex", "invocation": "cli"})
     finally:
         webapp.control_server.stop()
 
@@ -4796,8 +4835,8 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
         changed = webapp.build_activity_payload()
         current_infos.pop("2")
         deleted = webapp.build_activity_payload()
-        with webapp.client_watch_lock:
-            webapp.client_watch_attention_ack_rev += 1
+        with webapp.client_watch_service.lock:
+            webapp.client_watch_service.attention_ack_rev += 1
         acknowledged = webapp.build_activity_payload()
     finally:
         webapp.control_server.stop()
@@ -4806,7 +4845,7 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     assert second == first
     assert changed["agent_windows"]["2"][0]["state"] == "working"
     assert "2" not in deleted["agent_windows"]
-    assert "2" not in webapp.tabber_activity_cache_record.session_rows
+    assert "2" not in webapp.activity_transcript_service.tabber_cache_record.session_rows
     assert acknowledged["agent_windows"]["1"][0]["state"] == "idle"
     assert row_builds == ["2", "1", "2", "1"]
     assert recent_builds == [("2",), ("1",), ("2",), ("1",)]
@@ -4838,7 +4877,7 @@ def test_session_files_and_tabber_refreshes_are_per_target_single_flight(monkeyp
             ("changed-target",),
             lambda: ({"files": [{"path": "changed.py"}], "repos": [], "errors": []}, HTTPStatus.OK),
         )
-        assert len(webapp.session_files_work_records) == 0
+        assert len(webapp.session_files_service.work_records) == 0
 
         source_signature = ["same-signature"]
         monkeypatch.setattr(webapp, "tabber_activity_source_signature", lambda: source_signature[0])
@@ -5016,8 +5055,8 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     webapp.start_transcripts_payload_refresh = lambda: (webapp.refresh_transcripts_payload_cache() or True)
     try:
         first = webapp.transcripts_payload(force=True)
-        with webapp.transcripts_payload_cache_lock:
-            webapp.transcripts_payload_cache_record.stored_at -= app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS + 1.0
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at -= app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS + 1.0
         second = webapp.transcripts_payload()
         third = webapp.transcripts_payload()
     finally:
@@ -5099,17 +5138,17 @@ def test_old_transcripts_refresh_cannot_overwrite_forced_payload(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload, kwargs)))
     try:
         assert webapp.start_transcripts_payload_refresh(publish=True) is True
-        with webapp.transcripts_payload_cache_lock:
-            old_worker = webapp.transcripts_payload_cache_record.worker
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            old_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
         assert old_worker is not None
         assert old_started.wait(timeout=2)
 
         forced = webapp.session_metadata_payload(force=True)
         release_old.set()
         old_worker.join(timeout=2)
-        with webapp.transcripts_payload_cache_lock:
-            cached = webapp.transcripts_payload_cache_record.payload
-            active_worker = webapp.transcripts_payload_cache_record.worker
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
+            active_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
     finally:
         release_old.set()
         webapp.control_server.stop()
@@ -5133,16 +5172,16 @@ def test_clear_transcript_caches_invalidates_blocked_refresh(monkeypatch):
     monkeypatch.setattr(webapp, "build_transcripts_payload", blocked_build)
     try:
         assert webapp.start_transcripts_payload_refresh() is True
-        with webapp.transcripts_payload_cache_lock:
-            old_worker = webapp.transcripts_payload_cache_record.worker
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            old_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
         assert old_worker is not None
         assert old_started.wait(timeout=2)
 
         webapp.clear_transcript_caches()
         release_old.set()
         old_worker.join(timeout=2)
-        with webapp.transcripts_payload_cache_lock:
-            record = webapp.transcripts_payload_cache_record
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            record = webapp.activity_transcript_service.transcripts_payload_cache_record
             cached = record.payload
             stored_at = record.stored_at
             active_worker = record.worker
@@ -5263,14 +5302,14 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
     monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
     try:
-        old_record = webapp.client_event_watcher_record
+        old_record = webapp.client_watch_service.event_watcher_record
         assert webapp.start_client_watch_snapshot_publish() is True
         old_worker = old_record.snapshot_worker
         assert old_worker is not None
         assert old_started.wait(timeout=2)
 
         webapp.stop_client_event_watcher()
-        replacement = webapp.client_event_watcher_record
+        replacement = webapp.client_watch_service.event_watcher_record
         assert replacement is not old_record
         assert webapp.start_client_watch_snapshot_publish() is True
         assert replacement_started.wait(timeout=2)
@@ -5281,9 +5320,9 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
 
         release_old.set()
         old_worker.join(timeout=2)
-        with webapp.transcripts_payload_cache_lock:
-            cached = webapp.transcripts_payload_cache_record.payload
-            cache_worker = webapp.transcripts_payload_cache_record.worker
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
+            cache_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
     finally:
         release_old.set()
         release_replacement.set()
@@ -5315,10 +5354,10 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
     try:
         with pytest.raises(RuntimeError, match="thread unavailable"):
             webapp.start_client_watch_snapshot_publish()
-        with webapp.client_watch_lock:
-            assert webapp.client_event_watcher_record.snapshot_worker is None
-        with webapp.transcripts_payload_cache_lock:
-            assert webapp.transcripts_payload_cache_record.worker is None
+        with webapp.client_watch_service.lock:
+            assert webapp.client_watch_service.event_watcher_record.snapshot_worker is None
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            assert webapp.activity_transcript_service.transcripts_payload_cache_record.worker is None
 
         monkeypatch.setattr(app_module.threading, "Thread", real_thread)
         def retry_build():
@@ -5335,7 +5374,7 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
         monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
         assert webapp.start_client_watch_snapshot_publish() is True
         assert retry_started.wait(timeout=2)
-        worker = webapp.client_event_watcher_record.snapshot_worker
+        worker = webapp.client_watch_service.event_watcher_record.snapshot_worker
         assert worker is not None
         release_retry.set()
         worker.join(timeout=2)
@@ -5345,8 +5384,8 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()
 
-    assert webapp.transcripts_payload_cache_record.payload == {"marker": "retry"}
-    assert webapp.client_event_watcher_record.snapshot_worker is None
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload == {"marker": "retry"}
+    assert webapp.client_watch_service.event_watcher_record.snapshot_worker is None
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
@@ -5731,7 +5770,7 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
         assert second["cache"]["stale"] is False
         assert calls == ["snapshot"]
 
-        webapp.tabber_activity_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
+        webapp.activity_transcript_service.tabber_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
         monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: "queued")
         stale, _status = webapp.activity_payload()
@@ -5783,7 +5822,7 @@ def test_tabber_activity_cache_record_owns_signature_and_refresh(monkeypatch):
         assert webapp.get_tabber_activity_cache(60.0, source_signature="source-a")[0] == payload
         assert webapp.get_tabber_activity_cache(60.0, source_signature="source-b") is None
         assert webapp.start_tabber_activity_cache_refresh() is True
-        assert webapp.tabber_activity_cache_record.refresh_worker is not None
+        assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is not None
         assert webapp.start_tabber_activity_cache_refresh() is False
     finally:
         webapp.control_server.stop()
@@ -5817,9 +5856,9 @@ def test_tabber_activity_cache_refresh_failed_start_allows_retry(monkeypatch):
     try:
         with pytest.raises(RuntimeError, match="thread unavailable"):
             webapp.start_tabber_activity_cache_refresh()
-        assert webapp.tabber_activity_cache_record.refresh_worker is None
+        assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is None
         assert webapp.start_tabber_activity_cache_refresh() is True
-        assert webapp.tabber_activity_cache_record.refresh_worker is workers[1]
+        assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is workers[1]
     finally:
         webapp.control_server.stop()
 
@@ -5828,18 +5867,18 @@ def test_retired_tabber_activity_cache_refresh_cannot_clear_replacement(monkeypa
     webapp = app_module.TmuxWebtermApp([])
     old_worker = threading.Thread()
     replacement_worker = threading.Thread()
-    webapp.tabber_activity_cache_record.refresh_worker = old_worker
+    webapp.activity_transcript_service.tabber_cache_record.refresh_worker = old_worker
     monkeypatch.setattr(webapp, "background_refresh_event_details", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(webapp, "log_sampled_background_refresh_event", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(webapp, "publish_background_refresh_done", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         webapp,
         "refresh_tabber_activity_cache",
-        lambda: setattr(webapp.tabber_activity_cache_record, "refresh_worker", replacement_worker),
+        lambda: setattr(webapp.activity_transcript_service.tabber_cache_record, "refresh_worker", replacement_worker),
     )
     try:
         webapp.run_tabber_activity_cache_refresh(old_worker)
-        assert webapp.tabber_activity_cache_record.refresh_worker is replacement_worker
+        assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is replacement_worker
     finally:
         webapp.control_server.stop()
 
@@ -6089,7 +6128,7 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
         raise RuntimeError(f"stop after sleeping {seconds}")
 
     try:
-        record = webapp.tabber_activity_warmer_record
+        record = webapp.activity_transcript_service.tabber_warmer_record
         record.running = True
         webapp.mark_tabber_activity_consumer()
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
@@ -6104,7 +6143,7 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
 
     assert refreshes == ["refresh"]
     assert events == []
-    assert webapp.tabber_activity_warmer_record.running is False
+    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
 
 
 def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch):
@@ -6118,7 +6157,7 @@ def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch
         raise RuntimeError(f"stop after sleeping {seconds}")
 
     try:
-        record = webapp.tabber_activity_warmer_record
+        record = webapp.activity_transcript_service.tabber_warmer_record
         record.running = True
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
@@ -6135,7 +6174,7 @@ def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch
     recent = webapp.performance_metrics_payload()["recent"]
     assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
     assert recent[-1]["cache_status"] == "skipped:no-consumer"
-    assert webapp.tabber_activity_warmer_record.running is False
+    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
 
 
 def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(monkeypatch):
@@ -6161,17 +6200,17 @@ def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(mo
     try:
         assert webapp.mark_tabber_activity_consumer() is True
         assert webapp.tabber_activity_has_recent_consumer() is True
-        now[0] = webapp.tabber_activity_warmer_record.consumer_until
+        now[0] = webapp.activity_transcript_service.tabber_warmer_record.consumer_until
         assert webapp.tabber_activity_has_recent_consumer() is False
 
         assert webapp.start_tabber_activity_cache_warmer() is True
-        old_record = webapp.tabber_activity_warmer_record
+        old_record = webapp.activity_transcript_service.tabber_warmer_record
         assert webapp.start_tabber_activity_cache_warmer() is False
         replacement = app_module.TabberActivityWarmerRecord(running=True)
-        with webapp.tabber_activity_cache_lock:
-            webapp.tabber_activity_warmer_record = replacement
+        with webapp.activity_transcript_service.tabber_cache_lock:
+            webapp.activity_transcript_service.tabber_warmer_record = replacement
         webapp.tabber_activity_cache_warmer_loop(old_record)
-        assert webapp.tabber_activity_warmer_record is replacement
+        assert webapp.activity_transcript_service.tabber_warmer_record is replacement
         assert replacement.running is True
     finally:
         webapp.control_server.stop()
@@ -6191,7 +6230,7 @@ def test_activity_payload_hidden_consumer_does_not_refresh_stale_cache(monkeypat
     try:
         payload = {"activity": {"5": {"last_user_input_ts": 100}}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": 24.0}
         webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature=webapp.tabber_activity_source_signature())
-        webapp.tabber_activity_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
+        webapp.activity_transcript_service.tabber_cache_record.stored_at -= webapp.tabber_activity_refresh_seconds() + 1
         monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: (_ for _ in ()).throw(AssertionError("hidden activity request must not queue refresh")))
 
@@ -6462,10 +6501,10 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
     try:
         first, first_status = webapp.session_files_payload("5")
-        key = next(iter(webapp.session_files_cache))
-        with webapp.session_files_cache_lock:
-            stored_at, value = webapp.session_files_cache[key]
-            webapp.session_files_cache[key] = (stored_at - app_module.SESSION_FILES_CACHE_SECONDS - 1.0, value)
+        key = next(iter(webapp.session_files_service.cache))
+        with webapp.session_files_service.cache_lock:
+            stored_at, value = webapp.session_files_service.cache[key]
+            webapp.session_files_service.cache[key] = (stored_at - app_module.SESSION_FILES_CACHE_SECONDS - 1.0, value)
         path, signature = webapp.session_files_disk_cache_path(key)
         record = json.loads(path.read_text(encoding="utf-8"))
         record["stored_at"] = float(record["stored_at"]) - app_module.SESSION_FILES_CACHE_SECONDS - 1.0
@@ -6579,13 +6618,13 @@ def test_session_files_disk_prune_record_coalesces_and_tracks_completion(monkeyp
     try:
         assert webapp.request_session_files_disk_cache_prune("first") is True
         assert webapp.request_session_files_disk_cache_prune("duplicate") is False
-        assert webapp.session_files_disk_prune_record.running is True
-        assert webapp.session_files_disk_prune_record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        assert webapp.session_files_service.disk_prune_record.running is True
+        assert webapp.session_files_service.disk_prune_record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
         workers[0].target()
-        assert webapp.session_files_disk_prune_record.running is False
-        assert webapp.session_files_disk_prune_record.last_result == {"removed_entries": 0, "kept_bytes": 12}
+        assert webapp.session_files_service.disk_prune_record.running is False
+        assert webapp.session_files_service.disk_prune_record.last_result == {"removed_entries": 0, "kept_bytes": 12}
         assert webapp.request_session_files_disk_cache_prune("too-early") is False
-        now[0] = webapp.session_files_disk_prune_record.next_at
+        now[0] = webapp.session_files_service.disk_prune_record.next_at
         assert webapp.request_session_files_disk_cache_prune("due") is True
         assert len(workers) == 2
     finally:
@@ -6595,14 +6634,14 @@ def test_session_files_disk_prune_record_coalesces_and_tracks_completion(monkeyp
 def test_session_files_disk_prune_record_clears_running_after_failure(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "prune_session_files_disk_cache", lambda: (_ for _ in ()).throw(OSError("disk failed")))
-    webapp.session_files_disk_prune_record.running = True
+    webapp.session_files_service.disk_prune_record.running = True
     try:
         webapp.run_session_files_disk_cache_prune()
     finally:
         webapp.control_server.stop()
 
-    assert webapp.session_files_disk_prune_record.running is False
-    assert webapp.session_files_disk_prune_record.last_result == {"error": "disk failed"}
+    assert webapp.session_files_service.disk_prune_record.running is False
+    assert webapp.session_files_service.disk_prune_record.last_result == {"error": "disk failed"}
 
 
 def test_session_files_disk_prune_parallel_state_is_retired():
@@ -6654,25 +6693,25 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda _backend: "codex")
     try:
         fail_once(webapp.start_stats_history_sampler)
-        assert webapp.stats_history_sampler_record.running is False
-        assert webapp.stats_history_sampler_record.thread is None
+        assert webapp.stats_history_service.sampler_record.running is False
+        assert webapp.stats_history_service.sampler_record.thread is None
         assert webapp.start_stats_history_sampler() is True
 
         fail_once(webapp.start_client_event_watcher)
-        assert webapp.client_event_watcher_record.worker is None
+        assert webapp.client_watch_service.event_watcher_record.worker is None
         assert len(signal_starts) == 1 and len(signal_stops) == 1
         webapp.start_client_event_watcher()
-        assert webapp.client_event_watcher_record.worker is not None
+        assert webapp.client_watch_service.event_watcher_record.worker is not None
 
-        event_record = webapp.client_event_watcher_record
+        event_record = webapp.client_watch_service.event_watcher_record
         fail_once(lambda: webapp.start_client_directory_poll(event_record))
         assert event_record.directory_poll_worker is None
         assert webapp.start_client_directory_poll(event_record) is True
 
         fail_once(webapp.request_session_files_disk_cache_prune)
-        assert webapp.session_files_disk_prune_record.running is False
-        assert webapp.session_files_disk_prune_record.worker is None
-        assert webapp.session_files_disk_prune_record.next_at == 0.0
+        assert webapp.session_files_service.disk_prune_record.running is False
+        assert webapp.session_files_service.disk_prune_record.worker is None
+        assert webapp.session_files_service.disk_prune_record.next_at == 0.0
         assert webapp.request_session_files_disk_cache_prune() is True
 
         fail_once(webapp.start_input_heartbeat_worker)
@@ -6682,8 +6721,8 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert webapp.input_heartbeat_record.worker is not None
 
         fail_once(webapp.start_tabber_activity_cache_warmer)
-        assert webapp.tabber_activity_warmer_record.running is False
-        assert webapp.tabber_activity_warmer_record.thread is None
+        assert webapp.activity_transcript_service.tabber_warmer_record.running is False
+        assert webapp.activity_transcript_service.tabber_warmer_record.thread is None
         assert webapp.start_tabber_activity_cache_warmer() is True
 
         fail_once(lambda: webapp.warm_metadata_cache_async({}))
@@ -6699,15 +6738,15 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert root_index.building is True
         assert root_index.thread is not None
 
-        fail_once(lambda: webapp.start_yoagent_action_result_watcher({"session": "1"}, {}))
+        fail_once(lambda: webapp.yoagent_controller.start_yoagent_action_result_watcher({"session": "1"}, {}))
         assert webapp.yoagent_action_waits == {}
-        watch = webapp.start_yoagent_action_result_watcher({"session": "1"}, {})
+        watch = webapp.yoagent_controller.start_yoagent_action_result_watcher({"session": "1"}, {})
         assert watch["started"] is True and watch["id"] in webapp.yoagent_action_waits
 
-        fail_once(webapp.start_yoagent_backend_prewarm)
+        fail_once(webapp.yoagent_controller.start_yoagent_backend_prewarm)
         assert webapp.yoagent_prewarm_record.prewarm_running is False
         assert webapp.yoagent_prewarm_record.prewarm_worker is None
-        prewarm, status = webapp.start_yoagent_backend_prewarm()
+        prewarm, status = webapp.yoagent_controller.start_yoagent_backend_prewarm()
         assert status == HTTPStatus.ACCEPTED and prewarm["started"] is True
         assert webapp.yoagent_prewarm_record.prewarm_worker is not None
     finally:
@@ -6724,8 +6763,8 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
         return f"encoded-{len(calls)}"
 
     def fake_merge_attention_acks():
-        with webapp.client_watch_lock:
-            webapp.client_watch_attention_ack_rev = 7
+        with webapp.client_watch_service.lock:
+            webapp.client_watch_service.attention_ack_rev = 7
 
     webapp.client_event_payload_signature = fake_signature
     webapp.merge_shared_attention_acks = fake_merge_attention_acks
@@ -7007,10 +7046,10 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: (_ for _ in ()).throw(AssertionError("diff-only fs_changed must not list directories")))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
-        webapp.client_watch_filesystem_last_full_at = time.monotonic()
+        webapp.client_watch_service.filesystem_last_full_at = time.monotonic()
         webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
-        webapp.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.transcripts_payload_cache_record.payload = {"sessions": {}}
+        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {}}
         assert webapp.poll_client_events_once() == []
         assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed"]
     finally:
@@ -7026,9 +7065,9 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert fs_payload["change_summary"]["entries_added"] == 1
     assert fs_payload["change_summary"]["entries_removed"] == 1
     assert "listing_summary" not in fs_payload
-    assert webapp.session_files_cache != {}
-    assert webapp.transcripts_payload_cache_record.payload is None
-    assert webapp.transcripts_payload_cache_record.stored_at is None
+    assert webapp.session_files_service.cache != {}
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload is None
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at is None
 
 
 def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
@@ -7055,7 +7094,7 @@ def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeyp
     try:
         assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[0]) == ["fs_changed"]
         assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[1]) == ["fs_changed"]
-        webapp.client_watch_filesystem_last_full_at = time.monotonic() - app_module.FILESYSTEM_WATCH_KEYFRAME_SECONDS - 1.0
+        webapp.client_watch_service.filesystem_last_full_at = time.monotonic() - app_module.FILESYSTEM_WATCH_KEYFRAME_SECONDS - 1.0
         assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[2]) == ["fs_changed"]
     finally:
         webapp.control_server.stop()
@@ -7133,7 +7172,7 @@ def test_session_files_ready_skips_unchanged_fs_republish(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     events = []
     requests = [{"session": "5", "hours": 24}]
-    monkeypatch.setattr(webapp, "client_watch_state_snapshot", lambda: ([], requests, {}))
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], requests, {}))
     monkeypatch.setattr(webapp, "session_files_payload", lambda *args, **kwargs: ({"files": [{"path": "/repo/a.py"}], "repos": [], "errors": [], "cache": {"age": time.time()}}, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
@@ -7166,8 +7205,8 @@ def test_poll_client_events_once_transcript_change_is_lightweight_timing_regress
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
-        webapp.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.transcripts_payload_cache_record.payload = {"sessions": {}}
+        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {}}
         assert webapp.poll_client_events_once() == []
         started = time.perf_counter()
         assert webapp.poll_client_events_once() == ["transcripts_changed"]
@@ -7199,10 +7238,10 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": session_file_triggers.append(trigger) or ["session_files_ready"])
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published_events.append((event_type, payload or {})))
     try:
-        webapp.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.transcripts_payload_cache_record.payload = {"sessions": {"cached": {}}}
-        webapp.transcript_tail_cache = {("tail",): (1.0, "cached")}
-        webapp.context_items_cache = {("context",): (1.0, [{"cached": True}])}
+        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
+        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {"cached": {}}}
+        webapp.activity_transcript_service.transcript_tail_cache = {("tail",): (1.0, "cached")}
+        webapp.activity_transcript_service.context_items_cache = {("context",): (1.0, [{"cached": True}])}
         assert webapp.poll_client_events_once() == []
         assert webapp.poll_client_events_once() == ["context_items_ready", "session_files_ready"]
     finally:
@@ -7211,10 +7250,10 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     assert context_triggers == ["transcript_content_changed"]
     assert session_file_triggers == ["transcript_content_changed"]
     assert published_events == []
-    assert webapp.transcripts_payload_cache_record.stored_at == 1.0
-    assert webapp.transcripts_payload_cache_record.payload == {"sessions": {"cached": {}}}
-    assert webapp.transcript_tail_cache == {}
-    assert webapp.context_items_cache == {}
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at == 1.0
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload == {"sessions": {"cached": {}}}
+    assert webapp.activity_transcript_service.transcript_tail_cache == {}
+    assert webapp.activity_transcript_service.context_items_cache == {}
 
 
 def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):
@@ -7425,14 +7464,14 @@ def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_
     monkeypatch.setattr(app_module, "transcript_activity_is_recent", lambda *_args, **_kwargs: False)
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
-    monkeypatch.setattr(webapp, "run_yoagent_direct_prompt_backend", fake_direct_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_direct_prompt_backend", fake_direct_backend)
     settings = {"backend": "codex", "invocation": "cli"}
     try:
-        first = webapp.update_yoagent_session_summary("5", info, settings)
-        unchanged = webapp.update_yoagent_session_summary("5", info, settings)
+        first = webapp.yoagent_controller.update_yoagent_session_summary("5", info, settings)
+        unchanged = webapp.yoagent_controller.update_yoagent_session_summary("5", info, settings)
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"timestamp": "2026-06-07T10:05:00Z", "payload": {"type": "agent_message", "message": "Tests now pass."}}) + "\n")
-        second = webapp.update_yoagent_session_summary("5", info, settings)
+        second = webapp.yoagent_controller.update_yoagent_session_summary("5", info, settings)
         state = app_module.read_yolomux_state().get(app_module.YOAGENT_SESSION_SUMMARIES_STATE_KEY, {})
     finally:
         webapp.control_server.stop()
@@ -7466,10 +7505,10 @@ def test_yoagent_session_summary_worker_runs_once_per_server_launch(monkeypatch)
             self.target()
 
     monkeypatch.setattr(session_summaries_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
     try:
-        webapp.maybe_start_yoagent_summary_worker()
-        webapp.maybe_start_yoagent_summary_worker()
+        webapp.yoagent_controller.maybe_start_yoagent_summary_worker()
+        webapp.yoagent_controller.maybe_start_yoagent_summary_worker()
     finally:
         webapp.control_server.stop()
 
@@ -7498,16 +7537,16 @@ def test_yoagent_session_summary_worker_start_failure_allows_retry(monkeypatch):
             self.target()
 
     monkeypatch.setattr(session_summaries_module.threading, "Thread", FlakyThread)
-    monkeypatch.setattr(webapp, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "tick_yoagent_session_summaries", lambda settings=None, **kwargs: ticks.append((settings, kwargs)) or {"enabled": True})
     try:
         with pytest.raises(RuntimeError, match="thread unavailable"):
-            webapp.maybe_start_yoagent_summary_worker()
+            webapp.yoagent_controller.maybe_start_yoagent_summary_worker()
         failed_record = webapp.yoagent_summary_worker_record
         assert failed_record.worker is None
         assert failed_record.running is False
         assert failed_record.first_launch_started is False
 
-        webapp.maybe_start_yoagent_summary_worker()
+        webapp.yoagent_controller.maybe_start_yoagent_summary_worker()
     finally:
         webapp.control_server.stop()
 
@@ -7528,11 +7567,11 @@ def test_yoagent_session_summary_parallel_worker_fields_are_retired():
 def test_visible_yoagent_launch_starts_first_launch_summary_worker(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     starts = []
-    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: starts.append("summary"))
+    monkeypatch.setattr(webapp.yoagent_controller, "maybe_start_yoagent_summary_worker", lambda: starts.append("summary"))
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda _requested: "deterministic")
     try:
-        background_payload, background_status = webapp.yoagent_prewarm({"visible": False})
-        visible_payload, visible_status = webapp.yoagent_prewarm({"visible": True})
+        background_payload, background_status = webapp.yoagent_controller.yoagent_prewarm({"visible": False})
+        visible_payload, visible_status = webapp.yoagent_controller.yoagent_prewarm({"visible": True})
     finally:
         webapp.control_server.stop()
 
@@ -7550,8 +7589,8 @@ def test_cancel_yoagent_chat_marks_request_and_interrupts_active_backend(monkeyp
     monkeypatch.setattr(webapp, "publish_yoagent_stream_delta", lambda *args, **kwargs: stream_events.append((args, kwargs)))
     try:
         event = webapp.yoagent_controller.register_yoagent_chat_request("chat-test", "stream-test", "codex")
-        webapp.set_yoagent_chat_request_interrupt("chat-test", lambda: interrupts.append("called") or {"ok": True, "interrupted": True})
-        payload, status = webapp.cancel_yoagent_chat("chat-test")
+        webapp.yoagent_controller.set_yoagent_chat_request_interrupt("chat-test", lambda: interrupts.append("called") or {"ok": True, "interrupted": True})
+        payload, status = webapp.yoagent_controller.cancel_yoagent_chat("chat-test")
     finally:
         webapp.control_server.stop()
 
@@ -7585,7 +7624,7 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
         "errors": [],
     })
     try:
-        payload, status = webapp.yoagent_chat({"message": "what is session 5 doing?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "what is session 5 doing?"})
     finally:
         webapp.control_server.stop()
 
@@ -7634,7 +7673,7 @@ def test_yoagent_chat_sends_to_accepting_agent_pane_without_extra_confirmation(m
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
@@ -7651,10 +7690,10 @@ def test_yoagent_chat_sends_to_accepting_agent_pane_without_extra_confirmation(m
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(app_module, "tmux_paste_text", fake_tmux_paste_text)
-    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("visible sends must not use native resume")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("visible sends must not use native resume")))
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "wait for session 6 to be done, then ask for date"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "wait for session 6 to be done, then ask for date"})
     finally:
         webapp.control_server.stop()
 
@@ -7705,7 +7744,7 @@ def test_yoagent_chat_does_not_send_to_agent_waiting_for_question_input(monkeypa
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "needs-input", "text": "Want me to keep using system PT?"}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "needs-input", "text": "Want me to keep using system PT?"}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["1"],
@@ -7724,7 +7763,7 @@ def test_yoagent_chat_does_not_send_to_agent_waiting_for_question_input(monkeypa
     monkeypatch.setattr(app_module, "tmux_paste_text", fake_tmux_paste_text)
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "ask session 1 what it has done today"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "ask session 1 what it has done today"})
     finally:
         webapp.control_server.stop()
 
@@ -7776,7 +7815,7 @@ def test_yoagent_chat_sends_and_starts_background_result_watch(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
@@ -7792,13 +7831,13 @@ def test_yoagent_chat_sends_and_starts_background_result_watch(monkeypatch):
 
     def fake_start_result_watcher(preview, marker):
         watchers.append((preview, marker))
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
         return {"id": "wait-1", "started": True}
 
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", fake_start_result_watcher)
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", fake_start_result_watcher)
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "send `date` to tmux session 6"})
     finally:
         webapp.control_server.stop()
 
@@ -7857,7 +7896,7 @@ def test_yoagent_chat_direct_send_can_opt_out_of_background_result_watch(monkeyp
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
@@ -7869,10 +7908,10 @@ def test_yoagent_chat_direct_send_can_opt_out_of_background_result_watch(monkeyp
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: SimpleNamespace(returncode=0, stdout="", stderr=""))
     watchers = []
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"started": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"started": True})
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6 but do not wait for the result"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "send `date` to tmux session 6 but do not wait for the result"})
     finally:
         webapp.control_server.stop()
 
@@ -7931,14 +7970,14 @@ def test_yoagent_managed_transport_result_is_recorded_without_tmux_watcher(monke
     }
     webapp.yoagent_action_previews["preview-1"] = preview
     webapp.yoagent_transports = FakeRegistry()
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "yoagent_action_acceptance", lambda current: (True, "target agent is accepting an AI prompt"))
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("managed transport result should not start tmux watcher")))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_acceptance", lambda current: (True, "target agent is accepting an AI prompt"))
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("managed transport result should not start tmux watcher")))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
 
     try:
-        result, status = webapp.execute_yoagent_send_action({"preview_id": "preview-1"}, persist_result=True, start_result_watch=True)
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": "preview-1"}, persist_result=True, start_result_watch=True)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8028,12 +8067,12 @@ def test_yoagent_handoff_uses_structured_transport_for_managed_target(monkeypatc
     webapp.yoagent_transports = FakeRegistry()
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "2"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"2": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
 
     try:
-        result = webapp.continue_yoagent_handoff(source_preview, "Session 1 found three changed files.")
+        result = webapp.yoagent_controller.continue_yoagent_handoff(source_preview, "Session 1 found three changed files.")
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8087,10 +8126,10 @@ def test_yoagent_action_target_prefers_managed_codex_transport(monkeypatch):
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["7"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"7": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
 
     try:
-        target, status = webapp.yoagent_action_target("7")
+        target, status = webapp.yoagent_controller.yoagent_action_target("7")
     finally:
         webapp.control_server.stop()
 
@@ -8114,18 +8153,18 @@ def test_yoagent_action_result_watcher_appends_transcript_result(monkeypatch, tm
         "transport": "pane-paste",
     }
     preview = {"session": "6", "text": "tell me the date", "return_result": True, "target": target}
-    marker = webapp.yoagent_action_result_marker(target)
+    marker = webapp.yoagent_controller.yoagent_action_result_marker(target)
     transcript.write_text(
         json.dumps({"timestamp": "2026-06-13T17:41:00Z", "payload": {"type": "agent_message", "message": "The date is June 13, 2026."}}) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     events = []
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        result = webapp.run_yoagent_action_result_watcher(preview, marker, wait_seconds=1, poll_seconds=0.01)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, marker, wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8193,13 +8232,13 @@ def test_yoagent_action_result_watcher_waits_for_claude_final_after_tool_use(mon
         calls["count"] += 1
         return deltas[index]
 
-    monkeypatch.setattr(webapp, "yoagent_transcript_delta_text", fake_delta)
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_transcript_delta_text", fake_delta)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        result = webapp.run_yoagent_action_result_watcher(preview, {"transcript": target["agent_transcript"]}, wait_seconds=1, poll_seconds=0.01)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, {"transcript": target["agent_transcript"]}, wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8238,13 +8277,13 @@ def test_yoagent_action_result_watcher_waits_for_codex_task_complete(monkeypatch
         calls["count"] += 1
         return deltas[index]
 
-    monkeypatch.setattr(webapp, "yoagent_transcript_delta_text", fake_delta)
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_transcript_delta_text", fake_delta)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        result = webapp.run_yoagent_action_result_watcher(preview, {"transcript": target["agent_transcript"]}, wait_seconds=1, poll_seconds=0.01)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, {"transcript": target["agent_transcript"]}, wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8276,14 +8315,14 @@ def test_yoagent_action_result_watcher_does_not_record_visible_composer_draft(mo
     }
     preview = {"session": "1", "text": "what is the time?", "return_result": True, "target": target}
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == "what's the date in UTC"
-        assert webapp.yoagent_action_visible_result_text(target) == ""
-        result = webapp.run_yoagent_action_result_watcher(preview, {"transcript": ""}, wait_seconds=1, poll_seconds=0.01)
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == "what's the date in UTC"
+        assert webapp.yoagent_controller.yoagent_action_visible_result_text(target) == ""
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, {"transcript": ""}, wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8309,7 +8348,7 @@ def test_yoagent_action_result_watcher_prefers_edited_files_over_visible_fallbac
         "transport": "pane-paste",
     }
     preview = {"session": "1", "text": "edit notes", "return_result": True, "target": target}
-    marker = webapp.yoagent_action_result_marker(target)
+    marker = webapp.yoagent_controller.yoagent_action_result_marker(target)
     transcript.write_text(
         json.dumps({
             "type": "assistant",
@@ -8320,13 +8359,13 @@ def test_yoagent_action_result_watcher_prefers_edited_files_over_visible_fallbac
         }) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
-    monkeypatch.setattr(webapp, "yoagent_action_visible_result_text", lambda _target: "stale visible pane text")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_visible_result_text", lambda _target: "stale visible pane text")
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        result = webapp.run_yoagent_action_result_watcher(preview, marker, wait_seconds=1, poll_seconds=0.01)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, marker, wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8349,16 +8388,16 @@ def test_yoagent_action_result_watcher_timeout_clears_pending_wait(monkeypatch):
     preview = {"session": "1", "text": "what is the time?", "return_result": True, "target": target}
     marker = {"transcript": ""}
     events = []
-    monkeypatch.setattr(webapp, "yoagent_transcript_delta_text", lambda _marker: "")
-    monkeypatch.setattr(webapp, "yoagent_action_visible_result_text", lambda _target: "")
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_transcript_delta_text", lambda _marker: "")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_visible_result_text", lambda _target: "")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
         waiting = webapp.yoagent_conversation_payload()["pending_waits"]
-        result = webapp.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8396,14 +8435,14 @@ def test_yoagent_action_result_watcher_success_clears_pending_wait(monkeypatch):
         },
     })
     events = []
-    monkeypatch.setattr(webapp, "yoagent_transcript_delta_text", lambda _marker: final_text)
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_transcript_delta_text", lambda _marker: final_text)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
-        result = webapp.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8431,15 +8470,15 @@ def test_yoagent_action_result_watcher_partial_timeout_clears_pending_wait(monke
     preview = {"session": "1", "text": "what is the time?", "return_result": True, "target": target}
     marker = {"transcript": "/tmp/claude-session-1.jsonl"}
     events = []
-    monkeypatch.setattr(webapp, "yoagent_transcript_delta_text", lambda _marker: "partial transcript delta")
-    monkeypatch.setattr(webapp, "yoagent_action_result_text_from_transcript_delta", lambda _delta: "Partial answer before timeout.")
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "working", "text": "still working"}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_transcript_delta_text", lambda _marker: "partial transcript delta")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_result_text_from_transcript_delta", lambda _delta: "Partial answer before timeout.")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda *_args, **_kwargs: ({}, {"key": "working", "text": "still working"}))
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
-        result = webapp.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
+        result = webapp.yoagent_controller.run_yoagent_action_result_watcher(preview, marker, watch_id="wait-1", wait_seconds=1, poll_seconds=0.01)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8470,9 +8509,9 @@ def test_yoagent_pending_waits_show_and_clear(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
         waiting = webapp.yoagent_conversation_payload()["pending_waits"]
-        webapp.finish_yoagent_action_wait("wait-1", "yoagent_wait_finished")
+        webapp.yoagent_controller.finish_yoagent_action_wait("wait-1", "yoagent_wait_finished")
         cleared = webapp.yoagent_conversation_payload()["pending_waits"]
     finally:
         webapp.control_server.stop()
@@ -8510,9 +8549,9 @@ def test_clear_yoagent_action_wait_uses_existing_wait_store(monkeypatch):
 
     try:
         webapp.record_yoagent_message("assistant", "Result from tmux session `6`: done", kind="agent_result", session="6")
-        webapp.register_yoagent_action_wait("wait-1", preview, marker)
-        payload, status = webapp.clear_yoagent_action_wait("wait-1")
-        missing, missing_status = webapp.clear_yoagent_action_wait("wait-1")
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, marker)
+        payload, status = webapp.yoagent_controller.clear_yoagent_action_wait("wait-1")
+        missing, missing_status = webapp.yoagent_controller.clear_yoagent_action_wait("wait-1")
     finally:
         webapp.control_server.stop()
 
@@ -8547,14 +8586,14 @@ def test_yoagent_pending_waits_multiple_in_flight_coexist_and_clear_independentl
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview_one, {"transcript": "/tmp/claude-session-6.jsonl"})
-        webapp.register_yoagent_action_wait("wait-2", preview_two, {"transcript": "/tmp/codex-session-7.jsonl"})
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview_one, {"transcript": "/tmp/claude-session-6.jsonl"})
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-2", preview_two, {"transcript": "/tmp/codex-session-7.jsonl"})
         waiting = webapp.yoagent_conversation_payload()["pending_waits"]
-        webapp.record_yoagent_action_result(preview_one, "Session 6 date result.")
-        webapp.finish_yoagent_action_wait("wait-1", "yoagent_wait_finished")
+        webapp.yoagent_controller.record_yoagent_action_result(preview_one, "Session 6 date result.")
+        webapp.yoagent_controller.finish_yoagent_action_wait("wait-1", "yoagent_wait_finished")
         remaining = webapp.yoagent_conversation_payload()["pending_waits"]
-        webapp.record_yoagent_action_result(preview_two, "Session 7 time result.")
-        webapp.finish_yoagent_action_wait("wait-2", "yoagent_wait_finished")
+        webapp.yoagent_controller.record_yoagent_action_result(preview_two, "Session 7 time result.")
+        webapp.yoagent_controller.finish_yoagent_action_wait("wait-2", "yoagent_wait_finished")
         conversation = webapp.yoagent_conversation_payload()
         cleared = conversation["pending_waits"]
     finally:
@@ -8602,7 +8641,7 @@ def test_yoagent_handoff_pending_wait_label_includes_regarding(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
 
     try:
-        webapp.register_yoagent_action_wait("wait-1", preview, {"transcript": "/tmp/claude-session-1.jsonl"})
+        webapp.yoagent_controller.register_yoagent_action_wait("wait-1", preview, {"transcript": "/tmp/claude-session-1.jsonl"})
         waiting = webapp.yoagent_conversation_payload()["pending_waits"]
     finally:
         webapp.control_server.stop()
@@ -8708,14 +8747,14 @@ def test_yoagent_handoff_sends_to_second_session_and_watches_result(monkeypatch)
     watchers = []
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1", "2"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info1, "2": info2}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: sent.append((target, text, submit)) or SimpleNamespace(returncode=0, stdout="", stderr=""))
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda action, marker: watchers.append((action, marker)) or {"started": True})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda action, marker: watchers.append((action, marker)) or {"started": True})
 
     try:
-        result = webapp.continue_yoagent_handoff(preview, "The time is **2026-06-13 Sat 17:35:43 PDT** (Pacific Time).")
+        result = webapp.yoagent_controller.continue_yoagent_handoff(preview, "The time is **2026-06-13 Sat 17:35:43 PDT** (Pacific Time).")
     finally:
         webapp.control_server.stop()
 
@@ -8749,7 +8788,7 @@ def test_yoagent_handoff_right_time_now_sends_clean_single_question():
     ])
 
     try:
-        prompt = webapp.yoagent_handoff_prompt(preview, response)
+        prompt = webapp.yoagent_controller.yoagent_handoff_prompt(preview, response)
     finally:
         webapp.control_server.stop()
 
@@ -8771,7 +8810,7 @@ def test_yoagent_generic_handoff_prompt_hides_source_and_target_identity():
     }
 
     try:
-        prompt = webapp.yoagent_handoff_prompt(preview, "The cache invalidation path can drop dirty files.")
+        prompt = webapp.yoagent_controller.yoagent_handoff_prompt(preview, "The cache invalidation path can drop dirty files.")
     finally:
         webapp.control_server.stop()
 
@@ -8819,7 +8858,7 @@ def test_yoagent_send_does_not_claim_success_when_text_remains_in_composer(monke
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["1"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: SimpleNamespace(returncode=0, stdout="", stderr=""))
     still_in_composer = "\n".join([
         "new task? /clear to save 193.6k tokens",
@@ -8833,8 +8872,8 @@ def test_yoagent_send_does_not_claim_success_when_text_remains_in_composer(monke
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "Use this context: hello Task: answer."})
-        result, result_status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "Use this context: hello Task: answer."})
+        result, result_status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -8882,12 +8921,12 @@ def test_yoagent_send_revalidates_target_identity_before_paste(monkeypatch, chan
         "target": dict(base_target),
     }
     current_target = {**base_target, changed_key: changed_value, "screen": {"key": "idle", "text": ""}}
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (current_target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "yoagent_action_acceptance", lambda _target: (True, "target agent is accepting an AI prompt"))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (current_target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_acceptance", lambda _target: (True, "target agent is accepting an AI prompt"))
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale target must not receive paste")))
 
     try:
-        result, status = webapp.execute_yoagent_send_action({"preview_id": preview_id})
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview_id})
     finally:
         webapp.control_server.stop()
 
@@ -8947,7 +8986,7 @@ def test_yoagent_action_preview_allows_existing_target_composer_text_with_clear(
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda target, visible_only=False: visible_text)
 
     try:
-        preview, status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "what time is it?"})
+        preview, status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "what time is it?"})
     finally:
         webapp.control_server.stop()
 
@@ -9036,7 +9075,7 @@ def test_yoagent_chat_clears_existing_draft_before_send(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", fake_paste)
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "ask session 1 what time it is"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "ask session 1 what time it is"})
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -9067,7 +9106,7 @@ def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
         "prompt": {},
         "screen": {"key": "input-draft", "text": "target input box already contains unsent text", "detected_text": "old draft"},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
     draft_text = "\n".join([
         "new task? /clear to save 193.6k tokens",
         "────────────────────────────────────────────────────────────────",
@@ -9082,8 +9121,8 @@ def test_yoagent_send_refuses_when_existing_draft_does_not_clear(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("uncleared draft must not receive paste")))
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "what time is it?"})
-        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "what time is it?"})
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]})
     finally:
         webapp.control_server.stop()
 
@@ -9110,8 +9149,8 @@ def test_yoagent_claude_try_suggestion_is_idle_and_accepting(monkeypatch):
     info = SessionInfo(session="target-agent", panes=[], selected_pane=None, agents=[])
 
     try:
-        prompt, screen = webapp.yoagent_action_pane_status("target-agent", "%77", discovered_sessions={"target-agent": info})
-        accepting, acceptance_text = webapp.yoagent_action_acceptance({
+        prompt, screen = webapp.yoagent_controller.yoagent_action_pane_status("target-agent", "%77", discovered_sessions={"target-agent": info})
+        accepting, acceptance_text = webapp.yoagent_controller.yoagent_action_acceptance({
             "agent_kind": "claude",
             "pane_target": "%77",
             "prompt": prompt,
@@ -9120,7 +9159,7 @@ def test_yoagent_claude_try_suggestion_is_idle_and_accepting(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert webapp.yoagent_visible_composer_text(visible_text) == ""
+    assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == ""
     assert screen["key"] == "idle"
     assert screen["text"] == ""
     assert screen["negative_reason"] == "idle composer"
@@ -9178,8 +9217,8 @@ def test_yoagent_send_to_claude_try_suggestion_does_not_clear(monkeypatch):
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date"})
-        result, result_status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date"})
+        result, result_status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]})
     finally:
         webapp.control_server.stop()
 
@@ -9246,11 +9285,11 @@ def test_yoagent_send_to_claude_nbsp_suggestion_does_not_clear(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: operations.append(("paste", target, text, submit)) or SimpleNamespace(returncode=0, stdout="", stderr=""))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     watchers = []
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True, "wait_seconds": app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True, "wait_seconds": app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS})
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date", "return_result": True})
-        result, result_status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date", "return_result": True})
+        result, result_status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -9332,11 +9371,11 @@ def test_yoagent_send_to_codex_dim_suggestion_does_not_clear(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda target, text, submit=False: operations.append(("paste", target, text, submit)) or SimpleNamespace(returncode=0, stdout="", stderr=""))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     watchers = []
-    monkeypatch.setattr(webapp, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True, "wait_seconds": app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS})
+    monkeypatch.setattr(webapp.yoagent_controller, "start_yoagent_action_result_watcher", lambda preview, marker: watchers.append((preview, marker)) or {"id": "watch-1", "started": True, "wait_seconds": app_module.YOAGENT_ACTION_RESULT_WAIT_SECONDS})
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date", "return_result": True})
-        result, result_status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "target-agent", "text": "tell me the date", "return_result": True})
+        result, result_status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=True, start_result_watch=True)
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -9371,7 +9410,7 @@ def test_yoagent_composer_text_ignores_completed_prompt_history():
     ])
     webapp = app_module.TmuxWebtermApp(["2"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9391,7 +9430,7 @@ def test_yoagent_composer_text_ignores_submitted_queue_above_blank_prompt():
     ])
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9405,7 +9444,7 @@ def test_yoagent_composer_text_ignores_submitted_prompt_waiting_for_output():
     ])
     webapp = app_module.TmuxWebtermApp(["2"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9424,7 +9463,7 @@ def test_yoagent_composer_text_keeps_real_multiline_draft():
     ])
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == "Use this context: It's 11:17 PM PDT. Task: add 10 minutes and say if that is right."
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == "Use this context: It's 11:17 PM PDT. Task: add 10 minutes and say if that is right."
     finally:
         webapp.control_server.stop()
 
@@ -9442,8 +9481,8 @@ def test_yoagent_composer_text_keeps_real_claude_draft(monkeypatch):
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
 
     try:
-        prompt, screen = webapp.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
-        accepting, acceptance_text = webapp.yoagent_action_acceptance({
+        prompt, screen = webapp.yoagent_controller.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
+        accepting, acceptance_text = webapp.yoagent_controller.yoagent_action_acceptance({
             "agent_kind": "claude",
             "pane_target": "%1",
             "prompt": prompt,
@@ -9452,7 +9491,7 @@ def test_yoagent_composer_text_keeps_real_claude_draft(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert webapp.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
+    assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
     assert screen["key"] == "input-draft"
     assert screen["detected_text"] == "Write tests for @filename"
     assert accepting is True
@@ -9477,8 +9516,8 @@ def test_yoagent_composer_text_ignores_nbsp_suggestion_rows():
     ])
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
-        assert webapp.yoagent_visible_composer_text(claude_text) == ""
-        assert webapp.yoagent_visible_composer_text(codex_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(claude_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(codex_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9542,8 +9581,8 @@ def test_yoagent_composer_text_ignores_live_suggestion_captures():
     ])
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
-        assert webapp.yoagent_visible_composer_text(claude_text) == ""
-        assert webapp.yoagent_visible_composer_text(codex_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(claude_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(codex_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9572,8 +9611,8 @@ def test_yoagent_codex_dim_suggestion_is_idle_and_accepting(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda target, visible_only=False: styled_text)
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     try:
-        prompt, screen = webapp.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
-        accepting, acceptance_text = webapp.yoagent_action_acceptance({
+        prompt, screen = webapp.yoagent_controller.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
+        accepting, acceptance_text = webapp.yoagent_controller.yoagent_action_acceptance({
             "agent_kind": "codex",
             "pane_target": "%1",
             "prompt": prompt,
@@ -9582,8 +9621,8 @@ def test_yoagent_codex_dim_suggestion_is_idle_and_accepting(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert webapp.yoagent_visible_composer_text(plain_text) == "Summarize recent commits"
-    assert webapp.yoagent_visible_composer_text(styled_text) == ""
+    assert webapp.yoagent_controller.yoagent_visible_composer_text(plain_text) == "Summarize recent commits"
+    assert webapp.yoagent_controller.yoagent_visible_composer_text(styled_text) == ""
     assert screen["key"] == "idle"
     assert screen["text"] == ""
     assert accepting is True
@@ -9607,8 +9646,8 @@ def test_yoagent_composer_text_keeps_same_words_when_typed_with_plain_space():
     ])
     webapp = app_module.TmuxWebtermApp(["1"])
     try:
-        assert webapp.yoagent_visible_composer_text(claude_text) == "commit the DYN_PARSER_DEBUG change"
-        assert webapp.yoagent_visible_composer_text(codex_text) == "Summarize recent commits"
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(claude_text) == "commit the DYN_PARSER_DEBUG change"
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(codex_text) == "Summarize recent commits"
     finally:
         webapp.control_server.stop()
 
@@ -9634,8 +9673,8 @@ def test_yoagent_composer_text_ignores_numbered_choice_and_approval_rows(monkeyp
     monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: {"key": "approval", "text": "Would you like to run the following command?"})
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     try:
-        assert webapp.yoagent_visible_composer_text(numbered_choice) == ""
-        prompt, screen = webapp.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(numbered_choice) == ""
+        prompt, screen = webapp.yoagent_controller.yoagent_action_pane_status("1", "%1", discovered_sessions={"1": info})
     finally:
         webapp.control_server.stop()
 
@@ -9655,7 +9694,7 @@ def test_yoagent_composer_text_ignores_codex_template_placeholder():
     ])
     webapp = app_module.TmuxWebtermApp(["9"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == ""
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == ""
     finally:
         webapp.control_server.stop()
 
@@ -9670,7 +9709,7 @@ def test_yoagent_composer_text_keeps_codex_bottom_draft():
     ])
     webapp = app_module.TmuxWebtermApp(["9"])
     try:
-        assert webapp.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
+        assert webapp.yoagent_controller.yoagent_visible_composer_text(visible_text) == "Write tests for @filename"
     finally:
         webapp.control_server.stop()
 
@@ -9688,7 +9727,7 @@ def test_yoagent_clear_target_composer_ignores_claude_try_placeholder(monkeypatc
     monkeypatch.setattr(app_module, "tmux_clear_input", lambda target: clear_calls.append(target) or SimpleNamespace(returncode=0, stdout="", stderr=""))
 
     try:
-        result = webapp.yoagent_clear_target_composer({"session": "target-agent", "pane_target": "%77"}, wait_seconds=0)
+        result = webapp.yoagent_controller.yoagent_clear_target_composer({"session": "target-agent", "pane_target": "%77"}, wait_seconds=0)
     finally:
         webapp.control_server.stop()
 
@@ -9722,7 +9761,7 @@ def test_yoagent_clear_target_composer_accepts_claude_placeholder_after_clear(mo
     monkeypatch.setattr(app_module, "tmux_clear_input", fake_clear)
 
     try:
-        result = webapp.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
+        result = webapp.yoagent_controller.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
     finally:
         webapp.control_server.stop()
 
@@ -9756,7 +9795,7 @@ def test_yoagent_clear_target_composer_accepts_nbsp_suggestion_after_clear(monke
     monkeypatch.setattr(app_module, "tmux_clear_input", fake_clear)
 
     try:
-        result = webapp.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
+        result = webapp.yoagent_controller.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
     finally:
         webapp.control_server.stop()
 
@@ -9777,7 +9816,7 @@ def test_yoagent_clear_target_composer_still_fails_when_real_draft_remains(monke
     monkeypatch.setattr(app_module, "tmux_clear_input", lambda target: clear_calls.append(target) or SimpleNamespace(returncode=0, stdout="", stderr=""))
 
     try:
-        result = webapp.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
+        result = webapp.yoagent_controller.yoagent_clear_target_composer({"session": "1", "pane_target": "%1"}, wait_seconds=0)
     finally:
         webapp.control_server.stop()
 
@@ -9827,7 +9866,7 @@ def test_yoagent_chat_preview_only_when_confirmation_requested(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "idle", "text": ""}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
@@ -9840,7 +9879,7 @@ def test_yoagent_chat_preview_only_when_confirmation_requested(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("confirmation request must not auto-send")))
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "send `date` to tmux session 6, ask me before"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "send `date` to tmux session 6, ask me before"})
     finally:
         webapp.control_server.stop()
 
@@ -9890,7 +9929,7 @@ def test_yoagent_chat_does_not_send_when_target_agent_is_working(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["6"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"6": info}, []))
-    monkeypatch.setattr(webapp, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "working", "text": "agent is working"}))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_pane_status", lambda session, target, **_kwargs: ({}, {"key": "working", "text": "agent is working"}))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
         "generated_at": "2026-06-13T17:40:00+00:00",
         "session_order": ["6"],
@@ -9903,7 +9942,7 @@ def test_yoagent_chat_does_not_send_when_target_agent_is_working(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("working target must not receive paste")))
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "tell session 6 to run date"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "tell session 6 to run date"})
     finally:
         webapp.control_server.stop()
 
@@ -9949,10 +9988,10 @@ def test_yoagent_notify_job_create_dedupe_and_cancel(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6", "quiet_seconds": 0})
-        duplicate, duplicate_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6", "quiet_seconds": 0})
-        jobs, jobs_status = webapp.yoagent_jobs_payload()
-        cancelled, cancel_status = webapp.cancel_yoagent_job(payload["job"]["id"])
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "6", "quiet_seconds": 0})
+        duplicate, duplicate_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "6", "quiet_seconds": 0})
+        jobs, jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+        cancelled, cancel_status = webapp.yoagent_controller.cancel_yoagent_job(payload["job"]["id"])
     finally:
         webapp.control_server.stop()
 
@@ -9981,8 +10020,8 @@ def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
         "prompt": {},
         "screen": {"key": "idle", "text": ""},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "execute_yoagent_send_action", lambda payload, **_kwargs: ({
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "execute_yoagent_send_action", lambda payload, **_kwargs: ({
         "ok": True,
         "preview_id": payload["preview_id"],
         "transport": "tmux-legacy",
@@ -9993,9 +10032,9 @@ def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
-        fired = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10044,7 +10083,7 @@ def test_yoagent_direct_send_uses_tmux_legacy_agent_tui_send(monkeypatch):
         "screen": {"key": "idle", "text": ""},
     }
     send_calls = []
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         transport_module,
@@ -10054,8 +10093,8 @@ def test_yoagent_direct_send_uses_tmux_legacy_agent_tui_send(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct send must go through agent_tui send_prompt")))
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "6", "text": "date"})
-        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]})
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "6", "text": "date"})
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]})
     finally:
         webapp.control_server.stop()
 
@@ -10086,7 +10125,7 @@ def test_yoagent_prompt_answer_uses_verified_selector_path(monkeypatch):
     }
     moved = []
     entered = []
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(controller_module, "tmux_move_to_option", lambda pane, option, selected_option=None: moved.append((pane, option, selected_option)))
     monkeypatch.setattr(controller_module, "tmux_send_enter", lambda pane: entered.append(pane))
@@ -10094,8 +10133,8 @@ def test_yoagent_prompt_answer_uses_verified_selector_path(monkeypatch):
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt answers must not paste free text")))
 
     try:
-        preview, preview_status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "2"})
-        result, status = webapp.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=False)
+        preview, preview_status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "1", "text": "2"})
+        result, status = webapp.yoagent_controller.execute_yoagent_send_action({"preview_id": preview["id"]}, persist_result=False)
     finally:
         webapp.control_server.stop()
 
@@ -10128,7 +10167,7 @@ def test_yoagent_controller_reuses_shared_locale_keys(monkeypatch):
 
     try:
         prefix = webapp.yoagent_controller.yoagent_prompt_answer_error_prefix(target)
-        result = webapp.record_yoagent_action_result(
+        result = webapp.yoagent_controller.record_yoagent_action_result(
             {"session": "1", "target": {"session": "1", "transport": "tmux-legacy"}},
             "done",
         )
@@ -10155,12 +10194,12 @@ def test_yoagent_prompt_target_rejects_free_text_with_options_status(monkeypatch
         "prompt": {"visible": True, "selected_option": 1, "options": [{"text": "Pane capture"}, {"text": "Transcript capture"}]},
         "screen": {"key": "needs-input", "text": "Which verifier mode?", "selected_option": 1, "options": [{"text": "Pane capture"}, {"text": "Transcript capture"}]},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt targets must not receive free text")))
 
     try:
-        response, status = webapp.yoagent_chat({"message": "tell session 1 to run date"}, access_role="admin")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "tell session 1 to run date"}, access_role="admin")
     finally:
         webapp.control_server.stop()
 
@@ -10186,7 +10225,7 @@ def test_yoagent_wait_then_send_job_uses_tmux_legacy_agent_tui_send(monkeypatch)
         "screen": {"key": "idle", "text": ""},
     }
     send_calls = []
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (dict(target), HTTPStatus.OK))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
     monkeypatch.setattr(
@@ -10197,9 +10236,9 @@ def test_yoagent_wait_then_send_job_uses_tmux_legacy_agent_tui_send(monkeypatch)
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait-then-send must go through agent_tui send_prompt")))
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
-        fired = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10226,14 +10265,14 @@ def test_yoagent_risky_chat_send_requires_preview_confirmation_and_redacts_secre
         "prompt": {},
         "screen": {"key": "idle", "text": ""},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is idle."}, "sessions": {}, "errors": []})
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("risky target text must wait for confirmation")))
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "tell session 6 to run token=super-secret-value"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "tell session 6 to run token=super-secret-value"})
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -10254,9 +10293,9 @@ def test_yoagent_risky_wait_then_send_job_starts_pending_confirmation_and_redact
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "api_key=super-secret-value", "quiet_seconds": 0})
-        fired = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "api_key=super-secret-value", "quiet_seconds": 0})
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10288,17 +10327,17 @@ def test_yoagent_notify_all_idle_job_tracks_blockers_then_fires(monkeypatch):
             "screen": {"key": states[session], "text": states[session]},
         }, HTTPStatus.OK
 
-    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "notify_all_idle", "quiet_seconds": 0})
-        first = webapp.poll_yoagent_jobs_once()
-        waiting, _waiting_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_all_idle", "quiet_seconds": 0})
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        waiting, _waiting_status = webapp.yoagent_controller.yoagent_jobs_payload()
         states["2"] = "idle"
-        second = webapp.poll_yoagent_jobs_once()
-        fired, _fired_status = webapp.yoagent_jobs_payload()
+        second = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        fired, _fired_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10339,20 +10378,20 @@ def test_yoagent_notify_needs_input_and_blocked_jobs_fire_on_prompt_states(monke
             "screen": {"key": state["screen"], "text": state["question"], "question_text": state["question"]},
         }, HTTPStatus.OK
 
-    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        needs_input, needs_status = webapp.create_yoagent_job({"type": "notify_session_needs_input", "session": "6", "quiet_seconds": 0})
-        blocked, blocked_status = webapp.create_yoagent_job({"type": "notify_session_blocked", "session": "6", "quiet_seconds": 0})
-        first = webapp.poll_yoagent_jobs_once()
+        needs_input, needs_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_needs_input", "session": "6", "quiet_seconds": 0})
+        blocked, blocked_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_blocked", "session": "6", "quiet_seconds": 0})
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
         state.update({"screen": "needs-input", "question": "Which branch should I use?"})
-        needs_fired = webapp.poll_yoagent_jobs_once()
-        waiting, _waiting_status = webapp.yoagent_jobs_payload()
+        needs_fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        waiting, _waiting_status = webapp.yoagent_controller.yoagent_jobs_payload()
         state.update({"screen": "idle", "prompt_visible": True, "question": "Do you want to proceed?"})
-        blocked_fired = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        blocked_fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10386,19 +10425,19 @@ def test_yoagent_done_after_working_job_requires_working_transition(monkeypatch)
             "screen": {"key": state["screen"], "text": state["screen"]},
         }, HTTPStatus.OK
 
-    monkeypatch.setattr(webapp, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "notify_session_done_after_working", "session": "6", "quiet_seconds": 0})
-        already_idle = webapp.poll_yoagent_jobs_once()
-        idle_jobs, _idle_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_done_after_working", "session": "6", "quiet_seconds": 0})
+        already_idle = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        idle_jobs, _idle_status = webapp.yoagent_controller.yoagent_jobs_payload()
         state["screen"] = "working"
-        working = webapp.poll_yoagent_jobs_once()
+        working = webapp.yoagent_controller.poll_yoagent_jobs_once()
         state["screen"] = "idle"
-        finished = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        finished = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10421,11 +10460,11 @@ def test_yoagent_cancel_pending_jobs_by_session(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        idle, idle_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
-        blocked, blocked_status = webapp.create_yoagent_job({"type": "notify_session_blocked", "session": "6"})
-        other, other_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "7"})
-        cancelled, cancel_status = webapp.cancel_yoagent_jobs_for_session("6")
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        idle, idle_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
+        blocked, blocked_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_blocked", "session": "6"})
+        other, other_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "7"})
+        cancelled, cancel_status = webapp.yoagent_controller.cancel_yoagent_jobs_for_session("6")
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10450,9 +10489,9 @@ def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
     monkeypatch.setattr(first_app, "publish_client_event", lambda *args, **kwargs: {})
 
     try:
-        payload, status = first_app.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
+        payload, status = first_app.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
         second_app = app_module.TmuxWebtermApp(["6"])
-        jobs, jobs_status = second_app.yoagent_jobs_payload()
+        jobs, jobs_status = second_app.yoagent_controller.yoagent_jobs_payload()
     finally:
         first_app.control_server.stop()
         if second_app is not None:
@@ -10473,10 +10512,10 @@ def test_yoagent_job_fails_and_notifies_when_target_disappears(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {"type": event_type})
 
     try:
-        payload, status = webapp.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
-        monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: ({"error": "unknown session: 6"}, HTTPStatus.NOT_FOUND))
-        fired = webapp.poll_yoagent_jobs_once()
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.create_yoagent_job({"type": "wait_then_send", "session": "6", "text": "date", "quiet_seconds": 0})
+        monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: ({"error": "unknown session: 6"}, HTTPStatus.NOT_FOUND))
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10506,11 +10545,11 @@ def test_yoagent_action_preview_blocks_approval_prompt(monkeypatch):
         "prompt": {"visible": True, "type": "bash"},
         "screen": {"key": "idle", "text": ""},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
 
     try:
-        preview, status = webapp.create_yoagent_action_preview({"type": "send_prompt", "session": "6", "text": "date"})
+        preview, status = webapp.yoagent_controller.create_yoagent_action_preview({"type": "send_prompt", "session": "6", "text": "date"})
     finally:
         webapp.control_server.stop()
 
@@ -10532,15 +10571,15 @@ def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypat
         "prompt": {},
         "screen": {"key": "working", "text": "working"},
     }
-    monkeypatch.setattr(webapp, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (target, HTTPStatus.OK))
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": ["6"], "global": {"headline": "Session 6 is working."}, "sessions": {}, "errors": []})
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
     monkeypatch.setattr(app_module, "tmux_paste_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("queued job must not paste now")))
 
     try:
-        payload, status = webapp.yoagent_chat({"message": "wait for session 6 to finish, then tell it to run date"})
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "wait for session 6 to finish, then tell it to run date"})
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10560,9 +10599,9 @@ def test_yoagent_chat_cancels_pending_jobs_for_session(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {"type": "yoagent_jobs_changed"})
 
     try:
-        created, created_status = webapp.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
-        payload, status = webapp.yoagent_chat({"message": "cancel pending jobs for session 6"})
-        jobs, _jobs_status = webapp.yoagent_jobs_payload()
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({"type": "notify_session_idle", "session": "6"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "cancel pending jobs for session 6"})
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
     finally:
         webapp.control_server.stop()
 
@@ -10586,7 +10625,7 @@ def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
         "errors": [],
     })
     try:
-        payload, status = webapp.yoagent_chat({"message": "Can YO!agent read, poll, monitor, notify, and send commands to tmux panes?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "Can YO!agent read, poll, monitor, notify, and send commands to tmux panes?"})
     finally:
         webapp.control_server.stop()
 
@@ -10634,7 +10673,7 @@ def test_yoagent_chat_can_update_user_skill_files(monkeypatch):
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {})
     try:
-        payload, status = webapp.yoagent_chat({"message": "create skill local-checks description: Ask idle agents to run focused tests."})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "create skill local-checks description: Ask idle agents to run focused tests."})
     finally:
         webapp.control_server.stop()
 
@@ -10655,9 +10694,9 @@ def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
         "sessions": {},
         "errors": [],
     })
-    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("", "Error: not logged in. Run claude login."))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("", "Error: not logged in. Run claude login."))
     try:
-        payload, status = webapp.yoagent_chat({"message": "status?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "status?"})
     finally:
         webapp.control_server.stop()
 
@@ -10678,9 +10717,9 @@ def test_yoagent_cli_fallback_localizes_non_auth_error():
 
 def test_yoagent_direct_backend_keeps_raw_failure_as_cli_diagnostic(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", lambda *_args, **_kwargs: ("", "model overloaded", ""))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_cli", lambda *_args, **_kwargs: ("", "model overloaded", ""))
     try:
-        answer, fallback_reason, cli = webapp.run_yoagent_direct_prompt_backend("codex", "status?", locale="en")
+        answer, fallback_reason, cli = webapp.yoagent_controller.run_yoagent_direct_prompt_backend("codex", "status?", locale="en")
     finally:
         webapp.control_server.stop()
 
@@ -10743,9 +10782,9 @@ def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
     def fake_codex(prompt, session_id="", resume=False, settings=None, stream_callback=None, request_id=""):
         captured["prompt"] = prompt
         return ("respuesta", "", "s1", {"transport": "codex-app-server", "persistent": True})
-    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", fake_codex)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_app_server", fake_codex)
     try:
-        payload, status = webapp.yoagent_chat({"message": "estado?", "locale": "zh-Hant"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "estado?", "locale": "zh-Hant"})
     finally:
         webapp.control_server.stop()
     assert status == HTTPStatus.OK
@@ -10762,9 +10801,9 @@ def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
         "codex": {"installed": True, "logged_in": True},
     })
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "auto", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", lambda prompt, session_id="", resume=False, settings=None, stream_callback=None, request_id="": ("codex answer", "", "codex-session-1", {"transport": "codex-app-server", "persistent": True}))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_app_server", lambda prompt, session_id="", resume=False, settings=None, stream_callback=None, request_id="": ("codex answer", "", "codex-session-1", {"transport": "codex-app-server", "persistent": True}))
     try:
-        payload, status = webapp.yoagent_chat({"message": "status?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "status?"})
     finally:
         webapp.control_server.stop()
     assert payload["backend"] == "auto"
@@ -10796,12 +10835,12 @@ def test_yoagent_chat_serializes_cli_backend_turns(monkeypatch):
             active_count -= 1
         return f"{question} answer", "", {"session_id": f"{question}-session"}
 
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_backend)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(webapp.yoagent_chat, {"message": "first"})
+            first = executor.submit(webapp.yoagent_controller.yoagent_chat, {"message": "first"})
             assert entered_first.wait(1)
-            second = executor.submit(webapp.yoagent_chat, {"message": "second"})
+            second = executor.submit(webapp.yoagent_controller.yoagent_chat, {"message": "second"})
             time.sleep(0.05)
             assert started_questions == ["first"]
             release_first.set()
@@ -10849,8 +10888,8 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_pat
     monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
     try:
         settings = {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}
-        first, first_reason, first_status = webapp.run_yoagent_cli_backend("codex", "first?", activity, settings, [])
-        second, second_reason, second_status = webapp.run_yoagent_cli_backend("codex", "second?", activity, settings, [{"role": "user", "content": "first?"}])
+        first, first_reason, first_status = webapp.yoagent_controller.run_yoagent_cli_backend("codex", "first?", activity, settings, [])
+        second, second_reason, second_status = webapp.yoagent_controller.run_yoagent_cli_backend("codex", "second?", activity, settings, [{"role": "user", "content": "first?"}])
         terminated_before_shutdown = fake_process.terminated
     finally:
         webapp.stop_auto_approve_all()
@@ -10924,7 +10963,7 @@ def test_yoagent_codex_first_ask_reuses_server_start_prewarm(monkeypatch, tmp_pa
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: dict(settings))
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
     try:
-        prewarm, prewarm_status = webapp.start_yoagent_backend_prewarm(reason="server_start")
+        prewarm, prewarm_status = webapp.yoagent_controller.start_yoagent_backend_prewarm(reason="server_start")
         for _attempt in range(100):
             with webapp.yoagent_prewarm_lock:
                 if not webapp.yoagent_prewarm_record.prewarm_running:
@@ -10933,7 +10972,7 @@ def test_yoagent_codex_first_ask_reuses_server_start_prewarm(monkeypatch, tmp_pa
             time.sleep(0.01)
         else:
             raise AssertionError("prewarm did not finish")
-        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "first after idle?", activity, settings, [], include_activity_context=False)
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend("codex", "first after idle?", activity, settings, [], include_activity_context=False)
     finally:
         webapp.stop_auto_approve_all()
 
@@ -10962,9 +11001,9 @@ def test_yoagent_codex_backend_falls_back_to_exec_when_app_server_fails(monkeypa
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(transport_module.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("app-server failed")))
-    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("exec fallback answer", "", "exec-thread"))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("exec fallback answer", "", "exec-thread"))
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "status?", activity, {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}, [])
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend("codex", "status?", activity, {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}, [])
     finally:
         webapp.stop_auto_approve_all()
 
@@ -10979,7 +11018,7 @@ def test_yoagent_codex_backend_falls_back_to_exec_when_app_server_fails(monkeypa
 
 def test_yoagent_permission_block_answer_is_preserved(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
-    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("I'm blocked — the harness denied access to ~/.claude/projects/**/*.jsonl.", ""))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("I'm blocked — the harness denied access to ~/.claude/projects/**/*.jsonl.", ""))
     activity = {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
@@ -10988,7 +11027,7 @@ def test_yoagent_permission_block_answer_is_preserved(monkeypatch):
         "errors": [],
     }
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
     finally:
         webapp.control_server.stop()
 
@@ -11005,7 +11044,7 @@ def test_reset_yoagent_chat_clears_cli_sessions():
         app_module.yoagent_conversation.save_cli_sessions({"claude": {"session_id": "old"}})
         assert app_module.yoagent_conversation.YOAGENT_CONVERSATION_PATH.exists()
         assert app_module.yoagent_conversation.YOAGENT_CLI_STATE_PATH.exists()
-        assert webapp.reset_yoagent_chat()["ok"] is True
+        assert webapp.yoagent_controller.reset_yoagent_chat()["ok"] is True
         assert webapp.yoagent_cli_sessions == {}
         assert not app_module.yoagent_conversation.YOAGENT_CONVERSATION_PATH.exists()
         assert not app_module.yoagent_conversation.YOAGENT_CLI_STATE_PATH.exists()
@@ -11025,9 +11064,9 @@ def test_yoagent_chat_persists_conversation_until_reset(monkeypatch):
         "errors": [],
     })
     try:
-        payload, status = webapp.yoagent_chat({"message": "what changed?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "what changed?"})
         persisted = webapp.yoagent_conversation_payload()
-        reset = webapp.reset_yoagent_chat()
+        reset = webapp.yoagent_controller.reset_yoagent_chat()
     finally:
         webapp.control_server.stop()
 
@@ -11044,7 +11083,7 @@ def test_yoagent_prompt_history_prefers_persisted_transcript_over_frontend_histo
     try:
         webapp.record_yoagent_message("user", "persisted question")
         webapp.record_yoagent_message("assistant", "persisted answer")
-        history = webapp.yoagent_prompt_history(
+        history = webapp.yoagent_controller.yoagent_prompt_history(
             [
                 {"role": "user", "content": "stale frontend question"},
                 {"role": "assistant", "content": "stale frontend answer"},
@@ -11078,10 +11117,10 @@ def test_yoagent_model_chat_appends_history_and_skips_activity_for_simple_follow
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("simple follow-up should not build activity context")))
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_backend)
     try:
-        first, first_status = webapp.yoagent_chat({"message": "hello"})
-        second, second_status = webapp.yoagent_chat({"message": "what model are you?", "history": [{"role": "user", "content": "stale frontend"}]})
+        first, first_status = webapp.yoagent_controller.yoagent_chat({"message": "hello"})
+        second, second_status = webapp.yoagent_controller.yoagent_chat({"message": "what model are you?", "history": [{"role": "user", "content": "stale frontend"}]})
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -11120,9 +11159,9 @@ def test_yoagent_live_external_data_question_uses_backend_tools(monkeypatch):
         })
         return "It is 72F and clear.", "", {"transport": "claude-stream-json"}
 
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_backend)
     try:
-        payload, status = webapp.yoagent_chat({"message": "what is the weather in Cupertino now?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "what is the weather in Cupertino now?"})
     finally:
         webapp.control_server.stop()
 
@@ -11153,10 +11192,10 @@ def test_yoagent_codex_live_external_data_uses_search_exec(monkeypatch):
         })
         return "It is 72F and clear.", "", "search-thread"
 
-    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", fake_codex_cli)
-    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("live external data must use search-capable codex exec")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_cli", fake_codex_cli)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_app_server", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("live external data must use search-capable codex exec")))
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend(
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend(
             "codex",
             "what is the weather in Cupertino now?",
             {},
@@ -11184,9 +11223,9 @@ def test_yoagent_live_external_data_question_reports_missing_tools(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "deterministic")
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing tools should not call a model backend")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing tools should not call a model backend")))
     try:
-        payload, status = webapp.yoagent_chat({"message": "what is the weather in Cupertino now?"})
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "what is the weather in Cupertino now?"})
     finally:
         webapp.control_server.stop()
 
@@ -11214,9 +11253,9 @@ def test_yoagent_visible_prewarm_persists_startup_response(monkeypatch):
         calls.append((backend, question, stream_id, activity_payload, settings, history, locale))
         return "Start with the YO!agent streaming fix.", "", {"transport": "codex-app-server", "persistent": True, "elapsed_ms": 12, "prompt_chars": 345}
 
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_backend)
     try:
-        payload, status = webapp.yoagent_prewarm({"visible": True, "locale": "en"})
+        payload, status = webapp.yoagent_controller.yoagent_prewarm({"visible": True, "locale": "en"})
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -11258,7 +11297,7 @@ def test_yoagent_reset_invalidates_blocked_startup_and_blocks_reset_overlap(monk
     stream_events = []
     real_clear_messages = app_module.yoagent_conversation.clear_messages
 
-    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: None)
+    monkeypatch.setattr(webapp.yoagent_controller, "maybe_start_yoagent_summary_worker", lambda: None)
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli"})
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": [], "sessions": {}, "errors": []})
@@ -11274,16 +11313,16 @@ def test_yoagent_reset_invalidates_blocked_startup_and_blocks_reset_overlap(monk
         assert release_reset.wait(timeout=3)
         real_clear_messages()
 
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", blocked_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", blocked_backend)
     monkeypatch.setattr(app_module.yoagent_conversation, "clear_messages", blocked_clear_messages)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            old_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            old_future = executor.submit(webapp.yoagent_controller.yoagent_prewarm, {"visible": True})
             assert old_started.wait(timeout=2)
-            reset_future = executor.submit(webapp.reset_yoagent_chat)
+            reset_future = executor.submit(webapp.yoagent_controller.reset_yoagent_chat)
             assert reset_clearing.wait(timeout=2)
 
-            overlap_payload, overlap_status = webapp.yoagent_prewarm({"visible": True})
+            overlap_payload, overlap_status = webapp.yoagent_controller.yoagent_prewarm({"visible": True})
             assert overlap_status == HTTPStatus.ACCEPTED
             assert overlap_payload["started"] is False
             assert overlap_payload["reason"] == "conversation reset in progress"
@@ -11315,7 +11354,7 @@ def test_yoagent_replacement_startup_survives_stale_request_finally(monkeypatch)
     call_lock = threading.Lock()
     call_count = 0
 
-    monkeypatch.setattr(webapp, "maybe_start_yoagent_summary_worker", lambda: None)
+    monkeypatch.setattr(webapp.yoagent_controller, "maybe_start_yoagent_summary_worker", lambda: None)
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "codex", "invocation": "cli"})
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "codex")
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "session_order": [], "sessions": {}, "errors": []})
@@ -11333,14 +11372,14 @@ def test_yoagent_replacement_startup_survives_stale_request_finally(monkeypatch)
         assert release_replacement.wait(timeout=3)
         return "replacement startup answer", "", {"transport": "codex-app-server"}
 
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", blocked_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", blocked_backend)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            old_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            old_future = executor.submit(webapp.yoagent_controller.yoagent_prewarm, {"visible": True})
             assert old_started.wait(timeout=2)
-            assert webapp.reset_yoagent_chat()["conversation"]["messages"] == []
+            assert webapp.yoagent_controller.reset_yoagent_chat()["conversation"]["messages"] == []
 
-            replacement_future = executor.submit(webapp.yoagent_prewarm, {"visible": True})
+            replacement_future = executor.submit(webapp.yoagent_controller.yoagent_prewarm, {"visible": True})
             assert replacement_started.wait(timeout=2)
             with webapp.yoagent_prewarm_lock:
                 replacement_generation = webapp.yoagent_prewarm_record.active_startup_generation
@@ -11394,9 +11433,9 @@ def test_yoagent_cli_sessions_persist_across_restart(monkeypatch):
         "errors": [],
     }
     first_app = app_module.TmuxWebtermApp(["5"])
-    monkeypatch.setattr(first_app, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("answer", ""))
+    monkeypatch.setattr(first_app.yoagent_controller, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False, **_kwargs: ("answer", ""))
     try:
-        answer, reason, status = first_app.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
+        answer, reason, status = first_app.yoagent_controller.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
         session_id = status["session_id"]
     finally:
         first_app.control_server.stop()
@@ -11421,7 +11460,7 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
         calls.append({"prompt": prompt, "session_id": session_id, "resume": resume, **kwargs})
         return ("seeded" if not resume else "resumed", "")
 
-    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", fake_claude)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", fake_claude)
     activity = {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
@@ -11441,8 +11480,8 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
     }
     try:
         settings = {"claude_model": "claude-haiku-4-5", "claude_effort": "low"}
-        first, first_reason, first_status = webapp.run_yoagent_cli_backend("claude", "first?", activity, settings, [])
-        second, second_reason, second_status = webapp.run_yoagent_cli_backend("claude", "second?", activity, settings, [{"role": "user", "content": "first?"}])
+        first, first_reason, first_status = webapp.yoagent_controller.run_yoagent_cli_backend("claude", "first?", activity, settings, [])
+        second, second_reason, second_status = webapp.yoagent_controller.run_yoagent_cli_backend("claude", "second?", activity, settings, [{"role": "user", "content": "first?"}])
     finally:
         webapp.control_server.stop()
 
@@ -11504,9 +11543,9 @@ def test_yoagent_codex_resumed_cold_session_receives_context(monkeypatch):
         calls.append({"prompt": prompt, "session_id": session_id, "resume": resume, **kwargs})
         return "answer", "", "thread-1", {"transport": "codex-app-server", "persistent": True}
 
-    monkeypatch.setattr(webapp, "run_yoagent_codex_app_server", fake_codex)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_app_server", fake_codex)
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend("codex", "summarize this project", activity, {}, [])
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend("codex", "summarize this project", activity, {}, [])
     finally:
         webapp.control_server.stop()
 
@@ -11537,7 +11576,7 @@ def test_yoagent_cli_backend_does_not_hold_state_lock_during_cli(monkeypatch):
         thread.join()
         return ("answer", "")
 
-    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", fake_claude)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", fake_claude)
     activity = {
         "generated_at": "2026-05-31T00:00:00+00:00",
         "session_order": ["5"],
@@ -11546,7 +11585,7 @@ def test_yoagent_cli_backend_does_not_hold_state_lock_during_cli(monkeypatch):
         "errors": [],
     }
     try:
-        answer, reason, status = webapp.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
+        answer, reason, status = webapp.yoagent_controller.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
     finally:
         webapp.control_server.stop()
 
@@ -11584,8 +11623,8 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.subprocess, "run", fake_run)
     try:
         settings = {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}
-        first_answer, first_error, first_session = webapp.run_yoagent_codex_cli("first", resume=False, settings=settings)
-        second_answer, second_error, second_session = webapp.run_yoagent_codex_cli("second", session_id=first_session, resume=True, settings=settings)
+        first_answer, first_error, first_session = webapp.yoagent_controller.run_yoagent_codex_cli("first", resume=False, settings=settings)
+        second_answer, second_error, second_session = webapp.yoagent_controller.run_yoagent_codex_cli("second", session_id=first_session, resume=True, settings=settings)
     finally:
         webapp.control_server.stop()
 

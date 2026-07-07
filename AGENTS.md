@@ -15,6 +15,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 
 - Use [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) as the source of truth for local checks. The canonical local gate is `python3 tools/check.py`, which runs independent lanes in parallel by default.
 - When `AGENTS.md` and `docs/DEVELOPMENT.md` disagree on a build/test/development command, update `docs/DEVELOPMENT.md` and keep only a reference here.
+- Before an implementation edit: search for existing behavior owners; name the existing parent or explain the new shared parent; reproduce the bug; migrate every equivalent copy; run a negative search for the retired path; then report the parent checked, searches used, and net non-generated lines added/deleted. Every DOIT DONE note and handoff carries that evidence.
 
 ## Recent Agent Learnings
 

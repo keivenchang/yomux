@@ -213,6 +213,13 @@ def positive_finite_number(value: Any) -> float:
     return number if math.isfinite(number) and number > 0 else 0.0
 
 
+def path_mtime_or_zero(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def project_git(project: Any) -> dict[str, Any]:
     return as_dict(as_dict(project).get("git"))
 

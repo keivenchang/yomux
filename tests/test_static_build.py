@@ -1,5 +1,6 @@
 import ast
 import re
+from pathlib import Path
 
 import pytest
 
@@ -619,7 +620,7 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                     duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
 
     assert duplicates == []
-    assert helper_calls == 87
+    assert helper_calls == 88
 
 
 def test_browser_fixtures_use_one_read_only_english_catalog_owner():
@@ -792,6 +793,51 @@ def test_runtime_buttons_have_one_shared_construction_owner():
     assert sb.lint_direct_button_construction() == []
 
 
+def test_shared_ui_ownership_map_and_agent_reuse_protocol_remain_routable():
+    development = repo_path("docs/DEVELOPMENT.md").read_text(encoding="utf-8")
+    agents = repo_path("AGENTS.md").read_text(encoding="utf-8")
+    readme = repo_path("README.md").read_text(encoding="utf-8")
+    assert "## Shared UI Ownership Map" in development
+    for symbol in (
+        "TAB_TYPES",
+        "bindPanelShell()",
+        "bindActionDispatcher()",
+        "sessionAgentWindowStatusSummary()",
+        "createSharedTreeInteractionController()",
+        "createHoverPopover()",
+        "notificationEventDefinitions",
+        "conversationMessageShellHtml()",
+        "jsDebugGraphChartGroups",
+        "dragPayload()",
+        "YoagentController",
+        "### Central State Containers",
+    ):
+        assert symbol in development
+    assert "Before an implementation edit: search for existing behavior owners" in agents
+    assert "Existing parent checked: <symbol>" in development
+    assert "Shared UI Ownership Map" not in readme
+
+
+def test_panel_frame_builder_owns_the_shared_panel_chrome():
+    owner = repo_path("static_src/js/yolomux/78_panel_shell.js").read_text(encoding="utf-8")
+    assert "function panelFrameHtml(" in owner
+    assert "panel-toast-stack" in owner
+    assert "pane-tabs\" role=\"tablist\"" in owner
+    for path in (
+        "static_src/js/yolomux/78_panel_shell.js",
+        "static_src/js/yolomux/80_info_panel.js",
+        "static_src/js/yolomux/82_chat_panel.js",
+        "static_src/js/yolomux/82_preferences_panel.js",
+        "static_src/js/yolomux/83_debug_panel.js",
+        "static_src/js/yolomux/90_changes_editor.js",
+        "static_src/js/yolomux/99_terminal_boot.js",
+    ):
+        source = repo_path(path).read_text(encoding="utf-8")
+        if path != "static_src/js/yolomux/78_panel_shell.js":
+            assert "panelFrameHtml({" in source
+            assert '<div class="panel-head' not in source
+
+
 def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, tmp_path):
     owner = tmp_path / "10_core_utils.js"
     parallel = tmp_path / "20_parallel.js"
@@ -803,6 +849,66 @@ def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, 
     assert sb.lint_direct_button_construction() == [
         "20_parallel.js:2: direct button construction bypasses makeButton()"
     ]
+
+
+def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch, tmp_path):
+    terminal = tmp_path / "99_terminal_boot.js"
+    terminal.write_text(
+        "function paneFrameControlsHtml() {\n"
+        "  return '<button type=\"button\">x</button>';\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
+        "99_terminal_boot.js": (("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),),
+    })
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    errors = sb.lint_shared_ui_ownership()
+
+    assert "99_terminal_boot.js: shared pane-frame controls owner is missing 'toolbarButtonHtml('" in errors
+    assert "static_src/js/yolomux/99_terminal_boot.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
+
+
+def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
+    launcher = repo_path("tests/layout_url.test.js").read_text(encoding="utf-8")
+    helper = repo_path("tests/layout_test_helper.js").read_text(encoding="utf-8")
+    suite_files = re.findall(r"'tests/[^']+\.test\.js'", launcher)
+
+    assert len(suite_files) == len(set(suite_files)) == 9
+    assert "layout suite shards:" in launcher
+    assert "if (failed) process.exitCode = 1" in launcher
+    assert "DID NOT SETTLE" in helper
+    assert "layout suite: ${__testPass} passed, ${__testFail} failed" in helper
+
+
+def test_normalized_production_clone_lint_rejects_new_unreviewed_behavior_copy(monkeypatch, tmp_path):
+    body = "\n".join((
+        "function copiedBehavior() {",
+        "  const state = readState();",
+        "  if (!state) return null;",
+        "  const next = normalize(state);",
+        "  saveState(next);",
+        "  emitChange(next);",
+        "  return next;",
+        "}",
+        "",
+    ))
+    (tmp_path / "a.js").write_text(body, encoding="utf-8")
+    (tmp_path / "b.js").write_text(body.replace("copiedBehavior", "anotherBehavior"), encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["a.js", "b.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+    monkeypatch.setattr(sb, "NORMALIZED_PRODUCTION_CLONE_ALLOWLIST", {})
+
+    errors = sb.lint_normalized_production_clones(window=6)
+
+    assert len(errors) == 1
+    assert errors[0].startswith("normalized production clone ")
+    assert "across a.js, b.js" in errors[0]
+    key = errors[0].removeprefix("normalized production clone ").split(";", 1)[0]
+    digest = key.split(" across ", 1)[0]
+    monkeypatch.setattr(sb, "NORMALIZED_PRODUCTION_CLONE_ALLOWLIST", {f"a.js, b.js:{digest}": "fixture proves reviewed baseline suppression"})
+    assert sb.lint_normalized_production_clones(window=6) == []
 
 
 def test_code_syntax_color_ownership_requires_one_grouped_renderer_rule(monkeypatch, tmp_path):

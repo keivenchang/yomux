@@ -2264,18 +2264,7 @@ function applyShareTerminalDimensionsState(value = []) {
 }
 
 function applyShareEditorState(editor = {}) {
-  if (!editor || typeof editor !== 'object') return;
-  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
-  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
-  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
-  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
-  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
-  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
-  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
-  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
-  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  const modes = Array.isArray(editor.modes) ? editor.modes : [];
-  for (const entry of modes) shareApplyEditorModeEntry(entry);
+  applyEditorStateFields(editor, {applyModeEntry: shareApplyEditorModeEntry});
   applyCssSettings();
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true, refreshEditors: true});
   applyEditorThemeMode({refreshEditors: true});

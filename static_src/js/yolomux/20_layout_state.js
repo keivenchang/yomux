@@ -730,7 +730,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
 }
 
-function applyLayoutUrlEditorSeed(editor = {}) {
+function applyEditorStateFields(editor = {}, {applyModeEntry = null} = {}) {
   if (!editor || typeof editor !== 'object') return;
   if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
   if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
@@ -741,9 +741,7 @@ function applyLayoutUrlEditorSeed(editor = {}) {
   if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
   if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
   if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
-    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
-  }
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) applyModeEntry?.(entry);
 }
 
 function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
@@ -759,7 +757,7 @@ function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
 function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
-  applyLayoutUrlEditorSeed(state.editor || {});
+  applyEditorStateFields(state.editor || {}, {applyModeEntry: typeof shareApplyEditorModeEntry === 'function' ? shareApplyEditorModeEntry : null});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;

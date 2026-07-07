@@ -16,25 +16,22 @@
   --editor-toolbar-control-hover-bg: color-mix(in srgb, var(--editor-scheme-line) 38%, var(--editor-toolbar-control-bg));
   --editor-toolbar-control-hover-border: color-mix(in srgb, var(--editor-scheme-muted) 70%, var(--editor-toolbar-control-border));
 }
-.file-editor-html-preview {
-  display: block;
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-  height: 100%;
-  border: 0;
-  background: var(--document-preview-bg);
-  color-scheme: light;
-}
+.file-editor-html-preview,
 .file-editor-pdf-preview {
   display: block;
   flex: 1 1 auto;
   width: 100%;
-  min-height: 420px;
-  height: min(72vh, 100%);
   border: 0;
   background: var(--document-preview-bg);
   color-scheme: light;
+}
+.file-editor-html-preview {
+  min-height: 0;
+  height: 100%;
+}
+.file-editor-pdf-preview {
+  min-height: 420px;
+  height: min(72vh, 100%);
 }
 .html-preview-body,
 .pdf-preview-body {
