@@ -648,8 +648,11 @@ body.theme-light .js-debug-graph-view {
 .js-debug-line--agentToken {
   stroke: var(--js-debug-series-color, var(--accent-sky-strong));
 }
-.js-debug-line--agentTokenTotal {
+.js-debug-line.js-debug-line--agentTokenTotal {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-total));
+  opacity: 1;
+  stroke-width: 2.4;
+  stroke-dasharray: 1 4;
 }
 .js-debug-bar--askAgents {
   fill: var(--js-debug-agent-attention);
@@ -701,11 +704,6 @@ body.theme-light .js-debug-graph-view {
 }
 .js-debug-line--pattern-dash {
   --js-debug-line-dash: 6 4;
-}
-.js-debug-line--agentTokenTotal.js-debug-line--moving-average {
-  opacity: 1;
-  stroke-width: 2.4;
-  stroke-dasharray: 1 4;
 }
 .js-debug-legend {
   display: flex;

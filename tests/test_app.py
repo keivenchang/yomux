@@ -1900,6 +1900,43 @@ def test_stats_agent_token_rate_resets_baseline_after_unobserved_gap(monkeypatch
     assert "_agent_token_records" not in resumed
 
 
+def test_shared_stats_agent_token_delta_is_claimed_once_across_owner_handoff(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
+    first_owner = app_module.TmuxWebtermApp(["1"])
+    replacement_owner = app_module.TmuxWebtermApp(["1"])
+    first_owner.background_owner = StatsRoleOwner(owner=True, port=8003)
+    replacement_owner.background_owner = StatsRoleOwner(owner=True, port=8002)
+    generated_tokens = {"value": 100.0}
+
+    def rows():
+        return [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/codex.jsonl"}]
+
+    def token_count(row):
+        row["_stats_agent_token_source"] = "transcript"
+        row["_stats_agent_token_identity"] = "codex:stable-transcript"
+        return generated_tokens["value"]
+
+    monkeypatch.setattr(first_owner, "stats_agent_window_rows", rows)
+    monkeypatch.setattr(replacement_owner, "stats_agent_window_rows", rows)
+    monkeypatch.setattr(first_owner, "stats_agent_token_count", token_count)
+    monkeypatch.setattr(replacement_owner, "stats_agent_token_count", token_count)
+    try:
+        baseline = first_owner.stats_agent_activity_record(1000.0, include_token_rates=True)
+        generated_tokens["value"] = 220.0
+        claimed = replacement_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
+        duplicate = first_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
+        shared = json.loads(common.TMUX_AI_STATUS_PATH.read_text(encoding="utf-8"))["stats_history"]
+    finally:
+        first_owner.control_server.stop()
+        replacement_owner.control_server.stop()
+
+    assert "_agent_token_records" not in baseline
+    assert sum(item["tokens"] for record in claimed["_agent_token_records"] for item in record["agent_token_rates"]) == pytest.approx(120.0)
+    assert "_agent_token_records" not in duplicate
+    assert shared["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
+    assert shared["agent_token_state"]["1|0|codex"]["tokens"] == pytest.approx(220.0)
+
+
 def test_stats_agent_token_delta_records_accumulate_actual_overlap_seconds():
     webapp = app_module.TmuxWebtermApp([])
     try:

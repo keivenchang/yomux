@@ -117,7 +117,6 @@ const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
 const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
-const jsDebugGraphAgentTokenSmoothingSamples = 3;
 const jsDebugGraphThisClientId = 'this-client';
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphThisClientAggregate = 'thisClient';
@@ -2200,9 +2199,9 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
     cssKey: 'agentTokenTotal',
     agentTokenSeries: true,
     agentTokenTotalSeries: true,
-    movingAverageOnly: true,
+    overlayLineOnly: true,
     color: 'var(--js-debug-agent-token-total)',
-    movingAverageSamples: jsDebugGraphAgentTokenSmoothingSamples,
+    linePattern: 'dot',
   }];
 }
 
@@ -2993,7 +2992,8 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
-  const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true);
+  const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
+  const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
   const areaSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => series.hostMetric && series.hostProcessId) : [];
   const lineSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries;
   const plotSeries = group.kind === 'area'
@@ -3031,6 +3031,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${debugGraphGridLinesHtml(group, axisMax)}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}

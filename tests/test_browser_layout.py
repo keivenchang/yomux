@@ -672,7 +672,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="turquoise" style="--js-debug-series-color: var(--js-debug-agent-token-turquoise)" x="8" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="rose" style="--js-debug-series-color: var(--js-debug-agent-token-rose)" x="10" y="9" width="1" height="1"></rect>
           <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="violet" style="--js-debug-series-color: var(--js-debug-agent-token-violet)" x="12" y="9" width="1" height="1"></rect>
-          <path class="js-debug-line js-debug-line--agentTokenTotal js-debug-line--moving-average" style="--js-debug-series-color: var(--js-debug-agent-token-total)" d="M0 12L20 12"></path>
+          <path class="js-debug-line js-debug-line--agentTokenTotal js-debug-line--pattern js-debug-line--pattern-dot" style="--js-debug-series-color: var(--js-debug-agent-token-total)" d="M0 12L20 12"></path>
         </svg>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--api"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--sse"></span>

@@ -507,7 +507,7 @@ STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 2
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 3
 STATS_SHARED_FRESH_SECONDS = 3.0
 TMUX_AI_STATUS_VERSION = 1
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
@@ -3539,6 +3539,108 @@ class TmuxWebtermApp:
             cursor = bucket_end
         return records
 
+    def stats_agent_token_delta_records_from_state_locked(
+        self,
+        token_measurements: list[dict[str, Any]],
+        seen_keys: set[str],
+        sample_time: float,
+        state: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Claim each transcript counter advance once against the supplied durable baseline."""
+
+        records: list[dict[str, Any]] = []
+        for measurement in token_measurements:
+            key = str(measurement["key"])
+            token_count = float(measurement["tokens"])
+            token_source = str(measurement["source"])
+            token_identity = str(measurement["identity"])
+            label = str(measurement["label"])
+            previous = state.get(key)
+            previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
+            previous_identity = str(previous.get("identity") or previous_source) if isinstance(previous, dict) else ""
+            previous_tokens = float(previous.get("tokens") or 0.0) if isinstance(previous, dict) else 0.0
+            previous_time = float(previous.get("time") or 0.0) if isinstance(previous, dict) else 0.0
+            elapsed = sample_time - previous_time
+            if (
+                previous
+                and previous_source == token_source
+                and previous_identity == token_identity
+                and token_count >= previous_tokens
+                and 0 < elapsed <= STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS
+            ):
+                records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
+            state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source, "identity": token_identity}
+        for key in list(state):
+            if key not in seen_keys:
+                state.pop(key, None)
+        return records
+
+    @staticmethod
+    def stats_history_clear_agent_token_snapshots(stats_history: dict[str, Any]) -> None:
+        for container_name in ("raw_buckets", "rollup_buckets"):
+            snapshots = stats_history.get(container_name)
+            if not isinstance(snapshots, list):
+                continue
+            for snapshot in snapshots:
+                if isinstance(snapshot, dict):
+                    snapshot["tokens_per_agent_total"] = 0.0
+                    snapshot["agent_token_samples"] = 0.0
+                    snapshot["agent_token_rates"] = {}
+                elif isinstance(snapshot, list) and len(snapshot) >= len(STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY):
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("tokens_per_agent_total")] = 0.0
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_samples")] = 0.0
+                    snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index("agent_token_rates")] = {}
+
+    @staticmethod
+    def stats_history_has_agent_token_snapshots(stats_history: dict[str, Any]) -> bool:
+        for container_name in ("raw_buckets", "rollup_buckets"):
+            snapshots = stats_history.get(container_name)
+            if not isinstance(snapshots, list):
+                continue
+            for snapshot in snapshots:
+                if isinstance(snapshot, dict):
+                    if snapshot.get("agent_token_rates") or snapshot.get("tokens_per_agent_total") or snapshot.get("agent_token_samples"):
+                        return True
+                elif isinstance(snapshot, list) and len(snapshot) >= len(STATS_HISTORY_SHARED_BUCKET_FIELDS_LEGACY):
+                    if any(snapshot[STATS_HISTORY_SHARED_BUCKET_FIELDS.index(field)] for field in ("tokens_per_agent_total", "agent_token_samples", "agent_token_rates")):
+                        return True
+        return False
+
+    def stats_agent_token_claim_shared_delta_records_locked(
+        self,
+        token_measurements: list[dict[str, Any]],
+        seen_keys: set[str],
+        sample_time: float,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim transcript deltas so two server generations cannot count one interval twice."""
+
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            stats_history = status.get("stats_history") if isinstance(status.get("stats_history"), dict) else {}
+            stats_history = dict(stats_history)
+            compatible = self.stats_history_agent_tokens_compatible(stats_history)
+            discard_incompatible_history = not compatible and self.stats_history_has_agent_token_snapshots(stats_history)
+            if discard_incompatible_history:
+                # Schema 2 stored overlapping owner intervals. Its aggregate cannot be repaired
+                # after the fact, so discard only token history and establish clean baselines.
+                self.stats_history_clear_agent_token_snapshots(stats_history)
+            raw_state = stats_history.get("agent_token_state") if compatible else {}
+            state = self.stats_history_shared_agent_state_snapshot(raw_state if isinstance(raw_state, dict) else {})
+            if compatible or not discard_incompatible_history:
+                for key, item in self.stats_agent_token_state.items():
+                    if key not in state and isinstance(item, dict):
+                        state[key] = dict(item)
+            records = self.stats_agent_token_delta_records_from_state_locked(token_measurements, seen_keys, sample_time, state)
+            stats_history["agent_token_schema_version"] = STATS_AGENT_TOKEN_SCHEMA_VERSION
+            stats_history["agent_token_state"] = state
+            stats_history["updated_at"] = sample_time
+            stats_history["rev"] = max(0, int(stats_history.get("rev") or 0)) + 1
+            status["stats_history"] = stats_history
+            self._write_shared_tmux_ai_status_locked(status)
+        self.stats_agent_token_state = state
+        self.stats_history_shared_rev = max(self.stats_history_shared_rev, int(stats_history["rev"]))
+        return records
+
     def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
         rows = self.stats_agent_window_rows()
         if not rows:
@@ -3555,6 +3657,7 @@ class TmuxWebtermApp:
         idle_agents = 0
         inactive_agents = 0
         agent_token_records: list[dict[str, Any]] = []
+        token_measurements: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         transition_seconds = self.notification_transition_seconds()
         with self.stats_agent_token_lock:
@@ -3580,24 +3683,12 @@ class TmuxWebtermApp:
                     token_source = str(row.get("_stats_agent_token_source") or "sample").strip() or "sample"
                     token_identity = str(row.get("_stats_agent_token_identity") or token_source).strip() or token_source
                     label = self.stats_agent_token_label(row)
-                    previous = self.stats_agent_token_state.get(key)
-                    previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
-                    previous_identity = str(previous.get("identity") or previous_source) if isinstance(previous, dict) else ""
-                    previous_tokens = float(previous.get("tokens") or 0.0) if isinstance(previous, dict) else 0.0
-                    previous_time = float(previous.get("time") or 0.0) if isinstance(previous, dict) else 0.0
-                    elapsed = sample_time - previous_time
-                    if (
-                        previous
-                        and previous_source == token_source
-                        and previous_identity == token_identity
-                        and token_count >= previous_tokens
-                        and 0 < elapsed <= STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS
-                    ):
-                        agent_token_records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
-                    self.stats_agent_token_state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source, "identity": token_identity}
-            for key in list(self.stats_agent_token_state):
-                if key not in seen_keys:
-                    self.stats_agent_token_state.pop(key, None)
+                    token_measurements.append({"key": key, "tokens": token_count, "source": token_source, "identity": token_identity, "label": label})
+            if include_token_rates:
+                if self.stats_history_uses_shared_status():
+                    agent_token_records = self.stats_agent_token_claim_shared_delta_records_locked(token_measurements, seen_keys, sample_time)
+                else:
+                    agent_token_records = self.stats_agent_token_delta_records_from_state_locked(token_measurements, seen_keys, sample_time, self.stats_agent_token_state)
             for key in list(self.stats_agent_activity_state):
                 if key not in seen_keys:
                     self.stats_agent_activity_state.pop(key, None)
