@@ -875,6 +875,7 @@
   "menu.tmux.kill.for": "إنهاء جلسة tmux '{session}'",
   "menu.tmux.limitReached": "تم بلوغ الحد",
   "menu.tmux.newSession": "جديد {name}",
+  "menu.tmux.newSession.fullAccess": "{name} جديد (وصول كامل)",
   "menu.tmux.noTabFocused": "لا يوجد تبويب tmux مركّز",
   "menu.tmux.openInPaneFirst": "افتح التبويب في جزء أولاً",
   "menu.tmux.paneDetails": "شريط المعلومات",

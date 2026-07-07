@@ -37,6 +37,7 @@ from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import agent_command
 from .workdir import available_agent_commands
+from .workdir import available_terminal_commands
 from .yolo_rules import rules_status
 
 
@@ -244,10 +245,20 @@ def html_page(
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
         "dev": dev,
+        # Full-access agent launch controls are deliberately available only when the server operator
+        # explicitly opted in with --dangerously-yolo.
+        "dangerouslyYolo": dangerously_yolo,
         "availableAgents": available_agent_commands(),
-        # The exact launch command per agent (incl. the --dangerously-* flags when in YOLO mode), so the
-        # new-session menu can show "Claude — <params>" instead of just "+ Claude".
-        "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
+        "terminalCommands": available_terminal_commands(),
+        # The new-session menu exposes both explicit launch modes. Keep the command source server-owned
+        # so the UI describes the exact flags the selected Claude/Codex session will receive.
+        "agentLaunchCommands": {
+            agent: {
+                "normal": agent_command(agent, False),
+                "full_access": agent_command(agent, True),
+            }
+            for agent in ("claude", "codex", "term")
+        },
         # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": bootstrap_agent_auth_status(),

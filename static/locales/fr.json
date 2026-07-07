@@ -809,6 +809,7 @@
   "menu.tmux.kill.for": "Terminer la session tmux '{session}'",
   "menu.tmux.limitReached": "Limite atteinte",
   "menu.tmux.newSession": "nouveau {name}",
+  "menu.tmux.newSession.fullAccess": "nouveau {name} (accès complet)",
   "menu.tmux.noTabFocused": "Aucun onglet tmux focalisé",
   "menu.tmux.openInPaneFirst": "Ouvrez d'abord l'onglet dans un panneau",
   "menu.tmux.paneDetails": "Barre d'informations",

@@ -786,6 +786,7 @@
   "menu.tmux.kill": "终止 tmux 会话",
   "menu.tmux.kill.for": "终止 tmux 会话“{session}”",
   "menu.tmux.limitReached": "已达上限",
+  "menu.tmux.newSession.fullAccess": "新建 {name}（完全访问）",
   "menu.tmux.newSession": "新建 {name}",
   "menu.tmux.noTabFocused": "未聚焦任何 tmux 标签",
   "menu.tmux.openInPaneFirst": "请先在窗格中打开此标签",

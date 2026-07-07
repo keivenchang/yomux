@@ -5,6 +5,16 @@ function menuCommand(label, action, options = {}) {
   return {type: 'command', label, action, ...options};
 }
 
+// A paired row keeps closely related choices on one compact line while preserving independent buttons,
+// keyboard navigation, disabled state, and accessibility for each action.
+function menuCommandPair(primary, secondary, options = {}) {
+  return {type: 'command-pair', primary, secondary, ...options};
+}
+
+function menuCommandRow(items, options = {}) {
+  return {type: 'command-row', items, ...options};
+}
+
 function menuSubmenu(label, items, options = {}) {
   return {type: 'submenu', label, items, ...options};
 }
@@ -446,11 +456,16 @@ function tmuxSessionViewCommands(session) {
   ];
 }
 
-// The flags/params YOLOmux launches an agent with, shown as the new-session item's detail (e.g.
-// "--dangerously-skip-permissions"). Strips the binary name from the launch command; for a plain Term
-// it's just the shell ("bash"). Empty when the command carries no extra flags.
-function agentLaunchParams(agent) {
-  const command = String(agentLaunchCommands[agent] || '').trim();
+// The server owns the two launch commands. The full-access row exposes its exact --dangerously-* flags
+// so that choosing it is deliberate; normal rows remain clean one-click starts.
+function agentLaunchCommand(agent, dangerouslyYolo = false) {
+  const commands = agentLaunchCommands[agent];
+  if (commands && typeof commands === 'object') return String(commands[dangerouslyYolo ? 'full_access' : 'normal'] || '').trim();
+  return String(commands || '').trim(); // Compatibility with an older server during a rolling restart.
+}
+
+function agentLaunchParams(agent, dangerouslyYolo = false) {
+  const command = agentLaunchCommand(agent, dangerouslyYolo);
   if (!command) return '';
   const space = command.indexOf(' ');
   return space >= 0 ? command.slice(space + 1).trim() : command;
@@ -461,8 +476,22 @@ function agentUnavailableDetail(agent) {
   return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
 }
 
-function newTmuxSessionLabel(agent) {
-  return t('menu.tmux.newSession', {name: agentName(agent)});
+function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
+  return dangerouslyYolo
+    ? t('menu.tmux.newSession.fullAccess', {name: agentName(agent)})
+    : t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function newTmuxSessionFullAccessLabel(agent) {
+  const flags = agentLaunchParams(agent, true);
+  return flags ? `+ ${flags}` : t('menu.tmux.newSession.fullAccess', {name: agentName(agent)});
+}
+
+function terminalLaunchNames() {
+  return Array.from(new Set(terminalCommands
+    .map(command => String(command || '').trim())
+    .filter(command => /^[A-Za-z0-9][A-Za-z0-9_.+-]*$/.test(command))))
+    .sort((left, right) => left.localeCompare(right, undefined, {numeric: true, sensitivity: 'base'}));
 }
 
 function newTmuxSessionIcon(agent) {
@@ -476,19 +505,28 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    // When launchable, the detail shows the params actually passed (the --dangerously-* flags in YOLO
-    // mode) so you can see what command will run.
-    return menuCommand(newTmuxSessionLabel(agent), () => createNextSession(agent), {
-      iconHtml: newTmuxSessionIcon(agent),
+    const unavailableDetail = readOnlyMode
+      ? t('menu.common.adminOnly')
+      : (!available
+        ? agentUnavailableDetail(agent)
+        : (loggedOut
+          ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
+          : (capped ? t('menu.tmux.limitReached') : '')));
+    const launch = (dangerouslyYolo, terminal = '') => menuCommand(
+      terminal || (dangerouslyYolo ? newTmuxSessionFullAccessLabel(agent) : newTmuxSessionLabel(agent)),
+      () => createNextSession(agent, {dangerouslyYolo, terminal}), {
+      iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
-      detail: readOnlyMode
-        ? t('menu.common.adminOnly')
-        : (!available
-          ? agentUnavailableDetail(agent)
-          : (loggedOut
-            ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
-            : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
+      detail: unavailableDetail,
+      ariaLabel: dangerouslyYolo
+        ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
+        : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
     });
+    return agent === 'term'
+      ? menuCommandRow([launch(false), ...terminalLaunchNames().map(terminal => launch(false, terminal))], {className: 'app-menu-command-row'})
+      : (fullAccessAgentLaunchesEnabled
+        ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
+        : launch(false));
   });
 }
 
@@ -604,45 +642,30 @@ function inactiveTabMenuItems() {
   });
 }
 
-// P0 menu-bar: the Tabs navigator's order. 'attention' floats needs-* sessions to the top (the "Needs
-// me" view) using the shared state priority; 'name' sorts by label; 'default' keeps the
-// tmux/editors/other grouping. Stable (preserves the incoming order within equal keys).
-function tabMenuSortPriority(item) {
-  if (!isTmuxSession(item)) return 50;   // non-session tabs (editors/Finder/Prefs) sit after sessions
-  const priority = sessionState(item)?.priority;
-  return Number.isFinite(priority) ? priority : 50;
-}
-
 function sortTabItemsForMenu(items) {
-  if (tabsMenuSortMode === 'attention') {
-    return items
-      .map((item, index) => ({item, index}))
-      .sort((a, b) => tabMenuSortPriority(a.item) - tabMenuSortPriority(b.item) || a.index - b.index)
-      .map(entry => entry.item);
-  }
-  if (tabsMenuSortMode === 'name') {
-    return items
-      .map((item, index) => ({item, index}))
-      .sort((a, b) => String(itemLabel(a.item)).localeCompare(String(itemLabel(b.item))) || a.index - b.index)
-      .map(entry => entry.item);
-  }
-  return items;
-}
-
-function setTabsMenuSortMode(mode) {
-  tabsMenuSortMode = tabsMenuSortModes.includes(mode) ? mode : 'default';
-  storageSet('yolomux.tabsMenuSort.v1', tabsMenuSortMode);
-  renderSessionButtons({force: true});
+  const unique = Array.from(new Set(items.filter(isLayoutItem)));
+  const compare = (left, right) => String(itemLabel(left)).localeCompare(String(itemLabel(right)), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  }) || String(left).localeCompare(String(right));
+  // Tabs is a navigator, not a status dashboard: tmux sessions always form the first simple,
+  // naturally sorted group; every YOLOmux-owned/file tab follows in the same stable label order.
+  return [
+    ...unique.filter(isTmuxSession).sort(compare),
+    ...unique.filter(item => !isTmuxSession(item)).sort(compare),
+  ];
 }
 
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
-  const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
+  const allItems = Array.from(new Set([...openItems, ...paneItems(), ...allTabItems()]));
+  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems, query));
+  const tmuxItems = sortedItems.filter(isTmuxSession);
+  const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
     newTmuxSessionItems(),
-    filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
-    backgroundTabMenuItems(),
-    inactiveTabMenuItems()
+    tmuxItems.map(item => menuTabCommand(item, {toggleYolo: true})),
+    yoloItems.map(item => menuTabCommand(item, {toggleYolo: true}))
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand(t('menu.tabs.noMatch'), null, {disabled: true})];
   return resultItems;
@@ -732,11 +755,6 @@ function appMenuTree() {
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light', keepOpen: true}),
         ]),
         ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
-        menuSubmenu(t('menu.view.sortTabs'), [
-          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', keepOpen: true, detail: t('menu.view.sortTabs.default.detail')}),
-          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', keepOpen: true, detail: t('menu.view.sortTabs.attention.detail')}),
-          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name', keepOpen: true}),
-        ]),
       ],
     },
     {
@@ -1254,8 +1272,36 @@ function createAppMenuItem(item) {
     return node;
   }
   if (item.type === 'number-setting') return createAppMenuNumberSetting(item);
+  if (item.type === 'command-pair') return createAppMenuCommandPair(item);
+  if (item.type === 'command-row') return createAppMenuCommandRow(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
+}
+
+function createAppMenuCommandPair(item) {
+  return createAppMenuCommandGroup([item.primary, item.secondary], item.className, [item.primary?.label, item.secondary?.ariaLabel || item.secondary?.label], {separator: true});
+}
+
+function createAppMenuCommandRow(item) {
+  return createAppMenuCommandGroup(item.items || [], item.className, (item.items || []).map(command => command?.ariaLabel || command?.label));
+}
+
+function createAppMenuCommandGroup(items, className, labels, options = {}) {
+  const row = document.createElement('div');
+  row.className = ['app-menu-command-group', className || ''].filter(Boolean).join(' ');
+  row.setAttribute('role', 'group');
+  row.setAttribute('aria-label', labels.filter(Boolean).join(' / '));
+  for (const [index, command] of items.entries()) {
+    if (options.separator === true && index > 0) {
+      const separator = document.createElement('span');
+      separator.className = 'app-menu-command-separator';
+      separator.setAttribute('aria-hidden', 'true');
+      separator.textContent = '|';
+      row.appendChild(separator);
+    }
+    row.appendChild(createAppMenuCommand(command));
+  }
+  return row;
 }
 
 function clampAppMenuNumberSetting(item, rawValue) {

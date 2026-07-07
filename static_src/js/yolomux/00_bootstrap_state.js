@@ -1,7 +1,9 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
-// The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
+const terminalCommands = Array.isArray(bootstrap.terminalCommands) ? bootstrap.terminalCommands : [];
+const fullAccessAgentLaunchesEnabled = bootstrap.dangerouslyYolo === true;
+// The exact normal/full-access launch commands per agent for the new-session menu.
 const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
 // per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
@@ -721,10 +723,6 @@ const fileQuickOpenState = {
   abortController: null,
 };
 let tabsMenuSearchText = '';
-// P0 menu-bar: how the Tabs ▾ navigator orders its list — 'default' (tmux/editors/other), 'attention'
-// (needs-* sessions first, the "Needs me" view), or 'name'. Persisted; set from View → Sort tab list.
-const tabsMenuSortModes = ['default', 'attention', 'name'];
-let tabsMenuSortMode = tabsMenuSortModes.includes(storageGet('yolomux.tabsMenuSort.v1')) ? storageGet('yolomux.tabsMenuSort.v1') : 'default';
 let fileExplorerShortcutRestoreSlots = null;
 let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};

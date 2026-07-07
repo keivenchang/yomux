@@ -786,6 +786,7 @@
   "menu.tmux.kill": "Kill phiên tmux",
   "menu.tmux.kill.for": "Kill tmux phiên '{session}'",
   "menu.tmux.limitReached": "Đạt giới hạn",
+  "menu.tmux.newSession.fullAccess": "{name} mới (toàn quyền truy cập)",
   "menu.tmux.newSession": "mới {name}",
   "menu.tmux.noTabFocused": "Không tập trung tmux tab",
   "menu.tmux.openInPaneFirst": "Mở tab trong ngăn trước Thanh thông tin",

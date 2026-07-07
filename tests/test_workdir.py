@@ -10,6 +10,8 @@ from yolomux_lib.agent_comms import codex_app_server
 from yolomux_lib.workdir import agent_auth_status
 from yolomux_lib.workdir import agent_command
 from yolomux_lib.workdir import available_agent_commands
+from yolomux_lib.workdir import available_terminal_commands
+from yolomux_lib.workdir import terminal_command
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +26,24 @@ def test_agent_command_uses_plain_agent_cli_unless_dangerously_yolo():
     assert agent_command("codex", dangerously_yolo=False) == "codex"
     assert agent_command("claude", dangerously_yolo=True) == "claude --dangerously-skip-permissions"
     assert agent_command("codex", dangerously_yolo=True) == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+
+
+def test_terminal_commands_are_discovered_and_selected_only_by_name(monkeypatch, tmp_path):
+    bash = tmp_path / "bash"
+    tsh = tmp_path / "tsh"
+    zsh = tmp_path / "zsh"
+    for command in (bash, tsh, zsh):
+        command.touch()
+        command.chmod(0o755)
+    shell_list = tmp_path / "shells"
+    shell_list.write_text(f"{bash}\n{tsh}\n", encoding="utf-8")
+    monkeypatch.setattr(workdir, "SYSTEM_SHELLS_PATH", shell_list)
+    monkeypatch.setattr(workdir, "TERMINAL_COMMAND_CANDIDATES", ("bash", "tsh", "zsh", "tmux"))
+    monkeypatch.setattr(workdir.shutil, "which", lambda name: {"bash": str(bash), "tsh": str(tsh), "zsh": str(zsh)}.get(name))
+
+    assert available_terminal_commands() == ["bash", "tsh", "zsh"]
+    assert terminal_command("tsh") == str(tsh)
+    assert terminal_command("../../bin/sh") is None
 
 
 def test_numeric_session_workdir_uses_matching_yolomux_dev_checkout(monkeypatch, tmp_path):

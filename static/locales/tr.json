@@ -787,6 +787,7 @@
   "menu.tmux.kill.for": "Kill tmux oturumu '{session}'",
   "menu.tmux.limitReached": "Sınır Ulaşıldı",
   "menu.tmux.newSession": "yeni {name}",
+  "menu.tmux.newSession.fullAccess": "yeni {name} (tam erişim)",
   "menu.tmux.noTabFocused": "Odaklanmış tmux tab Yok",
   "menu.tmux.openInPaneFirst": "Önce bir paneldeki tab kısmını açın",
   "menu.tmux.paneDetails": "Bilgi Çubuğu",

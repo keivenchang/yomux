@@ -967,7 +967,9 @@ def post_create_session(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = parse_qs(parsed.query)
     agent = str(query_one(qs, "agent", "claude") or "claude")
-    request.write_app_result(request.server.app.create_next_session(agent))
+    dangerously_yolo = query_bool(qs, "dangerously_yolo", request.server.app.dangerously_yolo)
+    terminal = str(query_one(qs, "terminal", "") or "")
+    request.write_app_result(request.server.app.create_next_session(agent, dangerously_yolo, terminal))
 
 
 def post_rename_session(request: Any, parsed: Any, route: Route) -> None:

@@ -3659,6 +3659,46 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert commands[-1] == ["refresh-client", "-S"]
     assert webapp.tmux_theme_color == "purple"
 
+
+def test_create_next_session_uses_the_explicit_full_access_choice(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([], dangerously_yolo=True)
+    tmux_calls = []
+
+    def fake_refresh_sessions(maintenance=True):
+        del maintenance
+        return []
+
+    def fake_tmux(args, timeout=5.0):
+        tmux_calls.append((args, timeout))
+        return app_module.subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(webapp, "refresh_sessions", fake_refresh_sessions)
+    monkeypatch.setattr(app_module, "available_agent_commands", lambda: ["codex"])
+    monkeypatch.setattr(app_module, "session_workdir", lambda session: tmp_path)
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"appearance": {}}})
+    monkeypatch.setattr(app_module, "tmux", fake_tmux)
+    try:
+        payload, status = webapp.create_next_session("codex", dangerously_yolo=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["dangerously_yolo"] is True
+    assert tmux_calls[0][0][-1] == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+
+
+def test_create_next_session_rejects_full_access_without_server_opt_in(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([], dangerously_yolo=False)
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda maintenance=True: [])
+    monkeypatch.setattr(app_module, "available_agent_commands", lambda: ["codex"])
+    try:
+        payload, status = webapp.create_next_session("codex", dangerously_yolo=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.FORBIDDEN
+    assert "--dangerously-yolo" in payload["error"]
+
 def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     tmux_calls = []

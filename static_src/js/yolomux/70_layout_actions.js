@@ -1780,7 +1780,7 @@ async function tmuxSessionExistsForReconnect(session) {
   }
 }
 
-async function createNextSession(agent) {
+async function createNextSession(agent, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
     return;
@@ -1788,7 +1788,10 @@ async function createNextSession(agent) {
   const agentLabel = agentName(agent) || t('common.agentLabel');
   statusEl.textContent = t('status.sessionCreating', {agent: agentLabel});
   try {
-    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
+    const dangerouslyYolo = options.dangerouslyYolo === true;
+    const terminal = agent === 'term' ? String(options.terminal || '').trim() : '';
+    const terminalQuery = terminal ? `&terminal=${encodeURIComponent(terminal)}` : '';
+    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}${terminalQuery}`, {method: 'POST'});
     markPendingTmuxSession(payload.session);
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);

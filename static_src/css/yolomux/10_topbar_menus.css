@@ -962,6 +962,28 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
 .app-menu-submenu-wrap {
   position: relative;
 }
+.app-menu-command-pair {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+.app-menu-command-separator {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--muted);
+  font: var(--ui-font-size)/1 var(--mono-font);
+}
+.app-menu-command-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
 .app-menu-command {
   width: 100%;
   min-width: 0;
@@ -996,8 +1018,76 @@ body.app-topbar-menu-compact .actions > #topbarActivity::before {
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
 .app-menu-command + .app-menu-submenu-wrap,
-.app-menu-submenu-wrap + .app-menu-submenu-wrap {
+.app-menu-submenu-wrap + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-command,
+.app-menu-command-pair + .app-menu-command-pair,
+.app-menu-submenu-wrap + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-row,
+.app-menu-command-row + .app-menu-command,
+.app-menu-command-row + .app-menu-command-row,
+.app-menu-submenu-wrap + .app-menu-command-row,
+.app-menu-command-row + .app-menu-submenu-wrap {
   margin-top: var(--space-2);
+}
+.app-menu-command-pair .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-pair .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-row .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-check,
+.app-menu-command-row .app-menu-detail {
+  display: none;
+}
+.app-menu-command-row .app-menu-content {
+  display: block;
+}
+.app-menu-command-row .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-row .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-check {
+  display: none;
+}
+.app-menu-command-pair .app-menu-content {
+  display: block;
+}
+.app-menu-command-pair .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-pair .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-detail {
+  display: none;
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,

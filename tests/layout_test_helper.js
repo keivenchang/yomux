@@ -431,6 +431,13 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const bootstrapPayload = {
     sessions,
     availableAgents: [],
+    agentLaunchCommands: {
+      claude: {normal: 'claude', full_access: 'claude --dangerously-skip-permissions'},
+      codex: {normal: 'codex', full_access: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust'},
+      term: {normal: 'bash', full_access: 'bash'},
+    },
+    terminalCommands: ['bash', 'tsh', 'zsh'],
+    dangerouslyYolo: true,
     accessRole,
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
@@ -2110,7 +2117,6 @@ globalThis.__layoutTestApi = {
   buildTabberTreeForTest: buildTabberTree,
   tabMenuItems,
   sortTabItemsForMenu,
-  setTabsMenuSortMode,
   tmuxPaneTabHtml,
   paneTabs,
   paneStateWithTabs,

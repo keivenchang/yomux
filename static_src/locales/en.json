@@ -786,6 +786,7 @@
   "menu.tmux.kill": "Kill tmux session",
   "menu.tmux.kill.for": "Kill tmux session '{session}'",
   "menu.tmux.limitReached": "Limit reached",
+  "menu.tmux.newSession.fullAccess": "new {name} (full access)",
   "menu.tmux.newSession": "new {name}",
   "menu.tmux.noTabFocused": "No tmux tab focused",
   "menu.tmux.openInPaneFirst": "Open the tab in a pane first",

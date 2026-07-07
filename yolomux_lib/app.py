@@ -185,6 +185,8 @@ from .workdir import agent_command
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import available_agent_commands
+from .workdir import available_terminal_commands
+from .workdir import terminal_command
 from .workdir import resolved_upload_dir
 from .workdir import session_workdir
 from .yoagent import backends as yoagent_backends
@@ -11446,7 +11448,7 @@ class TmuxWebtermApp:
         self.sessions = sessions
         return {"session": clean_session, "exists": clean_session in sessions, "ok": True}, HTTPStatus.OK
 
-    def create_next_session(self, agent: str) -> tuple[dict[str, Any], HTTPStatus]:
+    def create_next_session(self, agent: str, dangerously_yolo: bool | None = None, terminal: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         agent = agent if agent in AGENT_COMMANDS else "claude"
         available_agents = available_agent_commands()
@@ -11457,6 +11459,21 @@ class TmuxWebtermApp:
                 "available_agents": available_agents,
                 "sessions": self.sessions,
                 **user_message_payload("session.error.agentUnavailablePath", diagnostic, agent=agent),
+            }, HTTPStatus.NOT_FOUND
+        if dangerously_yolo is True and not self.dangerously_yolo:
+            diagnostic = "full-access agent launches require YOLOmux --dangerously-yolo"
+            return {
+                "agent": agent,
+                **user_message_payload("status.sessionCreateFailedDefault", diagnostic, error=diagnostic),
+            }, HTTPStatus.FORBIDDEN
+        terminal_name = str(terminal or "").strip()
+        if agent == "term" and terminal_name and terminal_command(terminal_name) is None:
+            diagnostic = f"terminal command is not available on this server PATH: {terminal_name}"
+            return {
+                "agent": agent,
+                "terminal": terminal_name,
+                "available_terminals": available_terminal_commands(),
+                **user_message_payload("session.error.agentUnavailablePath", diagnostic, agent=terminal_name),
             }, HTTPStatus.NOT_FOUND
         if len(self.sessions) >= MAX_YOLOMUX_SESSION_TABS:
             diagnostic = f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}"
@@ -11472,7 +11489,10 @@ class TmuxWebtermApp:
                 **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
         cwd = session_workdir(session)
-        command = agent_command(agent, self.dangerously_yolo)
+        # An explicit launch choice is per session. Keep the server's old setting as the fallback for
+        # older clients that do not send a mode, rather than silently changing their behavior.
+        launch_dangerously_yolo = self.dangerously_yolo if dangerously_yolo is None else bool(dangerously_yolo)
+        command = agent_command(agent, launch_dangerously_yolo, terminal=terminal_name or None)
         result = tmux(
             [
                 "new-session",
@@ -11510,7 +11530,7 @@ class TmuxWebtermApp:
             session,
             "session_started",
             f"created {session} with {agent}",
-            {"agent": agent, "cwd": str(cwd), "command": command, "dangerously_yolo": self.dangerously_yolo},
+            {"agent": agent, "cwd": str(cwd), "command": command, "dangerously_yolo": launch_dangerously_yolo, "terminal": terminal_name},
             message_key="status.sessionCreatedWithAgent",
             message_params={"session": session, "agent": agent},
         )
@@ -11521,7 +11541,8 @@ class TmuxWebtermApp:
             "created": True,
             "cwd": str(cwd),
             "command": command,
-            "dangerously_yolo": self.dangerously_yolo,
+            "dangerously_yolo": launch_dangerously_yolo,
+            "terminal": terminal_name,
             "ok": True,
         }, HTTPStatus.OK
 

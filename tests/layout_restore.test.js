@@ -541,9 +541,11 @@ async function runLayoutRestoreSuite() {
 
   await testAsync('new Claude/Codex tab opens before delayed discovery lists it', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/create-session') {
+        createRequest = parsed;
         return Promise.resolve(jsonResponse({session: '2', sessions: ['1'], agent: parsed.searchParams.get('agent') || 'codex', created: true, ok: true}));
       }
       if (parsed.pathname === '/api/ensure-session') {
@@ -555,8 +557,9 @@ async function runLayoutRestoreSuite() {
       return Promise.resolve(jsonResponse({ok: true}));
     });
 
-    await api.createNextSessionForTest('codex');
+    await api.createNextSessionForTest('codex', {dangerouslyYolo: true});
     await flushAsyncWork();
+    assert.equal(createRequest.searchParams.get('dangerously_yolo'), '1', 'full-access Codex launches explicitly request its bypass flags');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
       left: {tabs: ['1', '2'], active: '2'},
     }, 'new session tab opens even when create-session returns the old roster');
@@ -572,9 +575,11 @@ async function runLayoutRestoreSuite() {
 
   await testAsync('new Xterm tab stays active when create-session is fresh but transcripts lag', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/create-session') {
+        createRequest = parsed;
         return Promise.resolve(jsonResponse({session: '2', sessions: ['1', '2'], agent: 'term', created: true, ok: true}));
       }
       if (parsed.pathname === '/api/ensure-session') {
@@ -586,8 +591,10 @@ async function runLayoutRestoreSuite() {
       return Promise.resolve(jsonResponse({ok: true}));
     });
 
-    await api.createNextSessionForTest('term');
+    await api.createNextSessionForTest('term', {terminal: 'tsh'});
     await flushAsyncWork();
+    assert.equal(createRequest.searchParams.get('dangerously_yolo'), '0', 'normal launches explicitly retain the default permission behavior');
+    assert.equal(createRequest.searchParams.get('terminal'), 'tsh', 'an explicit Xterm command is sent as a named server-validated choice');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
       left: {tabs: ['1', '2'], active: '2'},
     }, 'new Xterm tab opens even when create-session already includes it in the roster');

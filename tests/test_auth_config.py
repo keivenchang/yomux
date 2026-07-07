@@ -315,21 +315,30 @@ def test_setup_auth_script_has_no_parallel_english_status_fallbacks():
 
 
 def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
-    # Menu-bar: the new-session menu shows "Claude — <params>" using the launch commands, and Term is
-    # always offered (a plain shell), not greyed "unavailable".
+    # Menu-bar: the new-session menu offers an explicit normal/full-access choice using server-owned
+    # commands, and Term is always offered (a plain shell), not greyed "unavailable".
     assert "term" in available_agent_commands(), "Term (a shell) is always launchable"
 
     def boot(page):
         match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
         return json.loads(match.group(1))
     yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
-    assert yolo["agentLaunchCommands"]["claude"] == "claude --dangerously-skip-permissions"
-    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+    assert yolo["dangerouslyYolo"] is True
+    assert yolo["agentLaunchCommands"]["claude"] == {
+        "normal": "claude",
+        "full_access": "claude --dangerously-skip-permissions",
+    }
+    assert yolo["agentLaunchCommands"]["codex"] == {
+        "normal": "codex",
+        "full_access": "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+    }
     assert "term" in yolo["agentLaunchCommands"]
-    # Without --dangerously-yolo the commands carry no bypass flags.
+    assert isinstance(yolo["terminalCommands"], list)
+    assert all(isinstance(command, str) for command in yolo["terminalCommands"])
+    # Normal servers retain the commands for server-side validation but do not expose full-access UI.
     plain = boot(web.html_page([], "admin"))
-    assert plain["agentLaunchCommands"]["claude"] == "claude"
-    assert plain["agentLaunchCommands"]["codex"] == "codex"
+    assert plain["dangerouslyYolo"] is False
+    assert plain["agentLaunchCommands"] == yolo["agentLaunchCommands"]
 
 
 def test_main_page_bootstrap_includes_resolved_locale():

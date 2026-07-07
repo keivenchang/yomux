@@ -16,6 +16,10 @@ from .common import codex_runtime_env
 from .common import heal_server_path
 
 
+TERMINAL_COMMAND_CANDIDATES = ("bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "tsh")
+SYSTEM_SHELLS_PATH = Path("/etc/shells")
+
+
 def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | None, bool]:
     try:
         resolved = path.expanduser().resolve()
@@ -56,11 +60,43 @@ def numbered_project_workdir(session: str) -> Path | None:
     repo_path = workspace_base / f"project{session}"
     return repo_path if repo_path.is_dir() else None
 
-def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
+def terminal_command_paths() -> dict[str, str]:
+    """Return the host-approved interactive commands by short name, never user input paths."""
+    heal_server_path()
+    paths: dict[str, str] = {}
+    candidates = [Path(os.environ.get("SHELL", "")).name, *TERMINAL_COMMAND_CANDIDATES]
+    try:
+        candidates.extend(
+            Path(line.strip()).name
+            for line in SYSTEM_SHELLS_PATH.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+    except OSError:
+        pass
+    for name in candidates:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", name) or name == "tmux":
+            continue
+        command_path = shutil.which(name)
+        if command_path:
+            paths.setdefault(name, command_path)
+    return paths
+
+
+def available_terminal_commands() -> list[str]:
+    return sorted(terminal_command_paths(), key=str.casefold)
+
+
+def terminal_command(name: str | None = None) -> str | None:
+    if not name:
+        return os.environ.get("SHELL") or "bash"
+    return terminal_command_paths().get(name)
+
+
+def agent_command(agent: str, dangerously_yolo: bool = False, terminal: str | None = None) -> str:
     if agent == "codex":
         return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" if dangerously_yolo else "codex"
     if agent == "term":
-        return os.environ.get("SHELL") or "bash"
+        return terminal_command(terminal) or (os.environ.get("SHELL") or "bash")
     # Deliberately NOT --bare: --bare makes Claude Code read auth strictly from
     # ANTHROPIC_API_KEY/apiKeyHelper and never from the OAuth credential file or
     # keychain, so a subscription/enterprise OAuth login shows "Not logged in".
