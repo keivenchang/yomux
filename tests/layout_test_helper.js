@@ -1095,6 +1095,7 @@ globalThis.__layoutTestApi = {
   inactiveTabItems,
   infoItemId,
   infoRelationshipRecords,
+  infoPanelRenderSignatureForTest: infoPanelRenderSignature,
   infoGroupTree,
   infoDimensionCountTextForTest: infoDimensionCountText,
   infoGroupDimensions,

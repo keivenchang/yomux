@@ -1886,6 +1886,10 @@ async function runLayoutRestoreSuite() {
         '4': [{kind: 'codex', state: 'idle', window: '0', window_index: 0, window_label: '0:codex'}],
       },
     });
+    tabberCountsApi.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}, agent_windows: [{kind: 'claude', state: 'working', window: '0', window_index: 0, window_label: '0:claude'}]});
+    tabberCountsApi.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'idle'}, agent_windows: [{kind: 'codex', state: 'needs-input', window: '0', window_index: 0, window_label: '0:codex'}]});
+    tabberCountsApi.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'idle'}, agent_windows: [{kind: 'claude', state: 'idle', window: '0', window_index: 0, window_label: '0:claude', working_stopped_ts: 100}]});
+    tabberCountsApi.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'idle'}, agent_windows: [{kind: 'codex', state: 'idle', window: '0', window_index: 0, window_label: '0:codex'}]});
     const tabberCounts = tabberCountsApi.globalActivityCounts();
     assert.deepStrictEqual(
       {running: tabberCounts.running, ask: tabberCounts.ask, blocked: tabberCounts.blocked, idle: tabberCounts.idle, total: tabberCounts.total},

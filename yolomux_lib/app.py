@@ -274,6 +274,48 @@ class AutoApproveCacheRecord:
     generation: int = 0
 
 
+@dataclass(frozen=True)
+class AgentWindowAttentionInstance:
+    cooldown_generation: int = 0
+    cooldown_stopped_at: float = 0.0
+    cooldown_cancelled_generation: int = 0
+    cooldown_working: bool = False
+    attention_generation: int = 0
+    active_prompt_hash: str = ""
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any] | None) -> AgentWindowAttentionInstance:
+        payload = record if isinstance(record, dict) else {}
+        try:
+            cooldown_generation = max(0, int(payload.get("cooldown_generation", 0)))
+        except (TypeError, ValueError):
+            cooldown_generation = 0
+        try:
+            cooldown_stopped_at = max(0.0, float(payload.get("cooldown_stopped_at", 0.0)))
+        except (TypeError, ValueError):
+            cooldown_stopped_at = 0.0
+        try:
+            cooldown_cancelled_generation = max(0, int(payload.get("cooldown_cancelled_generation", 0)))
+        except (TypeError, ValueError):
+            cooldown_cancelled_generation = 0
+        try:
+            attention_generation = max(0, int(payload.get("attention_generation", 0)))
+        except (TypeError, ValueError):
+            attention_generation = 0
+        return cls(
+            cooldown_generation=cooldown_generation,
+            cooldown_stopped_at=cooldown_stopped_at,
+            cooldown_cancelled_generation=cooldown_cancelled_generation,
+            cooldown_working=payload.get("cooldown_working") is True,
+            attention_generation=attention_generation,
+            active_prompt_hash=str(payload.get("active_prompt_hash") or ""),
+        )
+
+    def cooldown_state(self) -> tuple[int, float]:
+        stopped_at = self.cooldown_stopped_at if self.cooldown_cancelled_generation < self.cooldown_generation else 0.0
+        return self.cooldown_generation, stopped_at
+
+
 @dataclass
 class ClientWatchFileRecord:
     expires_at: float
@@ -12009,6 +12051,7 @@ class TmuxWebtermApp:
         kind: str,
         state: str,
         observed_ts: float,
+        shared_instances: dict[str, AgentWindowAttentionInstance] | None = None,
     ) -> float:
         key = "\x1f".join((session, window, pane_target, kind))
         with self.agent_window_transition_lock:
@@ -12019,6 +12062,20 @@ class TmuxWebtermApp:
                 previous_generation = max(0, int(previous.get("cooldown_generation", 0)))
             except (TypeError, ValueError):
                 previous_generation = 0
+            # A process can begin watching after another YOLOmux server observed the
+            # working->idle transition. Hydrate that durable identity before using the
+            # local shadow state, otherwise this follower renders ordinary idle while
+            # the owner correctly renders the shared yellow completion.
+            shared_generation, shared_stopped_ts = self.shared_agent_window_cooldown_state(
+                session,
+                window,
+                pane_target,
+                kind,
+                shared_instances=shared_instances,
+            )
+            if shared_generation >= previous_generation:
+                previous_generation = shared_generation
+                previous_stopped_ts = shared_stopped_ts
             generation = previous_generation
             if state == "working":
                 stopped_ts = 0.0
@@ -12032,6 +12089,17 @@ class TmuxWebtermApp:
                         0,
                         observed_ts,
                     )
+                    if generation > 0:
+                        self.update_shared_agent_window_instance_snapshot(
+                            shared_instances,
+                            session,
+                            window,
+                            pane_target,
+                            kind,
+                            cooldown_generation=generation,
+                            cooldown_stopped_at=0.0,
+                            cooldown_working=True,
+                        )
             elif state == "idle":
                 # A completion belongs only to a working->idle transition observed by this
                 # tracker. Activity recency is historical metadata: treating it as a stop
@@ -12047,6 +12115,17 @@ class TmuxWebtermApp:
                         previous_generation,
                         observed_ts,
                     )
+                    if generation > 0:
+                        self.update_shared_agent_window_instance_snapshot(
+                            shared_instances,
+                            session,
+                            window,
+                            pane_target,
+                            kind,
+                            cooldown_generation=generation,
+                            cooldown_stopped_at=stopped_ts,
+                            cooldown_working=False,
+                        )
                 else:
                     stopped_ts = previous_stopped_ts
             else:
@@ -12150,6 +12229,57 @@ class TmuxWebtermApp:
                 self._write_shared_tmux_ai_status_locked(status)
         return result
 
+    def shared_agent_window_attention_instances_snapshot(self) -> dict[str, AgentWindowAttentionInstance]:
+        now = time.time()
+        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
+            raw_instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
+            instances = {str(key): dict(value) for key, value in raw_instances.items() if isinstance(value, dict)}
+            self.prune_attention_instances(instances, now)
+        return {key: AgentWindowAttentionInstance.from_record(record) for key, record in instances.items()}
+
+    def update_shared_agent_window_instance_snapshot(
+        self,
+        shared_instances: dict[str, AgentWindowAttentionInstance] | None,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        **changes: Any,
+    ) -> None:
+        if shared_instances is None:
+            return
+        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
+        current = shared_instances.get(key, AgentWindowAttentionInstance())
+        shared_instances[key] = AgentWindowAttentionInstance(
+            cooldown_generation=int(changes.get("cooldown_generation", current.cooldown_generation)),
+            cooldown_stopped_at=float(changes.get("cooldown_stopped_at", current.cooldown_stopped_at)),
+            cooldown_cancelled_generation=int(changes.get("cooldown_cancelled_generation", current.cooldown_cancelled_generation)),
+            cooldown_working=bool(changes.get("cooldown_working", current.cooldown_working)),
+            attention_generation=int(changes.get("attention_generation", current.attention_generation)),
+            active_prompt_hash=str(changes.get("active_prompt_hash", current.active_prompt_hash)),
+        )
+
+    def shared_agent_window_cooldown_state(
+        self,
+        session: str,
+        window: str,
+        pane_target: str,
+        kind: str,
+        shared_instances: dict[str, AgentWindowAttentionInstance] | None = None,
+    ) -> tuple[int, float]:
+        """Read the durable completion identity used by every server process."""
+
+        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
+        if shared_instances is not None:
+            return shared_instances.get(key, AgentWindowAttentionInstance()).cooldown_state()
+
+        def read(record: dict[str, Any], _now: float) -> tuple[tuple[int, float], bool]:
+            return AgentWindowAttentionInstance.from_record(record).cooldown_state(), False
+
+        return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, read)
+
     def shared_agent_window_cooldown_transition(
         self,
         session: str,
@@ -12161,19 +12291,11 @@ class TmuxWebtermApp:
         observed_ts: float,
     ) -> tuple[int, float]:
         def update(record: dict[str, Any], now: float) -> tuple[tuple[int, float], bool]:
-            try:
-                generation = max(0, int(record.get("cooldown_generation", 0)))
-            except (TypeError, ValueError):
-                generation = 0
-            try:
-                stopped_ts = max(0.0, float(record.get("cooldown_stopped_at", 0.0)))
-            except (TypeError, ValueError):
-                stopped_ts = 0.0
-            try:
-                cancelled_generation = max(0, int(record.get("cooldown_cancelled_generation", 0)))
-            except (TypeError, ValueError):
-                cancelled_generation = 0
-            working = record.get("cooldown_working") is True
+            instance = AgentWindowAttentionInstance.from_record(record)
+            generation = instance.cooldown_generation
+            stopped_ts = instance.cooldown_stopped_at
+            cancelled_generation = instance.cooldown_cancelled_generation
+            working = instance.cooldown_working
             if transition == "working":
                 if not working:
                     generation += 1
@@ -12209,15 +12331,22 @@ class TmuxWebtermApp:
         kind: str,
         state: str,
         prompt_hash: str,
+        shared_instances: dict[str, AgentWindowAttentionInstance] | None = None,
     ) -> str:
         attention_state = state in {"approval", "needs-approval", "needs-input", "interrupted"}
+        key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
+        snapshot = shared_instances.get(key, AgentWindowAttentionInstance()) if shared_instances is not None else None
+        if snapshot is not None:
+            if not attention_state or not prompt_hash:
+                if not snapshot.active_prompt_hash:
+                    return ""
+            elif prompt_hash == snapshot.active_prompt_hash:
+                return f"{prompt_hash}:{snapshot.attention_generation}"
 
         def update(record: dict[str, Any], _now: float) -> tuple[str, bool]:
-            previous_hash = str(record.get("active_prompt_hash") or "")
-            try:
-                generation = max(0, int(record.get("attention_generation", 0)))
-            except (TypeError, ValueError):
-                generation = 0
+            instance = AgentWindowAttentionInstance.from_record(record)
+            previous_hash = instance.active_prompt_hash
+            generation = instance.attention_generation
             if not attention_state or not prompt_hash:
                 if previous_hash:
                     record["active_prompt_hash"] = ""
@@ -12230,7 +12359,32 @@ class TmuxWebtermApp:
                 return f"{prompt_hash}:{generation}", True
             return f"{prompt_hash}:{generation}", False
 
-        return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, update)
+        signature = self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, update)
+        if shared_instances is not None:
+            if not attention_state or not prompt_hash:
+                self.update_shared_agent_window_instance_snapshot(
+                    shared_instances,
+                    session,
+                    window,
+                    pane_target,
+                    kind,
+                    active_prompt_hash="",
+                )
+            else:
+                try:
+                    generation = max(0, int(str(signature).rsplit(":", 1)[1]))
+                except (IndexError, ValueError):
+                    generation = 0
+                self.update_shared_agent_window_instance_snapshot(
+                    shared_instances,
+                    session,
+                    window,
+                    pane_target,
+                    kind,
+                    active_prompt_hash=prompt_hash,
+                    attention_generation=generation,
+                )
+        return signature
 
     def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
         if not signature:
@@ -12541,6 +12695,7 @@ class TmuxWebtermApp:
             return []
         activity = self.activity_snapshot_with_recency(activity_snapshot)
         observed_ts = time.time()
+        shared_instances = self.shared_agent_window_attention_instances_snapshot()
         rows: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
         path_records = self.agent_window_path_records(info, files_payload=files_payload) if include_path_metadata else {}
@@ -12562,6 +12717,7 @@ class TmuxWebtermApp:
                 kind,
                 state,
                 observed_ts,
+                shared_instances=shared_instances,
             )
             window_index: int | None
             try:
@@ -12589,6 +12745,7 @@ class TmuxWebtermApp:
                 kind,
                 state,
                 prompt_hash,
+                shared_instances=shared_instances,
             )
             attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, state, attention_signature)
             cooldown_signature = self.agent_window_attention_signature("cooldown", screen, working_stopped_ts)

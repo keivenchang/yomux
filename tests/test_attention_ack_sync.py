@@ -210,6 +210,81 @@ def test_cooldown_ack_uses_one_shared_transition_identity_across_servers(monkeyp
     assert first.attention_acknowledged(next_key) is False
 
 
+def test_fresh_server_hydrates_shared_cooldown_transition(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    owner = make_app()
+    follower = make_app()
+    scope = ("7003", "1", "%27", "claude")
+
+    owner.agent_window_working_stopped_ts(*scope, "working", 100.0)
+    owner_stopped = owner.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    follower_stopped = follower.agent_window_working_stopped_ts(*scope, "idle", 220.0)
+
+    assert owner_stopped == follower_stopped == 200.0
+
+
+def test_fresh_follower_status_payload_preserves_shared_cooldown_ack(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    owner = make_app()
+    follower = make_app()
+    scope = ("1", "0", "%27", "claude")
+    owner.agent_window_working_stopped_ts(*scope, "working", 100.0)
+    stopped_at = owner.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    key = owner.agent_window_attention_key(
+        *scope, "cooldown", owner.agent_window_attention_signature("cooldown", {}, stopped_at)
+    )
+    follower.acknowledge_attention({"keys": [key]})
+    owner.merge_shared_attention_acks()
+    follower.merge_shared_attention_acks()
+    pane = common.PaneInfo("1", "0", "0", "%27", "%27", "/repo", "claude", True, True, "claude", 27, "claude", 27)
+    info = common.SessionInfo(
+        session="1",
+        panes=[pane],
+        selected_pane=pane,
+        agents=[common.AgentInfo("1", "claude", 27, "%27", "claude", "/repo", "idle", "claude-1", None, None)],
+    )
+    monkeypatch.setattr(follower, "agent_window_screen_state", lambda *_args, **_kwargs: {"key": "idle", "text": "done"})
+
+    row = follower.agent_window_status_payloads("1", info=info, discovered_sessions={"1": info}, include_path_metadata=False)[0]
+
+    assert row["working_stopped_ts"] == stopped_at
+    assert row["cooldown_attention_key"] == key
+    assert row["cooldown_acknowledged"] is True
+    assert owner.attention_acknowledged(key) is True
+
+
+def test_agent_window_status_batch_reads_shared_instances_once(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    webapp = make_app()
+    panes = [
+        common.PaneInfo("1", str(index), "0", f"%{index}", f"%{index}", f"/repo/{index}", kind, True, index == 0, kind, index + 1, kind, index + 1)
+        for index, kind in enumerate(("claude", "codex", "claude"))
+    ]
+    info = common.SessionInfo(
+        session="1",
+        panes=panes,
+        selected_pane=panes[0],
+        agents=[
+            common.AgentInfo("1", kind, panes[index].pid, panes[index].target, kind, panes[index].current_path, "idle", f"{kind}-{index}", None, None)
+            for index, kind in enumerate(("claude", "codex", "claude"))
+        ],
+    )
+    monkeypatch.setattr(webapp, "agent_window_screen_state", lambda *_args, **_kwargs: {"key": "idle", "text": ""})
+    reads = []
+    read_shared = webapp._read_shared_tmux_ai_status_locked
+
+    def counted_read():
+        reads.append(True)
+        return read_shared()
+
+    monkeypatch.setattr(webapp, "_read_shared_tmux_ai_status_locked", counted_read)
+
+    rows = webapp.agent_window_status_payloads("1", info=info, discovered_sessions={"1": info}, include_path_metadata=False)
+
+    assert len(rows) == 3
+    assert len(reads) == 1
+
+
 def test_attention_ack_poll_publishes_once_per_revision(monkeypatch, tmp_path, make_app):
     patch_shared_path(monkeypatch, tmp_path)
     first = make_app()

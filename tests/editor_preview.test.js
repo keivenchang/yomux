@@ -1876,6 +1876,50 @@ async function runEditorPreviewSuite() {
     const sharedAcknowledgedRows = api.sessionAgentWindowStatusPayloadsForTest('1', {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}]});
     assert.equal(sharedAcknowledgedRows.find(row => row.kind === 'codex' && row.window_index === 2)?.attention_acknowledged, true, 'a fresh shared acknowledgement beats the stale unacknowledged Tabber row for the same prompt');
     assert.equal(/status-indicator--attention/.test(api.tmuxWindowBarHtml('1', {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}]})), false, 'the acknowledged prompt clears the red Tab marker without waiting for Tabber cache expiry');
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'idle', window_index: 2, window_label: '2:codex', working_stopped_ts: 300},
+    ]});
+    api.setTabberActivityForTest({agent_windows: {'1': [
+      {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
+    ]}});
+    const canonicalStatusRows = api.sessionAgentWindowStatusPayloadsForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
+    ]});
+    assert.deepStrictEqual(canonical(canonicalStatusRows.map(row => ({state: row.state, working_stopped_ts: row.working_stopped_ts}))), [{state: 'idle', working_stopped_ts: 300}], 'the canonical auto-approve row is the one status source for regular Tabs, Tabber, and YO!info; stale Tabber and transcript rows only enrich it');
+    const sourceInfo = {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}], agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
+    ]};
+    const sourceRecord = {tabKey: '1', tabLabel: '1', tabSession: '1', aiKey: '2:codex', aiLabel: '2:codex', aiKind: 'codex', aiWindow: '2', aiWindowIndex: '2', aiState: 'working'};
+    api.setTranscriptInfoForTest('1', sourceInfo);
+    api.setFileExplorerModeForTest('tabber');
+    const cooldownAt = Math.floor(Date.now() / 1000);
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'idle', window_index: 2, window_label: '2:codex', working_stopped_ts: cooldownAt, cooldown_acknowledged: false},
+    ]});
+    api.setTabberActivityForTest({agent_windows: {'1': [
+      {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
+    ]}});
+    const canonicalPaneTab = api.tmuxPaneTabHtml('1', sourceInfo, null, false);
+    const canonicalTabberWindow = api.buildTabberTreeForTest().entriesByDir.get('/s_1').find(row => row.tabber?.windowIndex === 2);
+    const canonicalInfo = api.infoTreeHtmlForTest([sourceRecord], ['ai']);
+    assert.ok(canonicalPaneTab.includes('status-indicator--cooldown'), 'the regular Tab renders the canonical yellow row rather than stale metadata working');
+    assert.ok(canonicalTabberWindow?.tabber.activityIconHtml.includes('status-indicator--cooldown'), 'Tabber renders the same canonical yellow row');
+    assert.ok(canonicalInfo.includes('status-indicator--cooldown'), 'YO!info resolves the same canonical yellow row instead of its copied working state');
+    const signatureBeforeAcknowledgement = api.infoPanelRenderSignatureForTest();
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'needs-input', window_index: 2, window_label: '2:codex', attention_key: 'canonical-ack', attention_acknowledged: true},
+    ]});
+    const acknowledgedPaneTab = api.tmuxPaneTabHtml('1', sourceInfo, null, false);
+    const acknowledgedTabberWindow = api.buildTabberTreeForTest().entriesByDir.get('/s_1').find(row => row.tabber?.windowIndex === 2);
+    const acknowledgedInfo = api.infoTreeHtmlForTest([sourceRecord], ['ai']);
+    assert.equal(acknowledgedPaneTab.includes('status-indicator--attention'), false, 'the regular Tab hides an acknowledged canonical red state');
+    assert.equal(acknowledgedTabberWindow?.tabber.activityIconHtml.includes('status-indicator--attention'), false, 'Tabber hides the same acknowledged canonical red state');
+    assert.equal(acknowledgedInfo.includes('status-indicator--attention'), false, 'YO!info preserves the acknowledgement fields from the canonical row');
+    assert.notEqual(api.infoPanelRenderSignatureForTest(), signatureBeforeAcknowledgement, 'an auto-approve acknowledgement invalidates the YO!info render cache even when transcript metadata is unchanged');
+    api.setAutoApproveStateForTest('1', {agent_windows: []});
+    const noCanonicalRows = api.sessionAgentWindowStatusPayloadsForTest('1', sourceInfo);
+    assert.equal(noCanonicalRows.find(row => row.window_index === 2)?.state, '', 'secondary Tabber/transcript rows provide identity only when no canonical status row exists');
+    assert.equal(api.tmuxPaneTabHtml('1', sourceInfo, null, false).includes('status-indicator--working'), false, 'a stale secondary working row cannot restore a visible status color after canonical status is absent');
     api.setTabberActivityForTest({});
     const repeatedAskKey = '8001:2:repeat-ask';
     const repeatedAskPayload = {agent_windows: [
@@ -1927,12 +1971,11 @@ async function runEditorPreviewSuite() {
       {kind: 'codex', state: 'working', observed_ts: 1005, working_elapsed_seconds: 0, window_index: 1, window_label: '1:codex'},
     ]}});
     const mergedRunRows = api.sessionAgentWindowStatusPayloadsForTest('1', {panes: runWindowPanes});
-    assert.equal(mergedRunRows.find(row => row.kind === 'claude' && row.window_index === 0)?.state, 'working', 'newer /api/activity Claude working row overrides stale auto-approve idle row');
-    assert.equal(mergedRunRows.find(row => row.kind === 'codex' && row.window_index === 1)?.state, 'working', 'newer /api/activity Codex working row overrides stale auto-approve idle row');
+    assert.equal(mergedRunRows.find(row => row.kind === 'claude' && row.window_index === 0)?.state, 'idle', 'the canonical auto-approve Claude row prevents stale Tabber activity from changing the status');
+    assert.equal(mergedRunRows.find(row => row.kind === 'codex' && row.window_index === 1)?.state, 'idle', 'the canonical auto-approve Codex row prevents stale Tabber activity from changing the status');
     const activityRunWindowBarHtml = api.tmuxWindowBarHtml('1', {panes: runWindowPanes});
     assert.ok(activityRunWindowBarHtml.includes('0:claude') && activityRunWindowBarHtml.includes('1:codex'), 'activity refresh preserves the canonical window labels');
-    assert.ok(/agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*agent-icon claude[\s\S]*0:claude/.test(activityRunWindowBarHtml), 'activity refresh places the Claude play glyph before its icon and canonical label');
-    assert.ok(/agent-window-status-dot[\s\S]*status-indicator--working[\s\S]*agent-icon codex[\s\S]*1:codex/.test(activityRunWindowBarHtml), 'activity refresh places the Codex play glyph before its icon and canonical label');
+    assert.equal(/status-indicator--working/.test(activityRunWindowBarHtml), false, 'the window bar does not render stale Tabber working dots when the canonical status is idle');
     const manyWindows = Array.from({length: 9}, (_unused, index) => ({
       window: String(index + 1),
       window_name: `w${index + 1}`,
@@ -2891,16 +2934,10 @@ async function runEditorPreviewSuite() {
       ],
       agents: [],
     });
-    multiWindowApi.setTabberActivityForTest({
-      activity: {},
-      agents: [],
-      agent_windows: {
-        '1': [
-          {kind: 'claude', state: 'working', window: '0', window_index: 0, window_label: '0:claude'},
-          {kind: 'codex', state: 'working', window: '1', window_index: 1, window_label: '1:codex'},
-        ],
-      },
-    });
+    multiWindowApi.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'claude', state: 'working', window: '0', window_index: 0, window_label: '0:claude'},
+      {kind: 'codex', state: 'working', window: '1', window_index: 1, window_label: '1:codex'},
+    ]});
     const multiWindowCounts = multiWindowApi.globalActivityCounts();
     multiWindowApi.updateDocumentTitle();
     assert.equal(multiWindowCounts.running, 2, 'the shared activity owner counts both working agent windows in one tmux session');
@@ -6157,6 +6194,13 @@ async function runEditorPreviewSuite() {
       ],
       project: appProject,
     });
+    api.setAutoApproveStateForTest('tab-a', {agent_windows: [
+      {kind: 'claude', state: 'working', window_index: 0, pane_target: '%tab-a-claude'},
+      {kind: 'codex', state: 'idle', window_index: 0, pane_target: '%tab-a-codex'},
+    ]});
+    api.setAutoApproveStateForTest('tab-b', {agent_windows: [
+      {kind: 'codex', state: 'needs-input', window_index: 0},
+    ]});
 
     const records = api.infoRelationshipRecords();
     assert.deepStrictEqual(canonical(records.map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathKey}|${record.branchKey}`)), [
@@ -6432,6 +6476,18 @@ async function runEditorPreviewSuite() {
       {tabKey: 'yellow-tab', tabLabel: 'yellow-tab', tabSession: 'yellow-tab', aiKey: '1:claude', aiLabel: '1:claude', aiKind: 'claude', aiWindow: '1', aiState: 'idle', aiWorkingStoppedTs: Math.floor(Date.now() / 1000)},
       {tabKey: 'green-tab', tabLabel: 'green-tab', tabSession: 'green-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiState: 'working'},
     ];
+    const statusNow = Math.floor(Date.now() / 1000);
+    api.setAutoApproveStateForTest('red-tab', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 0},
+      {kind: 'claude', state: 'needs-input', window_index: 1},
+    ]});
+    api.setAutoApproveStateForTest('yellow-tab', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 0},
+      {kind: 'claude', state: 'idle', window_index: 1, working_stopped_ts: statusNow},
+    ]});
+    api.setAutoApproveStateForTest('green-tab', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 0},
+    ]});
     const statusPriorityHtml = api.infoTreeHtmlForTest(statusPriorityRecords, ['tab'], {key: 'tab', dir: 'asc'});
     const tabSummaryFor = label => {
       const index = statusPriorityHtml.indexOf(`>[${label}]</`);

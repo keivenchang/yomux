@@ -17956,6 +17956,10 @@ function bindTabberPanel(panel) {
 
 const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
 const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
+  'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
+  'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id',
+]);
 
 function agentWindowVisibleTone(value) {
   return AGENT_WINDOW_VISIBLE_TONES.includes(value);
@@ -18107,57 +18111,6 @@ function agentWindowPayloadRows(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
 }
 
-function agentWindowObservedTs(agent) {
-  for (const key of ['observed_ts', 'observedTs', 'captured_ts', 'updated_ts']) {
-    const value = Number(agent?.[key] || 0);
-    if (Number.isFinite(value) && value > 0) return value;
-  }
-  return 0;
-}
-
-function agentWindowStateMergeRank(state) {
-  const key = agentWindowStateKey(state);
-  if (agentWindowIsAttentionState(key)) return 0;
-  if (key === STATE_KEY.working) return 1;
-  if (key === 'cooldown') return 2;
-  if (key === 'active') return 3;
-  if (key === STATE_KEY.idle) return 4;
-  return 9;
-}
-
-function agentWindowPayloadHasVisibleAttention(agent) {
-  return agentWindowIsAttentionState(agentWindowStateKey(agent?.state)) && agent?.attention_acknowledged !== true;
-}
-
-function agentWindowPayloadAcknowledgesSameStatus(candidate, current) {
-  const attentionKey = String(candidate?.attention_key || '');
-  if (candidate?.attention_acknowledged === true && attentionKey && attentionKey === String(current?.attention_key || '')) return true;
-  const cooldownKey = String(candidate?.cooldown_attention_key || '');
-  return candidate?.cooldown_acknowledged === true && cooldownKey && cooldownKey === String(current?.cooldown_attention_key || '');
-}
-
-function agentWindowPayloadIsPreferred(candidate, current) {
-  if (!current) return true;
-  // The shared acknowledgement identifies one exact prompt/transition. Its fresh explicit true
-  // must beat an older Tabber cache row for that same key, while a new key still re-arms normally.
-  if (agentWindowPayloadAcknowledgesSameStatus(candidate, current)) return true;
-  const candidateAttention = agentWindowPayloadHasVisibleAttention(candidate);
-  const currentAttention = agentWindowPayloadHasVisibleAttention(current);
-  // The parent Tab and its child button must not disagree because a later activity poll saw the
-  // pane quiet after the prompt capture. A live, unacknowledged approval remains authoritative
-  // until the acknowledgement state explicitly clears it.
-  if (candidateAttention !== currentAttention) return candidateAttention;
-  const candidateTs = agentWindowObservedTs(candidate);
-  const currentTs = agentWindowObservedTs(current);
-  if (candidateTs > 0 || currentTs > 0) {
-    if (candidateTs !== currentTs) return candidateTs > currentTs;
-  }
-  const candidateRank = agentWindowStateMergeRank(candidate?.state);
-  const currentRank = agentWindowStateMergeRank(current?.state);
-  if (candidateRank !== currentRank) return candidateRank < currentRank;
-  return true;
-}
-
 function agentWindowLiveKindFromInfo(info, agent) {
   const pane = agentWindowInfoPane(info, agent);
   for (const value of [pane?.process_label, pane?.window_name, pane?.command]) {
@@ -18167,13 +18120,20 @@ function agentWindowLiveKindFromInfo(info, agent) {
   return '';
 }
 
-function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info = null) {
+function agentWindowMetadataPayload(agent) {
+  const metadata = {};
+  for (const field of AGENT_WINDOW_METADATA_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(agent || {}, field)) metadata[field] = agent[field];
+  }
+  return metadata;
+}
+
+function mergedAgentWindowMetadataRows(activityRows, infoRows, info = null) {
   const rowsByKey = new Map();
   const looseRows = [];
   const sources = [
     {rows: infoRows, priority: 1},
     {rows: activityRows, priority: 2},
-    {rows: stateRows, priority: 3},
   ];
   for (const source of sources) {
     for (const row of source.rows) {
@@ -18191,12 +18151,23 @@ function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info = nul
         : null;
       const preferred = !current
         || liveKindDecision === true
-        || (liveKindDecision === null && rowKind !== currentKind && source.priority > current.priority)
-        || (rowKind === currentKind && agentWindowPayloadIsPreferred(row, current.row));
+        || (liveKindDecision === null && source.priority > current.priority);
       if (preferred) rowsByKey.set(key, {row, priority: source.priority});
     }
   }
-  return [...rowsByKey.values()].map(item => item.row).concat(looseRows);
+  return [...rowsByKey.values()].map(item => ({
+    kind: item.row.kind,
+    window: item.row.window,
+    window_index: item.row.window_index,
+    state: '',
+    ...agentWindowMetadataPayload(item.row),
+  })).concat(looseRows.map(row => ({
+    kind: row.kind,
+    window: row.window,
+    window_index: row.window_index,
+    state: '',
+    ...agentWindowMetadataPayload(row),
+  })));
 }
 
 function agentWindowStatusVisualSignature(payload = {}) {
@@ -18212,6 +18183,10 @@ function agentWindowStatusVisualSignature(payload = {}) {
       working_stopped_ts: Number.isFinite(Number(agent.working_stopped_ts)) ? Number(agent.working_stopped_ts) : null,
       last_active_ts: Number.isFinite(Number(agent.last_active_ts)) ? Number(agent.last_active_ts) : null,
       idle_since: Number.isFinite(Number(agent.idle_since)) ? Number(agent.idle_since) : null,
+      attention_key: String(agent.attention_key || ''),
+      attention_acknowledged: agent.attention_acknowledged === true,
+      cooldown_attention_key: String(agent.cooldown_attention_key || ''),
+      cooldown_acknowledged: agent.cooldown_acknowledged === true,
     }))
     .sort((a, b) => String(a.window_index ?? '').localeCompare(String(b.window_index ?? '')) || a.kind.localeCompare(b.kind));
   return JSON.stringify(rows);
@@ -18222,7 +18197,11 @@ function mergeAgentWindowPayload(base, candidates) {
   const enrich = candidates
     .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
     .find(Boolean) || {};
-  const merged = {...enrich, ...base};
+  const merged = {...base};
+  const metadata = agentWindowMetadataPayload(enrich);
+  for (const [field, value] of Object.entries(metadata)) {
+    if (merged[field] === undefined || merged[field] === null || merged[field] === '') merged[field] = value;
+  }
   if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
     merged.path = enrich.path;
     merged.paths = enrich.paths;
@@ -18277,11 +18256,16 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows, info);
+  // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
+  // metadata can identify a window and enrich its path/git details, but never provide a
+  // color, transition, or acknowledgement when the canonical status is unavailable.
+  const source = stateRows.length
+    ? stateRows
+    : mergedAgentWindowMetadataRows(activityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
-      state: STATE_KEY.idle,
+      state: '',
       pane_target: agent?.pane_target || '',
       window_label: agent?.window_label || '',
       transcript: agent?.transcript || '',
@@ -18292,7 +18276,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
   const agents = fallback
-    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
+    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
@@ -18375,6 +18359,10 @@ function agentWindowStatusForRecord(session, record, info = null) {
   if (indexKey === null) return null;
   const rows = sessionAgentWindowStatusPayloads(session, info);
   return rows.find(agent => agentWindowIndex(agent) === indexKey) || null;
+}
+
+function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null) {
+  return windowViewModel(session, windowIndex, info, autoPayload);
 }
 
 function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
@@ -59113,9 +59101,22 @@ function infoRecordAgentPayload(record) {
   return agent;
 }
 
+function infoRecordCanonicalAgent(record) {
+  const session = String(record?.tabSession || '').trim();
+  const windowIndex = infoRecordTmuxWindowIndex(record);
+  if (!session || !windowIndex || typeof agentWindowStatusForSessionWindow !== 'function') return null;
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  return agentWindowStatusForSessionWindow(session, windowIndex, info, autoApproveStates.get(session));
+}
+
+function infoRecordDisplayAgent(record) {
+  return infoRecordCanonicalAgent(record) || {...infoRecordAgentPayload(record), state: ''};
+}
+
 function infoRecordAgentActivityItem(record) {
   if (!infoRecordHasAi(record)) return null;
-  const agent = infoRecordAgentPayload(record);
+  const agent = infoRecordCanonicalAgent(record);
+  if (!agent) return null;
   return agentWindowActivityIconForStatusItem(agent, record.aiKind, record.tabSession, {
     current: false,
     window_active: false,
@@ -59150,7 +59151,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const agent = summary?.agent || infoRecordAgentPayload(record);
+  const agent = summary?.agent || infoRecordDisplayAgent(record);
   const activityHtml = summary?.item
     ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
       ...agentWindowActivityOptionsForStatus(agent, session),
@@ -59171,8 +59172,8 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   const label = String(record?.aiLabel || '').trim();
   if (!label) return '';
   const labelHtml = infoRecordSearchValueHtml(record, 'tmux-window', label);
-  const agent = infoRecordAgentPayload(record);
-  const active = record.aiCurrent === true || record.aiWindowActive === true;
+  const agent = infoRecordDisplayAgent(record);
+  const active = agent.current === true || agent.window_active === true;
   const title = String(options.title || record.aiTitle || label);
   const attrs = options.action === false
     ? []
@@ -59189,7 +59190,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     numberLabel: record.aiWindowIndex || record.aiWindow || label,
     active,
     agentStatus: agent,
-    agentKey: record.aiKind,
+    agentKey: agent.kind || record.aiKind,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -59197,7 +59198,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
 }
 
 function infoRecordAiRecencyHtml(record) {
-  const agent = infoRecordAgentPayload(record);
+  const agent = infoRecordDisplayAgent(record);
   const lastActive = Number(agent.idle_since || agent.last_active_ts || 0);
   if (!Number.isFinite(lastActive) || lastActive <= 0) return '';
   const text = typeof sessionPopoverAgentRecencyText === 'function'
@@ -59387,6 +59388,7 @@ function infoPanelRenderSignature() {
     grouping: infoGrouping,
     sort: infoSort,
     meta: transcriptMetadataState.payload,
+    agentStatus: sessions.map(session => [session, agentWindowStatusVisualSignature(autoApproveStates.get(session) || {})]),
   });
 }
 
@@ -61532,6 +61534,7 @@ async function setAutoApprove(session, enabled) {
     autoApproveStates.set(session, payload);
     updateDocumentTitle();
     updateSessionButtonStates();
+    renderInfoPanel();
     renderAutoApproveButton(session, payload);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();

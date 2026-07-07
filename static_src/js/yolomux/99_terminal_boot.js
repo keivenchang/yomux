@@ -1971,9 +1971,22 @@ function infoRecordAgentPayload(record) {
   return agent;
 }
 
+function infoRecordCanonicalAgent(record) {
+  const session = String(record?.tabSession || '').trim();
+  const windowIndex = infoRecordTmuxWindowIndex(record);
+  if (!session || !windowIndex || typeof agentWindowStatusForSessionWindow !== 'function') return null;
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  return agentWindowStatusForSessionWindow(session, windowIndex, info, autoApproveStates.get(session));
+}
+
+function infoRecordDisplayAgent(record) {
+  return infoRecordCanonicalAgent(record) || {...infoRecordAgentPayload(record), state: ''};
+}
+
 function infoRecordAgentActivityItem(record) {
   if (!infoRecordHasAi(record)) return null;
-  const agent = infoRecordAgentPayload(record);
+  const agent = infoRecordCanonicalAgent(record);
+  if (!agent) return null;
   return agentWindowActivityIconForStatusItem(agent, record.aiKind, record.tabSession, {
     current: false,
     window_active: false,
@@ -2008,7 +2021,7 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const agent = summary?.agent || infoRecordAgentPayload(record);
+  const agent = summary?.agent || infoRecordDisplayAgent(record);
   const activityHtml = summary?.item
     ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
       ...agentWindowActivityOptionsForStatus(agent, session),
@@ -2029,8 +2042,8 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   const label = String(record?.aiLabel || '').trim();
   if (!label) return '';
   const labelHtml = infoRecordSearchValueHtml(record, 'tmux-window', label);
-  const agent = infoRecordAgentPayload(record);
-  const active = record.aiCurrent === true || record.aiWindowActive === true;
+  const agent = infoRecordDisplayAgent(record);
+  const active = agent.current === true || agent.window_active === true;
   const title = String(options.title || record.aiTitle || label);
   const attrs = options.action === false
     ? []
@@ -2047,7 +2060,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     numberLabel: record.aiWindowIndex || record.aiWindow || label,
     active,
     agentStatus: agent,
-    agentKey: record.aiKind,
+    agentKey: agent.kind || record.aiKind,
     title,
     attrs,
     ariaPressed: options.action !== false,
@@ -2055,7 +2068,7 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
 }
 
 function infoRecordAiRecencyHtml(record) {
-  const agent = infoRecordAgentPayload(record);
+  const agent = infoRecordDisplayAgent(record);
   const lastActive = Number(agent.idle_since || agent.last_active_ts || 0);
   if (!Number.isFinite(lastActive) || lastActive <= 0) return '';
   const text = typeof sessionPopoverAgentRecencyText === 'function'
@@ -2245,6 +2258,7 @@ function infoPanelRenderSignature() {
     grouping: infoGrouping,
     sort: infoSort,
     meta: transcriptMetadataState.payload,
+    agentStatus: sessions.map(session => [session, agentWindowStatusVisualSignature(autoApproveStates.get(session) || {})]),
   });
 }
 
@@ -4390,6 +4404,7 @@ async function setAutoApprove(session, enabled) {
     autoApproveStates.set(session, payload);
     updateDocumentTitle();
     updateSessionButtonStates();
+    renderInfoPanel();
     renderAutoApproveButton(session, payload);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
