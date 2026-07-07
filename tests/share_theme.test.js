@@ -2930,33 +2930,36 @@ async function runShareThemeSuite() {
     noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
     noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(noMinimizedSlots);
+    const launchFileMenu = api.appMenuTree().find(menu => menu.id === 'file');
     const tabMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     const menuLabels = item => item.type === 'command-pair'
       ? [item.primary.label, item.secondary.label]
       : (item.type === 'command-row' ? [item.label, ...item.items.map(command => command.label)] : [item.label]);
+    const launchFileMenuLabels = launchFileMenu.items.flatMap(menuLabels).filter(Boolean);
     const tabMenuLabels = tabMenu.items.flatMap(menuLabels).filter(Boolean);
     assert.equal(api.menuTabCommand('1').html.includes('Loading...'), false, 'a fresh terminal tab omits unavailable transcript metadata instead of implying its interactive terminal is still loading');
-    const claudeLaunchPair = tabMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude');
-    const codexLaunchPair = tabMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex');
-    assert.ok(tabMenuLabels.includes('new Claude'), 'Tabs menu owns new Claude');
-    assert.equal(claudeLaunchPair.secondary.label, 'new Claude (full access)', 'Claude presents normal and full-access launches on one compact row');
-    assert.equal(claudeLaunchPair.secondary.title, '+ --dangerously-skip-permissions', 'the concise full-access action retains the exact Claude bypass flag as its tooltip');
-    assert.ok(tabMenuLabels.includes('new Codex'), 'Tabs menu owns new Codex');
-    assert.equal(codexLaunchPair.secondary.label, 'new Codex (full access)', 'Codex uses the concise full-access action label');
-    assert.ok(codexLaunchPair.secondary.title.startsWith('+ --dangerously-bypass-approvals-and-sandbox'), 'the concise Codex action retains its bypass flags as its tooltip');
-    const xtermLaunchRow = tabMenu.items.find(item => item.type === 'command-row' && item.label === 'new Xterm');
-    assert.equal(xtermLaunchRow.className, 'app-menu-command-row app-menu-command-row--shells', 'Xterm commands use the shared compact shell-row layout');
-    assert.deepEqual(xtermLaunchRow.items.map(item => item.label), ['bash', 'tsh', 'zsh'], 'Xterm shows only explicit server-provided terminal commands on one row');
-    assert.ok(xtermLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'new Xterm uses the shared shell icon as a non-clickable row label');
+    const claudeLaunchPair = launchFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude');
+    const codexLaunchPair = launchFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex');
+    assert.ok(launchFileMenuLabels.includes('new Claude'), 'File menu owns new Claude');
+    assert.equal(claudeLaunchPair.secondary.label, 'new Claude (dangerously auto approve)', 'Claude presents normal and deliberately dangerous launches on one compact row');
+    assert.equal(claudeLaunchPair.secondary.title, '+ --dangerously-skip-permissions', 'the dangerous-auto-approve action retains the exact Claude bypass flag as its tooltip');
+    assert.ok(launchFileMenuLabels.includes('new Codex'), 'File menu owns new Codex');
+    assert.equal(codexLaunchPair.secondary.label, 'new Codex (dangerously auto approve)', 'Codex uses the concise dangerous-auto-approve action label');
+    assert.ok(codexLaunchPair.secondary.title.startsWith('+ --dangerously-bypass-approvals-and-sandbox'), 'the dangerous Codex action retains its bypass flags as its tooltip');
+    const shellLaunchRow = launchFileMenu.items.find(item => item.type === 'command-row' && item.label === 'Shell:');
+    assert.equal(shellLaunchRow.className, 'app-menu-command-row app-menu-command-row--shells', 'explicit shell commands use the shared compact shell-row layout');
+    assert.equal(shellLaunchRow.separator, false, 'Shell choices omit visual separators to avoid wasting menu width');
+    assert.deepEqual(shellLaunchRow.items.map(item => item.label), ['bash', 'tsh', 'zsh'], 'Shell commands are explicit and alphabetically sorted');
+    assert.ok(shellLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'Shell uses the shared shell icon as a non-clickable row label');
     const normalServerApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
-    const normalServerTabs = normalServerApi.appMenuTree().find(menu => menu.id === 'tabs');
-    assert.equal(normalServerTabs.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose full-access agent launch controls');
-    assert.ok(normalServerTabs.items.some(item => item.type === 'command' && item.label === 'new Claude'), 'normal servers retain the ordinary Claude launch');
+    const normalServerFile = normalServerApi.appMenuTree().find(menu => menu.id === 'file');
+    assert.equal(normalServerFile.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose dangerous-auto-approve agent launch controls');
+    assert.ok(normalServerFile.items.some(item => item.type === 'command' && item.label === 'new Claude'), 'normal servers retain the ordinary Claude launch');
     assert.equal(tabMenuLabels.includes('Active'), false);
     assert.equal(tabMenuLabels.includes('Inactive'), false);
     assert.equal(tabMenuLabels.includes('Minimized'), false);
     assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
-    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 2, 'Tabs menu separators only split populated command groups');
+    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1, 'Tabs menu separators only split populated tmux and YOLOmux tab groups');
     // Tabs has one fixed navigator order: all tmux sessions naturally sorted first, followed by
     // the YOLOmux/file tabs in label order. Status or a prior stored preference cannot reshuffle it.
     assert.deepEqual(api.sortTabItemsForMenu(['2', '__prefs__', '1', '__files__']), ['1', '2', '__files__', '__prefs__'], 'Tabs puts naturally sorted tmux sessions before sorted YOLOmux tabs');
@@ -3054,8 +3057,9 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('Preferences'));
     assert.ok(fileMenuLabels.includes('YO!stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
-    assert.equal(fileMenuLabels[0], 'Open file', 'File -> Open file is the first File menu command');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 8)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands');
+    assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
+    assert.equal(fileMenu.items[1].primary.label, 'new Codex');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/Finder/Search/data/YO commands');
     const firstYoIndex = fileMenuLabels.indexOf('YO!info');
     assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
@@ -4265,38 +4269,41 @@ async function runShareThemeSuite() {
     ), 'textWraps', 'M9: wrapped text/control drift is named separately from generic geometry drift');
     const tmuxMenu = menus.find(menu => menu.id === 'tmux');
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
+    const launchMenuLabels = fileMenu.items.flatMap(menuLabels).filter(Boolean);
     const tabsMenu = menus.find(menu => menu.id === 'tabs');
     const tabsMenuLabels = tabsMenu.items.flatMap(menuLabels).filter(Boolean);
     assert.equal(tmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
     assert.equal(tmuxMenuLabels.includes('YO!info'), false, 'tmux menu omits the duplicate YO!info entry that File already owns');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
-    // New-session items use an explicit "new" command label in Tabs; the detail shows the params passed.
+    // New-session items use explicit commands in File; Tabs is only the sorted tab navigator.
     assert.equal(tmuxMenuLabels.includes('new Claude'), false);
     assert.equal(tmuxMenuLabels.includes('new Codex'), false);
-    assert.equal(tmuxMenuLabels.includes('new Xterm'), false);
-    assert.ok(tabsMenuLabels.includes('new Claude'));
-    assert.ok(tabsMenuLabels.includes('new Codex'));
-    assert.ok(tabsMenuLabels.includes('new Xterm'), 'Xterm is always offered (a plain shell), not greyed unavailable');
-    assert.ok(tabsMenu.items.find(item => item.type === 'command-row' && item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'Tabs -> new Xterm uses the shell symbol');
-    assert.equal(tmuxMenuLabels.includes('+ --dangerously-skip-permissions'), false, 'launch choices remain in Tabs, not the tmux menu');
+    assert.equal(tmuxMenuLabels.includes('Shell:'), false);
+    assert.equal(tabsMenuLabels.includes('new Claude'), false);
+    assert.equal(tabsMenuLabels.includes('new Codex'), false);
+    assert.equal(tabsMenuLabels.includes('Shell:'), false, 'Tabs is a navigator, not a session launcher');
+    assert.ok(launchMenuLabels.includes('new Claude'));
+    assert.ok(launchMenuLabels.includes('new Codex'));
+    assert.ok(fileMenu.items.find(item => item.type === 'command-row' && item.label === 'Shell:').iconHtml.includes('app-menu-ui-icon-shell'), 'File -> Shell uses the shell symbol');
+    assert.equal(tmuxMenuLabels.includes('+ --dangerously-skip-permissions'), false, 'launch choices remain in File, not the tmux menu');
     api.setAgentAuthForTest({claude: {installed: false, logged_in: false, unavailable_reason: 'not-on-path'}});
-    const unavailableTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    const missingPathClaude = unavailableTabsMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude').primary;
+    const unavailableFileMenu = api.appMenuTree().find(menu => menu.id === 'file');
+    const missingPathClaude = unavailableFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude').primary;
     assert.equal(missingPathClaude.disabled, true);
     assert.equal(missingPathClaude.detail, 'Not on server PATH');
     {
       const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
       const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(/function agentLaunchCommand\(agent, dangerouslyYolo = false\)[\s\S]*full_access[\s\S]*normal/.test(newSessionSrc), 'the server-owned normal/full-access launch-command helper exists');
-      assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels use a concise full-access action while retaining the exact bypass flags in its tooltip');
-      assert.ok(/const terminals = terminalLaunchNames\(\);[\s\S]*agent === 'term'[\s\S]*terminals\.length[\s\S]*menuCommandRow\(terminals\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: newTmuxSessionLabel\(agent\)[\s\S]*: launch\(false\)/.test(newSessionSrc), 'Xterm shows explicit terminal commands when available and retains a default launch for older bootstrap payloads');
-      assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'new Xterm uses the shared shell icon path while Claude/Codex keep agent icons');
-      assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands before the two stable tab groups');
+      assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels retain the exact dangerous-auto-approve bypass flags in their tooltip');
+      assert.ok(/function shellLaunchLabel\(terminal\)[\s\S]*Shell: \$\{terminal\}[\s\S]*const terminals = terminalLaunchNames\(\);[\s\S]*agent === 'term'[\s\S]*terminals\.length[\s\S]*menuCommandRow\(terminals\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: 'Shell:',[\s\S]*separator: false[\s\S]*: null/.test(newSessionSrc), 'Shell offers compact explicit server-provided commands with no separator and never guesses a default Xterm shell');
+      assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'Shell uses the shared shell icon path while Claude/Codex keep agent icons');
+      assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc) && /id: 'file',[\s\S]*items: menuGroups\(\s*newTmuxSessionItems\(\)/.test(newSessionSrc), 'File owns creation commands while Tabs remains the stable tab navigator');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
-      assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the full-access action retains the exact command flags for its tooltip and accessible name');
+      assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
-      assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Xterm command rows stay on one line and scroll only as a final narrow-screen fallback');
+      assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
       assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells[\s\S]*border-radius:\s*var\(--radius-pill\)/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and horizontally scrollable shell pills');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
@@ -4344,9 +4351,8 @@ async function runShareThemeSuite() {
     const fallbackTerminalApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {availableAgents: ['term'], terminalCommands: []},
     });
-    const fallbackTerminalLaunch = fallbackTerminalApi.tabMenuItems().find(item => item.label === 'new Xterm');
-    assert.equal(fallbackTerminalLaunch?.type, 'command', 'an empty terminal list keeps the default New Xterm action clickable');
-    assert.equal(fallbackTerminalLaunch?.ariaLabel, 'new Xterm', 'the default Xterm action remains accessible without a named shell');
+    const fallbackFileMenu = fallbackTerminalApi.appMenuTree().find(menu => menu.id === 'file');
+    assert.equal(fallbackFileMenu.items.some(item => item.type === 'command-row' && item.label === 'Shell:'), false, 'an empty terminal list does not guess a default shell command');
     assert.equal(yoloTmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
@@ -5495,10 +5501,9 @@ async function runShareThemeSuite() {
     namedSessionApi.setTabsMenuSearchTextForTest('do2');
     const filteredNamedCommands = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
     const filteredNamedTabs = filteredNamedCommands.filter(item => item.targetItem);
-    assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries without hiding launch commands');
+    assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries');
     assert.deepEqual(filteredNamedTabs.map(item => item.targetItem), ['dynamo2'], 'Tabs search keeps the matching session command');
-    const filteredLaunchCommands = namedSessionApi.tabMenuItems().flatMap(item => item.type === 'command-row' ? [{label: item.label}, ...item.items] : [item]);
-    assert.ok(filteredLaunchCommands.some(item => item.label === 'new Xterm'), 'Tabs search keeps new-session commands available');
+    assert.equal(namedSessionApi.tabMenuItems().some(item => item.type === 'command-pair' || item.type === 'command-row'), false, 'Tabs search never injects session-creation controls');
     assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('dynamo2', 'do2')), 'Tabs search matches the raw session name');
     namedSessionApi.setTabsMenuSearchTextForTest('');
     const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);

@@ -809,7 +809,7 @@
   "menu.tmux.kill.for": "Kill tmux sessione '{session}'",
   "menu.tmux.limitReached": "Limite raggiunto",
   "menu.tmux.newSession": "nuovo {name}",
-  "menu.tmux.newSession.fullAccess": "nuovo {name} (accesso completo)",
+  "menu.tmux.newSession.fullAccess": "nuovo {name} (approvazione automatica pericolosa)",
   "menu.tmux.noTabFocused": "No tmux tab concentrato",
   "menu.tmux.openInPaneFirst": "Apri prima il tab in un vetro",
   "menu.tmux.paneDetails": "Mostra/nascondi barra informazioni",

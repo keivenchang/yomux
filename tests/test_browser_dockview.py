@@ -3301,9 +3301,12 @@ def test_dockview_tabs_menu_new_xterm_survives_fresh_roster_then_stale_socket_cl
           command.click();
         };
         (async () => {
+          terminalCommands.push('bash');
+          renderSessionButtons({force: true});
+          await wait(0);
           window.__fixtureNextCreatedSession = '2';
           window.__fixtureCreateSessionRoster = ['1', '2'];
-          await clickAppMenuCommand('tabs', 'New Xterm');
+          await clickAppMenuCommand('file', 'bash');
           for (let index = 0; index < 50 && !paneTabs('left').includes('2'); index += 1) await wait(10);
           window.__fixtureSessions = ['1', '2'];
           await refreshTranscripts({force: true, refreshAuto: false});
@@ -3313,7 +3316,7 @@ def test_dockview_tabs_menu_new_xterm_survives_fresh_roster_then_stale_socket_cl
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           };
           const socket = socketForSession('2');
-          if (!socket) return done({error: 'new Xterm socket not opened', ...snapshot()});
+          if (!socket) return done({error: 'new shell socket not opened', ...snapshot()});
           socket.close();
           await wait(25);
           done(snapshot());

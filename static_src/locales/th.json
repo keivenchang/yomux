@@ -786,7 +786,7 @@
   "menu.tmux.kill": "Kill tmux",
   "menu.tmux.kill.for": "Kill tmux เซสชั่น '{session}'",
   "menu.tmux.limitReached": "ถึงขีดจํากัด",
-  "menu.tmux.newSession.fullAccess": "ใหม่ {name} (สิทธิ์เต็ม)",
+  "menu.tmux.newSession.fullAccess": "ใหม่ {name} (อนุมัติอัตโนมัติแบบอันตราย)",
   "menu.tmux.newSession": "ใหม่ {name}",
   "menu.tmux.noTabFocused": "ไม่มี tmux tab โฟกัส",
   "menu.tmux.openInPaneFirst": "เปิด tab ในบานหน้าต่างก่อน",

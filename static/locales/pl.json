@@ -831,7 +831,7 @@
   "menu.tmux.kill.for": "Kill tmux sesja '{session}'",
   "menu.tmux.limitReached": "Osiągnięty limit",
   "menu.tmux.newSession": "nowe {name}",
-  "menu.tmux.newSession.fullAccess": "nowe {name} (pełny dostęp)",
+  "menu.tmux.newSession.fullAccess": "nowe {name} (niebezpieczne automatyczne zatwierdzanie)",
   "menu.tmux.noTabFocused": "Nie tmux tab skupiony",
   "menu.tmux.openInPaneFirst": "Najpierw otwórz tab w szybie",
   "menu.tmux.paneDetails": "Pokaż/ukryj pasek informacyjny",

@@ -809,7 +809,7 @@
   "menu.tmux.kill.for": "סגור הפעלת tmux '{session}'",
   "menu.tmux.limitReached": "המגבלה הושגה",
   "menu.tmux.newSession": "חדש {name}",
-  "menu.tmux.newSession.fullAccess": "חדש {name} (גישה מלאה)",
+  "menu.tmux.newSession.fullAccess": "חדש {name} (אישור אוטומטי מסוכן)",
   "menu.tmux.noTabFocused": "אין לשונית tmux ממוקדת",
   "menu.tmux.openInPaneFirst": "פתח תחילה את הלשונית בחלונית",
   "menu.tmux.paneDetails": "הצג/הסתר סרגל מידע",

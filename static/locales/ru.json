@@ -831,7 +831,7 @@
   "menu.tmux.kill.for": "Завершить tmux-сессию '{session}'",
   "menu.tmux.limitReached": "Лимит достигнут",
   "menu.tmux.newSession": "новый {name}",
-  "menu.tmux.newSession.fullAccess": "новый {name} (полный доступ)",
+  "menu.tmux.newSession.fullAccess": "новый {name} (опасное автоодобрение)",
   "menu.tmux.noTabFocused": "Нет сфокусированной вкладки tmux",
   "menu.tmux.openInPaneFirst": "Сначала откройте вкладку в панели",
   "menu.tmux.paneDetails": "Показать/скрыть информационную панель",

@@ -6465,6 +6465,7 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
         document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100');
         const actions = document.getElementById('touch-actions');
         const activityNode = document.getElementById('touch-activity');
+        activityNode.classList.add('topbar-activity--mobile-count-balls');
         actions.insertBefore(activityNode, document.getElementById('refreshMeta'));
         const box = node => {
           const rect = node.getBoundingClientRect();
@@ -6531,6 +6532,60 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     assert metrics["activity"]["right"] <= metrics["refresh"]["left"] + 0.5, metrics
     assert metrics["refresh"]["left"] - metrics["activity"]["right"] <= 8, metrics
     assert metrics["header"]["height"] < 50, metrics
+
+
+def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser, tmp_path):
+    page = tmp_path / "compact-activity-desktop-rail.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LOmux</span></div></div>
+        <div id="sessionButtons" class="app-menu-area">
+          <nav class="app-menu-bar">
+            <div class="app-menu"><button class="app-menu-button">File</button></div><div class="app-menu"><button class="app-menu-button">View</button></div><div class="app-menu"><button class="app-menu-button">tmux</button></div><div class="app-menu"><button class="app-menu-button">Tabs</button></div><div class="app-menu"><button class="app-menu-button">Help</button></div>
+          </nav>
+          <div class="topbar-center-tools"><button id="search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span class="topbar-search-label">Search files, commands</span><kbd class="topbar-search-hint">Cmd-P</kbd></button></div>
+          <div class="topbar-right-tools"></div>
+        </div>
+        <div class="actions">
+          <div id="latencyMeter" class="latency-meter topbar-action-capacity-hidden">16 ms</div>
+          <button id="notifyToggle" class="topbar-action-capacity-hidden">Notify</button>
+          <button id="topbarActivity" class="topbar-activity topbar-status-surface topbar-activity--mobile-count-balls"><span class="topbar-activity-count active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-count active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span></button>
+          <button id="refreshMeta">Refresh</button>
+          <button id="logoutButton" class="topbar-action-capacity-hidden">Log out</button>
+        </div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; min-height: 0; }
+      #topbar { width: 1186px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = node => {
+          const box = node.getBoundingClientRect();
+          return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height, display: getComputedStyle(node).display};
+        };
+        const activity = document.getElementById('topbarActivity');
+        const refresh = document.getElementById('refreshMeta');
+        const search = document.getElementById('search');
+        const header = document.getElementById('topbar');
+        return {
+          header: rect(header), activity: rect(activity), refresh: rect(refresh), search: rect(search),
+          latency: rect(document.getElementById('latencyMeter')), notify: rect(document.getElementById('notifyToggle')), logout: rect(document.getElementById('logoutButton')),
+          balls: Array.from(activity.querySelectorAll('.topbar-activity-count.active')).map(rect),
+        };
+        """
+    )
+    assert metrics["activity"]["display"] == "flex", metrics
+    assert metrics["activity"]["right"] <= metrics["refresh"]["left"] + 0.5, metrics
+    assert metrics["refresh"]["right"] <= metrics["header"]["right"] + 0.5, metrics
+    assert metrics["search"]["width"] >= metrics["search"]["height"], metrics
+    assert all(ball["width"] >= 20 for ball in metrics["balls"]), metrics
+    assert metrics["latency"]["display"] == metrics["notify"]["display"] == metrics["logout"]["display"] == "none", metrics
 
 
 def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targets(browser, tmp_path):
@@ -9924,7 +9979,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     browser.execute_script(
         """
         compactTopbarForViewport = () => true;
-        topbarActivityUsesPhoneActionsRail = () => true;
+        topbarActivityUsesActionsRail = () => true;
         mobileSinglePaneMode = () => true;
         terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
         document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600');
@@ -9993,15 +10048,15 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
 
     # This is a real rendered touch sheet, not a source-only assertion. The compact agent pairs
     # must remain one row each and shell choices must remain chips inside the viewport.
-    tabs_button = browser.execute_script(
+    file_button = browser.execute_script(
         """
         const root = document.querySelector('.app-menu--nested-root');
         return Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap > .app-menu-command') || [])
-          .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('Tabs')) || null;
+          .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('File')) || null;
         """
     )
-    touch_tap(tabs_button)
-    compact_tabs = WebDriverWait(browser, 5).until(
+    touch_tap(file_button)
+    compact_file = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
             const root = document.querySelector('.app-menu--nested-root');
@@ -10013,19 +10068,20 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
               const box = node.getBoundingClientRect();
               return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height};
             };
-            return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), viewport: {width: visualViewport.width, height: visualViewport.height}};
+            return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), shellSeparators: shells.querySelectorAll('.app-menu-command-separator').length, viewport: {width: visualViewport.width, height: visualViewport.height}};
             """
         )
     )
-    assert compact_tabs["sheet"]["left"] >= -1 and compact_tabs["sheet"]["right"] <= compact_tabs["viewport"]["width"] + 1, compact_tabs
-    assert all(pair["height"] <= 46 for pair in compact_tabs["pairs"]), compact_tabs
-    assert all(len(pair) == 2 and pair[0]["right"] <= pair[1]["left"] + 12 for pair in compact_tabs["pairButtons"]), compact_tabs
-    assert all(button["height"] >= 40 for pair in compact_tabs["pairButtons"] for button in pair), compact_tabs
-    assert compact_tabs["shells"]["right"] <= compact_tabs["sheet"]["right"] + 1, compact_tabs
-    assert len(compact_tabs["shellButtons"]) == 5, compact_tabs
-    assert all(button["height"] >= 36 for button in compact_tabs["shellButtons"]), compact_tabs
+    assert compact_file["sheet"]["left"] >= -1 and compact_file["sheet"]["right"] <= compact_file["viewport"]["width"] + 1, compact_file
+    assert all(pair["height"] <= 46 for pair in compact_file["pairs"]), compact_file
+    assert all(len(pair) == 2 and pair[0]["right"] <= pair[1]["left"] + 12 for pair in compact_file["pairButtons"]), compact_file
+    assert all(button["height"] >= 40 for pair in compact_file["pairButtons"] for button in pair), compact_file
+    assert compact_file["shells"]["right"] <= compact_file["sheet"]["right"] + 1, compact_file
+    assert len(compact_file["shellButtons"]) == 5, compact_file
+    assert compact_file["shellSeparators"] == 0, compact_file
+    assert all(button["height"] >= 36 for button in compact_file["shellButtons"]), compact_file
 
-    # Use the real touch event path to launch an explicit Xterm shell. A launch must not merely
+    # Use the real touch event path to launch an explicit Shell command. A launch must not merely
     # create tmux state in the background: it closes Menus and makes the new session the active pane.
     shell_button = browser.execute_script(
         "return document.querySelector('.app-menu-command-row--shells .app-menu-command')"
@@ -10096,7 +10152,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         """
     )
     assert len(file_commands) >= 2, file_commands
-    assert file_commands[1].startswith(("Finder", "Explorer", "File Explorer")), file_commands
+    assert any(label.startswith(("Finder", "Explorer", "File Explorer")) for label in file_commands), file_commands
     touch_tap(file_button)
     file_collapsed = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -10113,8 +10169,13 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     )
     assert file_collapsed is True
     browser.execute_script("arguments[0].click()", file_button)
-    finder_button = browser.execute_script(
-        "return document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command')[1]"
+    finder_button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command'))
+              .find(button => /^(Finder|Explorer|File Explorer)/.test(button.textContent.replace(/\\s+/g, ' ').trim())) || null;
+            """
+        )
     )
     browser.execute_script("arguments[0].click()", finder_button)
     finder_closed = WebDriverWait(browser, 5).until(

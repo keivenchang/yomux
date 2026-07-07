@@ -473,8 +473,8 @@ function tmuxSessionViewCommands(session, options = {}) {
   ];
 }
 
-// The server owns the two launch commands. The full-access row exposes its exact --dangerously-* flags
-// so that choosing it is deliberate; normal rows remain clean one-click starts.
+// The server owns the two launch commands. The dangerous-auto-approve row exposes its exact
+// --dangerously-* flags so that choosing it is deliberate; normal rows remain clean one-click starts.
 function agentLaunchCommand(agent, dangerouslyYolo = false) {
   const commands = agentLaunchCommands[agent];
   if (commands && typeof commands === 'object') return String(commands[dangerouslyYolo ? 'full_access' : 'normal'] || '').trim();
@@ -497,6 +497,10 @@ function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
   return dangerouslyYolo
     ? t('menu.tmux.newSession.fullAccess', {name: agentName(agent)})
     : t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function shellLaunchLabel(terminal) {
+  return `Shell: ${terminal}`;
 }
 
 function newTmuxSessionFullAccessFlags(agent) {
@@ -540,7 +544,7 @@ function newTmuxSessionItems() {
           title: fullAccessFlags,
           ariaLabel: dangerouslyYolo
             ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
-            : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
+            : (terminal ? shellLaunchLabel(terminal) : newTmuxSessionLabel(agent)),
         });
     };
     const terminals = terminalLaunchNames();
@@ -548,12 +552,13 @@ function newTmuxSessionItems() {
       ? (terminals.length
         ? menuCommandRow(terminals.map(terminal => launch(false, terminal)), {
           className: 'app-menu-command-row app-menu-command-row--shells',
-          label: newTmuxSessionLabel(agent),
+          label: 'Shell:',
           iconHtml: newTmuxSessionIcon(agent),
+          separator: false,
         })
-        // Older cached bootstrap payloads can omit terminalCommands; the server still accepts a
-        // default Xterm launch, so keep a real action instead of a non-clickable heading.
-        : launch(false))
+        // Do not guess a shell. A terminal launch is valid only when the server supplied an
+        // explicit, validated command for the user to choose.
+        : null)
       : (fullAccessAgentLaunchesEnabled
         ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
         : launch(false));
@@ -693,7 +698,6 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const tmuxItems = sortedItems.filter(isTmuxSession);
   const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
-    newTmuxSessionItems(),
     tmuxItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     yoloItems.map(item => menuTabCommand(item, {toggleYolo: true}))
   );
@@ -735,6 +739,7 @@ function appMenuTree() {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
+        newTmuxSessionItems(),
         [
           menuCommand(t('common.openFile'), openFileQuickOpen, {
             detail: appShortcutText('P'),
@@ -1310,7 +1315,7 @@ function createAppMenuCommandPair(item) {
 
 function createAppMenuCommandRow(item) {
   return createAppMenuCommandGroup(item.items || [], item.className, [item.label, ...(item.items || []).map(command => command?.ariaLabel || command?.label)], {
-    separator: Boolean(item.label),
+    separator: item.separator ?? Boolean(item.label),
     prefixLabel: item.label,
     prefixIconHtml: item.iconHtml,
   });

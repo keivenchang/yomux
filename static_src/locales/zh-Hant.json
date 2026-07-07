@@ -786,7 +786,7 @@
   "menu.tmux.kill": "終止 tmux 工作階段",
   "menu.tmux.kill.for": "終止 tmux 工作階段「{session}」",
   "menu.tmux.limitReached": "已達上限",
-  "menu.tmux.newSession.fullAccess": "新增 {name}（完整存取）",
+  "menu.tmux.newSession.fullAccess": "新增 {name}（危險自動核准）",
   "menu.tmux.newSession": "新增 {name}",
   "menu.tmux.noTabFocused": "未聚焦任何 tmux 分頁",
   "menu.tmux.openInPaneFirst": "請先在窗格中開啟此分頁",

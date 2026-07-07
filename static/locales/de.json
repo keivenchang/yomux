@@ -787,7 +787,7 @@
   "menu.tmux.kill.for": "tmux-Sitzung '{session}' beenden",
   "menu.tmux.limitReached": "Limit erreicht",
   "menu.tmux.newSession": "neu {name}",
-  "menu.tmux.newSession.fullAccess": "neu {name} (Vollzugriff)",
+  "menu.tmux.newSession.fullAccess": "neu {name} (gefährliche automatische Genehmigung)",
   "menu.tmux.noTabFocused": "Kein tmux-Tab fokussiert",
   "menu.tmux.openInPaneFirst": "Öffne den Tab zuerst in einem Fenster",
   "menu.tmux.paneDetails": "Infoleiste ein-/ausblenden",

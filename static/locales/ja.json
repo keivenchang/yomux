@@ -787,7 +787,7 @@
   "menu.tmux.kill.for": "tmux セッション '{session}' を終了",
   "menu.tmux.limitReached": "上限に達しました",
   "menu.tmux.newSession": "新しい {name}",
-  "menu.tmux.newSession.fullAccess": "新しい {name}（フルアクセス）",
+  "menu.tmux.newSession.fullAccess": "新しい {name}（危険な自動承認）",
   "menu.tmux.noTabFocused": "tmux タブがフォーカスされていません",
   "menu.tmux.openInPaneFirst": "先にタブをペインで開いてください",
   "menu.tmux.paneDetails": "情報バーを表示/非表示",

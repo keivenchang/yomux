@@ -787,7 +787,7 @@
   "menu.tmux.kill.for": "Kill tmux sessie '{session}'",
   "menu.tmux.limitReached": "Limiet bereikt",
   "menu.tmux.newSession": "nieuwe {name}",
-  "menu.tmux.newSession.fullAccess": "nieuwe {name} (volledige toegang)",
+  "menu.tmux.newSession.fullAccess": "nieuwe {name} (gevaarlijke automatische goedkeuring)",
   "menu.tmux.noTabFocused": "Geen tmux tab gefocust",
   "menu.tmux.openInPaneFirst": "Open eerst de tab in een ruit",
   "menu.tmux.paneDetails": "Infobalk tonen/verbergen",

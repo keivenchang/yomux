@@ -513,9 +513,11 @@ body.theme-light .topbar-nav-button {
   cursor: default;
 }
 .topbar-search {
+  --topbar-search-min-inline-size: 8ch;
   margin-block: 0;
   margin-inline: var(--space-6) auto;
   flex: 1 1 42ch;
+  min-inline-size: var(--topbar-search-min-inline-size);
   max-inline-size: min(100%, 64ch);
   height: var(--compact-control-height);
   padding: 0 var(--space-8);
@@ -681,43 +683,35 @@ body.app-topbar-touch-compact.app-vw-lte-1100 .topbar-nav,
 body.app-topbar-touch-compact.app-vw-lte-980 #status {
   display: none;
 }
-/* Compact touch chrome keeps only active AI tones. The existing status-dot renderer remains the
-   color owner; this changes only the count geometry so green/red/yellow stay visible at phone and
-   portrait-tablet widths without consuming a separate number-plus-ball column. */
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity,
-body.app-topbar-menu-compact .topbar-activity {
+/* Compact activity is a state on the control itself, not an incidental touch/menu selector.
+   The existing status-dot renderer remains the color owner; this changes only count geometry. */
+.topbar-activity--mobile-count-balls {
   display: inline-flex;
   gap: var(--space-3);
   padding: 0;
   border-color: transparent;
   background: transparent;
 }
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count:not(.active),
-body.app-topbar-menu-compact .topbar-activity-count:not(.active),
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-idle,
-body.app-topbar-menu-compact .topbar-activity-idle,
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-sep,
-body.app-topbar-menu-compact .topbar-activity-sep {
+.topbar-activity--mobile-count-balls .topbar-activity-count:not(.active),
+.topbar-activity--mobile-count-balls .topbar-activity-idle,
+.topbar-activity--mobile-count-balls .topbar-activity-sep {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count.active,
-body.app-topbar-menu-compact .topbar-activity-count.active {
+.topbar-activity--mobile-count-balls .topbar-activity-count.active {
   position: relative;
   display: inline-grid;
   place-items: center;
   inline-size: 20px;
   block-size: 20px;
 }
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-ball.agent-window-activity,
-body.app-topbar-menu-compact .topbar-activity-ball.agent-window-activity {
+.topbar-activity--mobile-count-balls .topbar-activity-ball.agent-window-activity {
   --agent-status-ball-size-base: 20px;
   position: absolute;
   inset: 0;
   inline-size: var(--agent-status-ball-size);
   block-size: var(--agent-status-ball-size);
 }
-body.app-topbar-touch-compact.app-vw-lte-1280 .topbar-activity-count-number,
-body.app-topbar-menu-compact .topbar-activity-count-number {
+.topbar-activity--mobile-count-balls .topbar-activity-count-number {
   position: absolute;
   inset: 0;
   display: grid;
@@ -744,8 +738,8 @@ body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand {
 body.app-topbar-touch-compact.app-vw-lte-560 .topbar .brand-title > :not(.brand-yolo) {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta),
-body.app-topbar-menu-compact .actions > :not(#refreshMeta) {
+body.app-topbar-touch-compact.app-vw-lte-980 .actions > :not(#refreshMeta):not(.topbar-activity--mobile-count-balls),
+body.app-topbar-menu-compact .actions > :not(#refreshMeta):not(.topbar-activity--mobile-count-balls) {
   display: none;
 }
 body.app-topbar-touch-compact.app-vw-lte-980 #refreshMeta,
@@ -798,14 +792,13 @@ body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-s
 body.app-topbar-coarse-pointer.app-topbar-touch-compact.app-vw-lte-600 .topbar-search-hint {
   display: none;
 }
-/* Phone activity belongs immediately before Refresh in the real actions rail. The empty desktop
+/* Compact activity belongs immediately before Refresh in the real actions rail. The empty desktop
    host must not reserve a flex gap between search and the right-side controls. */
 body.app-topbar-touch-compact.app-vw-lte-600 .topbar-right-tools,
 body.app-topbar-menu-compact .topbar-right-tools {
   display: none;
 }
-body.app-topbar-touch-compact.app-vw-lte-600 .actions > .topbar-activity:not(#refreshMeta),
-body.app-topbar-menu-compact .actions > .topbar-activity:not(#refreshMeta) {
+.actions > .topbar-activity--mobile-count-balls {
   display: inline-flex;
   inline-size: auto;
   min-inline-size: 0;
@@ -815,9 +808,11 @@ body.app-topbar-menu-compact .actions > .topbar-activity:not(#refreshMeta) {
   overflow: visible;
   font-size: inherit;
 }
-body.app-topbar-touch-compact.app-vw-lte-600 .actions > #topbarActivity::before,
-body.app-topbar-menu-compact .actions > #topbarActivity::before {
+.actions > .topbar-activity--mobile-count-balls::before {
   display: none;
+}
+.actions > .topbar-action-capacity-hidden {
+  display: none !important;
 }
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
@@ -1137,12 +1132,14 @@ body.app-topbar-touch-compact .app-menu-command-row-label {
 /* Shell choices are peers, not full menu rows. Keep the explicit command names compact and let a
    narrow phone scroll this one row horizontally instead of clipping the final choices. */
 .app-menu-command-row--shells {
-  padding-block: var(--space-2);
+  gap: var(--space-3);
+  padding-block: var(--space-1);
   scrollbar-width: thin;
 }
 .app-menu-command-row--shells .app-menu-command {
-  min-width: 48px;
-  padding-inline: var(--space-5);
+  min-width: 0;
+  min-height: 26px;
+  padding-inline: var(--space-4);
   border-color: var(--sep-muted);
   border-radius: var(--radius-pill);
   background: var(--panel2);

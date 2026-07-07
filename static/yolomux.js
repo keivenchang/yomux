@@ -8778,8 +8778,53 @@ function topbarActivityUsesMobileCountBalls() {
   return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
 }
 
-function topbarActivityUsesPhoneActionsRail() {
-  return compactTopbarForViewport();
+// The activity rail is useful before phone-only Menus mode: compact balls keep their status
+// visible while leaving the menu row and its Cmd-P launcher room to shrink naturally.
+function topbarActivityUsesActionsRail() {
+  return topbarActivityUsesMobileCountBalls();
+}
+
+const topbarActionCapacityHideOrder = Object.freeze([
+  'latencyMeter',
+  'logoutButton',
+  'notifyToggle',
+]);
+let topbarActionCapacityFrame = 0;
+
+function topbarActionCapacityFits() {
+  const area = sessionButtons || document.querySelector('.app-menu-area');
+  const search = document.querySelector('.topbar-search');
+  if (!area || !search || search.hidden || getComputedStyle(search).display === 'none') return true;
+  return area.scrollWidth <= area.clientWidth + 1
+    && search.getBoundingClientRect().width >= search.getBoundingClientRect().height;
+}
+
+function syncTopbarActionCapacity() {
+  const actions = document.querySelector('.actions');
+  const activity = document.getElementById('topbarActivity');
+  if (!actions) return [];
+  const candidates = topbarActionCapacityHideOrder
+    .map(id => document.getElementById(id))
+    .filter(node => node?.parentElement === actions);
+  // Always begin from the fullest rail. This makes expansion walk optional icons back in,
+  // rather than preserving a narrower state from a prior viewport.
+  candidates.forEach(node => node.classList.remove('topbar-action-capacity-hidden'));
+  if (!activity || activity.hidden || !topbarActivityUsesActionsRail()) return [];
+  const hidden = [];
+  for (const node of candidates) {
+    if (topbarActionCapacityFits()) break;
+    node.classList.add('topbar-action-capacity-hidden');
+    hidden.push(node.id);
+  }
+  return hidden;
+}
+
+function scheduleTopbarActionCapacity() {
+  if (topbarActionCapacityFrame) return;
+  topbarActionCapacityFrame = requestAnimationFrame(() => {
+    topbarActionCapacityFrame = 0;
+    syncTopbarActionCapacity();
+  });
 }
 
 function syncTopbarActivityPlacement() {
@@ -8787,12 +8832,14 @@ function syncTopbarActivityPlacement() {
   const normalHost = document.querySelector('.topbar-right-tools');
   const actions = document.querySelector('.actions');
   if (!activity || !normalHost || !actions) return false;
-  if (topbarActivityUsesPhoneActionsRail()) {
+  if (topbarActivityUsesActionsRail()) {
     const refresh = actions.querySelector('#refreshMeta');
     if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    scheduleTopbarActionCapacity();
     return true;
   }
   if (activity.parentElement !== normalHost) normalHost.append(activity);
+  scheduleTopbarActionCapacity();
   return true;
 }
 
@@ -8834,6 +8881,7 @@ function updateTopbarActivityStatus() {
   node.classList.toggle('topbar-activity--mobile-count-balls', mobileCountBalls);
   node.classList.toggle('has-attention', counts.attention > 0);
   syncTopbarActivityPlacement();
+  scheduleTopbarActionCapacity();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
@@ -11669,6 +11717,7 @@ function updateTopbarMetrics() {
   if (!topbar) return;
   const height = Math.ceil(topbar.getBoundingClientRect().height || 38);
   document.documentElement?.style?.setProperty('--topbar-height', `${height}px`);
+  scheduleTopbarActionCapacity();
 }
 
 function scheduleTopbarMetricsUpdate() {
@@ -12368,8 +12417,8 @@ function tmuxSessionViewCommands(session, options = {}) {
   ];
 }
 
-// The server owns the two launch commands. The full-access row exposes its exact --dangerously-* flags
-// so that choosing it is deliberate; normal rows remain clean one-click starts.
+// The server owns the two launch commands. The dangerous-auto-approve row exposes its exact
+// --dangerously-* flags so that choosing it is deliberate; normal rows remain clean one-click starts.
 function agentLaunchCommand(agent, dangerouslyYolo = false) {
   const commands = agentLaunchCommands[agent];
   if (commands && typeof commands === 'object') return String(commands[dangerouslyYolo ? 'full_access' : 'normal'] || '').trim();
@@ -12392,6 +12441,10 @@ function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
   return dangerouslyYolo
     ? t('menu.tmux.newSession.fullAccess', {name: agentName(agent)})
     : t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function shellLaunchLabel(terminal) {
+  return `Shell: ${terminal}`;
 }
 
 function newTmuxSessionFullAccessFlags(agent) {
@@ -12435,7 +12488,7 @@ function newTmuxSessionItems() {
           title: fullAccessFlags,
           ariaLabel: dangerouslyYolo
             ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
-            : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
+            : (terminal ? shellLaunchLabel(terminal) : newTmuxSessionLabel(agent)),
         });
     };
     const terminals = terminalLaunchNames();
@@ -12443,12 +12496,13 @@ function newTmuxSessionItems() {
       ? (terminals.length
         ? menuCommandRow(terminals.map(terminal => launch(false, terminal)), {
           className: 'app-menu-command-row app-menu-command-row--shells',
-          label: newTmuxSessionLabel(agent),
+          label: 'Shell:',
           iconHtml: newTmuxSessionIcon(agent),
+          separator: false,
         })
-        // Older cached bootstrap payloads can omit terminalCommands; the server still accepts a
-        // default Xterm launch, so keep a real action instead of a non-clickable heading.
-        : launch(false))
+        // Do not guess a shell. A terminal launch is valid only when the server supplied an
+        // explicit, validated command for the user to choose.
+        : null)
       : (fullAccessAgentLaunchesEnabled
         ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
         : launch(false));
@@ -12588,7 +12642,6 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const tmuxItems = sortedItems.filter(isTmuxSession);
   const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
-    newTmuxSessionItems(),
     tmuxItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     yoloItems.map(item => menuTabCommand(item, {toggleYolo: true}))
   );
@@ -12630,6 +12683,7 @@ function appMenuTree() {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
+        newTmuxSessionItems(),
         [
           menuCommand(t('common.openFile'), openFileQuickOpen, {
             detail: appShortcutText('P'),
@@ -13205,7 +13259,7 @@ function createAppMenuCommandPair(item) {
 
 function createAppMenuCommandRow(item) {
   return createAppMenuCommandGroup(item.items || [], item.className, [item.label, ...(item.items || []).map(command => command?.ariaLabel || command?.label)], {
-    separator: Boolean(item.label),
+    separator: item.separator ?? Boolean(item.label),
     prefixLabel: item.label,
     prefixIconHtml: item.iconHtml,
   });

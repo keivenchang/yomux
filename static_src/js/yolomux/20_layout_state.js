@@ -2404,8 +2404,53 @@ function topbarActivityUsesMobileCountBalls() {
   return Math.max(effectiveViewportWidth(appViewport()), nativeViewport().width) <= 1300;
 }
 
-function topbarActivityUsesPhoneActionsRail() {
-  return compactTopbarForViewport();
+// The activity rail is useful before phone-only Menus mode: compact balls keep their status
+// visible while leaving the menu row and its Cmd-P launcher room to shrink naturally.
+function topbarActivityUsesActionsRail() {
+  return topbarActivityUsesMobileCountBalls();
+}
+
+const topbarActionCapacityHideOrder = Object.freeze([
+  'latencyMeter',
+  'logoutButton',
+  'notifyToggle',
+]);
+let topbarActionCapacityFrame = 0;
+
+function topbarActionCapacityFits() {
+  const area = sessionButtons || document.querySelector('.app-menu-area');
+  const search = document.querySelector('.topbar-search');
+  if (!area || !search || search.hidden || getComputedStyle(search).display === 'none') return true;
+  return area.scrollWidth <= area.clientWidth + 1
+    && search.getBoundingClientRect().width >= search.getBoundingClientRect().height;
+}
+
+function syncTopbarActionCapacity() {
+  const actions = document.querySelector('.actions');
+  const activity = document.getElementById('topbarActivity');
+  if (!actions) return [];
+  const candidates = topbarActionCapacityHideOrder
+    .map(id => document.getElementById(id))
+    .filter(node => node?.parentElement === actions);
+  // Always begin from the fullest rail. This makes expansion walk optional icons back in,
+  // rather than preserving a narrower state from a prior viewport.
+  candidates.forEach(node => node.classList.remove('topbar-action-capacity-hidden'));
+  if (!activity || activity.hidden || !topbarActivityUsesActionsRail()) return [];
+  const hidden = [];
+  for (const node of candidates) {
+    if (topbarActionCapacityFits()) break;
+    node.classList.add('topbar-action-capacity-hidden');
+    hidden.push(node.id);
+  }
+  return hidden;
+}
+
+function scheduleTopbarActionCapacity() {
+  if (topbarActionCapacityFrame) return;
+  topbarActionCapacityFrame = requestAnimationFrame(() => {
+    topbarActionCapacityFrame = 0;
+    syncTopbarActionCapacity();
+  });
 }
 
 function syncTopbarActivityPlacement() {
@@ -2413,12 +2458,14 @@ function syncTopbarActivityPlacement() {
   const normalHost = document.querySelector('.topbar-right-tools');
   const actions = document.querySelector('.actions');
   if (!activity || !normalHost || !actions) return false;
-  if (topbarActivityUsesPhoneActionsRail()) {
+  if (topbarActivityUsesActionsRail()) {
     const refresh = actions.querySelector('#refreshMeta');
     if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    scheduleTopbarActionCapacity();
     return true;
   }
   if (activity.parentElement !== normalHost) normalHost.append(activity);
+  scheduleTopbarActionCapacity();
   return true;
 }
 
@@ -2460,6 +2507,7 @@ function updateTopbarActivityStatus() {
   node.classList.toggle('topbar-activity--mobile-count-balls', mobileCountBalls);
   node.classList.toggle('has-attention', counts.attention > 0);
   syncTopbarActivityPlacement();
+  scheduleTopbarActionCapacity();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
@@ -5295,6 +5343,7 @@ function updateTopbarMetrics() {
   if (!topbar) return;
   const height = Math.ceil(topbar.getBoundingClientRect().height || 38);
   document.documentElement?.style?.setProperty('--topbar-height', `${height}px`);
+  scheduleTopbarActionCapacity();
 }
 
 function scheduleTopbarMetricsUpdate() {

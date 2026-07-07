@@ -786,7 +786,7 @@
   "menu.tmux.kill": "tmux 세션 종료",
   "menu.tmux.kill.for": "tmux 세션 '{session}' 종료",
   "menu.tmux.limitReached": "한도 초과",
-  "menu.tmux.newSession.fullAccess": "새 {name} (전체 액세스)",
+  "menu.tmux.newSession.fullAccess": "새 {name} (위험한 자동 승인)",
   "menu.tmux.newSession": "새로운 {name}",
   "menu.tmux.noTabFocused": "포커스된 tmux 탭 없음",
   "menu.tmux.openInPaneFirst": "먼저 창에서 탭을 여세요",
