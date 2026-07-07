@@ -12438,12 +12438,17 @@ function newTmuxSessionItems() {
             : (terminal ? `${newTmuxSessionLabel(agent)} - ${terminal}` : newTmuxSessionLabel(agent)),
         });
     };
+    const terminals = terminalLaunchNames();
     return agent === 'term'
-      ? menuCommandRow(terminalLaunchNames().map(terminal => launch(false, terminal)), {
-        className: 'app-menu-command-row app-menu-command-row--shells',
-        label: newTmuxSessionLabel(agent),
-        iconHtml: newTmuxSessionIcon(agent),
-      })
+      ? (terminals.length
+        ? menuCommandRow(terminals.map(terminal => launch(false, terminal)), {
+          className: 'app-menu-command-row app-menu-command-row--shells',
+          label: newTmuxSessionLabel(agent),
+          iconHtml: newTmuxSessionIcon(agent),
+        })
+        // Older cached bootstrap payloads can omit terminalCommands; the server still accepts a
+        // default Xterm launch, so keep a real action instead of a non-clickable heading.
+        : launch(false))
       : (fullAccessAgentLaunchesEnabled
         ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
         : launch(false));

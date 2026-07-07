@@ -4290,7 +4290,7 @@ async function runShareThemeSuite() {
       const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(/function agentLaunchCommand\(agent, dangerouslyYolo = false\)[\s\S]*full_access[\s\S]*normal/.test(newSessionSrc), 'the server-owned normal/full-access launch-command helper exists');
       assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels use a concise full-access action while retaining the exact bypass flags in its tooltip');
-      assert.ok(/agent === 'term'[\s\S]*menuCommandRow\(terminalLaunchNames\(\)\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: newTmuxSessionLabel\(agent\)/.test(newSessionSrc), 'Xterm exposes only explicit terminal commands after its non-clickable row label');
+      assert.ok(/const terminals = terminalLaunchNames\(\);[\s\S]*agent === 'term'[\s\S]*terminals\.length[\s\S]*menuCommandRow\(terminals\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: newTmuxSessionLabel\(agent\)[\s\S]*: launch\(false\)/.test(newSessionSrc), 'Xterm shows explicit terminal commands when available and retains a default launch for older bootstrap payloads');
       assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'new Xterm uses the shared shell icon path while Claude/Codex keep agent icons');
       assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands before the two stable tab groups');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
@@ -4341,6 +4341,12 @@ async function runShareThemeSuite() {
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     assert.equal(yoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while work is active');
     assert.equal(yoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while work is active');
+    const fallbackTerminalApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {availableAgents: ['term'], terminalCommands: []},
+    });
+    const fallbackTerminalLaunch = fallbackTerminalApi.tabMenuItems().find(item => item.label === 'new Xterm');
+    assert.equal(fallbackTerminalLaunch?.type, 'command', 'an empty terminal list keeps the default New Xterm action clickable');
+    assert.equal(fallbackTerminalLaunch?.ariaLabel, 'new Xterm', 'the default Xterm action remains accessible without a named shell');
     assert.equal(yoloTmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
