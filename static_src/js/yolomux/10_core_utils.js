@@ -2158,12 +2158,12 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
   focusTerminalDom(session, delay);
 }
 
-function focusTerminalFromUserAction(session, delay = 0) {
+function focusTerminalFromUserAction(session, delay = 0, options = {}) {
   // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
   // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
   if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
+  setFocusedTerminal(session, {...options, userInitiated: true});
   focusTerminalDom(session, delay);
 }
 

@@ -4212,12 +4212,12 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
   focusTerminalDom(session, delay);
 }
 
-function focusTerminalFromUserAction(session, delay = 0) {
+function focusTerminalFromUserAction(session, delay = 0, options = {}) {
   // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
   // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
   if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
+  setFocusedTerminal(session, {...options, userInitiated: true});
   focusTerminalDom(session, delay);
 }
 
@@ -61937,13 +61937,19 @@ function tmuxWindow(session, key, label) {
     statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
+  // Callers acknowledge the exact source/target window before switching. Refocusing afterward
+  // must not acknowledge a second, unrelated child selected by the parent-session summary.
+  const focusAfterAcknowledgedSwitch = () => focusTerminalFromUserAction(session, 75, {
+    acknowledgeAgentWindow: false,
+    acknowledgePromptAttention: false,
+  });
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
     const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
-    focusTerminalFromUserAction(session, 75);
+    focusAfterAcknowledgedSwitch();
     apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
       .then(() => {
         if (!tmuxWindowSwitchSequenceMatches(session, sequence)) return;
@@ -61976,7 +61982,7 @@ function tmuxWindow(session, key, label) {
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
-  focusTerminalFromUserAction(session, 75);
+  focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
 }
 

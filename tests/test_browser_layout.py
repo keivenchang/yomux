@@ -10078,7 +10078,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
             """
             const done = arguments[arguments.length - 1];
             const bar = document.querySelector('.topbar');
-            const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-owner', 'hide-nav', 'compact-menu'];
+            const steps = ['hide-version', 'compact-brand', 'hide-owner', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'icon-search', 'compact-menu'];
             const {settle} = window.__yolomuxTestHelpers;
             (async () => {
               syncTopbarPacking();
@@ -10100,7 +10100,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
     assert all("error" not in value for value in metrics.values()), metrics
     assert metrics["narrow"]["overflow"] is False, metrics
     assert metrics["narrow"]["steps"], metrics
-    expected_order = ["hide-version", "compact-brand", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-owner", "hide-nav", "compact-menu"]
+    expected_order = ["hide-version", "compact-brand", "hide-owner", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "icon-search", "compact-menu"]
     assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
     assert metrics["narrow"]["refresh"] != "none", metrics
     assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics
