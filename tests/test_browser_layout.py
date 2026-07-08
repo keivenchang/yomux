@@ -2226,7 +2226,7 @@ def test_debug_graph_peer_traffic_shows_red_averages_without_marking_short_self_
         assert all(item["color"] == metrics["systemAverageColor"] and item["points"] for item in chart["peerLines"]), (key, metrics)
 
 
-def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path):
+def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -2260,50 +2260,48 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
         };
         const activeSubtabPaint = paint(panel?.querySelector('.js-debug-subtab.active'));
         const resolutionLabel = panel?.querySelector('[data-js-debug-resolution]')?.textContent.trim();
-        const cpuClose = panel?.querySelector('[data-js-debug-chart-close="cpu"]');
-        cpuClose?.focus({focusVisible: true});
-        const closeFocusPaint = paint(cpuClose);
-        const closeUsesSharedParent = cpuClose?.classList.contains('control-active-hover') === true;
-        cpuClose?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        const toggleLabels = [...panel.querySelectorAll('[data-js-debug-chart-toggle]')].map(button => button.textContent.trim());
+        let cpuToggle = panel?.querySelector('[data-js-debug-chart-toggle="cpu"]');
+        cpuToggle?.focus({focusVisible: true});
+        const toggleFocusPaint = paint(cpuToggle);
+        cpuToggle?.click();
         const closed = !panel?.querySelector('[data-js-debug-chart="cpu"]');
-        const restore = panel?.querySelector('[data-js-debug-chart-restore="cpu"]');
-        restore?.focus({focusVisible: true});
-        const restoreFocusPaint = paint(restore);
-        const restoreUsesSharedParent = restore?.classList.contains('control-active-hover') === true;
-        restore?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
+        cpuToggle = panel?.querySelector('[data-js-debug-chart-toggle="cpu"]');
+        const cpuOff = cpuToggle?.getAttribute('aria-pressed') === 'false';
+        cpuToggle?.click();
         const restored = Boolean(panel?.querySelector('[data-js-debug-chart="cpu"]'));
+        const memoryToggle = panel?.querySelector('[data-js-debug-chart-toggle="memory"]');
+        memoryToggle?.click();
+        const memoryShown = Boolean(panel?.querySelector('[data-js-debug-chart="memory"]'));
         panel?.querySelector('[data-js-debug-subtab="events"]')?.click();
         setDebugGraphRange(14400);
-        panel?.querySelector('[data-js-debug-chart-close="gpuMemory"]')?.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true}));
         return {
           closed,
-          restoreVisible: Boolean(restore),
+          cpuOff,
           restored,
+          memoryShown,
           activeSubtabPaint,
           resolutionLabel,
-          closeFocusPaint,
-          restoreFocusPaint,
-          closeUsesSharedParent,
-          restoreUsesSharedParent,
+          toggleLabels,
+          toggleFocusPaint,
           saved: JSON.parse(localStorage.getItem(preferencesKey) || '{}'),
         };
         """
     )
     assert metrics["closed"] is True, metrics
-    assert metrics["restoreVisible"] is True, metrics
+    assert metrics["cpuOff"] is True, metrics
     assert metrics["restored"] is True, metrics
+    assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
-    assert metrics["closeFocusPaint"] == metrics["activeSubtabPaint"], metrics
-    assert metrics["restoreFocusPaint"] == metrics["activeSubtabPaint"], metrics
-    assert metrics["closeUsesSharedParent"] is True, metrics
-    assert metrics["restoreUsesSharedParent"] is True, metrics
+    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",
         "rangeSeconds": 14400,
         "resolutionOverrideSeconds": 0,
         "chartLayout": 0,
-        "hiddenCharts": ["gpuMemory", "gpuUtil", "memory"],
-        "visibleCharts": ["cpu"],
+        "hiddenCharts": ["gpuMemory", "gpuUtil"],
+        "visibleCharts": ["cpu", "memory"],
     }, metrics
 
     browser.refresh()
@@ -2315,10 +2313,48 @@ def test_debug_graph_chart_close_restore_persists_preferences(browser, tmp_path)
               && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
               && Number(document.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds || 0) >= 60
               && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
-              && document.querySelector('[data-js-debug-chart-restore="gpuMemory"]') !== null;
+              && document.querySelector('[data-js-debug-chart-toggle="gpuMemory"]')?.getAttribute('aria-pressed') === 'false';
             """
         )
     )
+
+
+def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphChartVisible === 'function' && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        localStorage.removeItem('yolomux.stats.ui_preferences.v1');
+        stopJsDebugStatsPolling();
+        setDebugGraphChartVisible('cpu', true);
+        setDebugGraphChartVisible('memory', true);
+        const panel = document.querySelector('.js-debug-panel');
+        const originalClose = panel.querySelector('[data-js-debug-chart-close="cpu"]');
+        const rect = originalClose.getBoundingClientRect();
+        const heading = originalClose.closest('.js-debug-chart-heading-row').getBoundingClientRect();
+        const clientX = rect.left + (rect.width / 2);
+        const clientY = rect.top + (rect.height / 2);
+        const eventInit = {bubbles: true, cancelable: true, button: 0, clientX, clientY, pointerType: 'mouse', isPrimary: true};
+        originalClose.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        const cpuVisibleAfterPointerDown = Boolean(panel.querySelector('[data-js-debug-chart="cpu"]'));
+        originalClose.dispatchEvent(new PointerEvent('pointerup', eventInit));
+        originalClose.dispatchEvent(new MouseEvent('click', eventInit));
+        return {
+          cpuVisibleAfterPointerDown,
+          cpuVisible: Boolean(panel.querySelector('[data-js-debug-chart="cpu"]')),
+          memoryVisible: Boolean(panel.querySelector('[data-js-debug-chart="memory"]')),
+          closeRightAligned: Math.abs(rect.right - heading.right) <= 8,
+        };
+        """
+    )
+    assert metrics["cpuVisibleAfterPointerDown"] is True, metrics
+    assert metrics["cpuVisible"] is False, metrics
+    assert metrics["memoryVisible"] is True, metrics
+    assert metrics["closeRightAligned"] is True, metrics
 
 
 def test_debug_graph_24_hour_range_change_avoids_multi_second_browser_task(browser, tmp_path):

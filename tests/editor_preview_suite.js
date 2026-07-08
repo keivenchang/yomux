@@ -3362,7 +3362,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(api.debugGraphPlotOverlayRectHtmlForTest('probe', 'data-probe', 0, 0, 1, 'probe'), / y="8"[^>]* height="112"/, 'plot overlays inherit the shared plot bounds instead of a parallel full-SVG rectangle');
     assert.ok(html.includes('viewBox="0 0 600 120"'), 'YO!stats chart viewBox consumes the shared SVG geometry');
     for (const chart of ['memory', 'gpuUtil', 'gpuMemory']) {
-      assert.ok(html.includes(`data-js-debug-chart-restore="${chart}"`), `${chart} starts minimized in the top restore strip`);
+      assert.ok(html.includes(`data-js-debug-chart-toggle="${chart}" aria-pressed="false"`), `${chart} starts off in the persistent chart-toggle group`);
     }
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
@@ -3407,13 +3407,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const chartLabels = {
       cpu: 'CPU',
       memory: 'System memory',
+      activity: 'Agent status',
+      agentTokens: 'Agent tokens/min',
       gpuUtil: 'GPU utilization',
       gpuMemory: 'GPU memory',
       latency: 'Client latency',
       count: 'Client API&SSE/sec',
       bandwidth: 'Client bandwidth/sec',
-      activity: 'Agent status',
-      agentTokens: 'Agent tokens/min',
     };
     assert.deepStrictEqual(chartKeys, Object.keys(chartLabels), 'YO!stats chart groups retain the documented host-first source-key order');
     const chartOrderText = `${chartKeys.slice(0, 4).map(key => chartLabels[key]).join(', ')}, then ${chartKeys.slice(4, -1).map(key => chartLabels[key]).join(', ')}, and ${chartLabels[chartKeys.at(-1)]}`;
@@ -3449,7 +3449,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(debugPaneCss.includes('.js-debug-range-slider') && debugPaneCss.includes('.js-debug-hover-line') && debugPaneCss.includes('.js-debug-selection-rect'), 'YO!stats ships compact range slider plus hover and selection overlays');
     assert.ok(/\.js-debug-subtab\.active,\s*\.js-debug-zoom-reset\s*\{[\s\S]*color:\s*var\(--active-control-text\)[\s\S]*background:\s*var\(--active-control-bg\)/.test(debugPaneCss), 'YO!stats selected and static accent controls share one paint owner');
     assert.equal(debugPaneCss.includes('.js-debug-scale-button'), false, 'YO!stats has no selectable aggregation-control styling');
-    assert.ok(/class="js-debug-hidden-chart control-active-hover"/.test(debugPaneSource) && /class="js-debug-chart-close control-active-hover"/.test(debugPaneSource), 'YO!stats chart restore and close controls reuse the global accent hover/focus parent');
+    assert.ok(/function debugGraphChartToggleControlsHtml\(\)[\s\S]*data-js-debug-chart-toggle[\s\S]*aria-pressed/.test(debugPaneSource) && /\.js-debug-chart-toggle-control button\[aria-pressed="true"\]/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'YO!stats chart buttons use one persistent pressed-state control family');
     assert.equal(debugPaneCss.includes('.js-debug-range-button'), false, 'YO!stats has no dead range-button CSS after migrating to the slider');
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-api-series\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API lines accept a shared comparison color while their default legend color stays API blue');
@@ -4338,9 +4338,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(html, /data-js-debug-axis-zero="memory"[^>]*>0GB</, 'System memory axis explicitly starts at 0GB');
     assert.match(html, /data-js-debug-bar-series="gpu:gpuUtil:gpu:1"[^>]*data-js-debug-bar-total="0"/, 'a sampled 0% GPU still renders a visible utilization bar');
     assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
-    assert.ok(html.includes('data-js-debug-chart-close="cpu"'), 'every chart has a compact X close control');
+    assert.ok(html.includes('data-js-debug-chart-toggle="cpu"') && html.includes('data-js-debug-chart-toggle="memory"') && html.includes('data-js-debug-chart-close="cpu"'), 'every graph name is available in the persistent chart-toggle group while its heading retains a compact X');
     const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
-    assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-restore'), 'YO!stats preferences persist browser-local chart visibility and restore markup');
+    assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-toggle'), 'YO!stats preferences persist browser-local chart visibility through named toggle markup');
   });
 
   test('YO!stats series descriptors keep sampled zero distinct from missing data', () => {
@@ -4420,7 +4420,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     let summary = api.debugGraphBucketSummaryForTest(now);
     assert.ok(summary.charts.includes('activity'), 'agent activity chart appears when agent rows exist');
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
-    assert.deepStrictEqual([...summary.charts], ['cpu', 'latency', 'count', 'bandwidth', 'activity', 'agentTokens'], 'YO!stats keeps CPU open while System memory and both GPU charts start minimized');
+    assert.deepStrictEqual([...summary.charts], ['cpu', 'activity', 'agentTokens', 'latency', 'count', 'bandwidth'], 'YO!stats keeps CPU open while System memory and both GPU charts start minimized, with agent charts immediately after memory');
 
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
@@ -4573,7 +4573,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(Math.abs(activeX - latencyX) <= 0.2, 'server activity bar hairline centering stays aligned with the matching latency timestamp');
   });
 
-  test('YO!stats graph range controls apply on pointer down before refresh can replace controls', () => {
+  test('YO!stats range controls retain native dragging while chart close waits for one completed click', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -4589,19 +4589,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const panel = new TestElement('debug-panel');
     const range = new TestElement('graph-range', 'button');
     const slider = new TestElement('graph-range-slider', 'input');
-    const chartClose = new TestElement('graph-chart-close', 'button');
-    const chartRestore = new TestElement('graph-chart-restore', 'button');
+    const chartToggle = new TestElement('graph-chart-toggle', 'button');
     range.dataset.jsDebugRange = '7200';
     slider.dataset.jsDebugRangeSlider = '';
-    chartClose.dataset.jsDebugChartClose = 'cpu';
-    chartRestore.dataset.jsDebugChartRestore = 'cpu';
+    chartToggle.dataset.jsDebugChartToggle = 'cpu';
+    chartToggle.setAttribute('aria-pressed', 'true');
     slider.value = '7';
     panel.appendChild(range);
     panel.appendChild(slider);
-    panel.appendChild(chartClose);
-    panel.appendChild(chartRestore);
+    panel.appendChild(chartToggle);
     api.bindDebugPanelForTest(panel);
     const pointerdown = panel.listeners.get('pointerdown')[0];
+    const click = panel.listeners.get('click')[0];
     const input = panel.listeners.get('input')[0];
     const change = panel.listeners.get('change')[0];
     let prevented = 0;
@@ -4620,11 +4619,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     change({type: 'change', target: slider, preventDefault() {}});
     assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider change commits the matching range stop after dragging');
     assert.equal(slider.value, '7', 'range slider change snaps the thumb to the nearest preset stop');
-    pointerdown({target: chartClose, preventDefault() { prevented += 1; }});
-    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), false, 'one X click hides the selected graph without changing its range');
-    assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-chart-restore="cpu"'), 'a closed graph moves to the compact restore strip at the top');
-    pointerdown({target: chartRestore, preventDefault() { prevented += 1; }});
-    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'the top restore chip reopens the graph');
+    pointerdown({type: 'pointerdown', target: chartToggle, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'chart pointerdown does not reflow the grid beneath its follow-up pointer event');
+    click({type: 'click', target: chartToggle, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), false, 'one chart-toggle click hides only its selected graph without changing the range');
+    chartToggle.setAttribute('aria-pressed', 'false');
+    click({type: 'click', target: chartToggle, preventDefault() { prevented += 1; }});
+    assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'the same named chart-toggle reopens the graph');
   });
 
   test('YO!stats graph choices survive a browser reload', () => {
@@ -4645,7 +4646,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.resolutionSeconds, 120, 'the graph automatically restores the four-hour bounded display resolution without a saved scale preference');
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
-    assert.ok(html.includes('data-js-debug-chart-restore="gpuMemory"'), 'the top restore strip retains a closed chart after reload');
+    assert.ok(html.includes('data-js-debug-chart-toggle="gpuMemory" aria-pressed="false"'), 'the persistent toggle retains a closed chart after reload');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {

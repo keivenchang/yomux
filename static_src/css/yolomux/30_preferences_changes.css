@@ -221,7 +221,8 @@
   color: inherit;
   font: inherit;
 }
-.js-debug-chart-layout-control {
+.js-debug-chart-layout-control,
+.js-debug-chart-toggle-control {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
@@ -231,7 +232,8 @@
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
-.js-debug-chart-layout-control button {
+.js-debug-chart-layout-control button,
+.js-debug-chart-toggle-control button {
   min-inline-size: 2.5rem;
   min-block-size: 1.65rem;
   padding: var(--space-2) var(--space-4);
@@ -248,7 +250,8 @@
   .js-debug-resolution-label {
     justify-self: start;
   }
-  .js-debug-chart-layout-control {
+  .js-debug-chart-layout-control,
+  .js-debug-chart-toggle-control {
     grid-column: 1;
   }
 }
@@ -260,13 +263,27 @@
 .js-debug-range-slider-control {
   min-width: 0;
 }
+.js-debug-chart-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-inline-start: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
 .js-debug-range-slider {
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   accent-color: var(--active-accent-bright);
 }
-.js-debug-hidden-charts {
+.js-debug-chart-toggle-control {
   display: inline-flex;
   grid-column: 1 / -1;
   grid-row: 2;
@@ -274,34 +291,6 @@
   align-items: center;
   gap: var(--space-4);
   min-width: 0;
-}
-.js-debug-hidden-charts-icon {
-  color: var(--muted);
-  font-size: var(--ui-font-size-xs);
-}
-.js-debug-hidden-chart,
-.js-debug-chart-close {
-  height: 24px;
-  padding: 0 var(--space-8);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  color: var(--muted);
-  background: var(--panel2);
-  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
-}
-.js-debug-chart-close {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  margin-inline-start: 0;
-  padding: 0;
-  border-color: transparent;
-  border-radius: var(--radius-control);
-  color: var(--muted);
-  background: transparent;
-  font-size: 16px;
-  line-height: 1;
 }
 .js-debug-range-slider-control datalist {
   display: none;

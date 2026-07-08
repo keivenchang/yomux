@@ -221,15 +221,15 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
-  {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'latency', labelKey: 'common.clientLatency', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
 
 function debugGraphLocalizedLabel(item = {}) {
@@ -2300,12 +2300,17 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   </div>`;
 }
 
-function debugGraphHiddenChartsHtml() {
-  const hiddenGroups = jsDebugGraphChartGroups.filter(group => !debugGraphChartVisible(group.key));
-  if (!hiddenGroups.length) return '';
-  return `<div class="js-debug-hidden-charts" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
-    <span class="js-debug-hidden-charts-icon" aria-hidden="true">▣</span>
-    ${hiddenGroups.map(group => `<button type="button" class="js-debug-hidden-chart control-active-hover" data-js-debug-chart-restore="${esc(group.key)}" aria-label="${esc(debugGraphLocalizedLabel(group))}" title="${esc(debugGraphLocalizedLabel(group))}">↗ ${esc(debugGraphLocalizedLabel(group))}</button>`).join('')}
+function debugGraphChartToggleControlsHtml() {
+  return `<div class="js-debug-chart-toggle-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
+    <span>${esc(t('debug.graph.control.charts'))}:</span>
+    ${jsDebugGraphChartGroups.map(group => {
+      const label = debugGraphLocalizedLabel(group);
+      // Compact labels are an English-only design vocabulary. Other locales keep the existing
+      // localized chart title until their own compact translation exists; never leak English UI.
+      const toggleLabel = i18nActiveLocale === 'en' ? String(group.toggleLabelEn || label) : label;
+      const visible = debugGraphChartVisible(group.key);
+      return `<button type="button" data-js-debug-chart-toggle="${esc(group.key)}" aria-pressed="${visible ? 'true' : 'false'}" title="${esc(label)}">${esc(toggleLabel)}</button>`;
+    }).join('')}
   </div>`;
 }
 
@@ -2314,7 +2319,7 @@ function debugGraphControlsHtml(nowMs = Date.now()) {
     ${debugGraphRangeControlsHtml(nowMs)}
     ${debugGraphResolutionLabelHtml(nowMs)}
     <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}"><span>${esc(t('debug.graph.control.charts'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
-    ${debugGraphHiddenChartsHtml()}
+    ${debugGraphChartToggleControlsHtml()}
   </div>`;
 }
 
@@ -3842,15 +3847,19 @@ function cancelDebugGraphSelection(panel) {
 
 function handleDebugGraphControlEvent(event, panel) {
   const chartClose = event.target.closest('[data-js-debug-chart-close]');
-  if (chartClose && panel.contains(chartClose)) {
+  // A chart close reflows the grid. Handling it on pointerdown replaces the target before the
+  // corresponding pointerup, so that follow-up event can land on another chart's X. Click is the
+  // browser's single completed activation and preserves both mouse and keyboard semantics.
+  if (event.type === 'click' && chartClose && panel.contains(chartClose)) {
     event.preventDefault();
     setDebugGraphChartVisible(chartClose.dataset.jsDebugChartClose, false);
     return true;
   }
-  const chartRestore = event.target.closest('[data-js-debug-chart-restore]');
-  if (chartRestore && panel.contains(chartRestore)) {
+  const chartToggle = event.target.closest('[data-js-debug-chart-toggle]');
+  if (event.type === 'click' && chartToggle && panel.contains(chartToggle)) {
     event.preventDefault();
-    setDebugGraphChartVisible(chartRestore.dataset.jsDebugChartRestore, true);
+    const visible = chartToggle.getAttribute('aria-pressed') !== 'true';
+    setDebugGraphChartVisible(chartToggle.dataset.jsDebugChartToggle, visible);
     return true;
   }
   const retry = event.target.closest('[data-js-debug-history-retry]');
