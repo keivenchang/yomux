@@ -4,7 +4,6 @@ const {
   UI_PINS,
   vm,
   FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST,
-  DEFAULT_TEST_SETTINGS,
   TestClassList,
   TestStyle,
   testDatasetKeyForAttribute,
@@ -13,6 +12,8 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
+  deferredFetch,
+  settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
   loadYolomuxWithFileExplorerClosed,
@@ -33,8 +34,16 @@ const {
   runSuites,
   finishSuite,
 } = require('./layout_test_helper');
+const {spawn} = require('node:child_process');
+const {runSuite} = require('./layout_url.test.js');
 
 async function runLayoutAsyncSuite() {
+  await testAsync('node shard launcher rejects a SIGKILL without a summary', async () => {
+    const result = await runSuite('signal-kill-stub', () => spawn(process.execPath, ['-e', "process.kill(process.pid, 'SIGKILL')"]));
+    assert.equal(result.status, 1, 'a signal-killed shard is never reported as successful');
+    assert.ok(result.output.includes('without a suite summary'), 'a killed shard reports the missing terminal summary');
+  });
+
   await testAsync('session metadata distinguishes fetch failure from a client apply failure', async () => {
     const api = loadYolomux('', ['1']);
     const fetchFailure = await api.fetchAndApplySessionMetadataForTest(
@@ -58,7 +67,9 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux();
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/background/status');
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const first = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
@@ -121,7 +132,9 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux();
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/activity-summary?'));
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const first = api.refreshActivitySummaryForTest({force: true, localeChange: true});
@@ -162,7 +175,9 @@ async function runLayoutAsyncSuite() {
       api.setFetchForTest((url, options = {}) => {
         assert.equal(String(url), '/api/fs/batch');
         const requests = JSON.parse(options.body || '{}').requests || [];
-        return new Promise(resolve => batches.push({requests, resolve}));
+        const batch = {...deferredFetch(), requests};
+        batches.push(batch);
+        return batch.promise;
       });
       const resolveBatch = (index, marker, ok = true) => {
         const batch = batches[index];
@@ -214,7 +229,9 @@ async function runLayoutAsyncSuite() {
     const batches = [];
     api.setFetchForTest((url, options = {}) => {
       const requests = JSON.parse(options.body || '{}').requests || [];
-      return new Promise(resolve => batches.push({requests, resolve}));
+      const batch = {...deferredFetch(), requests};
+      batches.push(batch);
+      return batch.promise;
     });
     const failed = api.fetchFilePathInfoForTest('/home/test/failure', {fresh: true});
     const failedFlush = api.flushFileExplorerFsBatchForTest();
@@ -320,7 +337,9 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux('', ['1']);
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/session-metadata'));
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const first = api.refreshSessionMetadataForTest({refreshAuto: false, refreshActivity: false});
@@ -341,6 +360,7 @@ async function runLayoutAsyncSuite() {
     pending[1].reject(new Error('metadata offline'));
     await failed;
     assert.equal(api.transcriptMetadataStateForTest().error.stage, 'fetch', 'the current fetch failure remains classified');
+    assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
   });
 
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
@@ -349,8 +369,16 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux();
     api.setFetchForTest(url => {
       const value = String(url);
-      if (value.startsWith('/api/search?')) return new Promise((resolve, reject) => pendingSearch.push({url: value, resolve, reject}));
-      if (value === '/api/run-history') return new Promise((resolve, reject) => pendingRuns.push({resolve, reject}));
+      if (value.startsWith('/api/search?')) {
+        const request = {...deferredFetch(), url: value};
+        pendingSearch.push(request);
+        return request.promise;
+      }
+      if (value === '/api/run-history') {
+        const request = deferredFetch();
+        pendingRuns.push(request);
+        return request.promise;
+      }
       throw new Error(`unexpected URL ${value}`);
     });
 
@@ -386,7 +414,9 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux();
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/yoagent/jobs');
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const oldLoad = api.loadYoagentJobsForTest({silent: true});
@@ -410,7 +440,9 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux();
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/yoagent/conversation');
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const oldLoad = api.loadYoagentConversationForTest({silent: true, render: false});
@@ -456,7 +488,12 @@ async function runLayoutAsyncSuite() {
     api.setFileExplorerSyncStateForTest({inFlightSignature: 'old-plan', appliedPlanKey: 'old-plan', generation: 4});
     api.setFetchForTest((url, options = {}) => {
       assert.equal(String(url), '/api/fs/batch');
-      return new Promise(resolve => pending.push({resolve, requests: JSON.parse(options.body || '{}').requests || []}));
+      const request = {
+        ...deferredFetch(),
+        requests: JSON.parse(options.body || '{}').requests || [],
+      };
+      pending.push(request);
+      return request.promise;
     });
     const reply = pendingRequest => jsonResponse({
       responses: pendingRequest.requests.map(request => ({
@@ -535,7 +572,9 @@ async function runLayoutAsyncSuite() {
     api.setFileExplorerModeForTest('tabber');
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/activity?'));
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const request = api.fetchTabberActivityForTest({visible: true});
@@ -560,12 +599,15 @@ async function runLayoutAsyncSuite() {
     const pending = [];
     const api = loadYolomux('', ['1']);
     api.installCommandPaletteFixtureForTest();
-    api.setFetchForTest((url, options = {}) => new Promise((resolve, reject) => pending.push({
-      url: String(url),
-      signal: options.signal,
-      resolve,
-      reject,
-    })));
+    api.setFetchForTest((url, options = {}) => {
+      const request = {
+        ...deferredFetch(),
+        url: String(url),
+        signal: options.signal,
+      };
+      pending.push(request);
+      return request.promise;
+    });
 
     const stale = api.refreshFileQuickOpenCandidatesForTest('/tmp/old');
     assert.ok(pending[0].url.startsWith('/api/fs/list?path='), 'absolute path mode uses a directory listing');
@@ -748,7 +790,9 @@ async function runLayoutAsyncSuite() {
     api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/session-files?'));
-      return new Promise((resolve, reject) => pending.push({resolve, reject}));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
     });
 
     const request = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
@@ -2974,7 +3018,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           availableAgents: [],
           agentAuth: {},
-          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+          settingsPayload: settingsOverride({yoagent: {backend: 'claude'}}),
         },
       });
       assert.equal(api.yoagentResolvedBackendForTest(), 'deterministic', 'without installed-agent metadata, explicit Claude cannot be attempted yet');
@@ -2992,7 +3036,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           availableAgents: ['claude'],
           agentAuth: {claude: {installed: true, logged_in: false}},
-          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+          settingsPayload: settingsOverride({yoagent: {backend: 'claude'}}),
         },
       });
       assert.equal(api.yoagentResolvedBackendForTest(), 'claude', 'explicit Claude selection stays explicit when the CLI exists');
@@ -3322,15 +3366,11 @@ async function runLayoutAsyncSuite() {
       assert.ok(api.terminalMobileAccessoryHtmlForTest('1').includes('⌘P') && api.terminalMobileAccessoryHtmlForTest('1').includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
-    test('server/client version mismatch asks whether to reload the browser', async () => {
+    await testAsync('server/client version mismatch asks whether to reload the browser', async () => {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       api.maybeHandleServerVersionChangeForTest('0.4.19');
@@ -3352,11 +3392,7 @@ async function runLayoutAsyncSuite() {
       const reloadApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       reloadApi.maybeHandleServerVersionChangeForTest('0.4.21');
@@ -3367,11 +3403,7 @@ async function runLayoutAsyncSuite() {
       const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: true}}),
         },
       });
       autoApi.setOpenFileStateForTest('/repo/app.py', {kind: 'text', content: 'dirty', original: 'clean', dirty: true});
@@ -3380,16 +3412,12 @@ async function runLayoutAsyncSuite() {
       assert.ok(autoApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), 'dirty auto-reload fallback still shows the existing reload banner');
     });
 
-    test('server/client bundle revision mismatch asks whether to reload the browser', async () => {
+    await testAsync('server/client bundle revision mismatch asks whether to reload the browser', async () => {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       api.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -3404,11 +3432,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: true}}),
         },
       });
       autoApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -3418,11 +3442,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: false, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: false, reload_on_update_auto: true}}),
         },
       });
       disabledApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -3430,7 +3450,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(disabledApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'disabled reload-on-update suppresses bundle revision banner');
     });
 
-    test('self-update: Update Now removes toast and reloads after restart ping', async () => {
+    await testAsync('self-update: Update Now removes toast and reloads after restart ping', async () => {
       const api = loadYolomux('', ['1']);
       api.setConfirmForTest(() => true);
       const toasts = [];
@@ -3487,7 +3507,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.reloadCountForTest(), 1, 'reachable restarted server triggers automatic reload');
     });
 
-    test('self-update: dirty edits and active typing defer automatic reload safely', async () => {
+    await testAsync('self-update: dirty edits and active typing defer automatic reload safely', async () => {
       const dirtyApi = loadYolomux('', ['1']);
       const dirtyToasts = [];
       dirtyApi.setShowToastForTest((title, lines) => {
@@ -3521,7 +3541,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(typingToasts.some(item => item.title === 'Software Update' && String(item.lines[0]).includes('active typing')), 'typing deferral shows a self-update-specific toast');
     });
 
-    test('self-update: restart polling record replaces timers and terminates one attempt', async () => {
+    await testAsync('self-update: restart polling record replaces timers and terminates one attempt', async () => {
       const timers = [];
       const cleared = [];
       const toasts = [];

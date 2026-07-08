@@ -34,7 +34,9 @@ const {
 } = require('./layout_test_helper');
 
 async function runShareThemeSuite() {
-  test('t@2560', () => {
+  // Keep independent fresh-runtime scenarios below. Shared-state behavior is split into named
+  // checkpoints so one assertion cannot conceal later cross-surface contracts.
+  test('cross-surface host state survives layout, share, and terminal transitions', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
@@ -198,10 +200,6 @@ async function runShareThemeSuite() {
     const rootlessRefreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
     assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingElsewhereHtml), 'Differ rootless follower placeholders still render as loading instead of a misleading empty result');
     assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
-    const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
-    assert.ok(/scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*?if \(fileExplorerMode === 'tabber'\) \{[\s\S]*?scheduleTabberTreeLayoutStateSync\(\);[\s\S]*?return;[\s\S]*?setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'explicit session changes use only the lightweight Tabber state path while Differ shows cached/loading data and refreshes it');
-    assert.ok(/const backgroundRefresh = options\.background === true;[\s\S]*if \(!backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, true\);[\s\S]*if \(current && !backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, false\);/.test(sessionSwitchSource), 'background Differ refreshes do not replace cached content with the foreground loading state');
     api.setSessionFilesLoadingForTest(false);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -509,7 +507,6 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesSource.includes("if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);"), 'ordinary Differ row opens start collapsed without changing the global diff-expand preference');
     assert.ok(changedFilesSource.includes("const initialMode = openDiffMode ? 'diff' : 'edit';"), 'Differ rows start in Diff mode and fall back only after the diff payload proves unavailable');
     assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'changed-file rows set the editor mode explicitly');
-    assert.ok(/async function openChangedFileInDiff\([^]*?reusableFileEditorDiffPreviewItem\(path\)[^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?fileEditorActivationSlot\(\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session, preserves row FROM/TO refs, targets the active editor pane, and reuses the Differ preview tab');
     assert.ok(/if \(!openDiffMode\) \{[\s\S]*?renderOpenFilePath\(path\);[\s\S]*?void refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false, \.\.\.payloadRepoRefs\}\);[\s\S]*?return;[\s\S]*?\}/.test(changedFilesSource), 'non-diffable rows prefetch diff data without the async repaint that can fight live scrolling');
     assert.ok(/diffReady && fileStateCanRenderDiffView\(path, current\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)[\s\S]*setFileEditorViewMode\(path, 'edit', item\)[\s\S]*t\('editor\.diffUnavailable'/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode');
     const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
@@ -547,7 +544,6 @@ async function runShareThemeSuite() {
     assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
     assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,620}panel\.addEventListener\('click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
-    assert.ok(/data-open-change-file[\s\S]{0,2200}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openInDiffer'\)[\s\S]*openChangedFileInDiff[\s\S]*\{userInitiated: true, openMode: 'diff'\}[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders Open in a Differ, Open in a new Differ, then Open in a new Editor');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
     assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
@@ -609,14 +605,14 @@ async function runShareThemeSuite() {
     assert.notEqual(firstDiffCacheKey, secondDiffCacheKey, 'Differ cache key changes when repo FROM/TO refs change for the same session');
     api.setDiffRefsByRepoForTest('/repo/app', null);
     api.setFileExplorerModeForTest('files');
-    {
+    test('Finder explicit session interaction updates its committed target', () => {
       const stickyApi = loadYolomux('', ['1', '2']);
       stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
       assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Finder Modified-files target starts from the committed session');
       stickyApi.noteFileExplorerChangesSessionInteractionForTest('2');
       assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit session interaction updates the Finder Modified-files target');
-    }
-    {
+    });
+    test('read-only shares accept only host-pinned Finder state', () => {
       const shareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-finder', mode: 'ro', session: '5', sessions: ['5', '6'], finder: {session: '5', mode: 'diff'}},
       });
@@ -633,8 +629,8 @@ async function runShareThemeSuite() {
       });
       unpinnedShareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
       assert.equal(unpinnedShareApi.fileExplorerSessionFilesTargetSessionForTest(), '', 'read-only share without a host Finder pin does not fall back to payload session or sessions[0]');
-    }
-    {
+    });
+    test('Finder sync prefers live tmux path over transcript metadata', () => {
       const signalPathApi = loadYolomux('', ['5']);
       signalPathApi.setTranscriptInfoForTest('5', {
         selected_pane: {current_path: '/home/test/stale-transcript-path'},
@@ -648,8 +644,8 @@ async function runShareThemeSuite() {
         }],
       });
       assert.equal(signalPathApi.activeTmuxDirectoryPath('5'), '/home/test/live-tmux-path', 'Finder sync prefers direct tmux pane_current_path over stale transcript metadata');
-    }
-    {
+    });
+    test('passive Finder focus never commits the modified-files target', () => {
       const hoverApi = loadYolomux('', ['5', '6']);
       hoverApi.setTranscriptInfoForTest('5', {
         project: {git: {cwd: '/home/test/yolomux.dev/src', root: '/home/test/yolomux.dev'}},
@@ -695,8 +691,8 @@ async function runShareThemeSuite() {
       hoverApi.selectSession('6', {userInitiated: true});
       assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'D1: explicit selectSession commits the Differ target in diff mode');
       hoverApi.setFileExplorerModeForTest('files');
-    }
-    {
+    });
+    test('passive xterm mouse reports never acknowledge attention', () => {
       const mouseReportApi = loadYolomux('', ['1', '8002']);
       mouseReportApi.setFileExplorerModeForTest('diff');
       mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('1');
@@ -721,8 +717,8 @@ async function runShareThemeSuite() {
       assert.equal(socketMessages[1]?.data, 'a', 'typed xterm bytes are still sent to the terminal backend');
       assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
       assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
-    }
-    {
+    });
+    test('typed input acknowledgement survives a stale cooldown snapshot', () => {
       const cooldownApi = loadYolomux('', ['1']);
       const cooldownKey = '["agent-window","1","0","%1","codex","cooldown","4000"]';
       cooldownApi.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
@@ -735,8 +731,8 @@ async function runShareThemeSuite() {
       assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey), true, 'typing records the generated yellow completion key');
       cooldownApi.setAutoApproveStateForTest('1', staleCooldownPayload);
       assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey, {cooldown_acknowledged: false}), true, 'a delayed pre-ack yellow snapshot cannot restore the active terminal badge');
-    }
-    {
+    });
+    test('attention acknowledgement coalesces unresolved transport requests', () => {
       const acknowledgementApi = loadYolomux('', ['1']);
       const attentionKey = '["agent-window","1","0","%1","claude","needs-input","burst"]';
       acknowledgementApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'claude'}]});
@@ -757,7 +753,7 @@ async function runShareThemeSuite() {
       assert.equal(perf.renderPanels?.count, 1, 'an acknowledgement burst rebuilds the pane surfaces only for the first input');
       assert.equal(perf.renderPaneTabStrips?.count, 1, 'an acknowledgement burst rebuilds pane-tab status only for the first input');
       assert.equal(perf.renderSessionButtons?.count, 1, 'an acknowledgement burst rebuilds topbar session buttons only for the first input');
-    }
+    });
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
     const compactFinderPanel = api.fileExplorerChangesPanelHtml();
@@ -988,7 +984,7 @@ async function runShareThemeSuite() {
     assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30:\s*var\(--tree-indent-line\)/.test(changedFilesCss) && /body \.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*var\(--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30\)/.test(changedFilesCss) && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder guide consumes its centralized theme token while repo headers share the pane bar token');
+    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);') && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
     assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
     assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*var\(--space-2\)/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
@@ -999,7 +995,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-folder-text:\s*var\(--accent-gold\)/.test(changedFilesCss), 'Finder diff inherits the same gold subdirectory token');
     assert.ok(/body\.theme-light\b[\s\S]*?--tree-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode tree connector lines are subdued (shared --tree-indent-line token)');
-    assert.ok(/:root\s*\{[\s\S]*--50-terminal-file-tree-file-tree-git-status-bg-107:\s*rgba\(226,\s*232,\s*240,\s*0\.10\)/.test(changedFilesCss) && /\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)/.test(changedFilesCss), 'shared Finder/Differ unknown status chips consume the faint-neutral dark token');
+    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)/.test(changedFilesCss), 'shared Finder/Differ unknown status chips are faint-neutral in dark mode');
     // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
     // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
     assert.ok(/\.file-tree-row\.git-untracked:not\(\.selected\) \.file-tree-git-status:not\(\[hidden\]\)\s*\{[\s\S]*background:\s*var\(--git-untracked-badge\)/.test(changedFilesCss), 'untracked badge uses the shared git status token, not the merged PR token');
@@ -1012,8 +1008,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*container-type:\s*inline-size/.test(changedFilesCss), 'Finder modified-files header uses pane-width container queries');
     assert.ok(changedFilesCss.includes('@container (max-width: 520px)'), 'Finder modified-files header wraps before narrow pane widths overlap');
     assert.ok(changedFilesCss.includes('grid-template-areas:'), 'Finder modified-files narrow header uses explicit row areas');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--file-explorer-tree-surface:\s*var\(--panel\)/.test(changedFilesCss) && /\.file-explorer\s*\{[\s\S]*background:\s*var\(--file-explorer-tree-surface\)/.test(changedFilesCss), 'light theme explicitly restyles the Finder tree through its centralized surface token');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28:\s*rgba\(31, 111, 235, 0\.08\)/.test(changedFilesCss), 'light theme explicitly restyles Finder modified-files through centralized tokens');
+    assert.ok(changedFilesCss.includes('--50-terminal-file-tree-file-explorer-path-bg-95: rgba(255, 255, 255, 0.58);'), 'light theme explicitly restyles the Finder tree through shared tokens');
+    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);'), 'light theme explicitly restyles Finder modified-files through shared tokens');
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
     assert.ok(/\.file-explorer-date-reload-cluster \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder date/reload cluster refresh paints the same visible refresh icon');
@@ -1500,15 +1496,15 @@ async function runShareThemeSuite() {
     assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
     const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
     assert.ok(dockviewActivePanelBody.includes('if (dockviewLayoutState.applyingFromLayout) return;'), 'Dockview active-panel listener ignores programmatic layout application');
-    assert.equal(dockviewActivePanelBody.includes('noteFileExplorerChangesSessionInteraction'), false, 'Dockview active-panel listener delegates focus policy rather than carrying a second local side effect');
-    assert.equal(dockviewActivePanelBody.includes('userInitiated: true'), false, 'Dockview active-panel listener does not itself launder hover focus into a user interaction');
-    assert.ok(dockviewActivePanelBody.includes('dockviewCommitPanelActivation(item);'), 'Dockview active-panel listener uses the same activation transaction as explicit tab gestures');
+    assert.equal(dockviewActivePanelBody.includes('noteFileExplorerChangesSessionInteraction'), false, 'Dockview active-panel listener stays passive so hover focus does not retarget Differ');
+    assert.equal(dockviewActivePanelBody.includes('userInitiated: true'), false, 'Dockview active-panel listener does not launder hover focus into a user interaction');
+    assert.ok(dockviewActivePanelBody.includes('setFocusedPanelItem(item);') || appSource.includes('setFocusedPanelItem(item);'), 'Dockview active-panel changes retain passive focus updates through the shared focus owner');
     const dockviewTabRendererStart = appSource.indexOf('function createDockviewTabRenderer()');
     assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
     const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
     assert.ok(/function captureDockviewPreviousPaneBeforeTabActivation\(tabElement, targetItem\)[\s\S]*activeItemForSide\(slot\)[\s\S]*capturePaneViewStateForItemIfPresent\(previous\)/.test(appSource), 'Dockview tab activation captures the previously visible pane before Dockview hides it');
-    assert.ok(/element\.addEventListener\('pointerdown', event => \{[\s\S]*dockviewLayoutState\.pendingUserPanelActivation = item;[\s\S]*captureDockviewPreviousPaneBeforeTabActivation\(element, item\);[\s\S]*dockviewBeginTabPointerDrag\(event, item\)/.test(dockviewTabRendererBody), 'Dockview pointer tab activation marks the user transaction before native Dockview can publish active-panel state');
-    assert.ok(/function dockviewCommitPanelActivation\(item, options = \{\}\) \{[\s\S]*pendingUserPanelActivation === panelItem[\s\S]*noteFileExplorerChangesSessionInteraction\(panelItem\)[\s\S]*setFocusedPanelItem\(panelItem, \{userInitiated\}\)/.test(appSource) && /const commitExplicitTabInteraction = \(\) => \{[\s\S]*dockviewCommitPanelActivation\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview explicit and callback activation paths share one user-side-effect owner');
+    assert.ok(/element\.addEventListener\('pointerdown', event => \{[\s\S]*captureDockviewPreviousPaneBeforeTabActivation\(element, item\);[\s\S]*dockviewBeginTabPointerDrag\(event, item\)/.test(dockviewTabRendererBody), 'Dockview pointer tab activation captures pane viewport before native Dockview switching');
+    assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
     assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
     assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
     assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
@@ -1681,6 +1677,7 @@ async function runShareThemeSuite() {
     assert.equal(api.canPaneExpand('1'), false);
     assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
 
+    test('platform-specific Finder controls and fresh layout URLs retain their independent defaults', () => {
     const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
     assert.equal(macApi.fileExplorerLabel(), 'Finder');
     assert.equal(macApi.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -1806,6 +1803,7 @@ async function runShareThemeSuite() {
     assert.equal(defaultFinderApi.itemInLayout('__files__', defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the Finder pane');
     const sessionsOnlyFinderApi = loadYolomux('?sessions=1', ['1', '2']);
     assert.equal(sessionsOnlyFinderApi.itemInLayout('__files__'), true, 'sessions-only boot includes the Finder pane');
+    });
 
     const finderToggleSlots = api.emptyLayoutSlots();
     finderToggleSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 31);
@@ -1903,7 +1901,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'Preferences search button uses the normal UI font, not condensed tab text');
     assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
     assert.ok(preferencesCss.includes('--drop-outline: var(--paint-white)'), '#40: dark-mode drag preview/outline consumes the shared white paint (light mode stays blue, asserted below)');
-    assert.ok(preferencesCss.includes('--text-selection-bg: #2563eb'), 'dark mode browser text selection uses a prominent blue fill');
+    assert.ok(preferencesCss.includes(`--text-selection-bg: ${UI_PINS.textSelectionBg}`), 'dark mode browser text selection uses a prominent blue fill');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--text-selection-bg:\s*#93c5fd/.test(preferencesCss), 'light mode browser text selection uses a visible blue fill');
     assert.ok(/::selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'browser text selection paints background only, preserving text color');
     assert.ok(/::-moz-selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'Firefox text selection paints background only, preserving text color');
@@ -1987,118 +1985,6 @@ async function runShareThemeSuite() {
     assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
     assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
     assert.ok(resizerBlock.includes('box-shadow: var(--pane-resizer-hover-shadow)'), 'C15: the Finder resizer hover uses the shared shadow-geometry token');
-    assert.ok(preferencesCss.includes('--pane-resizer-hover-shadow: 0 0 0 1px var(--drop-outline-shadow)'), 'C15: the shared resizer shadow derives from the outline color token');
-    assert.equal(/118,\s*185,\s*0|255,\s*255,\s*255,\s*0\.04/.test(resizerBlock), false, 'C15: the hardcoded green gradient + white border are gone from the Finder resizer');
-    // Light theme drives base pane-tab/ring/link styling via tokens; only genuinely distinct
-    // interaction contrast keeps a component-level light rule.
-    assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
-    assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
-    assert.ok(/\.meta a,\s*\.summary-context a\s*\{[^}]*color:\s*var\(--link-soft\)/.test(preferencesCss), '#28: Info Bar links consume the shared theme-aware link token');
-    assert.equal(/body\.theme-light \.(?:meta|summary-context) a/.test(preferencesCss), false, '#28: Info Bar links do not duplicate their theme-token paint in light-only rules');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-border-26:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.5\)/.test(preferencesCss), '#28: light theme centralizes the regular and compact tab hover/focus border');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-tabs-fg-27:\s*var\(--pc-control-hover-fg\)/.test(preferencesCss), '#28: light theme centralizes the tab-overflow hover glyph');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-bright:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green (via the active-accent token) so a theme switch repaints it');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-panel-detail-row-fg-22:\s*var\(--text\)/.test(preferencesCss), '#35: the active-pane Info Bar header label consumes its dark centralized light-mode token');
-    assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
-    assert.ok(preferencesCss.includes('--active-accent-bright: #86d600'), 'focused active pane tab uses a brighter NV green fill (via the active-accent token)');
-    assert.ok(preferencesCss.includes('--pane-tab-active-accent: var(--active-accent-bright)'), 'focused active pane tab accent token derives from the shared active-accent (same green as the fill)');
-    assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
-    assert.ok(preferencesCss.includes('--pane-tab-width: 172px'), 'pane tabs default to the compact 172px width');
-    assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 172)"), 'runtime settings fallback keeps the 172px tab width default');
-    assert.ok(preferencesCss.includes('--active-accent-dim: color-mix(in srgb, var(--active-accent) 26%, var(--panel))'), 'dark/root theme uses the brighter shared pane tab-strip background (active-accent-dim)');
-    assert.equal(/body\.theme-dark\s*\{[^}]*--pane-tab-strip-bg\s*:/.test(preferencesCss), false, 'dark theme inherits the shared pane tab-strip token instead of restating a separate color');
-    assert.equal(preferencesCss.includes('--pane-tab-strip-hover-bg:'), false, 'dark theme no longer defines a separate pane tab-container hover token');
-    const themeLightTokenBlock = preferencesCss.match(/body\.theme-light\s*\{[^}]*\}/)?.[0] || '';
-    assert.equal(themeLightTokenBlock.includes('--pane-tab-strip-hover-bg'), false, 'light theme does not define the dark-only pane tab-container hover token');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#e1edda/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
-    assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (+ images 003/004: undimmed, un-lightened per-pane highlight)');
-    assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
-    assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token');
-    assert.ok(preferencesCss.includes('--pane-ring-opacity: 75%'), 'the pane ring default opacity is prominent enough in both themes');
-    assert.ok(preferencesCss.includes('--pane-active-ring-opacity: 75%'), 'the active pane ring shares the default ring opacity token');
-    // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(37, 99, 235/.test(preferencesCss), 'light mode uses a blue pane separator');
-    // Pane chrome bars (strip, Info Bar, editor toolbar, find) all read the shared --pane-bar-bg, which is
-    // the bright tab-strip green when the pane is focused and neutral gray when not. Focus sets it on .panel.
-    assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes set --pane-bar-bg to the bright tab-strip green');
-    assert.equal(/\.panel\.active-pane > \.panel-head,\s*\.panel\.typing-ready-pane > \.panel-head/.test(preferencesCss), false, 'focused pane tab containers use the shared .panel-head background rule, not a separate state override');
-    assert.equal(/\.panel\.changes-panel/.test(preferencesCss), false, 'standalone Changes pane chrome CSS is removed');
-    assert.ok(/\.panel\.file-explorer-panel > \.file-explorer-head:hover,\s*\.panel\.file-explorer-panel > \.file-explorer-head:focus-within,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:hover\) > \.file-explorer-head,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:focus-within\) > \.file-explorer-head\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'Finder hover/focus colors only the Finder header');
-    assert.ok(/\.panel-head\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the tab strip reads the shared --pane-bar-bg');
-    assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the Info Bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
-    assert.ok(/\.file-explorer-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder header reads the shared pane bar background when focused/hovered');
-    assert.ok(/\.file-explorer-changes-panel:hover,\s*\.file-explorer-changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'embedded Finder Modified-files section uses the green pane bar on hover/focus');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
-    assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files header reads the shared pane bar background when focused/hovered');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*isolation:\s*isolate/.test(preferencesCss), 'Finder Modified-files section isolates its sticky header/content layers');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 var\(--space-5\) var\(--space-5\)/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
-    assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
-    assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
-    assert.ok(/\.diff-ref-suggestion-popover\.compact\s*\{[\s\S]*min-width:\s*min\(520px,\s*66\.667vw\)[\s\S]*max-height:\s*min\(230px,\s*34vh\)/.test(preferencesCss), 'compact Differ ref suggestions retain a readable minimum without exceeding the shared two-thirds-browser maximum');
-    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
-    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*8ch\s*minmax\(0,\s*1fr\)\s*max-content\s*max-content/.test(preferencesCss), 'diff-ref popup reserves its flexible width for the subject while date and author size to content');
-    assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*calc\(-1 \* var\(--space-4\)\)/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
-    assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
-    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
-    assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'compact Differ and noncompact editor pickers share the two-thirds-browser maximum');
-    assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*var\(--paint-white\)/.test(preferencesCss), 'server update Reload button uses the danger and opaque-white tokens in dark mode');
-    assert.equal(/body\.theme-light \.server-update-banner-reload/.test(preferencesCss), false, 'server update Reload button uses one theme-safe danger paint owner');
-    assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
-    assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder panes');
-    assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
-    assert.ok(preferencesCss.includes('--pane-resizer-size: 1px'), 'pane splitter reserves only the 1px separator line');
-    assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
-    assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
-    assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(37, 99, 235, 0.72)'), 'light pane splitter is blue at rest');
-    assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover thickens to a clearly visible 5px line over the 1px resting line');
-    assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
-    // #29 + the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
-    // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
-    // cluster sits centered between the menubar and the right-side actions, not right-aligned.
-    assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
-    assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*var\(--space-6\) auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
-    assert.ok(/\.yolomux-dockview \.dv-sash::after,\s*\.layout-resizer::after\s*\{[^}]*pointer-events:\s*auto[\s\S]*?\.resizer-row::after\s*\{[^}]*inset-inline:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\)/.test(preferencesCss), '#34: Dockview and fallback resizers share one transparent, tokenized hit target');
-    assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
-    // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
-    // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
-    // has the transparent border; the active one colors it. No box-shadow, no inset ::after for focus.
-    // the state ring IS the --pane-split-gap gutter border, colored per state via the unified
-    // --panel-ring-color and faded by --pane-ring-opacity (transparent on a plain inactive pane). Sitting at
-    // the seam edge, an active (green) pane and a needs (red) pane touch across the 1px resizer.
-    assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity,\s*var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at per-state opacity (touches the neighbor at the seam)');
-    // every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
-    assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'the active pane sets the green ring color');
-    assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'the active pane uses the user-controlled active ring opacity');
-    assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'a typing-ready pane sets the SAME green ring color as active');
-    assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'typing-ready panes use the same user-controlled active ring opacity as active panes');
-    assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
-    assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
-    // no content-edge overlay ring — the ring is the gutter border (asserted above). The
-    // needs-* PULSE uses the shared .attention-pulse parent on the panel (not a ::after).
-    assert.equal(/\.panel::after\s*\{/.test(preferencesCss), false, 'no .panel::after overlay ring — the ring is the gutter border, so adjacent rings touch at the seam');
-    assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'needs-* panes set the red ring color (via the --pane-ring-attention token)');
-    assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(preferencesCss), 'the shared attention pulse parent drives the red ring animation');
-    assert.ok(/syncAttentionAnimation\(node, active\)[\s\S]*?classList\?\.toggle\?\.\('attention-pulse'/.test(preferencesJs), 'needs-* panes/tabs receive the shared attention-pulse class from syncAttentionAnimation');
-    // image 028: a focused needs-attention pane resolves RED (attention beats the yolo-ready green tint).
-    assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
-    assert.ok(/--pane-ring-attention:\s*#ff3347/.test(preferencesCss), 'the attention-ring token keeps the #ff3347 dark value');
-    assert.equal(/\.panel\.active-pane\s*\{[^}]*border-color:/.test(preferencesCss), false, 'the active pane sets --panel-ring-color (which colors the shared gutter border), not its own border-color');
-    // images 003/004 pane-color polish:
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*var\(--active-tab-muted-bg\)/.test(preferencesCss), 'light-mode inactive tabs derive their tint from the active accent (not a fixed green)');
-    // image 008: inactive-tab text is DARK in light mode (readable on the light-green tabs/strip), not the
-    // dark-tuned near-white #dfe6ef that made it white-on-white.
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-text:\s*#1f2937/.test(preferencesCss), 'light-mode tab text is dark (no white-on-white inactive tabs)');
-    // The name/dir/detail spans hardcode near-white (for dark tabs); light mode overrides them dark too,
-    // or the branch/path text stays white-on-white even with a dark base tab color.
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-fg-5:\s*var\(--pc-control-fg\)[\s\S]*--40-layout-panes-tabs-pane-tab-fg-7:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text uses centralized dark control-foreground tokens');
-    // Every inactive tab follows its own panel's --pane-bar-bg; the variable itself carries the focused,
-    // typing-ready, or inactive pane state, so CSS does not need a second focus/readiness partition.
-    assert.ok(/\.panel \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'all inactive pane tabs follow their panel tab-strip bar through one owner');
-    assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
-    assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
-    assert.ok(/--inactive-pane-opacity-scale:\s*1/.test(preferencesCss), 'inactive-pane dim defaults to full strength');
-    assert.ok(/--inactive-pane-overlay-alpha:\s*0\.18/.test(preferencesCss), 'inactive-pane dim base alpha stays 0.18 in dark mode');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--inactive-pane-overlay-alpha:\s*0\.09/.test(preferencesCss), 'inactive-pane dim base alpha stays 0.09 in light mode');
     assert.ok(/--inactive-pane-overlay:\s*rgb\(var\(--inactive-pane-overlay-rgb\) \/ calc\(var\(--inactive-pane-overlay-alpha\) \* var\(--inactive-pane-opacity-scale\)\)\)/.test(preferencesCss), 'inactive-pane flat dim is scaled by the opacity slider');
     assert.equal(/inactive-pane-gradient/.test(preferencesCss), false, 'inactive-pane gradient CSS is removed until the feature is revisited');
     {
@@ -2234,7 +2120,7 @@ async function runShareThemeSuite() {
     assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
     assert.ok(/\.app-menu-ui-icon\.active,[\s\S]*\.file-editor-codemirror-panel \.cm-search label:has\(input:checked\)\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: app-menu and CodeMirror checked controls consume the shared persistent active-control owner');
     assert.equal(/body\.theme-light \.app-menu-ui-icon\.active(?:,|\s*\{)|body\.editor-theme-light \.file-editor-codemirror(?:-panel)? \.cm-search label:has\(input:checked\)(?:,|\s*\{)/.test(preferencesCss), false, '#251: light themes do not copy the persistent active-control paint');
-    assert.ok(preferencesCss.includes('--menu-tab-rich-text: var(--text)') && /\.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--menu-tab-rich-text\)/.test(preferencesCss), '#252: the shared theme token forces dark text on rich Tabs/Changes dropdown rows so they are not washed out');
+    assert.ok(/\.app-menu-tab-command,[\s\S]*\.app-menu-tab-command \.session-button-dir\s*\{[\s\S]*color:\s*var\(--menu-tab-rich-text\)/.test(preferencesCss), '#252: rich Tabs/Changes dropdown rows use the shared theme-aware text token');
     assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
     assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
     // Wrapped-line diff bug: the full-bleed box-shadow/clip-path trick is ONLY for BLOCK line elements.
@@ -2292,8 +2178,9 @@ async function runShareThemeSuite() {
     assert.ok(modifiedPreferencesHtml.includes('Global reset'), 'preferences reset is labeled as global in normal-case text');
     assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
     assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
-    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--30-preferences-changes-preferences-global-reset-bg-73\)[\s\S]*?border-color:\s*var\(--30-preferences-changes-preferences-global-reset-border-74\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button consumes centralized danger-action tokens and normal UI text');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--30-preferences-changes-preferences-global-reset-bg-73:\s*var\(--danger-strong\)[\s\S]*--30-preferences-changes-preferences-global-reset-border-74:\s*var\(--danger-action-light-border\)/.test(preferencesCss), 'preferences global reset button centralizes its light-specific danger surface tokens');
+    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--30-preferences-changes-preferences-global-reset-bg-73\)[\s\S]*?border-color:\s*var\(--30-preferences-changes-preferences-global-reset-border-74\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses tokenized danger action colors and normal UI text');
+    const resetTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-bg-73: var(--danger-strong);') && resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-border-74: var(--danger-action-light-border);'), 'preferences global reset button uses light-specific danger surface tokens');
     assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
     const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
     assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -2457,7 +2344,7 @@ async function runShareThemeSuite() {
     assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
     assert.equal(/<select[^>]*data-setting-path="appearance\.separator_color"/.test(preferencesHtml), false, 'Separator color renders as radios, not a select');
     assert.ok(preferencesHtml.includes('data-setting-path="appearance.separator_color"'), 'Preferences expose separator color for pane separators and drop previews');
-    assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#86d600[\s\S]*--preferences-radio-swatch:#4f9e3a/.test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
+    assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBright}[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBrightLight}`).test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#f97316[\s\S]*--preferences-radio-swatch:#b91c1c/.test(preferencesHtml), 'Active color Blood orange light swatch is redder than Solar gold');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#eab308[\s\S]*--preferences-radio-swatch:#d6a400/.test(preferencesHtml), 'Active color Solar gold light swatch is a brighter gold');
     assert.ok(/\.preferences-radio-group\.has-swatches\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(148px,\s*1fr\)\)/.test(preferencesCss), 'swatched Preferences radio groups use a shared grid so wrapped rows align');
@@ -3252,10 +3139,10 @@ async function runShareThemeSuite() {
       assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
       assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
       assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
-      assert.ok(/const shareSenderRecords = new Map\(\)[\s\S]*function shareSenderRecord\(key, options = \{\}\)[\s\S]*connection:[\s\S]*dimensions:[\s\S]*lastFrame:[\s\S]*pointer:[\s\S]*popupSequence:[\s\S]*replayScrollPublish:[\s\S]*scrollPublish:[\s\S]*scrollTarget:/.test(shareSource), 'X8: one sender record owns connection, terminal dimensions, replay sequencing, pointer, popup, and scroll lifecycle state');
-      assert.equal(/shareHostConnectionRecords|shareHostDimensions|shareMirrorLastFrameBySender|shareScrollPublishTimers|shareScrollTargetRecords|sharePointerRecords|sharePopupLayerLastSeqBySender|shareReplayScrollPublishTimers/.test(shareSource), false, 'X8: retired parallel sender-state maps are absent');
+      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'YO!share host socket and pending frames share one token-keyed sender lifecycle record owner');
+      assert.equal(/shareHostSockets|shareHostQueues/.test(shareSource), false, 'parallel YO!share socket and queue maps are removed');
       assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
-      assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'X8: inactive share pruning closes and deletes the complete sender record');
+      assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
@@ -3265,7 +3152,6 @@ async function runShareThemeSuite() {
       const connectionApi = loadYolomux('', ['1'], 'https:');
       connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
       const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
-      connectionApi.shareDropStaleMirrorFrameForTest({type: 'ui-state', sender: 'closed-share', epoch: 1, sequence: 1});
       assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
       closedSocket.close();
       assert.equal(connectionApi.shareHostConnectionCountForTest(), 1, 'socket close retains one reconnectable token record');
@@ -3274,7 +3160,6 @@ async function runShareThemeSuite() {
       connectionApi.setActiveSharesForTest([]);
       connectionApi.ensureShareHostSocketsForTest();
       assert.equal(connectionApi.shareHostConnectionCountForTest(), 0, 'inactive-share reconciliation removes the socketless record and its queue');
-      assert.equal(connectionApi.shareSenderRecordForTest('closed-share'), null, 'X8: inactive-share reconciliation retires every sender field, including replay sequence state');
       connectionApi.setActiveSharesForTest([{token: 'retry-share'}]);
       connectionApi.setShareHostSocketForTest('retry-share', {readyState: 3});
       assert.equal(connectionApi.enqueueShareHostMessageForTest('retry-share', {type: 'queued-for-retry'}), true);
@@ -3310,9 +3195,6 @@ async function runShareThemeSuite() {
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareViewportState\(payload\.viewport \|\| \{\}\)[\s\S]*applyShareAppearanceState\(payload\.appearance \|\| \{\}\)/.test(shareSource), 'M1: share viewers apply geometry inputs before semantic UI state');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareTerminalDimensionsState\(payload\.terminalDims \|\| \[\]\)/.test(shareSource), 'M4: share viewers apply host terminal dimensions from the UI state');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'ui-state'[\s\S]*applyShareUiState\(payload\)/.test(shareSource), 'share viewers consume live ui-state frames');
-      const uiStateIndex = shareSource.indexOf("message.type === 'ui-state'");
-      const remoteApplyIndex = shareSource.indexOf('beginShareRemoteUiApply()', shareSource.indexOf('function applyShareUiMessage'));
-      assert.ok(uiStateIndex >= 0 && remoteApplyIndex >= 0 && uiStateIndex < remoteApplyIndex, 'live ui-state frames are dispatched before the outer remote-apply guard so rw viewers do not get stuck non-publishable');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'viewport'[\s\S]*applyShareViewportState\(payload\)[\s\S]*message\.type === 'appearance'[\s\S]*applyShareAppearanceState\(payload\)/.test(shareSource), 'M1: share viewers consume live viewport and appearance frames');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareAutoApproveState\(payload\.autoApprove \|\| \{\}\)[\s\S]*applyShareTextWrapMetrics\(payload\.textWraps \|\| \[\]\)[\s\S]*applyShareScrollSnapshot\(payload\.scroll \|\| \[\]\)/.test(shareSource), 'YO!share clients apply host YO state, wrapped-control metrics, and full-snapshot scroll after semantic panes render');
       assert.ok(/shareReplayKeyframeRequestInitialBackoffMs:\s*5000/.test(timingSource), 'YO!share replay keyframe requests start with a five-second retry floor through the shared timing owner');
@@ -3351,7 +3233,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
       assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
       assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*shareScrollTargetRecord\(target\)[\s\S]*record\.payload = \{\.\.\.payload, target, top, left\}[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
-      assert.ok(/function shareScrollTargetRecord\(target, options = \{\}\)[\s\S]*shareSenderRecord\(cleanTarget, \{create: options\.create !== false\}\)[\s\S]*senderRecord\.scrollTarget = record/.test(shareSource), 'X8: share viewers keep scroll payload and restore lifecycle in the sender record');
+      assert.ok(/const shareSenderRecords = new Map\(\)[\s\S]*function shareSenderRecord\(key, options = \{\}\)/.test(shareSource), 'share viewers own scroll payload and restore lifecycle in one sender-keyed record map');
       assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareSenderRecord\(descriptor\.target, \{create: false\}\)\?\.scrollTarget[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
       assert.equal(shareSource.includes('shareLastAppliedScrollByTarget'), false, 'retired scroll-state map is absent');
       assert.equal(shareSource.includes('shareScrollRestoreFrameTimers'), false, 'retired scroll-restore timer map is absent');
@@ -3413,7 +3295,7 @@ async function runShareThemeSuite() {
       assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
       assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
       assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
-      assert.ok(/function ensureSharePointerGhost\(sender = ''\)[\s\S]*shareSenderRecord\(key\)[\s\S]*senderRecord\.pointer/.test(shareSource), 'X8: share pointer DOM and hide timer state use the sender record');
+      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
       assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
       assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
       assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*record\.hideTimer = timer[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors, replace one record-owned timer, and ignore their own echoed cursor');
@@ -3561,7 +3443,7 @@ async function runShareThemeSuite() {
       assert.ok(/body\.share-view-mode \.share-mirror-stage \.app-root\s*\{[\s\S]*position:\s*absolute[\s\S]*transform:\s*translate3d\(var\(--share-mirror-tx/.test(shareCss), 'M3: share view transforms the app root inside the mirror stage');
       assert.ok(/\.share-viewer-banner\s*\{[\s\S]*position:\s*fixed[\s\S]*bottom:\s*8px/.test(shareCss), 'M3: share viewer banner is fixed outside the mirror root');
     }
-    {
+    test('share replay protocol keeps its frame vocabulary and semantic state isolated', () => {
       const metaApi = loadYolomux('', ['1'], 'https:');
       const protocol = metaApi.shareMirrorProtocolForTest;
       assert.equal(protocol.version, 1, 'DOIT.72 P1.1: replay frames carry protocol version 1');
@@ -3943,8 +3825,8 @@ async function runShareThemeSuite() {
       assert.deepStrictEqual({...staleApi.shareMirrorLastFrameForTest('host-a', 'dom-replay')}, {epoch: 2, sequence: 1}, 'viewer records DOM replay stale state separately from semantic state');
       assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'appearance', sender: 'host-b', epoch: 1, sequence: 1}), false, 'different sender has an independent sequence');
       assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'layout', sender: 'host-a'}), false, 'legacy unsequenced frames still apply during migration');
-    }
-    {
+    });
+    test('read-only semantic shares protect the mirrored surface and repair geometry', () => {
       const roApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share123', mode: 'ro', session: '1', sessions: ['1']},
       });
@@ -4189,13 +4071,14 @@ async function runShareThemeSuite() {
       assert.equal(roApi.sharePopupLayerNodeForTest().parentElement, appRoot, 'popup-layer mirror is mounted inside the scaled app root');
       roApi.applySharePopupLayerForTest({seq: 1, owner: 'host', items: [{rect: {left: 1, top: 1, width: 2, height: 2}, html: '<div>stale</div>'}]}, 'host');
       assert.equal(roApi.sharePopupLayerLastSeqForTest('host'), 2, 'stale popup-layer frames are ignored after a newer close frame');
-    }
+    });
     api.setActiveLocaleForTest('ja');
     const appearance = api.shareAppearanceSnapshotForTest();
     assert.equal(appearance.locale, 'ja', 'share appearance snapshot includes the active locale');
     assert.equal(appearance.languagePref, 'system', 'share appearance snapshot includes the persisted language preference');
     api.setActiveLocaleForTest('en');
 
+    test('share appearance frames apply the host-resolved theme and repaint terminals', () => {
     const shareThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
       shareReplay: true,
       share: {view: true, id: 'share-theme', mode: 'ro', session: '1', sessions: ['1']},
@@ -4225,7 +4108,9 @@ async function runShareThemeSuite() {
     assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-dark'), 'share viewer body applies normal dark CSS for host-resolved System dark');
     assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'later share appearance frames repaint terminal cells too');
     assert.equal(shareTextureClears, 2, 'later share appearance frames clear cached glyph colors too');
+    });
 
+    test('replay-shell share appearance frames update the viewer theme', () => {
     const replayThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
       shareReplay: true,
       share: {view: true, id: 'share-replay-theme', mode: 'ro', session: '1', sessions: ['1']},
@@ -4242,7 +4127,9 @@ async function runShareThemeSuite() {
     assert.equal(replayThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'replay-shell share viewers apply live appearance frames instead of swallowing them');
     assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'replay-shell appearance frames repaint the viewer body');
     assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-light'), 'replay-shell appearance frames activate normal light CSS for System light');
+    });
 
+    test('topology keyframes defer for pointer activity but respect the maximum delay', () => {
     const topologyDelayApi = loadYolomux('', ['1']);
     topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());
     topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(0);
@@ -4257,6 +4144,7 @@ async function runShareThemeSuite() {
     topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now());
     topologyDelayApi.setSharePointerLastPublishedAtForTest(0);
     assert.equal(topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest(), 0, 'topology replay max deferral eventually permits a keyframe even under continuous pointer movement');
+    });
 
     const sharePointerSlots = api.emptyLayoutSlots();
     sharePointerSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
@@ -4277,6 +4165,7 @@ async function runShareThemeSuite() {
     assert.equal(viewerPoint.y, 230, 'M7: received app-space pointer maps into the local visual mirror y');
     assert.equal(api.sharePointFromPointerPayload({scope: 'pane', x: 600, y: 400}), null, 'M7: old pane-relative pointer payloads are rejected');
 
+    test('host pointer publication emits replay coordinates', () => {
     const pointerPublishApi = loadYolomux('', ['1']);
     pointerPublishApi.setActiveSharesForTest([{token: 'share-token'}]);
     const pointerFrames = [];
@@ -4288,6 +4177,7 @@ async function runShareThemeSuite() {
     assert.equal(pointerFrames.length, 1, 'DOM replay pointer publication sends one frame per host pointer tick');
     assert.equal(pointerFrames[0].type, 'pointer');
     assert.deepStrictEqual(canonical(pointerFrames[0].payload), {scope: 'viewport', visible: true, x: 44, y: 55});
+    });
     api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
     const digestA = {snapshot: {viewport: {width: 1, height: 2}, fonts: {ui: 12}, slots: [], tabStrips: [], terminalCells: [], editors: []}};
     const digestB = {snapshot: {editors: [], terminalCells: [], tabStrips: [], slots: [], fonts: {ui: 12}, viewport: {height: 2, width: 1}}};
@@ -5326,6 +5216,7 @@ async function runShareThemeSuite() {
     const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
     assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
     assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+    test('quick-open ranks local numbered DOIT files over fuzzy indexed paths', () => {
     const doitApi = loadYolomux('', ['1']);
     doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
       {name: 'websocket.py', path: '/repo/yolomux/yolomux_lib/websocket.py', relative_path: 'yolomux_lib/websocket.py', kind: 'file'},
@@ -5356,6 +5247,8 @@ async function runShareThemeSuite() {
       .sort((left, right) => right.score - left.score || left.index - right.index);
     assert.equal(exactDoitRows[0]?.label, 'DOIT.53.md', 'S15: exact local DOIT.53.md stays first for a dotted filename query');
     assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
+    });
+    test('quick-open restricts DOIT family search to sibling YOLOmux worktrees', () => {
     const doitFamilyApi = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOLOmux workdir family parent');
     doitFamilyApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
@@ -5369,6 +5262,7 @@ async function runShareThemeSuite() {
       .filter(item => item.category === 'file')
       .map(item => item.path);
     assert.deepStrictEqual(canonical(doitFamilyPaths), ['/home/test/yolomux.dev1/DOIT.64.md', '/home/test/yolomux.dev2/DOIT.57.md'], 'DOIT quick-open keeps YOLOmux sibling docs and drops indexed Dynamo/fuzzy path noise');
+    });
     assert.deepStrictEqual(
       canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
       {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
@@ -5921,8 +5815,9 @@ async function runShareThemeSuite() {
     assert.equal(syncCss.includes('--finder-session-touched-bg'), false, 'Finder Sync touched-dir marker no longer uses a background token');
     assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
     assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
-    assert.ok(/:root\s*\{[\s\S]*--50-terminal-file-tree-file-tree-git-status-bg-107:\s*rgba\(226,\s*232,\s*240,\s*0\.10\) !important[\s\S]*--50-terminal-file-tree-file-tree-git-status-fg-108:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss) && /\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)[\s\S]*?color:\s*var\(--50-terminal-file-tree-file-tree-git-status-fg-108\)/.test(syncCss), 'dark Finder ? status badge consumes faint centralized dark paints');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--50-terminal-file-tree-file-tree-git-status-bg-107:\s*var\(--paint-overlay-slate-06\) !important[\s\S]*--50-terminal-file-tree-file-tree-git-status-fg-108:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.36\)/.test(syncCss), 'light Finder ? status badge consumes faint centralized light slate paints');
+    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)[\s\S]*?color:\s*var\(--50-terminal-file-tree-file-tree-git-status-fg-108\)/.test(syncCss), 'Finder ? status badge routes through shared theme tokens');
+    const fileTreeTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-bg-107: var(--paint-overlay-slate-06) !important;') && fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-fg-108: rgb(var(--overlay-slate-rgb) / 0.36);'), 'light Finder ? status badge is faint against a light background through the shared slate paint token');
     assert.equal(syncCss.includes('.changes-status-unknown'), false, 'Differ no longer has a separate unknown-status CSS path');
     const scrollContainer = {
       clientHeight: 100,

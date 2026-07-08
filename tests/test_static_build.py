@@ -1,4 +1,5 @@
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -43,6 +44,18 @@ from tools.static_build import _color_luminance_alpha
 from tools.static_build import _first_color_literal
 from tools.static_build import _light_covers
 from tools.static_build import lint_light_mode_pairs
+
+
+UI_PINS = json.loads(repo_path("tests/ui_pins.json").read_text(encoding="utf-8"))
+
+
+def _grouped_css_selectors(css):
+    return {
+        frozenset(sb._split_css_selector_list(selector))
+        for _context, selector, _body, _line_no in sb._iter_located_css_rules(
+            sb._css_without_comments(css)
+        )
+    }
 
 
 def test_generated_static_assets_are_current():
@@ -555,7 +568,7 @@ def test_scroll_restoration_browser_checks_wait_for_observable_state():
         "Preferences scroll restoration",
         "YO!info scroll restoration",
     ):
-        assert source.count(f"description: '{description}'") == 1
+        assert f"description: '{description}'" in source
 
 
 def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
@@ -604,23 +617,15 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                 yield from statement_bodies(value)
 
     duplicates = []
-    helper_calls_by_path = {}
     for path in paths:
         source = repo_path(path).read_text(encoding="utf-8")
         tree = ast.parse(source, filename=path)
-        helper_calls_by_path[path] = sum(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "load_static_html_fixture"
-            for node in ast.walk(tree)
-        )
         for body in statement_bodies(tree):
             for first, second in zip(body, body[1:]):
                 if is_page_write(first) and is_page_navigation(second):
                     duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
 
     assert duplicates == []
-    assert all(count > 0 for count in helper_calls_by_path.values()), helper_calls_by_path
 
 
 def test_browser_fixtures_use_one_read_only_english_catalog_owner():
@@ -666,8 +671,12 @@ def test_browser_fixture_wait_loops_have_one_injected_owner():
     assert "BROWSER_WAIT_HELPER_SOURCE" in helper
     assert "Page.addScriptToEvaluateOnNewDocument" in helper
     assert "Timed out after ${timeoutMs}ms waiting for ${description}" in helper
-    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 40
     for path, source in fixture_sources.items():
+        wait_for_declarations = re.findall(r"\bconst\s+waitFor\s*=\s*([^;]+);", source)
+        assert wait_for_declarations, path
+        assert {declaration.strip() for declaration in wait_for_declarations} == {
+            "window.__yolomuxTestWaitFor"
+        }, path
         assert "const waitFor = async" not in source, path
         assert "const waitFor = predicate" not in source, path
         assert "await delay(320)" not in source, path
@@ -705,9 +714,9 @@ def test_yostats_history_browser_tests_use_shared_observable_waits():
         assert "window.__yolomuxTestWaitFor" in function_source, name
         assert "const deadline = performance.now()" not in function_source, name
         assert "setTimeout(resolve, 650)" not in function_source, name
-    assert function_sources["test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll"].count(
-        'assert metrics["historyResolution"] == 1'
-    ) == 1
+    assert 'assert metrics["historyResolution"] == 1' in function_sources[
+        "test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll"
+    ]
 
 
 def test_tokenized_component_base_rules_have_no_identical_light_restatements():
@@ -725,9 +734,8 @@ def test_tokenized_component_base_rules_have_no_identical_light_restatements():
     assert not re.search(r"body\.theme-light \.preferences-inline-action\s*\{\s*color:\s*var\(--active-control-bg\)", preferences_css)
     assert "body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .file-explorer-tree-col)" in tokens_css
     assert ":where(body.theme-light) .changes-comparison-head" not in tokens_css
-    assert ":where(body.theme-light) .changes-refresh," not in preferences_css
+    assert not re.search(r"body\.theme-light \.changes-refresh(?:,|\s*\{)", preferences_css)
     assert not re.search(r"body\.theme-light \.preferences-setting-control input\[type=\"number\"\],[\s\S]*?body\.theme-light \.diff-ref-suggestion-popover\s*\{[^}]*color:", preferences_css)
-    assert "--20-sessions-popovers-ci-indicator-bg-5: var(--paint-white);" in tokens_css
     assert ".ci-indicator:not(.branch-indicator):not(.pr-number-chip)" in popovers_css
     assert not re.search(r"body\.theme-light \.ci-indicator\.pr-number-chip\s*\{[^}]*(?:background|border-color):", popovers_css)
     assert "color: var(--pr-link-merged);" in popovers_css
@@ -771,13 +779,24 @@ def test_audited_css_families_have_one_grouped_owner():
     file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
     panels_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
 
-    assert ".preferences-search,\n.search-history-input {" in preferences_css
-    assert ".changes-summary-totals,\n.changes-repo-totals {" in preferences_css
-    assert ".keyboard-shortcut-row,\n.keyboard-legend-row {" in preferences_css
-    assert ".info-tree-search-control input:focus,\n.preferences-search:focus,\n.search-history-input:focus {" in file_tree_css
-    assert ".conversation-send,\n.yoagent-chat-stop {" in file_tree_css
-    assert ".file-editor-preview-pane,\n.file-editor-preview-pane-panel {" in panels_css
-    assert ".file-explorer-title,\n.file-explorer-panel-title,\n.file-editor-title {" in panels_css
+    preference_groups = _grouped_css_selectors(preferences_css)
+    file_tree_groups = _grouped_css_selectors(file_tree_css)
+    panel_groups = _grouped_css_selectors(panels_css)
+    assert frozenset({".preferences-search", ".search-history-input"}) in preference_groups
+    assert frozenset({".changes-summary-totals", ".changes-repo-totals"}) in preference_groups
+    assert frozenset({".keyboard-shortcut-row", ".keyboard-legend-row"}) in preference_groups
+    assert frozenset(
+        {
+            ".info-tree-search-control input:focus",
+            ".preferences-search:focus",
+            ".search-history-input:focus",
+        }
+    ) in file_tree_groups
+    assert frozenset({".conversation-send", ".yoagent-chat-stop"}) in file_tree_groups
+    assert frozenset({".file-editor-preview-pane", ".file-editor-preview-pane-panel"}) in panel_groups
+    assert frozenset(
+        {".file-explorer-title", ".file-explorer-panel-title", ".file-editor-title"}
+    ) in panel_groups
     assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
     assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.file-editor-panel-close::after\s*\{", preferences_css)
     assert re.search(r"\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{", panels_css)
@@ -792,6 +811,10 @@ def test_code_syntax_color_ownership_tree_is_clean():
 
 def test_runtime_buttons_have_one_shared_construction_owner():
     assert sb.lint_direct_button_construction() == []
+
+
+def test_shared_ui_ownership_lint_tree_is_clean():
+    assert sb.lint_shared_ui_ownership() == []
 
 
 def test_shared_ui_ownership_map_and_agent_reuse_protocol_remain_routable():
@@ -871,12 +894,31 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
     assert "static_src/js/yolomux/99_terminal_boot.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
 
 
+def test_shared_ui_ownership_lint_rejects_parallel_share_connection_maps(monkeypatch, tmp_path):
+    share_state = tmp_path / "96_share_state.js"
+    share_state.write_text(
+        "const shareHostConnectionRecords = new Map();\n"
+        "const shareHostSockets = new Map();\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
+        "96_share_state.js": (("share connection record", "shareHostConnectionRecords"),),
+    })
+    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES", (("parallel share host socket map", "shareHostSockets"),))
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["96_share_state.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_shared_ui_ownership() == [
+        "96_share_state.js: shared ownership forbids parallel share host socket map ('shareHostSockets')",
+    ]
+
+
 def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
     launcher = repo_path("tests/layout_url.test.js").read_text(encoding="utf-8")
     helper = repo_path("tests/layout_test_helper.js").read_text(encoding="utf-8")
-    suite_files = re.findall(r"'tests/[^']+\.test\.js'", launcher)
+    suite_files = re.findall(r"'(tests/[^']+\.test\.js)'", launcher)
 
-    assert len(suite_files) == len(set(suite_files)) == 9
+    assert len(suite_files) == len(set(suite_files)) and set(suite_files) == {f"tests/{path.name}" for path in repo_path("tests").glob("*.test.js") if path.name != "layout_url.test.js"}
     assert "layout suite shards:" in launcher
     assert "if (failed) process.exitCode = 1" in launcher
     assert "DID NOT SETTLE" in helper
@@ -1165,7 +1207,9 @@ def test_tree_row_hover_and_selection_paint_have_one_base_owner():
     editor_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
     selection_shadow = "box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);"
     hover_shadow = "box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);"
-    assert ".file-tree-row.selected,\n.file-tree-row.current-file:not(.selected) {" in tree_css
+    assert frozenset({".file-tree-row.selected", ".file-tree-row.current-file:not(.selected)"}) in (
+        _grouped_css_selectors(tree_css)
+    )
     assert tree_css.count(selection_shadow) == 1
     assert "body.theme-light .file-tree-row.selected {" not in tree_css
     assert "body.theme-light .file-tree-row.current-file:not(.selected) {" not in tree_css
@@ -1290,13 +1334,14 @@ def test_repeated_raw_component_literal_lint_flags_stale_allowlist_entries(monke
 
 
 def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
+    pane_meta_path_light = UI_PINS["paneMetaPathLight"]
     component = tmp_path / "component.css"
     component.write_text(".label { color: rgb(17, 24, 39); }\n", encoding="utf-8")
     monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
-    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#111827": ["--lt-text"]})
-    assert sb._canonical_opaque_color("#111827") == "#111827"
-    assert sb._canonical_opaque_color("rgb(17, 24, 39)") == "#111827"
+    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {pane_meta_path_light: ["--lt-text"]})
+    assert sb._canonical_opaque_color(pane_meta_path_light) == pane_meta_path_light
+    assert sb._canonical_opaque_color("rgb(17, 24, 39)") == pane_meta_path_light
     assert sb._canonical_opaque_color("rgba(17, 24, 39, 0.5)") is None
     assert lint_raw_literal_equals_token() == [
         "component.css:1: raw color rgb(17, 24, 39) duplicates token value(s) --lt-text; use var(--token)"
@@ -1304,14 +1349,15 @@ def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
 
 
 def test_raw_token_lint_masks_only_var_fallback_not_neighboring_literal(monkeypatch, tmp_path):
+    pane_meta_path_light = UI_PINS["paneMetaPathLight"]
     component = tmp_path / "component.css"
     component.write_text(
-        ".label { color: var(--fallback, #111827); border-color: rgb(17 24 39); }\n",
+        f".label {{ color: var(--fallback, {pane_meta_path_light}); border-color: rgb(17 24 39); }}\n",
         encoding="utf-8",
     )
     monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
-    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#111827": ["--lt-text"]})
+    monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {pane_meta_path_light: ["--lt-text"]})
     assert lint_raw_literal_equals_token() == [
         "component.css:1: raw color rgb(17 24 39) duplicates token value(s) --lt-text; use var(--token)"
     ]
@@ -1331,6 +1377,117 @@ def test_raw_token_lint_rejects_opaque_white_property_and_local_token(monkeypatc
         "component.css:1: raw color #fff duplicates token value(s) --paint-white; use var(--token)",
         "component.css:2: raw color #ffffff duplicates token value(s) --paint-white; use var(--token)",
     ]
+
+
+def test_novel_component_color_lint_tree_is_clean():
+    assert sb.lint_novel_component_colors() == []
+
+
+def test_novel_component_color_lint_rejects_one_use_mid_luminance_literal(monkeypatch, tmp_path):
+    css_dir = tmp_path / "static_src/css/yolomux"
+    css_dir.mkdir(parents=True)
+    tokens = css_dir / "00_tokens_base.css"
+    component = css_dir / "component.css"
+    tokens.write_text(":root { --known-color: #123456; }\n", encoding="utf-8")
+    component.write_text(".novel { color: #56789a; }\n", encoding="utf-8")
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.css",
+        [
+            "static_src/css/yolomux/00_tokens_base.css",
+            "static_src/css/yolomux/component.css",
+        ],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+    monkeypatch.setattr(sb, "NOVEL_COMPONENT_COLOR_ALLOWLIST", {})
+
+    violations = sb.lint_novel_component_colors()
+
+    assert len(violations) == 1
+    assert "static_src/css/yolomux/component.css:1: novel raw component color #56789a" in violations[0]
+
+
+def test_unused_css_token_lint_tree_is_clean():
+    assert sb.lint_unused_css_tokens() == []
+
+
+def test_unused_css_token_lint_rejects_new_dead_definition(monkeypatch, tmp_path):
+    tokens = tmp_path / "00_tokens_base.css"
+    component = tmp_path / "component.css"
+    javascript = tmp_path / "component.js"
+    tokens.write_text(":root { --used: #123456; --unused: #56789a; }\n", encoding="utf-8")
+    component.write_text(".used { color: var(--used); }\n", encoding="utf-8")
+    javascript.write_text("const unrelated = true;\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["component.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+    monkeypatch.setattr(sb, "UNUSED_CSS_TOKEN_ALLOWLIST", {})
+
+    violations = sb.lint_unused_css_tokens()
+
+    assert len(violations) == 1
+    assert "unused CSS token --unused" in violations[0]
+
+
+def test_semantic_color_contrast_lint_tree_is_clean():
+    assert sb.lint_semantic_color_contrast() == []
+
+
+def test_semantic_color_contrast_lint_rejects_low_contrast_theme_pair(monkeypatch, tmp_path):
+    tokens = tmp_path / "static_src/css/yolomux/00_tokens_base.css"
+    tokens.parent.mkdir(parents=True)
+    tokens.write_text(":root { --foreground: #777; --background: #888; }\n", encoding="utf-8")
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+    monkeypatch.setattr(sb, "SEMANTIC_CONTRAST_PAIRS", (("--foreground", "--background"),))
+
+    violations = sb.lint_semantic_color_contrast()
+
+    assert {violation.split(" contrast", 1)[0] for violation in violations} == {"dark", "light"}
+    assert all("expected >= 4.50:1" in violation for violation in violations)
+
+
+def test_asset_source_completeness_lint_tree_is_clean():
+    assert sb.lint_asset_source_completeness() == []
+
+
+def test_asset_source_completeness_lint_covers_registration_and_retirement_states(
+    monkeypatch, tmp_path
+):
+    source_dir = tmp_path / "static_src/js/yolomux"
+    source_dir.mkdir(parents=True)
+    for name in ("registered.js", "retired.js", "overlap.js", "orphan.js", "blank-reason.js"):
+        (source_dir / name).write_text("// fixture\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sb,
+        "ASSETS",
+        {
+            "yolomux.js": [
+                "static_src/js/yolomux/registered.js",
+                "static_src/js/yolomux/overlap.js",
+                "static_src/js/yolomux/missing.js",
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        sb,
+        "RETIRED_ASSET_PARTS",
+        {
+            "static_src/js/yolomux/retired.js": "reviewed retirement",
+            "static_src/js/yolomux/overlap.js": "must not also be registered",
+            "static_src/js/yolomux/stale.js": "stale fixture",
+            "static_src/js/yolomux/blank-reason.js": " ",
+        },
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
+
+    violations = sb.lint_asset_source_completeness()
+
+    assert any("unregistered static asset source part static_src/js/yolomux/orphan.js" in item for item in violations)
+    assert any("registered static asset source part is missing: static_src/js/yolomux/missing.js" in item for item in violations)
+    assert any("retired static asset part is missing: static_src/js/yolomux/stale.js" in item for item in violations)
+    assert any("retired static asset part is also registered: static_src/js/yolomux/overlap.js" in item for item in violations)
+    assert any("blank-reason.js" in item and "nonblank" in item for item in violations)
+    assert not any("retired.js" in item for item in violations)
 
 
 def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):

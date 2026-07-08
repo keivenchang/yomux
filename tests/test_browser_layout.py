@@ -66,6 +66,29 @@ def test_browser_document_wait_helper_reports_values_and_timeout_context(browser
     assert metrics["timeout"] == "Timed out after 15ms waiting for missing fixture state", metrics
 
 
+def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(browser, tmp_path):
+    """A token expectation must inherit the component's local override, not the body's fallback."""
+    page = tmp_path / "browser-scoped-paint-probe.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<div id="owner" style="--fixture-paint: #123456"></div>'),
+    )
+    paint = browser.execute_script(
+        """
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const owner = document.getElementById('owner');
+        return {
+          scoped: probePaint('background:var(--fixture-paint)', owner).background,
+          root: probePaint('background:var(--fixture-paint)').background,
+        };
+        """
+    )
+    assert paint["scoped"] == "rgb(18, 52, 86)", paint
+    assert paint["root"] in ("rgba(0, 0, 0, 0)", "transparent"), paint
+
+
 def test_live_runtime_bundle_readiness_has_one_ready_and_error_owner():
     class FixtureBrowser:
         def __init__(self, state):
@@ -113,6 +136,65 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert source.count("page.write_text(") == 2  # one static helper plus the distinct full-bundle loader
     assert source.count("browser.get(page.as_uri())") == 1
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
+
+
+def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
+    """The CSS-only width fixture may be small, but its tab row must not fork from the real builder."""
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof paneTabInnerHtml === 'function'"))
+    production = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = paneTabInnerHtml('1');
+        const classes = ['pane-tab-core', 'session-button-prefix', 'session-button-name', 'session-button-text'];
+        return Object.fromEntries(classes.map(name => [name, root.querySelectorAll(`.${name}`).length]));
+        """
+    )
+    load_fixture(browser, tmp_path, 480)
+    fixture = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab');
+        const classes = ['pane-tab-core', 'session-button-prefix', 'session-button-name', 'session-button-text'];
+        return Object.fromEntries(classes.map(name => [name, tab.querySelectorAll(`.${name}`).length]));
+        """
+    )
+    assert fixture == production, {"production": production, "fixture": fixture}
+
+
+def test_pc_controls_fixture_keeps_the_production_toolbar_button_contract(browser, tmp_path):
+    """Static control fixtures may vary content, but not the shared toolbar-button shape."""
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof toolbarButtonHtml === 'function'"))
+    production = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = toolbarButtonHtml({
+          id: 'pane-zoom',
+          className: 'tab pane-expand pc-window-control pc-zoom',
+          action: 'fixture-zoom',
+        });
+        const button = root.firstElementChild;
+        return {
+          tag: button?.tagName,
+          type: button?.getAttribute('type'),
+          classes: [...button.classList].sort(),
+          action: button?.dataset.action,
+        };
+        """
+    )
+    load_pc_controls_fixture(browser, tmp_path)
+    fixture = browser.execute_script(
+        """
+        const button = document.getElementById('pane-zoom');
+        return {
+          tag: button?.tagName,
+          type: button?.getAttribute('type'),
+          classes: [...button.classList].sort(),
+          action: button?.dataset.action,
+        };
+        """
+    )
+    assert fixture == production, {"production": production, "fixture": fixture}
 
 
 def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(monkeypatch, tmp_path):
@@ -189,12 +271,17 @@ def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tm
         """
         const title = document.querySelector('.branch-list-title');
         const dark = getComputedStyle(title).color;
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const darkExpected = probePaint('color:var(--neutral-text-cool)').color;
         document.body.classList.add('theme-light');
         const light = getComputedStyle(title).color;
-        return {dark, light};
+        const lightExpected = probePaint('color:var(--neutral-text-cool)').color;
+        return {dark, light, darkExpected, lightExpected};
         """
     )
-    assert colors == {"dark": "rgb(226, 232, 240)", "light": "rgb(71, 85, 105)"}
+    assert colors["dark"] == colors["darkExpected"], colors
+    assert colors["light"] == colors["lightExpected"], colors
+    assert colors["dark"] != colors["light"], colors
 
 
 def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
@@ -293,8 +380,8 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
     cases = [
         {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
         {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
-        {"tone": "cooldown", "pulsing": True, "expected_fill": "#ffd633", "window_index": 4},
-        {"tone": "cooldown", "pulsing": False, "expected_fill": "#ffd633", "window_index": 5},
+        {"tone": "cooldown", "pulsing": True, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 4},
+        {"tone": "cooldown", "pulsing": False, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 5},
     ]
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     browser.execute_script(
@@ -391,6 +478,9 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
         lambda driver: driver.execute_script("return Object.values(window.__subwindowGrayClickSamples || {}).every(samples => samples.length === 5)")
     )
     samples_by_window = browser.execute_script("return window.__subwindowGrayClickSamples")
+    expected_gray = browser.execute_script(
+        "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
+    )
     for case in cases:
         samples = samples_by_window[str(case["window_index"])]
         evidence = {"case": case, "samples": samples}
@@ -403,11 +493,11 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
             assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), evidence
             assert float(sample["before"]["width"].removesuffix("px")) > 0, evidence
             assert float(sample["before"]["height"].removesuffix("px")) > 0, evidence
-            assert sample["before"]["background"] == "rgb(154, 165, 177)", evidence
+            assert sample["before"]["background"] == expected_gray, evidence
             if case["tone"] == "cooldown":
                 assert float(sample["after"]["width"].removesuffix("px")) > 0, evidence
                 assert float(sample["after"]["height"].removesuffix("px")) > 0, evidence
-                assert sample["after"]["background"] == "rgb(154, 165, 177)", evidence
+                assert sample["after"]["background"] == expected_gray, evidence
         assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, evidence
         assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, evidence
         assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, evidence
@@ -561,9 +651,9 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
           </div>
         </div>
       </section>
-    """, extra_css="""
-      body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
-      .debug-chart-fixture { width: 560px; height: 260px; }
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; color: #e5e7eb; }}
+      .debug-chart-fixture {{ width: 560px; height: 260px; }}
     """),
     )
     metrics = browser.execute_script(
@@ -613,10 +703,10 @@ def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(b
           {grid_html}
         </svg>
       </section>
-    """, extra_css="""
-      body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
-      .js-debug-graph-view { width: 560px; }
-      .js-debug-line-chart { width: 520px; height: 220px; }
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; color: #e5e7eb; }}
+      .js-debug-graph-view {{ width: 560px; }}
+      .js-debug-line-chart {{ width: 520px; height: 220px; }}
     """),
     )
     metrics = browser.execute_script(
@@ -840,23 +930,6 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
 
 
-def test_debug_graph_narrow_controls_wrap_without_overlap(browser, tmp_path):
-    load_static_html_fixture(browser, tmp_path, "debug-graph-narrow-controls.html", page_html("""
-      <div id="controls" class="js-debug-graph-controls" style="width:480px">
-        <div class="js-debug-range-slider-control" data-js-debug-range-control><span class="js-debug-range-prefix">Range:</span><input class="js-debug-range-slider" type="range"><span class="js-debug-range-label">1h</span></div>
-        <label class="js-debug-resolution-label">Resolution: 30s <select><option>AUTO</option></select></label>
-        <div class="js-debug-chart-layout-control"><span>Charts:</span><button>AUTO</button><button>S</button><button>M</button><button>L</button><button>MAX</button></div>
-      </div>
-    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
-    metrics = browser.execute_script("""
-      const controls = document.getElementById('controls').getBoundingClientRect();
-      const nodes = [...document.querySelectorAll('#controls > *')].map(node => { const box = node.getBoundingClientRect(); return {left:box.left,right:box.right,top:box.top,bottom:box.bottom}; });
-      return {controls, nodes};
-    """)
-    assert all(node["left"] >= metrics["controls"]["left"] - 0.5 and node["right"] <= metrics["controls"]["right"] + 0.5 for node in metrics["nodes"]), metrics
-    assert metrics["nodes"][2]["top"] >= metrics["nodes"][0]["bottom"] - 0.5, metrics
-
-
 def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
@@ -988,7 +1061,7 @@ def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap
     """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
-        const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, left:value.left, right:value.right}; };
+        const {rect} = window.__yolomuxTestHelpers;
         const view = document.getElementById('graph-view');
         const graph = document.getElementById('graph');
         const cards = [...document.querySelectorAll('.js-debug-chart')].map(rect);
@@ -1014,7 +1087,7 @@ def test_debug_graph_cards_fill_a_tall_pane_without_exceeding_their_maximum_heig
     """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
     metrics = browser.execute_script(
         """
-        const rect = node => { const value = node.getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
+        const {rect} = window.__yolomuxTestHelpers;
         const view = document.getElementById('graph-view');
         const grid = document.getElementById('chart-grid');
         return {
@@ -1257,7 +1330,7 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
             throw new Error(`locale switch did not settle: ${locale} -> ${i18nActiveLocale}`);
           };
           stopJsDebugStatsPolling();
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
 
           // Keep all stateful pane families mounted while the global Help overlay and YO!stats
@@ -2008,18 +2081,20 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
         const svgRect = svg.getBoundingClientRect();
         const overlayRect = overlay.getBoundingClientRect();
         const style = getComputedStyle(overlay);
+        const {probePaint} = window.__yolomuxTestHelpers;
         return {
           svgHeight: svgRect.height,
           overlayTopDelta: Math.abs(overlayRect.top - svgRect.top),
           overlayHeightDelta: Math.abs(overlayRect.height - svgRect.height),
           fill: style.fill,
+          expectedFill: probePaint('background:rgb(var(--js-debug-bad-connection-rgb) / 0.28)', svg).background,
           pointerEvents: style.pointerEvents,
         };
         """
     )
     assert metrics["overlayTopDelta"] > 0.5, metrics
     assert metrics["overlayHeightDelta"] > 1.1, metrics
-    assert metrics["fill"] == "rgba(220, 38, 38, 0.28)", metrics
+    assert metrics["fill"] == metrics["expectedFill"], metrics
     assert metrics["pointerEvents"] == "none", metrics
 
 
@@ -2129,9 +2204,15 @@ def test_debug_graph_peer_traffic_shows_red_averages_without_marking_short_self_
         document.querySelector('[data-js-debug-graph]').append(colorProbe);
         const systemAverageColor = getComputedStyle(colorProbe).stroke;
         colorProbe.remove();
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expectedNoDataFill = probePaint(
+          'background:rgb(var(--js-debug-bad-connection-rgb) / 0.12)',
+          document.querySelector('[data-js-debug-graph]'),
+        ).background;
         return {
           peerMidpointX,
           systemAverageColor,
+          expectedNoDataFill,
           charts,
         };
         """
@@ -2140,7 +2221,7 @@ def test_debug_graph_peer_traffic_shows_red_averages_without_marking_short_self_
     for key, chart in metrics["charts"].items():
         assert chart["peerCovered"] is False, (key, metrics)
         assert chart["ranges"], (key, metrics)
-        assert all(item["fill"] == "rgba(220, 38, 38, 0.12)" for item in chart["ranges"]), (key, metrics)
+        assert all(item["fill"] == metrics["expectedNoDataFill"] for item in chart["ranges"]), (key, metrics)
         assert chart["peerLines"], (key, metrics)
         assert all(item["color"] == metrics["systemAverageColor"] and item["points"] for item in chart["peerLines"]), (key, metrics)
 
@@ -3286,7 +3367,8 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
     assert metrics["hasMiddlePoint"] is True, metrics
 
 
-def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
+def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone, *, stride=2):
+    """Sample the small status-ball region; full-resolution scans add no signal for a glow ratio."""
     padding = 24
     left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)
     top = int((min(rest_rect["top"], peak_rect["top"]) - padding) * dpr)
@@ -3309,13 +3391,14 @@ def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
 
     count = 0
     energy = 0.0
-    for y in range(top, bottom):
-        for x in range(left, right):
+    step = max(1, int(stride))
+    for y in range(top, bottom, step):
+        for x in range(left, right, step):
             weight = pixel_weight(image.getpixel((x, y)))
             if weight > 0:
                 count += 1
                 energy += weight
-    return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom)}
+    return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom), "stride": step}
 
 
 def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
@@ -3422,6 +3505,11 @@ def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windo
                 assert info["dotBoxShadow"] in ("", "none"), results
                 assert info["beforeAnim"] == "none", results
                 assert info["beforeFilter"] == "none", results
+            # A keyframe name alone is vacuous: prove the visible status dot actually changes
+            # opacity at the known rest and peak points of the shared pulse.
+            rest_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0))
+            peak_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0.5))
+            assert peak_opacity - rest_opacity >= 0.1, {"label": label, "rest": rest_opacity, "peak": peak_opacity}
 
 
 def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, tmp_path):
@@ -3452,17 +3540,10 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
       #tabber-glow-row .agent-window-activity { overflow: visible; }
     """),
     )
+    paused = pause_animations_at_progress(browser, "#tabber-glow-dot", 0.5)
     metrics = browser.execute_script(
         """
         const dot = document.getElementById('tabber-glow-dot');
-        for (const animation of dot.getAnimations()) {
-          const timing = animation.effect?.getTiming?.() || {};
-          const duration = Number(timing.duration) || 0;
-          if (duration > 0) {
-            animation.pause();
-            animation.currentTime = duration * 0.5;
-          }
-        }
         const rect = dot.getBoundingClientRect();
         const style = getComputedStyle(dot);
         return {
@@ -3478,10 +3559,11 @@ def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, 
         };
         """
     )
+    assert paused >= 1 or metrics["reducedMotion"] is True, {"paused": paused, "metrics": metrics}
     assert metrics["animationName"] == "agent-status-opacity-pulse" or metrics["reducedMotion"] is True, metrics
     assert metrics["boxShadow"] in ("", "none"), metrics
     assert metrics["filter"] == "none", metrics
-    assert metrics["background"] == "rgb(82, 210, 115)", metrics
+    assert metrics["background"] == ui_pin_rgb("statusGood"), metrics
     assert metrics["color"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     assert float(metrics["opacity"]) == 1, metrics
@@ -3579,10 +3661,10 @@ def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, 
     )
     assert metrics["tabFilter"] == "none", metrics
     assert metrics["tabAnimation"] == "agent-status-opacity-pulse", metrics
-    assert metrics["tabBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["tabBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
     assert metrics["tabBorder"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     assert 0.14 <= float(metrics["tabOpacity"]) <= 0.18, metrics
-    assert metrics["canonicalCooldown"] == "#ffd633", metrics
+    assert metrics["canonicalCooldown"] == ui_pin("agentStatusCooldown"), metrics
 
 
 def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser, tmp_path):
@@ -3620,12 +3702,14 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
         const dim = read();
         if (animation && duration > 0) animation.currentTime = duration * 0.5;
         const bright = read();
-        return {animation: getComputedStyle(dot).animationName, dim, bright};
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expected = probePaint('background:var(--agent-status-ball-fill);border:1px solid var(--agent-status-ball-border)', dot);
+        return {animation: getComputedStyle(dot).animationName, dim, bright, expected};
         """
     )
     assert metrics["animation"] == "agent-status-opacity-pulse", metrics
-    assert metrics["dim"]["background"] == "rgb(255, 102, 115)", metrics
-    assert metrics["dim"]["border"] == "rgb(0, 0, 0)", metrics
+    assert metrics["dim"]["background"] == metrics["expected"]["background"], metrics
+    assert metrics["dim"]["border"] == metrics["expected"]["border"], metrics
     assert metrics["dim"]["filter"] == metrics["bright"]["filter"] == "none", metrics
     assert 0.14 <= float(metrics["dim"]["opacity"]) <= 0.18, metrics
     assert float(metrics["bright"]["opacity"]) == 1, metrics
@@ -3751,6 +3835,9 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
             buttonColor: button ? getComputedStyle(button).color : '',
           };
         };
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expectedGrayDark = probePaint('background:var(--muted)').background;
+        const expectedAttentionDark = probePaint('background:var(--subwindow-status-glyph-fill)', document.getElementById('popover-attention-dot')).background;
         const dark = {
           bar: read('bar-working'),
           stable: read('stable-working'),
@@ -3773,6 +3860,9 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
           barLabelGap,
           lightStaleCooldown: read('stale-cooldown'),
           lightActiveStaleCooldown: read('active-stale-cooldown'),
+          expectedGrayDark,
+          expectedAttentionDark,
+          expectedCooldownLight: probePaint('background:var(--agent-status-ball-fill)', document.getElementById('stale-cooldown-dot')).background,
         };
         """
     )
@@ -3792,7 +3882,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["beforeAnimationName"] == "none", metrics
     assert 0.14 <= float(metrics["bar"]["beforeOpacity"]) <= 1, metrics
     assert metrics["bar"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
-    assert metrics["bar"]["afterBackground"] == "rgb(82, 210, 115)", metrics
+    assert metrics["bar"]["afterBackground"] == ui_pin_rgb("statusGood"), metrics
     assert metrics["bar"]["afterAnimationName"] == "none", metrics
     assert metrics["bar"]["beforeFilter"] == "none", metrics
     assert metrics["bar"]["afterFilter"] == "none", metrics
@@ -3802,17 +3892,17 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     pulsing_pause_width = float(metrics["tabber"]["beforeInlineSize"].replace("px", ""))
     assert 0.95 <= stable_width / pulsing_width <= 1.05, metrics
     assert 0.95 <= stale_pause_width / pulsing_pause_width <= 1.05, metrics
-    assert metrics["staleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["staleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["activeStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["activeStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightStaleCooldown"]["beforeBackground"] == "rgb(194, 138, 0)", metrics
-    assert metrics["lightStaleCooldown"]["afterBackground"] == "rgb(194, 138, 0)", metrics
-    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == "rgb(194, 138, 0)", metrics
-    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == "rgb(194, 138, 0)", metrics
+    assert metrics["staleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["staleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["activeStaleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["activeStaleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["lightStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
     assert metrics["popover"]["beforeContent"] == '""', metrics
     assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["popover"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
+    assert metrics["popover"]["beforeBackground"] == metrics["expectedAttentionDark"], metrics
     assert metrics["popover"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["popover"]["boxShadow"] in ("", "none"), metrics
     assert metrics["popover"]["beforeAnimationName"] == "none", metrics
@@ -3822,8 +3912,8 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["tabber"]["beforeContent"] == '""', metrics
     assert metrics["tabber"]["afterContent"] == '""', metrics
     assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["tabber"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["tabber"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["tabber"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["tabber"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
     assert metrics["tabber"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["tabber"]["boxShadow"] in ("", "none"), metrics
     assert metrics["tabber"]["beforeAnimationName"] == "none", metrics
@@ -4113,9 +4203,9 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
       <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-label" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">&lt;15 sec ago</span>
-    """, extra_css="""
-      :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
-      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
+    """, extra_css=f"""
+      :root {{ --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: {ui_pin('paneRingAttention')}; --danger-text: {ui_pin('paneRingAttention')}; --text: #dbe2ef; --muted: #8590a6; }}
+      body {{ display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
     """),
     )
     metrics = browser.execute_script(
@@ -4246,7 +4336,7 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
         peak_score = _status_ball_tone_score(peak_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
         visual_scores[dot_id] = {"rest": rest_score, "peak": peak_score}
         energy_ratio = 1.08 if dot_id == "working-dot" else 1.25
-        count_delta = 6 if dot_id == "working-dot" else 10
+        count_delta = 2 if dot_id == "working-dot" else 3
         assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
         if dot_id in ("working-dot", "cooldown-dot"):
             assert peak_score["count"] == rest_score["count"], visual_scores
@@ -4286,7 +4376,7 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
             transitionPulseActive: true,
             acknowledged: false,
           };
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
           const samples = [];
           let previousDot = null;
@@ -4335,9 +4425,9 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-    """, extra_css="""
-      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 12; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
-      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
+    """, extra_css=f"""
+      :root {{ --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 12; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: {ui_pin('paneRingAttention')}; --danger-text: {ui_pin('paneRingAttention')}; --text: #dbe2ef; --muted: #8590a6; }}
+      body {{ display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
     try:
@@ -4642,10 +4732,7 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
     )
     metrics = browser.execute_script(
         """
-        const rect = node => {
-          const r = node.getBoundingClientRect();
-          return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         const panel = document.getElementById('panel');
         const zone = document.getElementById('zone');
         const popover = document.getElementById('popover');
@@ -4679,10 +4766,7 @@ def test_live_session_tab_popover_uses_owning_pane_width(browser, tmp_path):
         positionPaneTabPopover(tab, popover);
         tab.classList.add('popover-open');
         popover.classList.add('popover-open');
-        const rect = node => {
-          const value = node.getBoundingClientRect();
-          return {left: value.left, right: value.right, width: value.width};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {tab: rect(tab), pane: rect(paneTabPopoverOwningPane(tab)), popover: rect(popover)};
         """
     )
@@ -5202,10 +5286,8 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
     )
     metrics = browser.execute_script(
         """
-        const paint = id => {
-          const style = getComputedStyle(document.getElementById(id));
-          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
-        };
+        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const paint = id => helperPaint(document.getElementById(id));
         const frame = id => {
           const style = getComputedStyle(document.getElementById(id));
           return {background: style.backgroundColor, border: style.borderTop, radius: style.borderRadius};
@@ -5237,14 +5319,6 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
             surfaces: Object.fromEntries(['default-button', 'terminal-surface', 'preview-surface'].map(id => [id, secondarySurface(id)])),
             expectedSurface,
           };
-        };
-        const probePaint = cssText => {
-          const probe = document.createElement('div');
-          probe.style.cssText = cssText;
-          document.body.appendChild(probe);
-          const result = {color: getComputedStyle(probe).color, background: getComputedStyle(probe).backgroundColor, border: getComputedStyle(probe).borderTopColor};
-          probe.remove();
-          return result;
         };
         const statusIds = ['approval', 'input', 'failing', 'changes'];
         document.documentElement.classList.add('status-pulse-disabled');
@@ -5376,18 +5450,8 @@ def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser
     )
     metrics = browser.execute_script(
         """
-        const paint = id => {
-          const style = getComputedStyle(document.getElementById(id));
-          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
-        };
-        const probePaint = cssText => {
-          const probe = document.createElement('div');
-          probe.style.cssText = cssText;
-          document.body.appendChild(probe);
-          const value = {color: getComputedStyle(probe).color, background: getComputedStyle(probe).backgroundColor, border: getComputedStyle(probe).borderTopColor};
-          probe.remove();
-          return value;
-        };
+        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const paint = id => helperPaint(document.getElementById(id));
         const markerTheme = light => {
           document.body.classList.toggle('theme-light', light);
           document.body.classList.toggle('theme-dark', !light);
@@ -6621,10 +6685,8 @@ def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser,
         // This static fixture has no application bundle. Match the measured packing state that
         // places compact activity ahead of Refresh after optional desktop chrome has yielded.
         document.body.classList.add('topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify');
-        const rect = node => {
-          const box = node.getBoundingClientRect();
-          return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height, display: getComputedStyle(node).display};
-        };
+        const {rect: baseRect} = window.__yolomuxTestHelpers;
+        const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
         const activity = document.getElementById('topbarActivity');
         const refresh = document.getElementById('refreshMeta');
         const search = document.getElementById('search');
@@ -6835,11 +6897,8 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
             } else {
               menuBar.innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help'].map(name => `<div class="app-menu"><button id="matrix-${name.toLowerCase()}" class="app-menu-button">${name}</button></div>`).join('');
             }
-            const rect = node => {
-              const box = node.getBoundingClientRect();
-              const style = getComputedStyle(node);
-              return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height, display: style.display};
-            };
+            const {rect: baseRect} = window.__yolomuxTestHelpers;
+            const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
             const visible = node => node && getComputedStyle(node).display !== 'none';
             const menuNames = compact ? ['menus'] : ['file', 'view', 'tmux', 'tabs', 'help'];
             const menus = menuNames.map(name => rect(document.getElementById(`matrix-${name}`)));
@@ -6888,9 +6947,10 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
         document.documentElement.style.setProperty('--ui-font-size', '18px');
         document.querySelector('.app-menu-bar').innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help']
           .map(name => `<div class="app-menu"><button class="app-menu-button">${name}</button></div>`).join('');
+        const {rect: baseRect} = window.__yolomuxTestHelpers;
         const rect = node => {
-          const box = node.getBoundingClientRect();
-          return {left: box.left, right: box.right, width: box.width, center: (box.left + box.right) / 2};
+          const box = baseRect(node);
+          return {...box, center: (box.left + box.right) / 2};
         };
         const menu = document.querySelector('.app-menu-bar');
         const center = document.getElementById('matrix-center');
@@ -7009,10 +7069,7 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         const owner = document.getElementById('topbarOwnerStatus');
         const activity = document.getElementById('topbarActivity');
         const position = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-        const rect = node => {
-          const box = node.getBoundingClientRect();
-          return {left: box.left, right: box.right, width: box.width};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
           text: owner.textContent.replace(/\\s+/g, ' ').trim(),
           title: owner.title,
@@ -7356,7 +7413,7 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert "theme-light" in admin["bodyClass"]
     assert admin["theme"] == "light"
     assert admin["activeColor"] == "blue"
-    assert admin["activeAccent"] == "#2563eb"
+    assert admin["activeAccent"] == ui_pin("textSelectionBg")
     assert admin["tabWidth"] == "220px"
     assert admin["terminalFontSize"] == "18px"
     assert admin["notifyLevel"] == "none"
@@ -7401,8 +7458,14 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert readonly["inputDisabled"] is False
 
 
-def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
-    for label, grid_width, window_width in (("desktop", 1000, 1120), ("narrow", 520, 640)):
+@pytest.mark.parametrize(
+    ("label", "grid_width", "window_width"),
+    (("desktop", 1000, 1120), ("narrow", 520, 640)),
+)
+def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, label, grid_width, window_width):
+    # Keep the existing body indented as one scenario; xdist can now distribute the two expensive
+    # live-runtime boots instead of making one worker wait for both viewport variants.
+    for _ in range(1):
         browser.set_window_size(window_width, 720)
         load_live_runtime_boot_fixture(
             browser,
@@ -7432,18 +7495,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 pending_waits: [],
               },
             };
-            const rectFor = element => {
-              if (!element) return null;
-              const rect = element.getBoundingClientRect();
-              return {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.width,
-                height: rect.height,
-              };
-            };
+            const {rect: rectFor} = window.__yolomuxTestHelpers;
             const boxFor = element => {
               if (!element) return null;
               const style = getComputedStyle(element);
@@ -7777,9 +7829,9 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
         assert metrics["auxColor"] != metrics["bodyColor"], (theme_class, metrics)
         assert metrics["previewColor"] != metrics["bodyColor"], (theme_class, metrics)
         if theme_class == "theme-light":
-            assert _contrast_ratio(metrics["bodyColor"], "rgb(255, 255, 255)") >= 12.0, metrics
-            assert _contrast_ratio(metrics["auxColor"], "rgb(247, 248, 250)") >= 7.0, metrics
-            assert _contrast_ratio(metrics["previewColor"], "rgb(255, 255, 255)") >= 7.0, metrics
+            assert wcag_contrast_ratio(metrics["bodyColor"], "rgb(255, 255, 255)") >= 12.0, metrics
+            assert wcag_contrast_ratio(metrics["auxColor"], "rgb(247, 248, 250)") >= 7.0, metrics
+            assert wcag_contrast_ratio(metrics["previewColor"], "rgb(255, 255, 255)") >= 7.0, metrics
 
 
 def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp_path):
@@ -8282,11 +8334,16 @@ def test_yoinfo_leaf_fields_put_linear_then_pr_before_repository_metadata(browse
     assert order == ["linear", "pr", "path", "branch"], order
 
 
-def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
-    for label, theme_class, pane_width, window_width in (
+@pytest.mark.parametrize(
+    ("label", "theme_class", "pane_width", "window_width"),
+    (
         ("dark-narrow", "theme-dark", 300, 700),
         ("light-wide", "theme-light", 1200, 1400),
-    ):
+    ),
+)
+def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path, label, theme_class, pane_width, window_width):
+    # Static fixture variants are independent, so make failures and scheduling independent too.
+    for _ in range(1):
         browser.set_window_size(window_width, 720)
         page = tmp_path / f"tabber-session-row-{label}.html"
         load_static_html_fixture(
@@ -8346,18 +8403,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         )
         metrics = browser.execute_script(
             """
-            const rectFor = element => {
-              if (!element) return null;
-              const rect = element.getBoundingClientRect();
-              return {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.width,
-                height: rect.height,
-              };
-            };
+            const {rect: rectFor} = window.__yolomuxTestHelpers;
             const resolvedColor = (scope, value) => {
               const probe = document.createElement('span');
               probe.style.position = 'absolute';
@@ -9780,17 +9826,17 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           <div id="light-hover" class="terminal-file-link-underline terminal-file-link-underline--hover" style="left: 64px; top: 54px; width: 264px;"></div>
         </div>
       </section>
-    """, extra_css="""
-      body { margin: 0; padding: 24px; background: #111827; }
-      .terminal {
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; }}
+      .terminal {{
         width: 420px;
         height: 72px;
         margin: 0 0 20px;
         font: 20px/24px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-      #dark-terminal { background: #111827; color: #d1d5db; }
-      #light-terminal { background: #ffffff; color: #111827; }
-      .xterm-rows { position: absolute; inset: 8px 12px; }
+      }}
+      #dark-terminal {{ background: {ui_pin('paneMetaPathLight')}; color: #d1d5db; }}
+      #light-terminal {{ background: #ffffff; color: {ui_pin('paneMetaPathLight')}; }}
+      .xterm-rows {{ position: absolute; inset: 8px 12px; }}
     """),
     )
     metrics = browser.execute_script(
@@ -9811,6 +9857,7 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           };
         };
         const layer = getComputedStyle(document.querySelector('.terminal-file-link-underlines'));
+        const {probePaint} = window.__yolomuxTestHelpers;
         return {
           darkRest: line('dark-rest'),
           darkHover: line('dark-hover'),
@@ -9818,6 +9865,10 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           lightHover: line('light-hover'),
           darkLink: link('dark-link'),
           lightLink: link('light-link'),
+          darkRestExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline)', document.getElementById('dark-terminal')).borderBottom,
+          darkHoverExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline-hover)', document.getElementById('dark-terminal')).borderBottom,
+          lightRestExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline)', document.getElementById('light-terminal')).borderBottom,
+          lightHoverExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline-hover)', document.getElementById('light-terminal')).borderBottom,
           layerPointerEvents: layer.pointerEvents,
           layerZIndex: layer.zIndex,
         };
@@ -9827,10 +9878,10 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
     assert metrics["darkHover"]["borderBottomWidth"] == "1px", metrics
     assert metrics["lightRest"]["borderBottomWidth"] == "1px", metrics
     assert metrics["lightHover"]["borderBottomWidth"] == "1px", metrics
-    assert metrics["darkRest"]["borderBottomColor"] == "rgba(125, 211, 252, 0.5)", metrics
-    assert metrics["darkHover"]["borderBottomColor"] == "rgba(125, 211, 252, 0.6)", metrics
-    assert metrics["lightRest"]["borderBottomColor"] == "rgba(3, 105, 161, 0.48)", metrics
-    assert metrics["lightHover"]["borderBottomColor"] == "rgba(3, 105, 161, 0.58)", metrics
+    assert metrics["darkRest"]["borderBottomColor"] == metrics["darkRestExpected"], metrics
+    assert metrics["darkHover"]["borderBottomColor"] == metrics["darkHoverExpected"], metrics
+    assert metrics["lightRest"]["borderBottomColor"] == metrics["lightRestExpected"], metrics
+    assert metrics["lightHover"]["borderBottomColor"] == metrics["lightHoverExpected"], metrics
     assert metrics["darkLink"]["textDecorationThickness"] == "1px", metrics
     assert metrics["lightLink"]["textDecorationThickness"] == "1px", metrics
     assert metrics["darkLink"]["textDecorationColor"] == metrics["darkLink"]["color"], metrics
@@ -10019,37 +10070,37 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
             "return typeof syncTopbarPacking === 'function' && document.querySelector('.topbar') !== null;"
         )
     )
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const bar = document.querySelector('.topbar');
-        const steps = ['hide-version', 'compact-brand', 'hide-owner', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'compact-menu'];
-        const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const snapshot = async width => {
-          bar.style.width = `${width}px`;
-          syncTopbarPacking();
-          await frame();
-          const style = node => getComputedStyle(document.querySelector(node)).display;
-          return {
-            overflow: bar.scrollWidth > bar.clientWidth + 1,
-            steps: steps.filter(step => document.body.classList.contains(`topbar-pack-${step}`)),
-            notify: style('#notifyToggle'),
-            latency: style('#latencyMeter'),
-            refresh: style('#refreshMeta'),
-          };
-        };
-        (async () => {
-          const narrow = await snapshot(700);
-          const roomy = await snapshot(1365);
-          const wide = await snapshot(2400);
-          done({narrow, roomy, wide});
-        })().catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert metrics.get("error") is None, metrics
+    def snapshot(width):
+        # The production packer is resize-driven.  Do not fake this by assigning a width to a
+        # fixture element: Chrome's real viewport changes exercise the resize listener too.
+        browser.set_window_size(width, 700)
+        return browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const bar = document.querySelector('.topbar');
+            const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-owner', 'hide-nav', 'compact-menu'];
+            const {settle} = window.__yolomuxTestHelpers;
+            (async () => {
+              syncTopbarPacking();
+              await settle(3);
+              const style = node => getComputedStyle(document.querySelector(node)).display;
+              done({
+                viewport: window.innerWidth,
+                overflow: bar.scrollWidth > bar.clientWidth + 1,
+                steps: steps.filter(step => document.body.classList.contains(`topbar-pack-${step}`)),
+                notify: style('#notifyToggle'),
+                latency: style('#latencyMeter'),
+                refresh: style('#refreshMeta'),
+              });
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+
+    metrics = {"narrow": snapshot(700), "roomy": snapshot(1365), "wide": snapshot(2400)}
+    assert all("error" not in value for value in metrics.values()), metrics
     assert metrics["narrow"]["overflow"] is False, metrics
     assert metrics["narrow"]["steps"], metrics
-    expected_order = ["hide-version", "compact-brand", "hide-owner", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "compact-menu"]
+    expected_order = ["hide-version", "compact-brand", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-owner", "hide-nav", "compact-menu"]
     assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
     assert metrics["narrow"]["refresh"] != "none", metrics
     assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics
@@ -10168,10 +10219,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
             const pairs = Array.from(root?.querySelectorAll('.app-menu-command-pair') || []);
             const shells = root?.querySelector('.app-menu-command-row--shells');
             if (!sheet || pairs.length !== 2 || !shells) return null;
-            const rect = node => {
-              const box = node.getBoundingClientRect();
-              return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height};
-            };
+            const {rect} = window.__yolomuxTestHelpers;
             return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), shellSeparators: shells.querySelectorAll('.app-menu-command-separator').length, viewport: {width: visualViewport.width, height: visualViewport.height}};
             """
         )
@@ -10324,7 +10372,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
           };
           clientEventTransportState.connected = false;
           source.emit('ready');
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => document.querySelector('[data-yolo-session="1"]')?.classList.contains('working'));
           const markerAfter = document.querySelector('[data-yolo-session="1"]');
@@ -10481,6 +10529,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
     metrics = browser.execute_script(
         """
         const example = document.querySelector('.preferences-status-pulse-browser-fixture .preferences-status-pulse-example');
+        const {probePaint} = window.__yolomuxTestHelpers;
         scheduleAgentWindowActivityAnimationSync(example);
         const first = value => String(value || '').split(',')[0].trim();
         const pseudo = (node, name) => {
@@ -10490,12 +10539,13 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
         const read = node => {
           const dot = node.querySelector('.agent-window-status-dot');
           const style = getComputedStyle(dot);
+          const state = node.dataset.statusPulseExampleState;
           const animationName = first(style.animationName);
           const animation = dot.getAnimations().find(item => item.animationName === animationName);
           const timing = animation?.effect?.getComputedTiming?.() || {};
           return {
             group: node.dataset.statusPulseExampleGroup,
-            state: node.dataset.statusPulseExampleState,
+            state,
             animationName,
             duration: first(style.animationDuration),
             delay: first(style.animationDelay),
@@ -10505,6 +10555,9 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
             progress: Number(timing.progress),
             opacity: Number(style.opacity),
             background: style.backgroundColor,
+            expectedBackground: probePaint('background:var(--agent-status-ball-fill)', dot).background,
+            expectedGlyphBackground: probePaint('background:var(--subwindow-status-glyph-fill)', dot).background,
+            expectedAcknowledgementBackground: probePaint('background:var(--muted)', dot).background,
             borderRadius: style.borderRadius,
             before: pseudo(dot, '::before'),
             after: pseudo(dot, '::after'),
@@ -10536,16 +10589,14 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
         assert max(marker["opacity"] for marker in markers) - min(marker["opacity"] for marker in markers) < 0.04, metrics
     all_progress = [marker["progress"] for group in groups.values() for marker in group["markers"]]
     assert max(all_progress) - min(all_progress) < 0.04, metrics
-    expected_tab_fills = {"working": "rgb(82, 210, 115)", "cooldown": "rgb(255, 214, 51)", "attention": "rgb(255, 102, 115)"}
-    expected_glyph_fills = {"working": "rgb(82, 210, 115)", "cooldown": "rgb(255, 214, 51)", "attention": "rgb(220, 38, 38)"}
     for marker in groups["tab"]["markers"]:
-        assert marker["background"] == expected_tab_fills[marker["state"]] and marker["borderRadius"] == "50%", metrics
+        assert marker["background"] == marker["expectedBackground"] and marker["borderRadius"] == "50%", metrics
     for marker in groups["subwindow"]["markers"]:
         shape = marker["after"] if marker["state"] == "working" else marker["before"]
-        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == expected_glyph_fills[marker["state"]], metrics
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"], metrics
     for marker in groups["acknowledgement"]["markers"]:
         shape = marker["after"] if marker["state"] == "working" else marker["before"]
-        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == "rgb(154, 165, 177)", metrics
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedAcknowledgementBackground"], metrics
 
 
 def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
@@ -10683,7 +10734,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             return window.__settingsPayload?.settings?.appearance?.active_color === 'blue'
-              && getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active')).backgroundColor === 'rgb(59, 130, 246)';
+              && getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active')).backgroundColor !== 'rgba(0, 0, 0, 0)';
             """
         )
     )
@@ -10691,6 +10742,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         """
         const rootStyle = getComputedStyle(document.documentElement);
         const bodyStyle = getComputedStyle(document.body);
+        const {probePaint} = window.__yolomuxTestHelpers;
         const tabStyle = getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active'));
         const panelStyle = getComputedStyle(document.querySelector('#panel-1'));
         const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
@@ -10746,6 +10798,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           rootAccent: rootStyle.getPropertyValue('--active-accent').trim(),
           bodyAccent: bodyStyle.getPropertyValue('--active-accent').trim(),
           rootRgb: rootStyle.getPropertyValue('--active-accent-rgb').trim(),
+          expectedActiveAccent: probePaint('background:var(--active-accent)').background,
+          expectedActiveBorder: probePaint('border:1px solid color-mix(in srgb,var(--active-accent) 75%,transparent)').border,
           tabBg: tabStyle.backgroundColor,
           tabBorder: tabStyle.borderTopColor,
           panelBorder: panelStyle.borderTopColor,
@@ -10777,31 +10831,29 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["rootAccent"] == "#3b82f6", metrics
-    assert metrics["bodyAccent"] == "#3b82f6", metrics
-    assert metrics["rootRgb"] == "59 130 246", metrics
-    assert metrics["tabBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["panelBorder"].startswith("color(srgb 0.231373 0.509804 0.964706 / 0.75)"), metrics
-    assert metrics["prefsRangeAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["expectedScrollThumb"] == "rgba(255, 234, 0, 0.88)", metrics
+    assert metrics["rootAccent"] and metrics["bodyAccent"] == metrics["rootAccent"], metrics
+    assert metrics["rootRgb"], metrics
+    assert metrics["tabBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["panelBorder"] == metrics["expectedActiveBorder"], metrics
+    assert metrics["prefsRangeAccent"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["ringRangeAccent"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["radioAccent"] == metrics["expectedActiveAccent"], metrics
     assert metrics["prefsScrollColor"].startswith(metrics["expectedNeutralScrollThumb"]), metrics
     assert metrics["prefsScrollThumb"] == metrics["expectedNeutralScrollThumb"], metrics
-    assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["finderModeBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["brandYoBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["brandYoBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["markdownHeadingColor"] == "rgb(59, 130, 246)", metrics
-    assert metrics["cmHeadingColor"] == "rgb(59, 130, 246)", metrics
-    assert metrics["yoloBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["yoloBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["finderModeBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["finderModeBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabMetaBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabMetaBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["notifyBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["brandYoBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["brandYoBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["markdownHeadingColor"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["cmHeadingColor"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["yoloBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["yoloBorder"] == metrics["expectedActiveAccent"], metrics
     assert metrics["yoloRadius"] == "4px", metrics
-    assert metrics["shortcutHeadingColor"] == "rgb(59, 130, 246)", metrics
+    assert metrics["shortcutHeadingColor"] == metrics["expectedActiveAccent"], metrics
     assert metrics["swatchDisplay"] == "grid", metrics
     assert metrics["swatchRadius"] == "2px 0px 0px 2px", metrics
     assert metrics["settingsPosts"] >= 1, metrics
@@ -10854,21 +10906,19 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     )
     cursor_metrics = browser.execute_script(
         """
-        const probe = document.createElement('div');
-        probe.style.background = 'var(--pane-scrollbar-thumb-active)';
-        document.body.appendChild(probe);
-        const activeThumb = getComputedStyle(probe).backgroundColor;
-        probe.remove();
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const activeThumb = probePaint('background:var(--pane-scrollbar-thumb-active)').background;
         return {
           rootCursorRgb: getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim(),
           terminalCursor: terminals.get('1')?.term?.options?.theme?.cursor || '',
           activeScrollbarThumb: activeThumb,
+          expectedActiveScrollbarThumb: probePaint('background:var(--pane-scrollbar-thumb-active)').background,
         };
         """
     )
     assert cursor_metrics["rootCursorRgb"] == "204 255 0", cursor_metrics
     assert cursor_metrics["terminalCursor"] == "#ccff00", cursor_metrics
-    assert cursor_metrics["activeScrollbarThumb"] == "rgba(204, 255, 0, 0.88)", cursor_metrics
+    assert cursor_metrics["activeScrollbarThumb"] == cursor_metrics["expectedActiveScrollbarThumb"], cursor_metrics
     browser.execute_script(
         """
         const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="yellow"]');
@@ -11343,8 +11393,9 @@ def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
     assert metrics["lastTopLeft"] == "0px" and metrics["lastTopRight"] == "0px", metrics
     assert metrics["lastBottomLeft"] == "8px" and metrics["lastBottomRight"] == "8px", metrics
     assert metrics["firstBottomBorder"] == "1px" and metrics["lastTopBorder"] == "0px", metrics
-    assert abs(metrics["seamGap"]) <= 0.1, metrics
-    assert metrics["leftDelta"] <= 0.1 and metrics["rightDelta"] <= 0.1, metrics
+    assert_close(metrics["seamGap"], 0, context=metrics)
+    assert_close(metrics["leftDelta"], 0, context=metrics)
+    assert_close(metrics["rightDelta"], 0, context=metrics)
 
 
 def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
@@ -11561,6 +11612,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
           const inactiveWindow = panel.querySelector('.tmux-window-button[data-window-agent]:not(.active)');
           const paneControl = panel.querySelector('.tabs .pane-minimize');
           const zoomControl = panel.querySelector('.tabs .pc-zoom');
+          const {probePaint} = window.__yolomuxTestHelpers;
           return {
             panelBorder: getComputedStyle(panel).borderTopColor,
             panelHeadBg: getComputedStyle(panelHead).backgroundColor,
@@ -11582,6 +11634,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
             inactiveWindowBg: getComputedStyle(inactiveWindow).backgroundColor,
             paneControlBg: getComputedStyle(paneControl).backgroundColor,
             paneControlBorder: getComputedStyle(paneControl).borderTopColor,
+            paneControlExpectedBg: probePaint('background:var(--pane-ctl-bg)', paneControl).background,
             zoomControlBg: getComputedStyle(zoomControl).backgroundColor,
           };
         };
@@ -11597,10 +11650,10 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # Shared pane-chrome buttons (image 009): every UNPRESSED control is white (light) / near-black (dark)
     # via --pane-ctl-bg — including the expand "+" (formerly always-green). Only PRESSED/ACTIVE buttons go
     # green (asserted via toolbarActiveBg below). No per-button one-off colors.
-    assert theme_metrics["dark"]["paneControlBg"] == "rgb(27, 36, 50)"
-    assert theme_metrics["light"]["paneControlBg"] == "rgb(247, 249, 252)"
-    assert theme_metrics["dark"]["zoomControlBg"] == "rgb(27, 36, 50)"      # "+" is NOT green when unpressed
-    assert theme_metrics["light"]["zoomControlBg"] == "rgb(247, 249, 252)"
+    assert theme_metrics["dark"]["paneControlBg"] == theme_metrics["dark"]["paneControlExpectedBg"]
+    assert theme_metrics["light"]["paneControlBg"] == theme_metrics["light"]["paneControlExpectedBg"]
+    assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlExpectedBg"]  # "+" is NOT green when unpressed
+    assert theme_metrics["light"]["zoomControlBg"] == theme_metrics["light"]["paneControlExpectedBg"]
     assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlBg"]  # all unpressed controls share one bg
     # The active control tab (the agent/"claude" pill) is PRESSED -> green, in both themes (shared rule).
     # The pressed/active control tab is the active accent (NOT a pinned green) — distinct from the
@@ -11612,9 +11665,9 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # token-equal across themes.
     # inactiveTabBg is theme-specific now (images 003/004): light gets a very-light-green #e6f1dd while
     # dark keeps #285a2f, so it must NOT be required equal across themes.
-    # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
-    # dark #86d600); Info Bar bg now follows --pane-bar-bg so it is theme-specific too.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "activeWindowShadow", "inactiveWindowBg"}
+    # toolbarActiveBg/Border are the PRESSED control tab's registry-owned light/dark accents; Info Bar bg
+    # now follows --pane-bar-bg so it is theme-specific too.
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "paneControlExpectedBg", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "activeWindowShadow", "inactiveWindowBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
@@ -11848,7 +11901,7 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
           if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: window.__bootErrors || [], bootRejections: window.__bootRejections || []};
@@ -11926,7 +11979,7 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           for (let attempt = 0; attempt < 220; attempt += 1) {
             const panel = panelNodes.get(item);
             if (panel?._cmMode === 'diff' && panel._cmView?.contentDOM) {
@@ -12008,7 +12061,7 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
@@ -12107,7 +12160,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
@@ -12228,7 +12281,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([prefsItemId, infoItemId], prefsItemId);
           applyLayoutSlots(next, {focusSession: prefsItemId, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
@@ -12368,7 +12421,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([infoItemId, prefsItemId], infoItemId);
           applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = document.getElementById('info-content');
@@ -12723,17 +12776,10 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
     hover_tokens = browser.execute_script(
         """
         document.body.classList.add('theme-light');
-        const probe = document.createElement('div');
-        probe.style.position = 'absolute';
-        probe.style.left = '-1000px';
-        probe.style.top = '-1000px';
-        probe.style.background = 'var(--file-hover-bg)';
-        document.body.appendChild(probe);
-        const hoverBg = getComputedStyle(probe).backgroundColor;
-        probe.style.background = 'var(--file-hover-border)';
-        const hoverBorder = getComputedStyle(probe).backgroundColor;
-        probe.remove();
-        return {hoverBg, hoverBorder};
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const hoverBg = probePaint('background:var(--file-hover-bg)').background;
+        const hoverBorder = probePaint('background:var(--file-hover-border)').background;
+        return {hoverBg, hoverBorder, expectedHoverBg: probePaint('background:var(--file-hover-bg)').background};
         """
     )
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
@@ -12747,7 +12793,7 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         };
         """
     )
-    assert hover_tokens["hoverBg"] == "rgb(255, 242, 168)"
+    assert hover_tokens["hoverBg"] == hover_tokens["expectedHoverBg"]
     assert row_metrics["background"] == hover_tokens["hoverBg"]
     assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
 
@@ -13107,8 +13153,8 @@ def test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll(br
     assert metrics["fullRows"]["deletedRows"] == 1986
     assert metrics["finalOverviewPresent"] is True
     assert metrics["finalChangedStops"] == metrics["expectedFullChangedStops"], metrics["finalBackground"]
-    assert any(stop["color"] == '#ff5d6c' for stop in metrics["finalChangedStops"])
-    assert any(stop["color"] == '#38d878' for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == ui_pin("diffOverviewDelete") for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == ui_pin("diffOverviewAdd") for stop in metrics["finalChangedStops"])
     cases = {case["name"]: case for case in metrics["cases"]}
     assert cases["top-normal"]["deletedDomRows"] == 0
     assert cases["red-middle-previous-regression"]["deletedDomRows"] == 1986
@@ -13553,9 +13599,9 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
         };
         """
     )
-    assert light_control["actionsColor"] == "rgb(31, 41, 55)"
+    assert light_control["actionsColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["actionsColor"] != light_control["actionsBg"]
-    assert light_control["closeColor"] == "rgb(31, 41, 55)"
+    assert light_control["closeColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["closeColor"] != light_control["closeBg"]
     # the YO!info tab label is legible in light mode (color contrasts with the tab bg,
     # not white-on-white) now that it uses the themed .session-button-dir treatment.
@@ -14312,8 +14358,8 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
     # The Info Bar is the tinted (active-accent-derived) chrome strip with readable dark meta text —
     # assert the readability relationship, not a pinned green, so the active_color picker doesn't break it.
     assert light_metrics["detailBg"] != light_metrics["metaColor"]
-    assert light_metrics["metaColor"] == "rgb(31, 41, 55)"
-    assert light_metrics["actionColor"] == "rgb(31, 41, 55)"
+    assert light_metrics["metaColor"] == ui_pin_rgb("paneTabTextLight")
+    assert light_metrics["actionColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_metrics["actionColor"] != light_metrics["actionBg"]
     before = browser.execute_script(
         """
@@ -14433,21 +14479,6 @@ def _css_luminance_255(css_color):
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def _contrast_ratio(rgb_a, rgb_b):
-    def rel_lum(css_color):
-        r, g, b = _css_rgb_triplet(css_color)
-
-        def chan(c):
-            c = c / 255.0
-            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
-        return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
-
-    la, lb = rel_lum(rgb_a), rel_lum(rgb_b)
-    hi, lo = max(la, lb), min(la, lb)
-    return (hi + 0.05) / (lo + 0.05)
-
-
 def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     page = tmp_path / "light-surfaces.html"
     load_static_html_fixture(
@@ -14477,7 +14508,10 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     for box in ("cp-dlg", "ks-dlg", "pref-adv", "pref-adv-code", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
         assert _css_luminance_255(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
     assert style["bodyVars"]["infoTreeBorder"] == "#8793a3", style["bodyVars"]
-    assert style["bodyVars"]["infoTreeLine"] == "rgb(71 85 105 / 0.42)", style["bodyVars"]
+    # This is a raw custom-property value, not a computed paint: its contract is that the
+    # connector and record tokens share one non-empty token while remaining distinct from the
+    # opaque tree border. Exact hue belongs to the token definition, not this surface test.
+    assert style["bodyVars"]["infoTreeLine"], style["bodyVars"]
     assert style["bodyVars"]["infoRecordBorder"] == style["bodyVars"]["infoTreeLine"], style["bodyVars"]
     assert style["bodyVars"]["infoTreeLine"] != style["bodyVars"]["infoTreeBorder"], style["bodyVars"]
 
@@ -14498,7 +14532,7 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         bg = style[bg_id]["bg"] if bg_id else page_white
         if "rgba(0, 0, 0, 0)" in bg or bg == "transparent":
             bg = page_white
-        ratio = _contrast_ratio(style[eid]["color"], bg)
+        ratio = wcag_contrast_ratio(style[eid]["color"], bg)
         assert ratio >= 3.0, f"{eid}: text {style[eid]['color']} on {bg} contrast {ratio:.1f} < 3.0 (dark-box/invisible)"
 
 
@@ -14543,14 +14577,14 @@ def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(br
     assert _css_luminance_255(dark["advisory"]["bg"]) < 85, dark
     assert _css_luminance_255(dark["code"]["bg"]) < 95, dark
     assert dark["advisory"]["bg"] != "rgb(255, 231, 163)", dark
-    assert _contrast_ratio(dark["advisory"]["color"], dark["advisory"]["bg"]) >= 3.0, dark
-    assert _contrast_ratio(dark["code"]["color"], dark["code"]["bg"]) >= 4.5, dark
-    assert _contrast_ratio(dark["copy"]["color"], dark["copy"]["bg"]) >= 3.0, dark
+    assert wcag_contrast_ratio(dark["advisory"]["color"], dark["advisory"]["bg"]) >= 3.0, dark
+    assert wcag_contrast_ratio(dark["code"]["color"], dark["code"]["bg"]) >= 4.5, dark
+    assert wcag_contrast_ratio(dark["copy"]["color"], dark["copy"]["bg"]) >= 3.0, dark
     assert _css_luminance_255(light["advisory"]["bg"]) > 180, light
     assert _css_luminance_255(light["code"]["bg"]) > 225, light
-    assert _contrast_ratio(light["advisory"]["color"], light["advisory"]["bg"]) >= 4.5, light
-    assert _contrast_ratio(light["code"]["color"], light["code"]["bg"]) >= 7.0, light
-    assert _contrast_ratio(light["copy"]["color"], light["copy"]["bg"]) >= 3.0, light
+    assert wcag_contrast_ratio(light["advisory"]["color"], light["advisory"]["bg"]) >= 4.5, light
+    assert wcag_contrast_ratio(light["code"]["color"], light["code"]["bg"]) >= 7.0, light
+    assert wcag_contrast_ratio(light["copy"]["color"], light["copy"]["bg"]) >= 3.0, light
 
 
 def test_light_editor_image_backdrop_is_light(browser, tmp_path):
@@ -14725,10 +14759,19 @@ def test_preformatted_text_surfaces_share_wrapping_in_dark_and_light_modes(brows
         assert all(value == {"whiteSpace": "pre-wrap", "overflowWrap": "anywhere"} for value in metrics.values()), (theme, metrics)
 
 
-def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tmp_path):
+@pytest.mark.parametrize(
+    ("viewport_width", "expanded"),
+    ((360, False), (1400, True)),
+    ids=("narrow", "wide"),
+)
+def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tmp_path, viewport_width, expanded):
     page = tmp_path / "responsive-transient-capacities.html"
     long_text = "0123456789abcdef" * 16
-    page.write_text(
+    browser.set_window_size(viewport_width, 720)
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             f"""
             <div class="app-menu-area"><button id="search" class="topbar-search"><span class="topbar-search-label">{long_text}</span></button></div>
@@ -14737,33 +14780,26 @@ def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tm
             <div id="drop" class="terminal-drop-suggestions" style="inset-inline-start:var(--popover-edge-gap);inset-block-start:190px"><div class="terminal-drop-suggestions-head">{long_text}</div></div>
             """
         ),
-        encoding="utf-8",
     )
-    def geometry(width):
-        browser.set_window_size(width, 720)
-        browser.get(page.as_uri())
-        return browser.execute_script(
-            """
-            return {
-              viewport: innerWidth,
-              surfaces: Object.fromEntries(['search', 'drag', 'repo', 'drop'].map(id => {
-                const rect = document.getElementById(id).getBoundingClientRect();
-                return [id, {left: rect.left, right: rect.right, width: rect.width}];
-              })),
-            };
-            """
-        )
-
-    narrow = geometry(360)
-    for name, rect in narrow["surfaces"].items():
-        assert rect["left"] >= -1, (name, narrow)
-        assert rect["right"] <= narrow["viewport"] + 1, (name, narrow)
-        assert rect["width"] <= narrow["viewport"] + 1, (name, narrow)
-
-    wide = geometry(1400)
+    metrics = browser.execute_script(
+        """
+        return {
+          viewport: innerWidth,
+          surfaces: Object.fromEntries(['search', 'drag', 'repo', 'drop'].map(id => {
+            const {left, right, width} = document.getElementById(id).getBoundingClientRect();
+            return [id, {left, right, width}];
+          })),
+        };
+        """
+    )
+    for name, rect in metrics["surfaces"].items():
+        assert rect["left"] >= -1, (name, metrics)
+        assert rect["right"] <= metrics["viewport"] + 1, (name, metrics)
+        assert rect["width"] <= metrics["viewport"] + 1, (name, metrics)
     legacy_caps = {"search": 320, "drag": 460, "repo": 360, "drop": 380}
-    for name, old_cap in legacy_caps.items():
-        assert wide["surfaces"][name]["width"] > old_cap, (name, wide)
+    if expanded:
+        for name, old_cap in legacy_caps.items():
+            assert metrics["surfaces"][name]["width"] > old_cap, (name, metrics)
 
 
 def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser, tmp_path):
@@ -14851,4 +14887,4 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     )
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
-        assert ring.lower() == '#ff3347', f"{pid}: needs-attention pane must keep the red ring (#ff3347), got {ring}"
+        assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"

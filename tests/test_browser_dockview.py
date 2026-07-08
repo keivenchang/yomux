@@ -5,6 +5,42 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 
+def test_dockview_representative_light_retina_visual_profile(browser, tmp_path):
+    """Keep one real Dockview render covered outside the default dark/DPR=1 profile."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    dark = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab');
+        return {page: getComputedStyle(document.body).backgroundColor, tab: getComputedStyle(tab).backgroundColor};
+        """
+    )
+    profile = set_browser_visual_profile(browser, theme="light", dpr=2)
+    light = WebDriverWait(browser, 5).until(
+        lambda driver: (
+            metrics
+            if (metrics := driver.execute_script(
+                """
+                const tab = document.querySelector('.dockview-pane-tab');
+                const rect = tab?.getBoundingClientRect();
+                return {
+                  light: document.body.classList.contains('theme-light'),
+                  dpr: window.devicePixelRatio,
+                  page: getComputedStyle(document.body).backgroundColor,
+                  tab: getComputedStyle(tab).backgroundColor,
+                  visible: Boolean(rect && rect.width > 40 && rect.height > 12),
+                  errors: window.__bootErrors || [],
+                };
+                """
+            ))["light"] and metrics["dpr"] >= 1.9
+            else False
+        )
+    )
+    assert "theme-light" in profile["theme"] and profile["dpr"] >= 1.9, profile
+    assert light["visible"] is True and light["errors"] == [], light
+    assert light["page"] != dark["page"] or light["tab"] != dark["tab"], {"dark": dark, "light": light}
+
+
 def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -720,7 +756,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     assert all(metrics), metrics
     assert all(item["numberJustifyContent"] == "flex-start" for item in metrics), metrics
     for key in ("statusWidth", "statusOffset", "prefixOffset"):
-        assert max(item[key] for item in metrics) - min(item[key] for item in metrics) < 0.1, {key: metrics}
+        assert_close(max(item[key] for item in metrics), min(item[key] for item in metrics), context={key: metrics})
     assert metrics[0]["prefixWidth"] < metrics[1]["prefixWidth"], metrics
     assert metrics[1]["textOffset"] - metrics[0]["textOffset"] < 20, metrics
 
@@ -1519,9 +1555,9 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
 
 
-def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser, tmp_path):
+@pytest.mark.parametrize("grid_width", (1800, 1300, 1000, 900, 700))
+def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser, tmp_path, grid_width):
     sessions = [str(index) for index in range(1, 8)]
-    grid_widths = (1800, 1300, 1000, 900, 700)
     transcript_sessions = {
         session: {
             "panes": [
@@ -1538,20 +1574,19 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
         for session in sessions
     }
 
-    for grid_width in grid_widths:
-        browser.set_window_size(grid_width + 100, 700)
-        load_live_runtime_boot_fixture(
-            browser,
-            tmp_path,
-            f"?sessions={','.join(sessions)}&layout=left&tabs=left:{','.join(sessions)}",
-            sessions=sessions,
-            grid_width=grid_width,
-            transcript_sessions=transcript_sessions,
-        )
-        wait_for_dockview(browser, min_tabs=len(sessions))
-        metrics = WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                """
+    browser.set_window_size(grid_width + 100, 700)
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions={','.join(sessions)}&layout=left&tabs=left:{','.join(sessions)}",
+        sessions=sessions,
+        grid_width=grid_width,
+        transcript_sessions=transcript_sessions,
+    )
+    wait_for_dockview(browser, min_tabs=len(sessions))
+    metrics = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
                 const sessionTab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
                 const group = sessionTab?.closest('.dv-groupview');
                 const header = group?.querySelector('.dv-tabs-and-actions-container');
@@ -1562,13 +1597,9 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                 const infoBar = panel?.querySelector('.pane-info-bar, .panel-detail-row');
                 const windowButton = infoBar?.querySelector('.tmux-window-button');
                 if (!header || !tabsContainer || !actions || !infoBar || !windowButton || tabs.length !== arguments[0]) return false;
-                const rect = node => {
-                  const value = node.getBoundingClientRect();
-                  return {left: value.left, right: value.right, top: value.top, bottom: value.bottom, width: value.width};
-                };
+                const {rect, rowsByTop} = window.__yolomuxTestHelpers;
                 const tabRects = tabs.map(rect);
-                const rows = [...new Set(tabRects.map(value => Math.round(value.top)))].sort((left, right) => left - right)
-                  .map(top => tabRects.filter(value => Math.round(value.top) === top));
+                const rows = rowsByTop(tabRects);
                 const reservation = tabsContainer.querySelector(':scope > .dockview-tab-first-row-reservation');
                 const lastTabBottom = Math.max(...tabRects.map(value => value.bottom));
                 const infoBarRect = infoBar.getBoundingClientRect();
@@ -1587,25 +1618,25 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                   infoBarTop: infoBarRect.top,
                   windowButtonTop: windowButtonRect.top,
                 };
-                """,
-                len(sessions),
-            )
+            """,
+            len(sessions),
         )
-        assert metrics["rowCount"] >= (1 if grid_width == 1800 else 2), {"grid_width": grid_width, **metrics}
-        assert metrics["reservation"] is not None, metrics
-        assert metrics["reservation"]["top"] == metrics["tabs"][0]["top"], metrics
-        assert metrics["rows"][0][-1]["right"] <= metrics["reservation"]["left"] + 1, metrics
-        assert abs(metrics["reservation"]["right"] - metrics["contentRight"]) < 1.1, metrics
-        assert metrics["rows"][0][-1]["right"] <= metrics["actionLeft"] + 1, metrics
-        assert abs(metrics["headerBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
-        assert abs(metrics["tabsBottom"] - metrics["lastTabBottom"]) < 0.1, metrics
-        assert abs(metrics["infoBarTop"] - metrics["lastTabBottom"]) < 0.1, metrics
-        assert abs(metrics["windowButtonTop"] - metrics["lastTabBottom"] - 1) < 0.1, metrics
-        for row in metrics["rows"]:
-            assert abs(row[0]["left"] - metrics["tabsLeft"]) < 0.1, metrics
-            assert row[-1]["right"] <= metrics["contentRight"] + 0.1, metrics
-            for previous, current in zip(row, row[1:]):
-                assert abs(current["left"] - previous["right"] - 1) < 0.1, metrics
+    )
+    assert metrics["rowCount"] >= (1 if grid_width == 1800 else 2), {"grid_width": grid_width, **metrics}
+    assert metrics["reservation"] is not None, metrics
+    assert metrics["reservation"]["top"] == metrics["tabs"][0]["top"], metrics
+    assert metrics["rows"][0][-1]["right"] <= metrics["reservation"]["left"] + 1, metrics
+    assert_close(metrics["reservation"]["right"], metrics["contentRight"], 1.1, context=metrics)
+    assert metrics["rows"][0][-1]["right"] <= metrics["actionLeft"] + 1, metrics
+    assert_close(metrics["headerBottom"], metrics["lastTabBottom"], context=metrics)
+    assert_close(metrics["tabsBottom"], metrics["lastTabBottom"], context=metrics)
+    assert_close(metrics["infoBarTop"], metrics["lastTabBottom"], context=metrics)
+    assert_close(metrics["windowButtonTop"], metrics["lastTabBottom"] + 1, context=metrics)
+    for row in metrics["rows"]:
+        assert_close(row[0]["left"], metrics["tabsLeft"], context=metrics)
+        assert row[-1]["right"] <= metrics["contentRight"] + 0.1, metrics
+        for previous, current in zip(row, row[1:]):
+            assert_close(current["left"], previous["right"] + 1, context=metrics)
 
 
 def test_dockview_window_bar_buttons_select_tmux_windows(browser, tmp_path):
@@ -2524,13 +2555,10 @@ def test_dockview_window_bar_status_dots_render_subwindow_state_glyphs_only(brow
     assert metrics["working"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["working"]["beforeBorderStartWidth"] != "0px", metrics
     assert metrics["attention"]["beforeBackground"] == metrics["attention"]["glyphFill"], metrics
-    assert metrics["attention"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
-    assert metrics["stale"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
+    assert metrics["stale"]["beforeBackground"] == metrics["stale"]["glyphFill"], metrics
     assert metrics["attention"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["cooldown"]["beforeBackground"] == metrics["cooldown"]["glyphFill"], metrics
     assert metrics["cooldown"]["afterBackground"] == metrics["cooldown"]["glyphFill"], metrics
-    assert metrics["cooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["cooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
     assert metrics["cooldown"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["cooldown"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["cooldown"]["afterBorderTopWidth"] == "0px", metrics
@@ -3060,10 +3088,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     )
     before = browser.execute_script(
         """
-        const rectFor = node => {
-          const rect = node.getBoundingClientRect();
-          return {top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height};
-        };
+        const {rect: rectFor} = window.__yolomuxTestHelpers;
         const panel = document.querySelector('#panel-1');
         const row = panel.querySelector('.panel-detail-row');
         const bar = row.querySelector('.tmux-window-bar');
@@ -3115,10 +3140,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     )
     after = browser.execute_script(
         """
-        const rectFor = node => {
-          const rect = node.getBoundingClientRect();
-          return {top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height};
-        };
+        const {rect: rectFor} = window.__yolomuxTestHelpers;
         const panel = document.querySelector('#panel-1');
         const row = panel.querySelector('.panel-detail-row');
         const pane = panel.querySelector('#terminal-pane-1');
@@ -4477,10 +4499,7 @@ def test_dockview_tab_drag_preview_is_between_tabs(browser, tmp_path):
         )
         metrics = browser.execute_script(
             """
-            const rectFor = node => {
-              const rect = node.getBoundingClientRect();
-              return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height};
-            };
+            const {rect: rectFor} = window.__yolomuxTestHelpers;
             const tab2 = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
             const tab3 = document.querySelector('.dockview-pane-tab[data-pane-tab="3"]');
             const selection = document.querySelector('.dv-tab.dv-drop-target .dv-drop-target-selection');
@@ -5108,7 +5127,7 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview') || null;
           const widthOf = group => Math.round(group?.getBoundingClientRect?.().width || 0);

@@ -3032,8 +3032,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     }
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    if (viewportChanged) scheduleCachedRender();
-    if (viewportChanged && !timer) {
+    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
+    if (viewportChanged || contentChanged) scheduleCachedRender();
+    if ((viewportChanged || contentChanged) && !timer) {
       timer = setTimeout(() => {
         timer = 0;
         if (active()) refresh();

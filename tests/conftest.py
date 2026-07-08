@@ -9,6 +9,8 @@ general.language) can leave a *persistent* shared config dir mutated across runs
 """
 
 import os
+from pathlib import Path
+import re
 import socket
 import tempfile
 
@@ -39,12 +41,26 @@ SLOWEST_FIRST_TESTS = (
     "tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
     "tests/test_browser_dockview.py::test_dockview_yellow_window_ball_click_switches_and_acknowledges",
     "tests/test_node_suite.py::test_node_layout_suite_passes",
-    "tests/test_yoagent_stream_state.py::test_yoagent_stream_callback_truncates_oversized_auxiliary_history",
 )
 
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
+_SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pytest\.importorskip\([\"']selenium", re.MULTILINE)
+
+
+def _test_path(item) -> Path:
+    return Path(str(getattr(item, "path", getattr(item, "fspath", ""))))
+
+
+def _automatic_test_markers(path: Path) -> tuple[str, ...]:
+    return ("browser", "socket") if path.name.startswith("test_browser_") else ()
+
+
+def _test_path_imports_selenium(path: Path) -> bool:
+    if path.suffix != ".py" or not path.is_file():
+        return False
+    return bool(_SELENIUM_IMPORT_RE.search(path.read_text(encoding="utf-8")))
 
 
 @pytest.fixture
@@ -112,6 +128,13 @@ def isolated_file_index_background_hooks():
 
 
 def pytest_collection_modifyitems(config, items):
+    for item in items:
+        path = _test_path(item)
+        for marker_name in _automatic_test_markers(path):
+            item.add_marker(getattr(pytest.mark, marker_name))
+        if _test_path_imports_selenium(path) and item.get_closest_marker("browser") is None:
+            raise pytest.UsageError(f"{path}: Selenium tests must carry the browser marker")
+
     indexed = list(enumerate(items))
 
     def sort_key(pair):

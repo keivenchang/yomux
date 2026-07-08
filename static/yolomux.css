@@ -796,10 +796,8 @@
   --50-terminal-file-tree-yoagent-global-fg-7: var(--pane-tab-text);
   --50-terminal-file-tree-yoagent-global-bg-8: #151d24;
   --50-terminal-file-tree-yoagent-global-border-9: var(--line);
-  --50-terminal-file-tree-yoagent-chat-yoagent-content-text-10: initial;
   --50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11: initial;
   --50-terminal-file-tree-yoagent-chat-fg-12: var(--text);
-  --50-terminal-file-tree-yoagent-message-yoagent-content-text-13: initial;
   --50-terminal-file-tree-yoagent-message-yoagent-detail-text-14: initial;
   --50-terminal-file-tree-yoagent-message-fg-15: var(--text);
   --50-terminal-file-tree-yoagent-message-bg-16: var(--panel2);
@@ -879,7 +877,6 @@
   --50-terminal-file-tree-server-update-banner-dismiss-fg-90: var(--pr-status-closed);
   --50-terminal-file-tree-file-tree-row-fg-91: #ffb454;
   --50-terminal-file-tree-file-tree-row-text-decoration-color-92: rgba(255, 180, 84, 0.55);
-  --50-terminal-file-tree-file-tree-row-fg-93: var(--accent-lime);
   --50-terminal-file-tree-file-tree-row-fg-94: var(--file-tree-recency-fresh);
   --50-terminal-file-tree-file-explorer-path-bg-95: color-mix(in srgb, var(--panel) 72%, transparent);
   --50-terminal-file-tree-file-explorer-path-border-96: var(--line);
@@ -1322,10 +1319,8 @@ body.theme-light {
   --50-terminal-file-tree-yoagent-global-fg-7: var(--text);
   --50-terminal-file-tree-yoagent-global-bg-8: var(--lt-bg);
   --50-terminal-file-tree-yoagent-global-border-9: var(--line);
-  --50-terminal-file-tree-yoagent-chat-yoagent-content-text-10: var(--pc-control-hover-fg);
   --50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11: #334155;
   --50-terminal-file-tree-yoagent-chat-fg-12: var(--pc-control-hover-fg);
-  --50-terminal-file-tree-yoagent-message-yoagent-content-text-13: var(--pc-control-hover-fg);
   --50-terminal-file-tree-yoagent-message-yoagent-detail-text-14: #334155;
   --50-terminal-file-tree-yoagent-message-fg-15: var(--pc-control-hover-fg);
   --50-terminal-file-tree-yoagent-message-bg-16: var(--panel);
@@ -1405,7 +1400,6 @@ body.theme-light {
   --50-terminal-file-tree-server-update-banner-dismiss-fg-90: var(--lt-muted);
   --50-terminal-file-tree-file-tree-row-fg-91: #b06a00;
   --50-terminal-file-tree-file-tree-row-text-decoration-color-92: rgba(176, 106, 0, 0.6);
-  --50-terminal-file-tree-file-tree-row-fg-93: #3f6312;
   --50-terminal-file-tree-file-tree-row-fg-94: #3f6312;
   --50-terminal-file-tree-file-explorer-path-bg-95: rgba(255, 255, 255, 0.58);
   --50-terminal-file-tree-file-explorer-path-border-96: rgba(37, 99, 235, 0.18);
@@ -9701,7 +9695,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: var(--panel);
 
 
-  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-content-text-10);
   --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11);
   color: var(--50-terminal-file-tree-yoagent-chat-fg-12);
   border-color: var(--line);
@@ -12549,7 +12542,6 @@ body.app-vw-lte-980 .tabs {
 /* Theme-token consumers without a pre-existing local owner. */
 .yoagent-message {
 
-  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-message-yoagent-content-text-13);
   --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-message-yoagent-detail-text-14);
   color: var(--50-terminal-file-tree-yoagent-message-fg-15);
   background: var(--50-terminal-file-tree-yoagent-message-bg-16);

@@ -4,6 +4,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const {makeCatalogT} = require('./layout_test_helper');
 
 const source = fs.readFileSync('static_src/js/yolomux/46_file_drop_actions.js', 'utf8');
 const templates = {
@@ -11,13 +12,12 @@ const templates = {
   'drop.result.preview.truncated': 'Localized truncation at {count}',
   'upload.dropActionResultTitle': 'Fallback result',
 };
-const interpolate = (text, params = {}) => String(text || '').replace(/\{(\w+)\}/g, (match, name) =>
-  Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
+const t = makeCatalogT(templates);
 const context = {
-  t: (key, params) => interpolate(templates[key] || key, params),
+  t,
   messageDescriptorText(descriptor, fallback = '') {
     const template = templates[String(descriptor?.key || '')];
-    return template ? interpolate(template, descriptor?.params) : String(descriptor?.fallback || fallback || '');
+    return template ? t(descriptor?.key, descriptor?.params) : String(descriptor?.fallback || fallback || '');
   },
   userMessageText: value => String(value?.error || ''),
 };

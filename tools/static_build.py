@@ -33,6 +33,117 @@ SOURCE_LOCALE = FALLBACK_LOCALE
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES: set[str] = set()
 RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
+# Existing component-owned colors are an explicit migration baseline. New literals must instead
+# use a shared token or be added here with a reviewed reason; normalized identities make equivalent
+# hex/rgb spellings share one entry.
+NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
+    "static_src/css/yolomux/10_topbar_menus.css": (
+        frozenset({
+            "#041108", "rgb(255 255 255 / 0.42)", "rgb(255 255 255 / 0.66)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+    "static_src/css/yolomux/20_sessions_popovers.css": (
+        frozenset({
+            "#082014", "#10151f", "#3a3524", "#67d7ff", "#7a1020", "#9befad",
+            "#a5e8ff", "#aab4c4", "#e7ebf1", "#ff304a", "#ffd75d", "#ffd7dc",
+            "rgb(255 226 122 / 0.62)", "rgb(255 226 122 / 0.92)",
+            "rgb(255 255 255 / 0.07)", "rgb(255 255 255 / 0.24)",
+            "rgb(255 255 255 / 0.62)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+    "static_src/css/yolomux/30_preferences_changes.css": (
+        frozenset({
+            "#081205", "#a6e35f", "rgb(174 184 199 / 0.62)",
+            "rgb(255 255 255 / 0.18)", "rgb(48 57 72 / 0.45)",
+            "rgb(82 95 116 / 0.42)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+    "static_src/css/yolomux/40_layout_panes_tabs.css": (
+        frozenset({
+            "#7a8799", "rgb(0 0 0 / 0.52)", "rgb(0 0 0 / 0.66)",
+            "rgb(8 18 5 / 0.28)", "rgb(245 197 66 / 0.95)",
+            "rgb(255 255 255 / 0.16)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+    "static_src/css/yolomux/50_terminal_file_tree.css": (
+        frozenset({
+            "#061207", "#14171d", "#1d0307", "#2a1e00", "#314154", "#394354",
+            "#3a2b00", "#3b82f6", "#6f7b8d", "#6fce8a", "#b8ee5c", "#b98c24",
+            "#c8941e", "#d28b00", "#e8b04b", "#ffd6dc", "#ffe7a3", "#fff3c6",
+            "#fff4c2", "rgb(0 0 0 / 0.35)", "rgb(112 167 255 / 0.65)",
+            "rgb(226 232 240 / 0.16)", "rgb(255 102 115 / 0.14)",
+            "rgb(255 243 198 / 0.72)", "rgb(255 244 194 / 0.58)",
+            "rgb(255 255 255 / 0.26)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+    "static_src/css/yolomux/60_editor_file_panels.css": (
+        frozenset({
+            "#0b0e14", "#0e1724", "#0f131b", "#17210f", "#202838", "#35d36f",
+            "#3b0a0a", "#59677d", "#6cb6df", "#91a68a", "#9b2d33", "#a8e95a",
+            "#b9e7c2", "#b9e9ff", "#c69a15", "#c9ff7a", "#d9ffe0", "#edf3ff",
+            "#f4b7b7", "#f6e6a8", "#ff5a6d", "#ffe0e4", "#fff8cc",
+            "rgb(0 0 0 / 0.2)", "rgb(0 0 0 / 0.24)",
+            "rgb(120 180 255 / 0.4)", "rgb(159 216 255 / 0.1)",
+            "rgb(159 216 255 / 0.12)", "rgb(159 216 255 / 0.14)",
+            "rgb(159 216 255 / 0.22)", "rgb(177 40 55 / 0.26)",
+            "rgb(180 230 140 / 0.34)", "rgb(201 255 122 / 0.08)",
+            "rgb(226 238 248 / 0.045)", "rgb(226 238 248 / 0.18)",
+            "rgb(245 197 66 / 0.55)", "rgb(255 255 255 / 0.025)",
+            "rgb(255 255 255 / 0.03)", "rgb(255 255 255 / 0.045)",
+            "rgb(255 255 255 / 0.12)",
+            "rgb(28 146 68 / 0.24)", "rgb(9 105 218 / 0.04)",
+        }),
+        "reviewed pre-token component palette (2026-07-07)",
+    ),
+}
+
+# These definitions predate the unused-token gate. Keep them visible and individually reviewable so
+# new dead tokens fail while follow-up cleanup can remove entries one by one.
+UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
+    token: "reviewed pre-lint unused token baseline (2026-07-07)"
+    for token in (
+        "--active-ring", "--agent-window-activity-block-size",
+        "--agent-window-activity-inline-size", "--attention-ring-border", "--auto-active-text",
+        "--auto-border-disabled", "--auto-border-muted", "--auto-glow", "--auto-muted-text",
+        "--auto-surface", "--auto-surface-active", "--bottom", "--changes-folder-bg",
+        "--changes-folder-text", "--changes-icon-text", "--changes-indent-line",
+        "--changes-pane-min-inline-size", "--changes-path-text", "--changes-row-hover-bg",
+        "--cm-search-field-gap", "--dense-control-height", "--dense-control-min-height",
+        "--drop-outline-bg", "--drop-outline-strong", "--drop-outline-surface",
+        "--dv-active-sash-color", "--dv-activegroup-hiddenpanel-tab-background-color",
+        "--dv-activegroup-hiddenpanel-tab-color",
+        "--dv-activegroup-visiblepanel-tab-background-color",
+        "--dv-activegroup-visiblepanel-tab-color", "--dv-drag-over-background-color",
+        "--dv-drag-over-border", "--dv-drag-over-border-color",
+        "--dv-group-view-background-color",
+        "--dv-inactivegroup-hiddenpanel-tab-background-color",
+        "--dv-inactivegroup-hiddenpanel-tab-color",
+        "--dv-inactivegroup-visiblepanel-tab-background-color",
+        "--dv-inactivegroup-visiblepanel-tab-color", "--dv-sash-color", "--dv-tab-divider-color",
+        "--dv-tabs-and-actions-container-background-color",
+        "--dv-tabs-and-actions-container-font-size", "--dv-tabs-and-actions-container-height",
+        "--editor-text-padding-inline", "--editor-ui-font-size", "--editor-ui-font-size-sm",
+        "--file-explorer-open-inline-size", "--inactive-gray", "--inactive-gray-hover",
+        "--inactive-tab-bg", "--inactive-tab-border", "--info-tree-border",
+        "--info-tree-group-bg", "--js-debug-agent-token-pattern-ink-rgb", "--left",
+        "--pane-detail-bg", "--pane-tab-active-accent", "--pane-tab-panel-detail-bg",
+        "--pane-tab-panel-head-bg", "--pane-tab-panel-ring-shadow", "--pane-tab-zoom-bg",
+        "--pane-tab-zoom-border", "--pane-tab-zoom-hover-bg", "--pane-tab-zoom-hover-border",
+        "--panel2-inactive", "--pc-zoom-bg", "--pc-zoom-border", "--pc-zoom-hover-bg",
+        "--pc-zoom-hover-border", "--red-reminder-easing", "--right", "--top",
+        "--yolo-reminder-duration", "--z-finder-quick-access", "--z-tab-popover",
+    )
+}
+SEMANTIC_CONTRAST_PAIRS: tuple[tuple[str, str], ...] = (
+    ("--text", "--bg"),
+    ("--pane-tab-text", "--pane-tab-control-bg"),
+    ("--pane-tab-active-text", "--pane-tab-active-bg"),
+)
 SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/99_terminal_boot.js": (
         ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
@@ -46,7 +157,50 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/83_debug_panel.js": (
         ("graph series descriptor", "function debugGraphSeriesData", ".value(", ".hasData("),
     ),
+    # Finder, Tabber, and Differ deliberately have distinct product-specific callbacks, but their
+    # selection, expansion, click, and keyboard mechanics must all flow through this one parent.
+    # Keep this structural fact in the build lint rather than duplicating source-text regexes in
+    # the node shard that exercises the controller's actual behavior.
+    "static_src/js/yolomux/40_file_explorer_files.js": (
+        (
+            "shared tree controller parent",
+            "function createSharedTreeInteractionController",
+            "function sharedTreeSelectionApi",
+            "function sharedTreeExpansionApi",
+            "function sharedTreeClickHandler",
+            "function sharedTreeKeyboardHandler",
+            "const tabberTreeInteractionController = createSharedTreeInteractionController({",
+        ),
+    ),
+    "static_src/js/yolomux/45_file_explorer_actions.js": (
+        ("Finder tree controller registration", "const finderTreeInteractionController = createSharedTreeInteractionController({"),
+    ),
+    "static_src/js/yolomux/90_changes_editor.js": (
+        ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
+    ),
+    # Socket and queue state are one token-keyed record.  A second map lets reconnect, close, and
+    # pruning disagree about ownership, which was the source of a prior share replay regression.
+    "static_src/js/yolomux/00_bootstrap_state.js": (
+        (
+            "share sender lifecycle-record owner",
+            "const shareSenderRecords = new Map()",
+        ),
+    ),
+    "static_src/js/yolomux/96_share_state.js": (
+        (
+            "share host connection-record operations",
+            "function shareHostConnectionRecord",
+            "function enqueueShareHostMessage",
+            "function sendOrQueueShareHostMessage",
+            "function ensureShareHostSocket",
+            "function ensureShareHostSockets",
+        ),
+    ),
 }
+SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = (
+    ("parallel share host socket map", "shareHostSockets"),
+    ("parallel share host queue map", "shareHostQueues"),
+)
 # Exact normalized production clones are rare; each reviewed exception must name why the two
 # surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
 # normalized block digest emitted by lint_normalized_production_clones().
@@ -587,6 +741,15 @@ ASSETS: dict[str, list[str]] = {
     ],
 }
 
+# Source partials intentionally kept on disk but no longer concatenated into a served asset. A
+# reviewed marker distinguishes retirement from the much more dangerous "forgot to register it"
+# state that lint_asset_source_completeness() rejects.
+RETIRED_ASSET_PARTS: dict[str, str] = {
+    "static_src/js/yolomux/80_panes_preferences.js": (
+        "superseded by 80_info_panel.js and 82_preferences_panel.js; retained during migration"
+    ),
+}
+
 
 def repo_path(path: str | Path) -> Path:
     return REPO_ROOT / path
@@ -781,6 +944,20 @@ def _css_without_functions(css: str, function_names: set[str]) -> str:
 def _css_without_var_functions(css: str) -> str:
     """Mask var(...) calls while preserving line numbers and every unrelated declaration literal."""
     return _css_without_functions(css, {"var"})
+
+
+def _css_without_custom_property_values(css: str) -> str:
+    """Mask local `--token: value` bodies while preserving their declarations and line numbers."""
+    declaration_re = re.compile(
+        r"(?P<head>(?:^|[;{])\s*--[\w-]+\s*:)(?P<value>[^;{}]*)",
+        re.MULTILINE,
+    )
+
+    def masked(match: re.Match[str]) -> str:
+        value = "".join("\n" if char == "\n" else " " for char in match.group("value"))
+        return match.group("head") + value
+
+    return declaration_re.sub(masked, css)
 
 
 def _iter_located_css_rules(
@@ -1801,6 +1978,15 @@ def lint_shared_ui_ownership() -> list[str]:
             missing = [needle for needle in needles if needle not in source]
             if missing:
                 errors.append(f"{part}: shared {label} owner is missing {', '.join(repr(needle) for needle in missing)}")
+    for part in ASSETS.get("yolomux.js", []):
+        path = repo_path(part)
+        try:
+            source = read_text(path)
+        except FileNotFoundError:
+            continue
+        for label, needle in SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES:
+            if needle in source:
+                errors.append(f"{part}: shared ownership forbids {label} ({needle!r})")
     terminal_boot = repo_path("static_src/js/yolomux/99_terminal_boot.js")
     if terminal_boot.exists():
         source = read_text(terminal_boot)
@@ -1887,6 +2073,45 @@ def lint_source_control_characters() -> list[str]:
     return errors
 
 
+def lint_asset_source_completeness() -> list[str]:
+    """Every source partial on disk must be shipped or explicitly retired with a reason."""
+    source_families = (
+        ("static_src/js/yolomux", "*.js"),
+        ("static_src/js/emoji", "*.js"),
+        ("static_src/css/yolomux", "*.css"),
+    )
+    discovered = {
+        f"{directory}/{path.name}"
+        for directory, pattern in source_families
+        for path in repo_path(directory).glob(pattern)
+        if path.is_file()
+    }
+    registrations = [str(Path(part).as_posix()) for parts in ASSETS.values() for part in parts]
+    registered = set(registrations)
+    retired = {str(Path(part).as_posix()) for part in RETIRED_ASSET_PARTS}
+    errors: list[str] = []
+
+    for part, count in sorted(Counter(registrations).items()):
+        if count > 1:
+            errors.append(f"static asset source part registered {count} times: {part}")
+    for part in sorted(registered - discovered):
+        errors.append(f"registered static asset source part is missing: {part}")
+    for part, reason in sorted(RETIRED_ASSET_PARTS.items()):
+        normalized = str(Path(part).as_posix())
+        if not str(reason).strip():
+            errors.append(f"retired static asset part {normalized} needs a nonblank reviewed reason")
+        if normalized not in discovered:
+            errors.append(f"retired static asset part is missing: {normalized}; remove stale marker")
+        if normalized in registered:
+            errors.append(f"retired static asset part is also registered: {normalized}; remove retired marker")
+    for part in sorted(discovered - registered - retired):
+        errors.append(
+            f"unregistered static asset source part {part}; add it to ASSETS or "
+            "RETIRED_ASSET_PARTS with a reviewed reason"
+        )
+    return errors
+
+
 def lint_undefined_css_vars() -> list[str]:
     """Every `var(--x)` in the CSS bundle must resolve to a `--x:` definition (CSS) or a JS
     `setProperty('--x', …)` / inline `style="--x:…"`. a typo'd or removed token name otherwise
@@ -1902,8 +2127,35 @@ def lint_undefined_css_vars() -> list[str]:
             for name in sorted(referenced - defined)]
 
 
+def lint_unused_css_tokens() -> list[str]:
+    """Reject newly defined CSS custom properties that no CSS var() or JavaScript references."""
+    css = _css_without_comments(build_asset("yolomux.css"))
+    js = build_asset("yolomux.js")
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css))
+    referenced = set(re.findall(r"var\(\s*(--[\w-]+)", css))
+    referenced.update(re.findall(r"--[\w-]+", js))
+    unused = defined - referenced
+    errors: list[str] = []
+
+    for token, reason in sorted(UNUSED_CSS_TOKEN_ALLOWLIST.items()):
+        if not re.fullmatch(r"--[\w-]+", token):
+            errors.append(f"invalid unused CSS token allowlist entry {token}")
+            continue
+        if not str(reason).strip():
+            errors.append(f"unused CSS token allowlist entry {token} needs a nonblank reviewed reason")
+        if token not in defined:
+            errors.append(f"stale unused CSS token allowlist entry {token}: token is no longer defined")
+        elif token not in unused:
+            errors.append(f"stale unused CSS token allowlist entry {token}: token is now referenced")
+    for token in sorted(unused - set(UNUSED_CSS_TOKEN_ALLOWLIST)):
+        errors.append(
+            f"unused CSS token {token}; remove it or add UNUSED_CSS_TOKEN_ALLOWLIST with a reviewed reason"
+        )
+    return errors
+
+
 def _token_opaque_color_values() -> dict[str, list[str]]:
-    token_file = repo_path("static_src/css/yolomux/00_tokens_base.css")
+    token_file = repo_path(_css_token_source_part())
     css = re.sub(r"/\*.*?\*/", "", read_text(token_file), flags=re.DOTALL)
     values: dict[str, list[str]] = defaultdict(list)
     literal_re = re.compile(rf"(--[\w-]+)\s*:\s*({CSS_COLOR_LITERAL_PATTERN})")
@@ -1912,6 +2164,152 @@ def _token_opaque_color_values() -> dict[str, list[str]]:
         if canonical:
             values[canonical].append(match.group(1))
     return values
+
+
+def _css_token_source_part() -> str:
+    """Return the registered token partial so synthetic ASSETS fixtures use the same code path."""
+    return next(
+        (
+            part
+            for part in ASSETS.get("yolomux.css", [])
+            if str(part).endswith("00_tokens_base.css")
+        ),
+        "static_src/css/yolomux/00_tokens_base.css",
+    )
+
+
+def _token_color_identities() -> set[tuple[int, int, int, float]]:
+    """All literal color identities owned by the shared token partial, including alpha colors."""
+    css = _css_without_comments(read_text(repo_path(_css_token_source_part())))
+    identities: set[tuple[int, int, int, float]] = set()
+    declaration_re = re.compile(r"(?:^|[;{])\s*--[\w-]+\s*:\s*([^;{}]+)")
+    for declaration in declaration_re.finditer(css):
+        for match in CSS_COLOR_LITERAL_RE.finditer(declaration.group(1)):
+            identity = _color_identity(match.group(0))
+            if identity is not None:
+                identities.add(identity)
+    return identities
+
+
+def lint_novel_component_colors() -> list[str]:
+    """A raw component color must be token-owned or part of the reviewed migration baseline."""
+    token_identities = _token_color_identities()
+    css_parts = set(ASSETS.get("yolomux.css", []))
+    occurrences: dict[str, dict[tuple[int, int, int, float], list[int]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    errors: list[str] = []
+
+    for part in sorted(css_parts):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        try:
+            text = _css_without_var_functions(
+                _css_without_custom_property_values(
+                    _css_without_comments(read_text(repo_path(part)))
+                )
+            )
+        except FileNotFoundError:
+            continue
+        for match in CSS_COLOR_LITERAL_RE.finditer(text):
+            identity = _color_identity(match.group(0))
+            if identity is None or identity in token_identities:
+                continue
+            line_no = 1 + text.count("\n", 0, match.start())
+            occurrences[part][identity].append(line_no)
+
+    allowed_by_part: dict[str, set[tuple[int, int, int, float]]] = defaultdict(set)
+    for part, entry in sorted(NOVEL_COMPONENT_COLOR_ALLOWLIST.items()):
+        colors, reason = entry
+        if part not in css_parts:
+            continue
+        if not str(reason).strip():
+            errors.append(f"novel component color allowlist for {part} needs a nonblank reviewed reason")
+        for literal in sorted(colors):
+            identity = _color_identity(literal)
+            if identity is None:
+                errors.append(f"invalid novel component color allowlist entry {literal} for {part}")
+                continue
+            allowed_by_part[part].add(identity)
+            if identity not in occurrences.get(part, {}):
+                errors.append(
+                    f"stale novel component color allowlist entry {literal} for {part}; remove it"
+                )
+
+    for part, identities in sorted(occurrences.items()):
+        for identity, lines in sorted(identities.items()):
+            if identity in allowed_by_part.get(part, set()):
+                continue
+            literal = _color_identity_label(identity)
+            shown = ", ".join(str(line) for line in lines[:4])
+            suffix = "" if len(lines) <= 4 else f" (+{len(lines) - 4} more)"
+            errors.append(
+                f"{part}:{shown}: novel raw component color {literal}{suffix}; use a CSS token or "
+                "add NOVEL_COMPONENT_COLOR_ALLOWLIST with a reviewed reason"
+            )
+    return errors
+
+
+def _css_custom_property_declarations(body: str) -> dict[str, str]:
+    declaration_re = re.compile(r"(?:^|;)\s*(--[\w-]+)\s*:\s*([^;{}]+)")
+    return {match.group(1): match.group(2).strip() for match in declaration_re.finditer(body)}
+
+
+def _resolve_literal_color_token(token: str, values: dict[str, str]) -> str | None:
+    seen: set[str] = set()
+    current = token
+    while current not in seen:
+        seen.add(current)
+        value = values.get(current, "").strip()
+        reference = re.fullmatch(r"var\(\s*(--[\w-]+)\s*\)", value)
+        if reference is None:
+            return value if _color_luminance_alpha(value) is not None else None
+        current = reference.group(1)
+    return None
+
+
+def lint_semantic_color_contrast() -> list[str]:
+    """Enforce WCAG normal-text contrast for the core semantic foreground/background pairs."""
+    token_path = repo_path(_css_token_source_part())
+    try:
+        css = _css_without_comments(read_text(token_path))
+    except FileNotFoundError:
+        return [f"semantic contrast token source is missing: {token_path}"]
+    dark: dict[str, str] = {}
+    light_overrides: dict[str, str] = {}
+    for _context, selector, body, _line in _iter_located_css_rules(css):
+        members = set(_split_css_selector_list(selector))
+        if ":root" in members:
+            dark.update(_css_custom_property_declarations(body))
+        if "body.theme-light" in members:
+            light_overrides.update(_css_custom_property_declarations(body))
+
+    errors: list[str] = []
+    for theme, values in (("dark", dark), ("light", {**dark, **light_overrides})):
+        for foreground, background in SEMANTIC_CONTRAST_PAIRS:
+            foreground_color = _resolve_literal_color_token(foreground, values)
+            background_color = _resolve_literal_color_token(background, values)
+            foreground_measure = _color_luminance_alpha(foreground_color or "")
+            background_measure = _color_luminance_alpha(background_color or "")
+            if (
+                foreground_measure is None
+                or background_measure is None
+                or not math.isclose(foreground_measure[1], 1.0)
+                or not math.isclose(background_measure[1], 1.0)
+            ):
+                errors.append(
+                    f"{theme} contrast {foreground} on {background} cannot resolve to opaque literal colors"
+                )
+                continue
+            ratio = (
+                max(foreground_measure[0], background_measure[0]) + 0.05
+            ) / (min(foreground_measure[0], background_measure[0]) + 0.05)
+            if ratio < 4.5:
+                errors.append(
+                    f"{theme} contrast {foreground} ({foreground_color}) on {background} "
+                    f"({background_color}) is {ratio:.2f}:1; expected >= 4.50:1"
+                )
+    return errors
 
 
 def lint_raw_literal_equals_token() -> list[str]:
@@ -2209,6 +2607,7 @@ def main(argv: list[str] | None = None) -> int:
                 + lint_shared_ui_ownership()
                 + lint_normalized_production_clones()
                 + lint_source_control_characters()
+                + lint_asset_source_completeness()
                 + lint_css_structure()
                 + lint_identical_theme_restatements()
                 + lint_repeated_semantic_declaration_sets()
@@ -2218,12 +2617,15 @@ def main(argv: list[str] | None = None) -> int:
                 + lint_raw_standard_font_sizes()
                 + lint_raw_standard_spacing()
                 + lint_undefined_css_vars()
+                + lint_unused_css_tokens()
                 + lint_raw_literal_equals_token()
+                + lint_novel_component_colors()
                 + lint_repeated_raw_component_literals()
                 + lint_repeated_raw_box_shadows()
                 + lint_unowned_z_indexes()
                 + lint_raw_window_viewport_reads()
                 + lint_light_mode_pairs()
+                + lint_semantic_color_contrast()
             )
             i18n_warnings, i18n_errors = i18n_untranslated_report()
             for warning in i18n_warnings:

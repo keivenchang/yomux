@@ -30,16 +30,13 @@ def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
         const banner = document.querySelector('.share-viewer-banner');
         const grid = document.getElementById('grid');
         const dock = document.querySelector('.yolomux-dockview');
-        const rect = el => {
-          const r = el.getBoundingClientRect();
-          return {top: Math.round(r.top), height: Math.round(r.height), width: Math.round(r.width)};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
-          root: rect(root),
-          banner: rect(banner),
+          root: rect(root, {round: true}),
+          banner: rect(banner, {round: true}),
           bannerPosition: getComputedStyle(banner).position,
-          grid: rect(grid),
-          dock: rect(dock),
+          grid: rect(grid, {round: true}),
+          dock: rect(dock, {round: true}),
         };
         """
     )
@@ -199,17 +196,14 @@ def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
         const primary = document.querySelector('.share-url-primary');
         const primaryStyle = getComputedStyle(primary);
         const actions = document.querySelector('.share-actions');
-        const rect = el => {
-          const r = el.getBoundingClientRect();
-          return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height)};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
-          primary: rect(primary),
+          primary: rect(primary, {round: true}),
           primaryBorder: primaryStyle.borderTopColor,
           primaryBackground: primaryStyle.backgroundColor,
-          control: rect(control),
-          input: rect(input),
-          copy: rect(copy),
+          control: rect(control, {round: true}),
+          input: rect(input, {round: true}),
+          copy: rect(copy, {round: true}),
           copyCount: document.querySelectorAll('[data-share-copy]').length,
           copyText: copy.textContent.trim(),
           copyTitle: copy.getAttribute('title'),
@@ -579,7 +573,7 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               const path = {json.dumps(path)};
               const current = {json.dumps(current).replace("</script", "<\\/script")};
               const item = fileEditorItemFor(path);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {{frame}} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               installShareScrollPublisher();
               installShareReadonlyInteractionBlocker();
@@ -764,7 +758,7 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
               window.__shareInfoErrors = [];
               window.addEventListener('error', event => window.__shareInfoErrors.push(event.message || String(event.error || event)));
               window.addEventListener('unhandledrejection', event => window.__shareInfoErrors.push(String(event.reason || event)));
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {{frame}} = window.__yolomuxTestHelpers;
               infoPanelSubTab = 'info';
               transcriptMetadataState.loaded = true;
               transcriptMetadataState.loading = false;
@@ -896,7 +890,7 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
               window.__shareFinderErrors = [];
               window.addEventListener('error', event => window.__shareFinderErrors.push(event.message || String(event.error || event)));
               window.addEventListener('unhandledrejection', event => window.__shareFinderErrors.push(String(event.reason || event)));
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {{frame}} = window.__yolomuxTestHelpers;
               transcriptMetadataState.loaded = true;
               transcriptMetadataState.payload = {{
                 session_order: ['5', '6'],
@@ -1114,7 +1108,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
             const donePath = arguments[1];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               const visibleText = selector => Array.from(document.querySelectorAll(selector))
                 .map(node => node.textContent || '')
@@ -1237,7 +1231,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               for (let attempt = 0; attempt < 60; attempt += 1) {
                 if (document.querySelector('.share-viewer-banner [data-share-viewer-control="fit"]')) break;
                 await frame();
@@ -1352,7 +1346,7 @@ def test_share_replay_default_routes_write_share_to_replay_shell(browser, tmp_pa
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = (label, sequence) => ({
             digest: `sha256:${label}`,
@@ -1574,7 +1568,7 @@ def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const hostSockets = () => (window.__bootSocketInstances || []).filter(socket => socket.url.includes('/ws/share-host'));
           const hostMessages = () => hostSockets().flatMap(socket => socket.sent.map(message => JSON.parse(message)));
@@ -1677,7 +1671,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             const session = arguments[0];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               const bulk = document.createElement('section');
               bulk.id = 'share-large-dom-payload';
@@ -1785,7 +1779,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               document.getElementById('share-parity-finder')?.remove();
               document.getElementById('share-parity-differ')?.remove();
               const finder = document.createElement('section');
@@ -1818,7 +1812,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               document.getElementById('share-parity-finder')?.remove();
               document.getElementById('share-parity-differ')?.remove();
               const differ = document.createElement('section');
@@ -1864,6 +1858,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
     session = runtime.sessions[0]
     server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    # The canonical lane uses xdist worksteal: each parameter can execute in a different process,
+    # so a module-scoped Selenium fixture cannot share a driver across this matrix.  Keep the
+    # independent viewer local, which preserves the currently measured parallel execution and
+    # avoids falsely implying cross-worker browser reuse.
     viewer = new_chrome_driver("1220,742")
     install_browser_websocket_tracker(viewer)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -2062,7 +2060,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             const session = arguments[1];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               await ensureTerminalRunning(session);
               if (!await waitFor(
@@ -2100,7 +2098,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 throw new Error('share host socket did not open');
               }
               window.__shareMatrix = (() => {
-                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const {frame} = window.__yolomuxTestHelpers;
                 const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
                 const marker = () => {
                   let node = document.getElementById('shareMatrixMarker');
@@ -2699,7 +2697,7 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           window.__replayHandlerRan = false;
           window.__replayScriptRan = false;
@@ -2936,7 +2934,7 @@ def test_share_replay_popups_menus_and_modals_use_normal_dom_replay(browser, tmp
         const closePayload = arguments[1];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 22, sequence: 1, payload: openPayload});
           await frame();
           const openText = document.getElementById('appRoot')?.textContent || '';
@@ -3033,7 +3031,7 @@ def test_share_replay_shell_rebinds_xterm_to_moving_terminal_placeholder(browser
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = (label, terminalEpoch, includeTerminal = true) => ({
             digest: `sha256:${label}`,
@@ -3145,7 +3143,7 @@ def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: '',
@@ -3281,7 +3279,7 @@ def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(brow
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: 'sha256:resize-terminal',
@@ -3419,7 +3417,7 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: 'sha256:behind-terminal',
@@ -3523,7 +3521,7 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const keyframe = {
             digest: 'sha256:keyframe',
@@ -3648,7 +3646,7 @@ def test_share_replay_shell_ignores_interleaved_semantic_finder_frames(browser, 
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = (text, nodeId) => ({
             digest: '',
             viewport: {width: 1200, height: 700},
@@ -3766,7 +3764,7 @@ def test_share_replay_shell_applies_scroll_and_pointer_deltas(browser, tmp_path)
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const scrollerAttrs = testid => ({
             'data-testid': testid,
@@ -3914,7 +3912,7 @@ def test_share_replay_debug_copy_exports_sanitized_health(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const keyframe = {
             digest: 'sha256:keyframe-debug',
@@ -4046,7 +4044,7 @@ def test_share_replay_debug_copy_exports_last_replay_error(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = {
             digest: 'sha256:keyframe-debug-error',
             createdAt: Date.now() / 1000,
@@ -4148,7 +4146,7 @@ def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = {
             digest: 'sha256:replay-health-keyframe',
             createdAt: Date.now() / 1000,
@@ -4258,7 +4256,7 @@ def test_share_geometry_digest_repairs_wrapped_text_labels_in_browser(browser, t
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const root = appRootElement();
           const label = document.createElement('span');
           label.className = 'file-tree-name';
@@ -4356,7 +4354,7 @@ def test_share_geometry_digest_resyncs_slot_drift_in_browser(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           await frame();
           const host = shareGeometryDigestFrame();
@@ -4471,7 +4469,7 @@ def test_share_geometry_digest_repairs_terminal_cell_drift_with_host_resize(brow
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const item = terminals.get('1');
           const host = shareGeometryDigestFrame();
@@ -4572,7 +4570,7 @@ def test_share_geometry_digest_slots_use_layout_model_in_contain_viewer(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFrames = async count => {
             for (let index = 0; index < count; index += 1) await frame();
           };
@@ -4659,7 +4657,7 @@ def test_share_debug_diagnostics_redact_fragment_token_in_browser(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           await waitFor(() => window.yolomuxShareDebug?.enabled === true && document.querySelector('[data-share-viewer-control="debug"]'));
           const host = shareGeometryDigestFrame();
@@ -4798,7 +4796,7 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           await applyShareUiState({
             layout: arguments[0],
@@ -4835,7 +4833,7 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           await applyShareUiState({
             layout: arguments[0],
@@ -4924,7 +4922,7 @@ def test_share_viewer_drops_stale_layout_after_newer_ui_state(browser, tmp_path)
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           applyShareUiMessage({
             ch: 'ui',
@@ -5019,7 +5017,7 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const path = '/home/test/yolomux.dev/DONE.md';
           const item = fileEditorItemFor(path);
@@ -5111,7 +5109,7 @@ def test_share_geometry_digest_tolerates_safari_tab_strip_one_pixel_jitter(brows
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           setShareViewFit('contain', {persist: false});
           await frame();

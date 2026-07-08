@@ -1,6 +1,7 @@
 const assert = require('node:assert');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const {makeCatalogT, sourceBetween} = require('./layout_test_helper');
 
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
@@ -9,14 +10,6 @@ const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
 const shareSource = fs.readFileSync('static_src/js/yolomux/98_share_admin.js', 'utf8');
 const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
 const editorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
-const coreStart = coreSource.indexOf('function messageDescriptorText(');
-const coreEnd = coreSource.indexOf('function clientPushCanSupplyData(', coreStart);
-const eventStart = terminalSource.indexOf('function eventItemHtml(');
-const eventEnd = terminalSource.indexOf('function formatEventTime(', eventStart);
-const ownerStart = terminalSource.indexOf('function autoApproveOwnerLabel(');
-const ownerEnd = terminalSource.indexOf('function renderAutoApproveButtons(', ownerStart);
-assert.ok(coreStart >= 0 && coreEnd > coreStart && eventStart >= 0 && eventEnd > eventStart && ownerStart >= 0 && ownerEnd > ownerStart);
-
 const catalog = {
   'events.message.test': 'localized event {count}',
   'share.error.test': 'localized share {reason}',
@@ -27,10 +20,10 @@ const context = {
   i18nInterpolate: (text, params) => String(text).replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params || {}, name) ? String(params[name]) : match),
   esc: value => String(value),
   formatEventTime: value => String(value),
-  t: key => key === 'common.eventLabel' ? 'event' : key === 'yolo.ownerFallback' ? 'another YOLOmux' : key,
+  t: makeCatalogT({'common.eventLabel': 'event', 'yolo.ownerFallback': 'another YOLOmux'}),
 };
 vm.runInNewContext(
-  `${coreSource.slice(coreStart, coreEnd)}\n${terminalSource.slice(eventStart, eventEnd)}\n${terminalSource.slice(ownerStart, ownerEnd)}\nthis.api = {eventItemHtml, structuredMessageText, structuredMessageSnapshot, userMessageSnapshot, userMessageText, autoApproveOwnerLabel};`,
+  `${sourceBetween(coreSource, 'function messageDescriptorText(', 'function clientPushCanSupplyData(')}\n${sourceBetween(terminalSource, 'function eventItemHtml(', 'function formatEventTime(')}\n${sourceBetween(terminalSource, 'function autoApproveOwnerLabel(', 'function renderAutoApproveButtons(')}\nthis.api = {eventItemHtml, structuredMessageText, structuredMessageSnapshot, userMessageSnapshot, userMessageText, autoApproveOwnerLabel};`,
   context,
 );
 const api = context.api;
@@ -117,14 +110,6 @@ Object.assign(catalog, {
   'transcript.itemHeader': '{role} localized ({meta})',
   'transcript.role.assistant': 'localized assistant',
 });
-const searchStart = panelSource.indexOf('function runHistoryStateLabel(');
-const searchEnd = panelSource.indexOf('function runHistoryMetaParts(', searchStart);
-const transcriptErrorStart = terminalSource.indexOf('function transcriptMetadataLoadErrorText(');
-const transcriptErrorEnd = terminalSource.indexOf('function clearTranscriptContextLoadError(', transcriptErrorStart);
-const transcriptItemStart = terminalSource.indexOf('function transcriptItemHtml(');
-const transcriptItemEnd = terminalSource.indexOf('function eventItemHtml(', transcriptItemStart);
-assert.ok(searchStart >= 0 && searchEnd > searchStart && transcriptErrorStart >= 0 && transcriptErrorEnd > transcriptErrorStart && transcriptItemStart >= 0 && transcriptItemEnd > transcriptItemStart);
-
 const i16Context = {
   structuredMessageText: api.structuredMessageText,
   userMessageText: api.userMessageText,
@@ -138,13 +123,10 @@ const i16Context = {
   stateDef: () => ({label: catalog['state.done']}),
   normalizeRole: role => String(role || '').toLowerCase(),
   esc: value => String(value),
-  t: (key, params = {}) => {
-    const template = catalog[key] ?? key;
-    return String(template).replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
-  },
+  t: makeCatalogT(catalog),
 };
 vm.runInNewContext(
-  `${panelSource.slice(searchStart, searchEnd)}\n${terminalSource.slice(transcriptErrorStart, transcriptErrorEnd)}\n${terminalSource.slice(transcriptItemStart, transcriptItemEnd)}\nthis.i16 = {runHistoryStateLabel, searchHistorySourceLabel, searchHistoryErrorText, transcriptMetadataLoadErrorText, transcriptAgentErrorText, transcriptContextLoadErrorText, transcriptItemHtml};`,
+  `${sourceBetween(panelSource, 'function runHistoryStateLabel(', 'function runHistoryMetaParts(')}\n${sourceBetween(terminalSource, 'function transcriptMetadataLoadErrorText(', 'function clearTranscriptContextLoadError(')}\n${sourceBetween(terminalSource, 'function transcriptItemHtml(', 'function eventItemHtml(')}\nthis.i16 = {runHistoryStateLabel, searchHistorySourceLabel, searchHistoryErrorText, transcriptMetadataLoadErrorText, transcriptAgentErrorText, transcriptContextLoadErrorText, transcriptItemHtml};`,
   i16Context,
 );
 const i16 = i16Context.i16;
@@ -229,11 +211,6 @@ Object.assign(catalog, {
   'fs.error.notDirectory': 'first-locale not a directory: {path}',
   'transcript.lookupFailed': 'first-locale transcript lookup failed',
 });
-const fileStateStart = fileSource.indexOf('function fileErrorMessageSnapshot(');
-const fileStateEnd = fileSource.indexOf('function openFileIsMissing(', fileStateStart);
-const notificationStart = terminalSource.indexOf('function yoagentJobNotificationTitle(');
-const notificationEnd = terminalSource.indexOf('function tmuxSignalsPayloadWithWindowOverrides(', notificationStart);
-assert.ok(fileStateStart >= 0 && fileStateEnd > fileStateStart && notificationStart >= 0 && notificationEnd > notificationStart);
 const eagerStateContext = {
   MAX_FILE_PREVIEW_BYTES: 1024,
   fileEntryMtime: () => 0,
@@ -246,7 +223,7 @@ const eagerStateContext = {
   t: i16Context.t,
 };
 vm.runInNewContext(
-  `${fileSource.slice(fileStateStart, fileStateEnd)}\n${terminalSource.slice(notificationStart, notificationEnd)}\nthis.eagerState = {fileErrorState, missingFileState, fileErrorText, yoagentJobNotificationTitle, yoagentJobNotificationBody};`,
+  `${sourceBetween(fileSource, 'function fileErrorMessageSnapshot(', 'function openFileIsMissing(')}\n${sourceBetween(terminalSource, 'function yoagentJobNotificationTitle(', 'function tmuxSignalsPayloadWithWindowOverrides(')}\nthis.eagerState = {fileErrorState, missingFileState, fileErrorText, yoagentJobNotificationTitle, yoagentJobNotificationBody};`,
   eagerStateContext,
 );
 const eagerState = eagerStateContext.eagerState;

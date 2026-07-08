@@ -1801,7 +1801,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
             if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
@@ -1916,7 +1916,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
             if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});

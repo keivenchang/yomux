@@ -1241,7 +1241,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: var(--panel);
 
 
-  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-content-text-10);
   --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11);
   color: var(--50-terminal-file-tree-yoagent-chat-fg-12);
   border-color: var(--line);
@@ -4089,7 +4088,6 @@ body.app-vw-lte-980 .tabs {
 /* Theme-token consumers without a pre-existing local owner. */
 .yoagent-message {
 
-  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-message-yoagent-content-text-13);
   --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-message-yoagent-detail-text-14);
   color: var(--50-terminal-file-tree-yoagent-message-fg-15);
   background: var(--50-terminal-file-tree-yoagent-message-bg-16);

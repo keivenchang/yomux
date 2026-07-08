@@ -84,40 +84,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.i18nActiveLocaleId(), 'en');
   });
 
-  test('bootstrap, state, and editor chrome resolve visible labels lazily', () => {
-    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-    const dropSource = fs.readFileSync('static_src/js/yolomux/46_file_drop_actions.js', 'utf8');
-    const editorSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
-
-    assert.ok(/function yolomuxEditorSchemeLabel\(mode\)[\s\S]*t\('app\.documentTitle'\)[\s\S]*t\(`pref\.appearance\.theme\.\$\{mode\}`\)/.test(bootstrapSource), 'YOLOmux editor scheme names share one lazy localized product/theme helper');
-    assert.ok(/id: 'dark', get label\(\) \{ return yolomuxEditorSchemeLabel\('dark'\); \}/.test(bootstrapSource)
-      && /id: 'yolomux-light', get label\(\) \{ return yolomuxEditorSchemeLabel\('light'\); \}/.test(bootstrapSource), 'YOLOmux Dark/Light scheme labels resolve lazily while proper theme names stay stable');
-    assert.ok(/popoutDisabledReason: item => t\(fileItemPath\(item\)[\s\S]*pane\.popout\.filePreviewRequired[\s\S]*pane\.popout\.filePathRequired/.test(bootstrapSource), 'file popout disabled reasons resolve lazily by capability');
-    assert.equal((bootstrapSource.match(/pane\.popout\.interactiveDisabled/g) || []).length, 1, 'interactive tab types inherit one localized popout-disabled template from virtualPanelTabType');
-    assert.equal(/Hide tab metadata|Show tab metadata/.test(bootstrapSource), false, 'bootstrap does not initialize tab metadata controls with raw English');
-    assert.ok(/function renderTabMetaToggle\(\)[\s\S]*labelOn: t\('menu\.view\.tabMeta\.hide'\)[\s\S]*labelOff: t\('menu\.view\.tabMeta\.show'\)/.test(coreSource), 'tab metadata tooltip and aria state reuse existing locale keys');
-
-    for (const key of ['tmuxActionRequired', 'tmuxBellAlert', 'tmuxSilenceAlert', 'tmuxAgentExited', 'tmuxAgentExitedStatus', 'tmuxAgentExitedSignal', 'tmuxAgentRunning']) {
-      assert.ok(layoutSource.includes(`stateReason('${key}'`), `tmux state reason ${key} resolves through the shared state reason owner`);
-    }
-    assert.ok(layoutSource.includes("tPlural('tmux.viewer', count)"), 'tmux viewer presence uses plural-aware locale text');
-    assert.ok(/group: t\('palette\.group\.fileActions'\)[\s\S]*group: options\.group \|\| t\('palette\.group\.files'\)/.test(layoutSource), 'quick-open groups use localized labels');
-    assert.ok(/commandPaletteDropActionItems\(\)[\s\S]*const label = dropActionDisplayLabel\(action\)[\s\S]*label,[\s\S]*searchFields: \[t\('palette\.group\.fileActions'\), label/.test(layoutSource), 'command-palette drop actions reuse one localized label for display and search');
-    assert.ok(/function fileQuickOpenScopeLabel[\s\S]*tPlural\('palette\.scope\.indexedRoot', roots\.length - 1, \{path: compactHomePath\(roots\[0\]\)\}\)/.test(layoutSource), 'quick-open indexed-root scope uses the shared plural locale family');
-    assert.ok((layoutSource.match(/fileQuickOpenState.error = userMessageSnapshot\(/g) || []).length === 2
-      && !/fileQuickOpenState.error = error;/.test(layoutSource), 'quick-open retains every search failure through the shared relocalizable user-message snapshot');
-    assert.ok(/function runDropAction[\s\S]*const displayLabel = dropActionDisplayLabel\(action\)[\s\S]*status\.insertedDropAction[\s\S]*\{name: displayLabel\}/.test(dropSource), 'drop-action status reuses the same localized display-label owner as menus and search');
-    assert.ok(/label: t\(previewMediaKindForPath\(path\) === 'image' \? 'palette\.openImage' : 'palette\.openFile', \{name\}\)/.test(layoutSource)
-      && /t\('common\.indexedPath', \{path: compactHomePath\(indexedRoot\)\}\)/.test(layoutSource), 'quick-open file and indexed-root labels resolve lazily');
-    assert.ok(/startupHelperNavigationGroup[\s\S]*t\('startupHelper\.navigation'\)[\s\S]*t\('startupHelper\.action\.previous'\)/.test(layoutSource), 'startup-tip navigation aria text is localized');
-    assert.ok(/function compactNotificationTitle[\s\S]*const product = t\('app\.documentTitle'\)[\s\S]*`\$\{product\}\[\$\{label\}\]/.test(layoutSource), 'OS notification titles preserve product[session] form with the localized product name');
-    assert.ok(/keyboard-legend-meta-branch[\s\S]*esc\(t\('info\.field\.gitBranch'\)\)/.test(layoutSource), 'Help legend reuses the localized Git branch label');
-    assert.ok(/function updateFileEditorDiffButton[\s\S]*button\.textContent = t\('brand\.tab\.changes'\)/.test(editorSource), 'editor Differ control reuses the shared localized title');
-  });
-
-  test('t@1160', () => {
+  test('HTTP transport warning recommends self-signed HTTPS', () => {
     const api = loadYolomux();
     api.renderTransportWarning();
     const warning = api.httpsWarningForTest();
@@ -297,107 +264,6 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.terminalTmuxAltWindowShortcutForTest('l'), null);
   });
 
-  test('Finder, Differ, and editor fallback chrome reuse existing locale keys', () => {
-    const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
-    const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-    const differSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
-
-    assert.ok(finderSource.includes("`${t('common.field.branch')}: ${data.branchText}`"), 'Tabber branch hover metadata uses the shared localized branch label');
-    assert.ok(/data\.label \|\| stripTrailingEllipsisText\(t\('common\.loading'\)\)/.test(finderSource), 'Tabber loading fallback uses the shared localized loading label');
-    assert.ok(/const title = t\('finder\.quickAccess\.openPath', \{path\}\)[\s\S]*makeButton\(\{[\s\S]*title,/.test(finderSource), 'Finder quick paths use their exact localized path-opening label through the shared button builder');
-    assert.ok(/function repoInfoSummary[\s\S]*t\('git\.dirty'[\s\S]*t\('git\.ahead'[\s\S]*t\('git\.behind'/.test(finderSource), 'Finder repo summaries reuse shared localized git counts');
-    assert.ok(/function repoBranchDisplayText\(repo\)[\s\S]*t\('git\.detached'\)/.test(finderSource)
-      && /function setFileExplorerRepoSummary[\s\S]*repoBranchDisplayText\(repo\)/.test(finderSource), 'Finder repo title metadata shares the exact localized detached-branch fallback');
-    assert.ok(/function repoInfoPopoverHtml[\s\S]*repoBranchDisplayText\(repo\)[\s\S]*t\('git\.ahead'[\s\S]*t\('git\.behind'[\s\S]*t\('git\.dirty'/.test(finderSource), 'Finder repo popovers use the same localized git metadata');
-    assert.ok(/function gitStatusBadgeTitle[\s\S]*M: t\('state\.modified'\)[\s\S]*A: t\('git\.status\.added'\)[\s\S]*D: t\('git\.status\.deleted'\)[\s\S]*T: t\('git\.status\.transcriptTouched'\)[\s\S]*C: t\('git\.status\.copied'\)/.test(finderSource), 'Finder git badges resolve every semantic status through the shared localized git-status key family');
-    assert.ok(/function fileExplorerIndexBadgeTitle[\s\S]*finder\.index\.indexing[\s\S]*finder\.index\.indexed/.test(finderSource)
-      && /function setFileExplorerDirectoryIndexed[\s\S]*finder\.index\.alreadyIndexedBy[\s\S]*common\.indexedPath[\s\S]*finder\.index\.removed/.test(finderSource), 'Finder index titles and completion statuses resolve through one localized key family');
-    assert.ok(/function fileEntryStatusFromWatchFilePayload[\s\S]*common\.pathNotFound[\s\S]*finder\.invalidFileSignature/.test(finderSource), 'filesystem watch errors localize missing paths and invalid signatures');
-    assert.ok(/function showFileOpenError[\s\S]*emitNotification\('fileOpen', \{title: t\('editor\.fileOpenFailedTitle'\)/.test(actionsSource), 'file-open error uses the shared notification policy while retaining its localized title');
-    assert.ok(/function reloadOpenFileFromDisk[\s\S]*window\.confirm\(t\('dialog\.externalMessage', \{name: basenameOf\(path\)\}\)\)/.test(actionsSource), 'dirty reload confirmation reuses the localized external-change question');
-    assert.ok(/function openFileStatus[\s\S]*t\('dialog\.missingOnDisk'\)[\s\S]*t\('dialog\.unableLoadDisk'\)[\s\S]*t\('dialog\.staleStatus'\)[\s\S]*t\('dialog\.externalTitle'\)/.test(actionsSource), 'external-file status states reuse existing localized conflict labels');
-    assert.ok(/function codeMirrorPhraseValues\(\)[\s\S]*next: t\('preview\.find\.next'\)[\s\S]*previous: t\('preview\.find\.previous'\)[\s\S]*const phrases = codeMirrorPhraseValues\(\)[\s\S]*`\$\{phrases\.next\} \(Enter\)`[\s\S]*`\$\{phrases\.previous\} \(Shift\+Enter\)`/.test(actionsSource), 'CodeMirror next/previous search controls reuse one localized phrase owner while preserving shortcuts');
-    assert.ok(/function truncateDialogText[\s\S]*t\('fileCompare\.truncated', \{count: value\.length - maxChars\}\)/.test(actionsSource), 'comparison truncation uses the localized shared message');
-    assert.ok(/function focusExistingPhysicalFileEditor[\s\S]*t\('editor\.alreadyOpenAs', \{name: basenameOf\(existingPath\)\}\)/.test(actionsSource), 'physical-file dedup status uses the localized existing-editor message');
-    assert.ok(/function localizedDiffRefSubject[\s\S]*t\('diff\.ref\.base'\)[\s\S]*t\('diff\.ref\.workingTree'\)[\s\S]*function defaultDiffRefSuggestions/.test(differSource), 'default ref subjects share one lazy localized owner');
-    assert.ok(/function diffRefSuggestions[\s\S]*const suggestions = defaultDiffRefSuggestions\(\)/.test(differSource)
-      && /function fileDiffRefHistoryItems[\s\S]*const suggestions = defaultDiffRefSuggestions\(\)/.test(differSource), 'Differ and file-editor history reuse the same localized default refs');
-    assert.ok(/appendContextMenuButton\(menu, t\('contextmenu\.copyRelativePath'\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copyFullPath'\)/.test(differSource), 'Differ directory context menu reuses shared localized copy actions');
-    assert.ok(/async function copyChangedPath\(path, statusKey\)[\s\S]*statusEl\.textContent = t\(statusKey\)/.test(differSource), 'Differ copy completion resolves the matching localized status key');
-    assert.ok(/function fileExplorerModeButtonLabel[\s\S]*mode === 'diff'\) return t\('brand\.tab\.changes'\)/.test(differSource), 'Differ mode label resolves from the shared localized title');
-    assert.ok(/function fileExplorerModeButtonTitle[\s\S]*t\('tabber\.description'\)/.test(differSource)
-      && /function fileExplorerModeButtonLabel[\s\S]*t\('tabber\.title'\)/.test(differSource), 'Tabber title and description resolve lazily through locale keys');
-    assert.ok(/const changesOutsideRepoKey = 'Outside repo'[\s\S]*repo === changesOutsideRepoKey \? t\('changes\.outsideRepo'\)/.test(differSource), 'Differ keeps one internal outside-repo sentinel and localizes only its display label');
-    assert.ok(/function sessionFileStatusCountParts[\s\S]*t\('common\.files'\)/.test(differSource), 'directory status count suffix reuses the shared localized files label');
-    assert.ok(/className: 'file-editor-diff-panel'[\s\S]*label: t\('brand\.tab\.changes'\)/.test(differSource), 'editor Differ button reuses the same localized title');
-    assert.ok(/function changedFileAgentTitle[\s\S]*const prefix = t\('state\.modified'\)[\s\S]*`\$\{prefix\}: \$\{name\}/.test(differSource), 'Differ agent hover text reuses the localized modified label');
-    assert.ok(/function savePreferenceControl[\s\S]*t\('status\.settingSaved', \{path\}\)/.test(differSource), 'preference save completion reuses the localized saved-path status');
-  });
-
-  test('audited fallback chrome contains no parallel English display strings', () => {
-    const sources = Object.fromEntries([
-      'core', 'layout', 'menus', 'editorSettings', 'dockview', 'panel', 'info', 'markdown', 'preview', 'editor', 'terminal',
-    ].map((name, index) => [name, fs.readFileSync([
-      'static_src/js/yolomux/10_core_utils.js',
-      'static_src/js/yolomux/20_layout_state.js',
-      'static_src/js/yolomux/30_app_menus.js',
-      'static_src/js/yolomux/50_editor_settings_runtime.js',
-      'static_src/js/yolomux/75_dockview_layout.js',
-      'static_src/js/yolomux/78_panel_shell.js',
-      'static_src/js/yolomux/80_info_panel.js',
-      'static_src/js/yolomux/93_markdown_preview.js',
-      'static_src/js/yolomux/94_preview_popout.js',
-      'static_src/js/yolomux/95_codemirror_editor.js',
-      'static_src/js/yolomux/99_terminal_boot.js',
-    ][index], 'utf8')]));
-
-    assert.ok(sources.core.includes("t('finder.toolbar.hideHidden')") && sources.core.includes("t('app.noHttpsDetail'") && sources.core.includes("t('common.clipboardUnavailable')"), 'Finder, transport, and clipboard fallbacks resolve through locale keys');
-    assert.ok(sources.layout.includes("t('terminal.window.title', {name: windowIndex})"), 'attention-toast tmux targets reuse the shared window title');
-    assert.ok(sources.menus.includes("label: t('pref.general.language.system')"), 'language fallback reuses the localized System label');
-    assert.ok(sources.editorSettings.includes("t('editor.findUnavailable', {error})"), 'both CodeMirror find failure paths reuse one locale key');
-    assert.ok(/function paneTabAriaLabel[\s\S]*t\('filetab\.missingTitle'\)/.test(sources.panel) && /function dockviewTabAriaLabel[\s\S]*return paneTabAriaLabel\(item\)/.test(sources.dockview), 'DOM and Dockview tabs share one localized aria-label owner');
-    assert.ok(sources.info.includes("label: t('common.sort.recent')"), 'Info sort fallback reuses the localized recent label');
-    assert.ok(sources.markdown.includes("new Error(t('preview.mermaid.renderFailed'))") && !/Mermaid bundle missing critical exports|Mermaid unavailable/.test(sources.markdown), 'Mermaid loader failures resolve through the shared preview error key');
-    assert.ok(sources.preview.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout document title is localized');
-    assert.ok(/function renderClosedEditor[\s\S]*t\('editor\.fileClosed'\)/.test(sources.editor)
-      && /async function saveFileEditor[\s\S]*editor\.autoSaving[\s\S]*dialog\.conflictTitle[\s\S]*editor\.saveFailed[\s\S]*editor\.autoSaved/.test(sources.editor), 'editor closed/save lifecycle statuses resolve through locale keys');
-    assert.ok(/function worktreeDisplayText\(worktree\)[\s\S]*t\('popover\.worktreeOf'/.test(sources.core)
-      && /function infoPathLabel[\s\S]*worktreeDisplayText/.test(sources.terminal)
-      && sources.terminal.includes("t('info.missing.tmuxSubWindow')"), 'Info worktree and missing-window metadata are localized through shared owners');
-    assert.equal(/Hide dotfiles|Show hidden files \(dotfiles\)|No HTTPS\. Highly recommend|clipboard copy is unavailable|Find unavailable:| missing on disk|label: 'recent'|`\$\{basenameOf\(path\)\} preview`|file closed|failed to inspect preview file|auto-saving\.\.\.|save conflict: file changed on disk|save failed:|no Claude\/Codex tmux sub-window detected/.test(Object.values(sources).join('\n')), false, 'audited source files retain no raw-English display copies');
-  });
-
-  test('structured backend user messages localize once and retain diagnostics as fallback', () => {
-    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-    const dropSource = fs.readFileSync('static_src/js/yolomux/46_file_drop_actions.js', 'utf8');
-    const layoutSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
-    const summarySource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-    const yoagentSource = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
-    const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
-    const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-    const editorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
-    assert.ok(/function messageDescriptorText\(descriptor, fallback = ''\)[\s\S]*i18nResolve\(key\)[\s\S]*i18nInterpolate\(template, params\)[\s\S]*function userMessageText\(value, fallback = ''\)[\s\S]*payload\.user_message[\s\S]*messageDescriptorText\(descriptor, payload\.error \|\| source\.message \|\| fallback/.test(coreSource), 'one shared descriptor parent localizes frontend user messages and retains raw diagnostics as fallback');
-    assert.ok(/async function apiJsonResponse\(response\)[\s\S]*new Error\(userMessageText\(payload, response\.statusText \|\| `HTTP \$\{response\.status\}`\)\)/.test(coreSource)
-      && /async function apiFetchJson\([\s\S]*apiJsonResponse\(await apiFetch\(url, options\)\)/.test(coreSource)
-      && /async function apiFetchJsonQuiet\([\s\S]*response = await fetch\(url, requestOptions\)[\s\S]*apiJsonResponse\(response\)/.test(coreSource), 'shared JSON API helpers localize structured backend errors through one response parent before callers render them');
-    assert.ok(/function yoagentJobRowsHtml\([\s\S]*userMessageText\(job\?\.result\?\.send \|\| job\?\.result \|\| job, ''\)/.test(yoagentSource), 'YO!agent job rows consume the shared message descriptor, including nested send failures');
-    assert.ok(/function runServerDropAction[\s\S]*userMessageText\(error, error\)/.test(dropSource)
-      && /function showDropActionResult[\s\S]*dropActionResultPresentation\(payload\)/.test(dropSource)
-      && /function dropActionResultPresentation[\s\S]*structuredMessageText[\s\S]*messageDescriptorText[\s\S]*userMessageText\(source\)/.test(dropSource), 'drop-action errors and structured results share the message descriptor parents');
-    assert.ok(/summary_error[\s\S]*userMessageText\(payload, t\('summary\.stream\.failed'\)\)/.test(summarySource), 'summary SSE errors share the same structured message resolver');
-    assert.ok(/function ensureSession[\s\S]*userMessageText\(error, t\('status\.sessionCreateFailedDefault'\)\)[\s\S]*function createNextSession[\s\S]*userMessageText\(error, t\('status\.sessionCreateFailedDefault'\)\)/.test(layoutSource), 'ensure/create session failures share the structured message resolver');
-    assert.ok(/function showSessionRenameDialog[\s\S]*renameResult\?\.error[\s\S]*function renameTmuxSession[\s\S]*userMessageText\(error, t\('status\.sessionRenameFailedDefault'\)\)/.test(layoutSource), 'session rename failures use the structured message resolver and show the same error in the dialog');
-    assert.ok(/function fetchTmuxSelectionText[\s\S]*userMessageText\(payload, t\('status\.nothingSelected'\)\)/.test(coreSource), 'tmux copy-selection failures use the structured message resolver');
-    assert.ok(/function showFileTransferError\(error, options = \{\}\)[\s\S]*userMessageText\(error,/.test(actionsSource)
-      && /function uploadFiles[\s\S]*showFileTransferError\(error, \{session,/.test(summarySource)
-      && /function uploadEditorFiles[\s\S]*showFileTransferError\(error, \{item: focusedPanelItem,/.test(summarySource), 'terminal and editor uploads share the structured file-transfer error parent');
-    assert.ok(/function setAutoApprove[\s\S]*userMessageText\(error, t\('status\.yoloApprovalFailedDefault'\)\)/.test(summarySource), 'YOLO failures use the structured message resolver');
-    assert.ok(/function triggerSelfUpdate[\s\S]*userMessageText\(data, t\(data\.ok \? 'state\.done' : 'update\.seeServerLogs'\)\)/.test(summarySource), 'self-update results use the structured message resolver');
-    assert.ok(/function settleFileExplorerFsBatchItem[\s\S]*new Error\(userMessageText\(response, t\('common\.requestFailed'\)\)\)/.test(finderSource), 'batched Finder failures resolve the same structured descriptor as single-file API failures');
-    assert.ok(/function setFileExplorerListError[\s\S]*error\?\.payload[\s\S]*source,[\s\S]*function currentFileExplorerListError[\s\S]*userMessageText\(fileExplorerLastListError\.source/.test(finderSource), 'Finder retains the descriptor rather than freezing translated batch-error prose in cache state');
-    assert.ok(/async function saveFileEditor[\s\S]*const errorText = userMessageText\(payload, response\.statusText \|\| String\(response\.status\)\)[\s\S]*showFileSaveConflictDialog\(path, panel, \{message: errorText\}\)[\s\S]*editor\.saveFailed/.test(editorSource), 'editor save and conflict failures resolve structured filesystem descriptors before rendering');
-  });
-
   test('YO!info activity-summary lookback state uses shared options and refreshes activity summary', () => {
     const requests = [];
     const api = loadYolomux('', ['1']);
@@ -428,7 +294,7 @@ async function runLayoutRestoreSuite() {
     }), 'changing Info lookback refreshes all-session activity summary with selected hours');
   });
 
-  test('t@1174', () => {
+  test('default layout places Finder beside three sessions', () => {
     const api = loadYolomux('', ['1', '2', '3']);
     const layout = api.defaultLayoutForTest();
     assert.deepStrictEqual(canonical(layout), {
@@ -446,7 +312,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(params.get('tabs'), 'slot1:files;left:1,2;right:3');
   });
 
-  test('t@1191', () => {
+  test('empty default layout retains a Finder and placeholder pane', () => {
     const api = loadYolomux('', []);
     const layout = api.defaultLayoutForTest();
     assert.deepStrictEqual(canonical(layout), {
@@ -462,7 +328,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(params.get('tabs'), 'left:files;slot1:__empty_pane__');
   });
 
-  test('t@1201', () => {
+  test('session URL order restores the active pane layout', () => {
     const api = loadYolomux('?sessions=3,2,1', ['1', '2', '3']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
@@ -474,7 +340,7 @@ async function runLayoutRestoreSuite() {
     });
   });
 
-  test('t@1207', () => {
+  test('share bootstrap restores host layout and Finder state', () => {
     const api = loadYolomux('', ['6', '7'], 'https:', 'Linux x86_64', 'readonly', {
       share: {
         view: true,
@@ -609,7 +475,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['2'], 'fresh transcript metadata does not end the new Xterm grace window before tmux/socket state settles');
   });
 
-  test('t@1212', () => {
+  test('layout URL parser round-trips and clamps invalid splits', () => {
     const api = loadYolomux('?keep=1');
     assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');
     assert.equal(api.layoutFromParam(null, ''), null, 'null layout param falls back to default layout');
@@ -641,7 +507,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(slots)));
   });
 
-  test('t@1243', () => {
+  test('legacy tree layouts migrate to the current slot model', () => {
     const api = loadYolomuxWithFileExplorerClosed();
     const oldPayload = {
       tree: {
@@ -750,7 +616,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(restored.pendingFileEditorLineTargetForTest(item), 3, 'reload schedules the saved line through the shared editor line-target path');
   });
 
-  test('t@1270', () => {
+  test('legacy compact session layout restores without Finder', () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},
@@ -760,7 +626,7 @@ async function runLayoutRestoreSuite() {
     });
   });
 
-  test('t@1280', () => {
+  test('legacy Changes tokens migrate to Finder diff mode', () => {
   for (const legacyChangesToken of ['changes', '__changes__']) {
     const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -774,7 +640,7 @@ async function runLayoutRestoreSuite() {
   }
   });
 
-  test('t@1289', () => {
+  test('legacy YO!agent tokens migrate to the chat tab', () => {
   for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     const api = loadYolomuxWithFileExplorerClosed(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
@@ -785,7 +651,7 @@ async function runLayoutRestoreSuite() {
   }
   });
 
-  test('t@1298', () => {
+  test('file tabs survive URL layout restoration', () => {
     const search = '?sessions=files,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:file%3A%2Fhome%2Fkeivenc%2FAGENTS.md;slot1:5';
     const api = loadYolomux(search, ['5']);
     const serialized = api.serialize(api.currentSlots());
@@ -800,7 +666,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(params.get('tabs'), 'slot2:files;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
   });
 
-  test('t@1313', () => {
+  test('mixed virtual and file tabs restore from URL state', () => {
     const search = '?sessions=files,6&layout=row@22(slot2,slot3)&tabs=slot2:files;slot3:prefs,6*,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,ant,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2FTODO.md,file%3A%2Fhome%2Fkeivenc%2Fcomponents_metrics_README.md,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2F20260528-022.png';
     const api = loadYolomux(search, ['6', 'ant']);
     const agentsItem = 'file:/home/keivenc/AGENTS.md';
@@ -866,7 +732,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function terminalTabTitle\(session, info\)[\s\S]*terminalTabDetailLabel\(session, info\)/.test(sessionSource), 'DOIT.56 N3: terminal tab title still uses process/window detail');
   });
 
-  test('t@1367', () => {
+  test('Finder preserves its split width when peers close', () => {
     // Dockview round-trip parity: slots -> Dockview JSON -> slots is idempotent on the compacted
     // form. The pane rewrite's bidirectional sync hinges on dockviewJsonFromLayoutSlots and
     // layoutSlotsFromDockviewJson being exact inverses (up to compaction); any drift silently
@@ -907,7 +773,7 @@ async function runLayoutRestoreSuite() {
     }
   });
 
-  test('t@1410', () => {
+  test('file editor tabs use file identity chrome', () => {
     const api = loadYolomux('', ['1', '2']);
     const item = 'file:/home/keivenc/review.json';
     const paneTab = api.fileEditorPaneTabHtml(item);
@@ -1256,27 +1122,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(compareHtml.includes('data-file-compare-scroll'), 'compare columns expose synchronized scroll targets');
   });
 
-  test('t@1645', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(
-      source.includes('if (panel._cmGeneration !== generation) return null;'),
-      'stale CodeMirror renders no-op instead of reporting a load failure',
-    );
-    assert.ok(
-      source.includes('if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);'),
-      'raw editor fallback is only rendered for real CodeMirror failures',
-    );
-  });
-
-  test('t@1657', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const withoutStorageHelpers = source
-      .replace(/function storageGet\([\s\S]*?\n}\n\nfunction storageSet/, 'function storageSet')
-      .replace(/function storageSet\([\s\S]*?\n}\n\nfunction safeJsonParse/, 'function safeJsonParse');
-    assert.equal(withoutStorageHelpers.includes('localStorage.'), false, 'browser storage access goes through storageGet/storageSet helpers');
-  });
-
-  test('t@1665', () => {
+  test('preview-capable file types expose preview mode', () => {
     const api = loadYolomux('', ['1']);
     assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
@@ -1465,7 +1311,7 @@ async function runLayoutRestoreSuite() {
     api.setFileEditorViewMode(codePath, 'edit', codeItem);
   });
 
-  test('t@1835', () => {
+  test('runtime interval delay normalizes invalid values', () => {
     const api = loadYolomux('', ['1']);
     assert.equal(api.runtimeIntervalDelay(3000), 3000);
     assert.equal(api.runtimeIntervalDelay(1250), 1250);
@@ -1510,7 +1356,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(cleared.has(afterSettle[1].timer), true, 'clearing the named loop cancels its pending timer');
   });
 
-  test('t@1842', () => {
+  test('CodeMirror search supports literal and regexp options', () => {
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('foo bar foo', 'foo')), [
       {from: 0, to: 3},
@@ -1525,40 +1371,7 @@ async function runLayoutRestoreSuite() {
     ], 'absolute paths with dots and hyphens are searched as literal text');
   });
 
-  test('t@1857', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const start = source.indexOf('function renderFileEditorPanel(');
-    const end = source.indexOf('function loadFileEditorState(', start);
-    assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
-    assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
-    assert.ok(source.includes('function capturePaneViewStateForItemIfPresent(item)'), 'pane viewport capture has one shared focus-transition helper');
-    assert.ok(source.includes('capturePaneViewStateForItemIfPresent(previous)'), 'switching pane tabs captures the outgoing pane viewport through the shared helper');
-    assert.ok(/function setFocusedPanelItem[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== item\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking away from a pane snapshots its live viewport');
-    assert.ok(/function setFocusedTerminal[\s\S]*const previousItem = focusedPanelItem;[\s\S]*if \(previousItem !== session\) capturePaneViewStateForItemIfPresent\(previousItem\);/.test(source), 'clicking into a terminal snapshots the outgoing pane viewport');
-    assert.ok(/function setFocusedTerminalMeasured\(session, options = \{\}\)[\s\S]*const alreadyFocused = focusedTerminal === session && focusedPanelItem === session[\s\S]*if \(alreadyFocused\) \{[\s\S]*options\.userInitiated === true[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null, options\)[\s\S]*return;[\s\S]*updateFocusOnlyChrome\(\)/.test(source), 'already-focused terminal input acknowledges attention without rerunning the shared focus chrome updates for every key');
-    assert.ok(/function updateFocusOnlyChrome\(\)[\s\S]*updateTopbarActivityStatus\(\)[\s\S]*for \(const activeSession of activeSessions\) updateTypingIndicator\(activeSession\)[\s\S]*updatePanelInactiveOverlays\(\)/.test(source), 'changed focus refreshes all focus chrome through one shared parent');
-    assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
-    assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
-    assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
-    assert.ok(source.includes("scrollSnapshot: typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null"), 'CodeMirror editor viewport capture stores a document-anchored scroll snapshot for long files');
-    assert.ok(/view\.dispatch\(\{\s*selection: \{anchor, head\},[\s\S]*state\.scrollSnapshot \? \{effects: state\.scrollSnapshot\}/.test(source), 'CodeMirror editor viewport restore dispatches the saved scroll snapshot through CodeMirror');
-    assert.ok(/function fileEditorPanelViewStateCaptureHasLayout\(panel, scrollDOM\)[\s\S]*!panel\.isConnected[\s\S]*scrollDOM\.clientHeight <= 0/.test(source), 'CodeMirror editor viewport capture ignores detached zero-height panels');
-    assert.ok(/const paneScrollContainerSelector = \[[\s\S]*'\.preferences-scroll'[\s\S]*'\.info-list'[\s\S]*'\.file-explorer-tree-panel'[\s\S]*'\.file-editor-codemirror-panel \.cm-scroller'/.test(source), 'generic pane viewport capture includes non-editor and editor scroll containers');
-	    assert.ok(/function movePanelsToPool\(\)[\s\S]*capturePaneViewState\(item, panel\)/.test(source), 'pooled pane capture uses the generic pane viewport path');
-	    assert.ok(/function bindPanelShell\(panel, session\)[\s\S]*panel\.addEventListener\('scroll'[\s\S]*schedulePaneViewStateCapture\(session, panel\)/.test(source), 'pane shell delegates scroll captures to the generic pane viewport scheduler');
-	    assert.ok(/function schedulePaneViewStateCapture\(item, panel\)[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*capturePaneViewState\(item, currentPanel\)/.test(source), 'pane scroll capture is throttled through one shared scheduler');
-	    assert.ok(source.includes('const tabStripOverflowCheckSet = new Set();') && source.includes('let tabStripOverflowCheckFrame = null;'), 'tab-strip overflow checks share one queued measurement owner');
-	    assert.ok(/function flushScheduledTabStripOverflowChecks\(\)[\s\S]*Array\.from\(tabStripOverflowCheckSet\)[\s\S]*strip\.classList\.toggle\('tabs-overflowing', strip\.scrollWidth > strip\.clientWidth \+ 1\)/.test(source), 'tab-strip overflow reads are batched into one post-render frame');
-	    const overflowStart = source.indexOf('function scheduleTabStripOverflowCheck(');
-	    const overflowEnd = source.indexOf('function scheduleAllTabStripOverflowChecks(', overflowStart);
-	    const overflowSchedulerSource = source.slice(overflowStart, overflowEnd);
-	    assert.ok(overflowSchedulerSource.includes('requestAnimationFrame(flushScheduledTabStripOverflowChecks)'), 'tab-strip overflow scheduler uses the shared rAF flush');
-	    assert.equal(/requestAnimationFrame\(\(\) =>/.test(overflowSchedulerSource), false, 'tab-strip overflow check no longer schedules one inline forced-layout read per strip render');
-	    assert.ok(/function scheduleFileEditorPanelViewStateCapture\(item, panel\)[\s\S]*schedulePaneViewStateCapture\(item, panel\)/.test(source), 'CodeMirror editor scroll capture routes through the shared pane scheduler');
-    assert.ok(/addEventListener\('scroll', \(\) => \{[\s\S]*scheduleFileEditorSplitScrollSync\(panel, 'editor'\);[\s\S]*scheduleFileEditorPanelViewStateCapture\(item, panel\);[\s\S]*\}\)/.test(source), 'CodeMirror editor scroll listener records viewport state as well as split-preview sync');
-  });
-
-  test('t@1869', () => {
+  test('menu and refresh state share guarded runtime owners', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const menuStart = source.indexOf('function bindAppMenuHover(');
     const menuEnd = source.indexOf('function openAppMenu(', menuStart);
@@ -1799,20 +1612,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function markOpenFileReloadDeferred(path, state, entry)') && source.includes('state.externalReloadDeferred'), 'deferred background reload marks external state instead of replacing the active document');
   });
 
-  test('t@2069', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const start = source.indexOf('function updatePaneTabStrip(');
-    const end = source.indexOf('function reconcilePaneTabChildren(', start);
-    assert.ok(start > 0 && end > start, 'could not locate updatePaneTabStrip body');
-    const body = source.slice(start, end);
-    assert.equal(body.includes('replaceChildren(...'), false, 'routine pane-tab refresh must reconcile instead of rebuilding hovered tabs');
-    assert.ok(source.includes('function reconcilePaneTabChildren('), 'pane-tab reconcile helper exists');
-    assert.ok(source.includes('function paneTabShouldPreserve('), 'open pane-tab popovers keep their existing node');
-    // The per-pane left-dropdown caret was removed (it wasted a line above the tab strip) — keep it gone.
-    assert.equal(source.includes('pane-tabs-menu-caret'), false, 'no per-pane dropdown caret (removed by request)');
-  });
-
-  test('t@2082', () => {
+  test('tab popovers close on panel focus transitions', () => {
     const api = loadYolomux('', ['1']);
     const tab = new TestElement('tab');
     const popover = new TestElement('popover');
@@ -1844,7 +1644,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(tab.getAttribute('aria-label'), 'Session 1');
   });
 
-  test('t@2114', () => {
+  test('global activity counts aggregate agent state', () => {
     // GLOBAL activity status line: cross-session YOLO-screen working / attention / blocked / idle rollup.
     const api = loadYolomux('', ['1', '2', '3', '4']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2084,7 +1884,7 @@ async function runLayoutRestoreSuite() {
 	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
   });
 
-  test('t@2134', () => {
+  test('session teardown distinguishes confirmed removals', () => {
     // Event-driven session-kill: a terminal WS close checks tmux existence once vs transient disconnect.
     const api = loadYolomux('', ['1', '2', '3']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2222,7 +2022,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(fullSummary.last.origin, 'pane-died', 'full snapshot latency keeps the pane-death origin');
   });
 
-  test('t@2147', () => {
+  test('session teardown clears runtime records and toasts', () => {
     // T5: stopping a session clears every session-keyed UI map and closes live streams.
     const cleared = [];
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {clearTimeout(id) { cleared.push(id); }});
@@ -2450,7 +2250,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.toastStateForTest(alertId), null, 'rename discards transient toasts whose click handlers captured the old session');
   });
 
-  test('t@2164', () => {
+  test('Finder repo metadata renders shared sync markers', () => {
     // Git-aware Finder: repo-dir inline annotation (branch + ahead/behind/dirty) + hover popover.
     const api = loadYolomux('', ['1']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2473,7 +2273,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
   });
 
-  test('t@2187', () => {
+  test('per-pane tab cap normalizes and applies settings', () => {
     // Max tabs per pane + LRU eviction (Preference).
     const api = loadYolomux('', ['1', '2', '3', '4', '5']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2517,7 +2317,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
   });
 
-  test('t@2231', () => {
+  test('pull request review badges render review outcomes', () => {
     // the session popover shows review status AND who reviewed.
     const api = loadYolomux('', ['5']);
     const approved = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: [{login: 'alice', state: 'APPROVED'}]});
@@ -2532,7 +2332,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/Approved</.test(approvedNoWho) && !/ by /.test(approvedNoWho), 'approved with no reviewer omits the "by" clause');
   });
 
-  test('t@2246', () => {
+  test('review-required badge has one readable theme owner', () => {
     // #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
     const api = loadYolomux('', ['5']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2557,7 +2357,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.pullRequestLinkLabel({number: 123, state: 'open'}), '#123', 'open PR inline labels omit redundant OPEN text');
   });
 
-  test('t@2268', () => {
+  test('approval indicators reflect review state', () => {
     // #38: tab APPROVAL badge driven by GitHub reviewDecision.
     const api = loadYolomux('', ['5']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2577,7 +2377,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.ci-indicator\.pr-review-required[\s\S]*?line-through/.test(css), '#38: the review-required badge is crossed out');
   });
 
-  test('t@2288', () => {
+  test('tab popover placement follows the owning tab', () => {
     const api = loadYolomux('', ['1']);
     const strip = new TestElement('strip');
     const tab = new TestElement('tab');
@@ -2595,64 +2395,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.paneTabShouldPreserve(tab), true);
   });
 
-  test('t@2306', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const start = source.indexOf('function renderTreeChildren(');
-    const end = source.indexOf('function rawFileUrl(', start);
-    assert.ok(start > 0 && end > start, 'could not locate renderTreeChildren body');
-    const body = source.slice(start, end);
-    assert.equal(body.includes('replaceChildren(...nextNodes)'), false, 'Finder refresh must reconcile existing rows instead of rebuilding them');
-    assert.equal(source.includes('function differFileTreeHtmlStr'), false, 'Differ must not maintain a parallel file-tree HTML renderer');
-    assert.equal(source.includes('function changesGroupsHtmlStr'), false, 'Differ groups must render through the shared DOM renderer, not a duplicate HTML renderer');
-    assert.equal(/function renderChangesPanels[\s\S]*renderChangesRoot\(/.test(source), false, 'standalone Changes render loop is removed');
-    assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder diff panel / embedded Differ refreshes through the shared incremental render root');
-    assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
-    assert.ok(source.includes('function fileTreeRowDerivedState(') && source.includes('function applyFileTreeRowDerivedState('), 'R3: Finder derived row state has one builder and one applier');
-    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState\(fullPath, entry, depth, options\)[\s\S]*applyFileTreeRowDerivedState\(row, rowState\.derivedState\)/.test(source), 'R3/RA4: full Finder/Differ render applies the shared derived row state through the row-state builder');
-    assert.ok(/function updateFileTreeGitStatusRows\(\)[\s\S]*applyFileTreeRowDerivedState\(row, fileTreeRowDerivedState\(fullPath, entry,/.test(source), 'R3: lightweight Finder refresh applies the shared derived row state');
-    assert.equal(/const gitStatus = row\.dataset\.kind === 'file' \? fileTreeGitStatus/.test(source), false, 'R3: lightweight Finder refresh no longer has its own git-status derivation fork');
-    const updateStart = source.indexOf('function updateFileTreeRowContents(');
-    const updateEnd = source.indexOf('function updateFileTreeRow(', updateStart);
-    assert.ok(updateStart > 0 && updateEnd > updateStart, 'could not locate updateFileTreeRowContents body');
-    const updateBody = source.slice(updateStart, updateEnd);
-    assert.equal(updateBody.includes("name.textContent = nameText;\n    name.innerHTML = '';"), false, 'Finder row text must not be cleared after being written');
-    assert.ok(updateBody.includes("name.innerHTML = '';\n    name.textContent = nameText;"), 'Finder row clears stale HTML before writing plain text');
-    const sharedTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the AI marker directly beside the filename while allowing the filename to ellipsize');
-    assert.equal(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), false, 'file-tree agent metadata must not use auto-margin that can push date columns out of view');
-    assert.ok(/\.changes-file-list\s*\{[^}]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)[\s\S]*min-inline-size:\s*0/.test(sharedTreeCss), 'Differ file-list grid constrains shared file-tree rows to the pane width instead of max-content clipping the date column');
-    assert.ok(/\.file-tree-row:has\(> \.file-tree-diff:not\(\[hidden\]\)\) > \.file-tree-diff,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the diff column, not the AI marker, to the right edge when diff data exists');
-    assert.ok(/--file-tree-row-control-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ row controls scale from the Finder font size');
-    assert.ok(/--file-tree-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ icon boxes scale from the Finder font size');
-    assert.equal(/--file-tree-row-control-size:\s*max\(18px/.test(sharedTreeCss), false, 'Finder/Differ row controls must not keep the old fixed 18px minimum');
-    assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*flex:\s*0 0 var\(--file-tree-icon-size\)[\s\S]*font-size:\s*var\(--file-tree-icon-font-size\)[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered box that follows the Finder font size');
-    assert.ok(/\.file-tree-icon\.ui-disclosure-triangle\s*\{[^}]*flex:\s*0 0 var\(--file-tree-icon-size\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(sharedTreeCss), 'Finder/Tabber disclosure chevrons use the shared disclosure font size from the row font');
-    assert.ok(/\.file-tree-agent \.agent-icon\s*\{[^}]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 3px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 1px\)/.test(sharedTreeCss), 'Finder/Differ AI markers scale with the Finder font size instead of pinning the row height');
-    assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 auto[\s\S]*min-width:\s*6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff metadata grows for labeled directory file counts while keeping a shared minimum column');
-    assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');
-    assert.ok(/\.file-tree-git-status\s*\{[^}]*overflow:\s*hidden[\s\S]*white-space:\s*nowrap/.test(sharedTreeCss), 'Finder/Differ status badges cannot spill into the date column');
-    assert.ok(/\.file-tree-date\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ date cells align to the icon/status centerline');
-    assert.ok(/\.file-tree-date\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(sharedTreeCss), 'Finder/Differ date cells reserve a fixed right column so status badges line up');
-    assert.ok(/\.file-tree-dir-count\[hidden\],[\s\S]*?\.file-tree-date\[hidden\]\s*\{[\s\S]*display:\s*none/.test(sharedTreeCss), '#46: hidden Finder/Differ metadata cells do not reserve their right-side columns');
-    assert.ok(source.includes("refreshActivitySummary({force: true})"), 'YO!agent Refresh summary forces cached summaries to rebuild');
-    assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
-    assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
-    assert.ok(source.includes("data-yolo-rule-open"), 'Preferences exposes an Open button for the YOLO rule file');
-    assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
-    assert.ok(source.includes("apiFetchJson('/api/yoagent/conversation'"), 'YO!agent hydrates chat history from the server-side conversation transcript');
-    assert.ok(source.includes("transcript_display_path"), 'YO!agent conversation payload carries the transcript display path');
-    assert.ok(source.includes("pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy'"), 'YO!agent transcript path renders with the shared copy button');
-    assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
-    assert.ok(source.includes("'yoagent_conversation_changed'") && source.includes('loadYoagentConversation({force: true'), 'YO!agent background result pushes refresh the persisted conversation');
-    assert.equal(source.includes('yoagentSessionSummariesHtml'), false, 'YO!agent default panel does not render the per-session SESSION detail card list');
-    assert.ok(source.includes("row.draggable = entry.kind === 'file' || entry.kind === 'dir';") && source.includes("setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '')"), 'Modified-files rows use the shared tree renderer and remain draggable as file payloads');
-    assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
-    assert.ok(/appendContextMenuButton\(menu, t\(fileExplorerDirectoryIsIndexed\(fullPath\) \? 'contextmenu\.disallowIndex' : 'contextmenu\.allowIndex'\)/.test(source), 'Finder directory context menu exposes localized Allow/Disallow index actions');
-    assert.ok(source.includes("row.classList.toggle('indexed-directory', state.indexedDirectory)"), 'Finder row render marks indexed directories');
-    assert.ok(source.includes("'file-icon-dir-indexed'"), 'Finder indexed directories use a distinct icon class');
-  });
-
-  test('t@2355', () => {
+  test('image preview uses delayed shared hover timing', () => {
     const api = loadYolomux('', ['1']);
     assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -2789,7 +2532,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
     assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
-    assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
+    // The preview fixture above asserts restored vertical and horizontal scroll state.  Avoid
+    // coupling that behavior to one helper call spelling.
     assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
     assert.ok(/function openFileQuickOpenPath\(path, options = \{\}\)[\s\S]*const targetSlot = fileQuickOpenTargetSlot\(\);[\s\S]*openedItem = await openFileInEditor\(path, \{name: label\}, targetSlot[\s\S]*\? \{targetSlot, userInitiated: true\}[\s\S]*: \{userInitiated: true\}\)/.test(source), 'quick-open normal file opens pass the active pane target slot');
     assert.ok(/function fileQuickOpenTargetSlot\(\)[\s\S]*commandPaletteState\.targetSlot[\s\S]*layoutSlotKeys\(\)\.includes\(requested\)[\s\S]*return focusedActivationSlot\(\);/.test(source), 'quick-open keeps the shared focused-pane fallback while an empty pane can request its exact destination');
@@ -2956,7 +2700,13 @@ async function runLayoutRestoreSuite() {
   });
 
   test('file editor restore dispatches CodeMirror scroll snapshot for long documents', () => {
-    const api = loadYolomux('', ['1']);
+    const animationFrames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        animationFrames.push(callback);
+        return animationFrames.length;
+      },
+    });
     const path = '/home/test/2026.md';
     const item = api.registerFileEditorLayoutItemForTest(path);
     const panel = new TestElement('editor-panel');
@@ -2986,11 +2736,16 @@ async function runLayoutRestoreSuite() {
     assert.strictEqual(dispatches[0].effects, scrollSnapshot, 'restore dispatches CodeMirror scrollSnapshot instead of relying only on raw scrollTop');
     assert.equal(scrollDOM.scrollTop, 960);
     assert.equal(scrollDOM.scrollLeft, 12);
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/function restoreFileEditorPanelViewState[\s\S]*scrollStillAtTarget[\s\S]*requestAnimationFrame\(\(\) => measuredRestore\(true\)\)[\s\S]*requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => measuredRestore\(true\)\)\)/.test(source), 'delayed CodeMirror scroll restores are guarded so user scrolling during diff load is not snapped back');
+    // The first restore is deliberate.  Subsequent measured frames must not snap a user who has
+    // scrolled while a diff/editor render was still settling back to the old position.
+    scrollDOM.scrollTop = 481;
+    scrollDOM.scrollLeft = 3;
+    while (animationFrames.length) animationFrames.shift()();
+    assert.equal(scrollDOM.scrollTop, 481, 'delayed CodeMirror restore does not overwrite user scroll');
+    assert.equal(scrollDOM.scrollLeft, 3, 'delayed CodeMirror restore preserves user horizontal scroll');
   });
 
-  test('t@2463', () => {
+  test('split geometry honors shared pane minimums', () => {
     const api = loadYolomux('', ['1']);
     const section = new TestElement('section');
     section.rect = {left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500};
@@ -3245,7 +3000,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(await api.moveLayoutItemDirectional('__info__', 'left', 'right'), false);
   });
 
-  test('t@2474', () => {
+  test('editor focus restoration preserves CodeMirror selection', () => {
     const api = loadYolomux('', ['1']);
     const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
     let focusCount = 0;
@@ -3286,7 +3041,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(focusCount, 2);
   });
 
-  test('t@2515', () => {
+  test('auto-focus only follows hover when enabled', () => {
     const api = loadYolomux('', ['1']);
     assert.equal(api.autoFocusEnabledForTest(), false, 'auto-focus is off by default');
     api.testElementForId('terminal-pane-1').classList.add('active');
@@ -3303,7 +3058,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(enabledApi.focusedPanelItemForTest(), '1');
   });
 
-  test('t@2532', () => {
+  test('explicit pane focus focuses terminal input', () => {
     const api = loadYolomux('', ['1']);
     let focusCount = 0;
     api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
@@ -3319,7 +3074,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(focusCount, 2, 'selecting an already visible tmux tab is an explicit user focus action');
   });
 
-  test('t@2548', () => {
+  test('terminal blur keeps visual active pane state', () => {
     const api = loadYolomux('', ['1']);
     api.setFocusedTerminal('1');
     assert.equal(api.focusedPanelItemForTest(), '1');

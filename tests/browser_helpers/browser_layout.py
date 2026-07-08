@@ -44,11 +44,95 @@ SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").Web
 
 
 XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
+DEFAULT_BROWSER_WINDOW_SIZE = (1000, 700)
+GOLDEN_UPDATE_ENV = "YOLOMUX_UPDATE_GOLDENS"
+GOLDEN_DIR_ENV = "YOLOMUX_GOLDEN_DIR"
 LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
 LIVE_RUNTIME_LATE_FUNCTION = "handleGlobalShortcutKeydown"
 LIVE_RUNTIME_BUNDLE_WAIT_SECONDS = 20.0
 BROWSER_WAIT_HELPER_SOURCE = r"""
 (() => {
+  const frame = (target = window) => new Promise(resolve => (target || window).requestAnimationFrame(resolve));
+  const settle = async (count = 2) => {
+    const frames = Math.max(1, Number(count) || 1);
+    for (let index = 0; index < frames; index += 1) await frame();
+  };
+  const rect = (node, options = {}) => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node?.getBoundingClientRect) return options.fallback ?? null;
+    const value = node.getBoundingClientRect();
+    const number = options.round === true ? Math.round : current => current;
+    return {
+      left: number(value.left),
+      right: number(value.right),
+      top: number(value.top),
+      bottom: number(value.bottom),
+      width: number(value.width),
+      height: number(value.height),
+    };
+  };
+  const paint = node => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node) return null;
+    const style = getComputedStyle(node);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+      borderBottom: style.borderBottomColor,
+    };
+  };
+  // Resolve an expected paint through the same cascade as its owner.  Passing a component as
+  // context matters for scoped tokens (for example an agent-status dot's fill); a document-body
+  // probe would accidentally test only the root fallback.
+  const probePaint = (cssText, context = document.body) => {
+    const probe = document.createElement('div');
+    probe.style.cssText = String(cssText || '');
+    (context || document.body).appendChild(probe);
+    const value = paint(probe);
+    probe.remove();
+    return value;
+  };
+  const normalizeColor = color => {
+    const value = String(color || '').trim().toLowerCase();
+    if (value === 'transparent' || /^#[0-9a-f]{6}$/.test(value)) return value;
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(value);
+    if (!rgb) return value;
+    return `#${rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}`;
+  };
+  const parseStops = gradient => {
+    const value = String(gradient || '');
+    const stops = [];
+    const rangePattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+    let match = rangePattern.exec(value);
+    while (match) {
+      stops.push({color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100});
+      match = rangePattern.exec(value);
+    }
+    if (stops.length) return stops;
+    const tokens = [];
+    const tokenPattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%/gi;
+    match = tokenPattern.exec(value);
+    while (match) {
+      tokens.push({color: normalizeColor(match[1]), pos: Number(match[2]) / 100});
+      match = tokenPattern.exec(value);
+    }
+    for (let index = 1; index < tokens.length; index += 1) {
+      const previous = tokens[index - 1];
+      const current = tokens[index];
+      if (current.pos > previous.pos) stops.push({color: previous.color, start: previous.pos, end: current.pos});
+    }
+    return stops;
+  };
+  const rowsByTop = (rects, tolerance = 1) => {
+    const rows = [];
+    for (const item of [...rects].sort((left, right) => left.top - right.top || left.left - right.left)) {
+      const row = rows.find(candidate => Math.abs(candidate.top - item.top) <= tolerance);
+      if (row) row.items.push(item);
+      else rows.push({top: item.top, items: [item]});
+    }
+    return rows.map(row => row.items);
+  };
   const waitFor = async (predicate, options = {}) => {
     if (typeof predicate !== 'function') throw new TypeError('wait predicate must be a function');
     const requestedTimeout = Number(options.timeoutMs);
@@ -79,6 +163,10 @@ BROWSER_WAIT_HELPER_SOURCE = r"""
     configurable: true,
     value: waitFor,
   });
+  Object.defineProperty(window, '__yolomuxTestHelpers', {
+    configurable: true,
+    value: Object.freeze({frame, settle, rect, paint, probePaint, parseStops, rowsByTop}),
+  });
 })();
 """
 
@@ -100,12 +188,33 @@ class WebDriverWait(SeleniumWebDriverWait):
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 
 _APP_CSS_CACHE: str | None = None
 _APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
+_UI_PINS_CACHE: Mapping[str, object] | None = None
 
 
-def new_chrome_driver(window_size: str = "1000,700"):
+def register_browser_new_document_script(driver, source: str, *, reset_after_test: bool = True) -> str:
+    result = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
+    identifier = str(result.get("identifier") or "")
+    if reset_after_test and identifier:
+        identifiers = getattr(driver, "_yolomux_test_script_ids", None)
+        if identifiers is None:
+            identifiers = []
+            driver._yolomux_test_script_ids = identifiers
+        identifiers.append(identifier)
+    return identifier
+
+
+def remove_browser_test_new_document_scripts(driver):
+    identifiers = list(getattr(driver, "_yolomux_test_script_ids", []))
+    driver._yolomux_test_script_ids = []
+    for identifier in identifiers:
+        driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
+
+
+def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
@@ -114,9 +223,11 @@ def new_chrome_driver(window_size: str = "1000,700"):
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"--window-size={window_size}")
+    requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
+    window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
+    options.add_argument(f"--window-size={window_size_arg}")
     driver = webdriver.Chrome(options=options)
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": BROWSER_WAIT_HELPER_SOURCE})
+    register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
     return driver
 
@@ -126,6 +237,137 @@ def fast_pointer_actions(browser):
     # roughly three 60 Hz frames so hover paint/popover geometry can settle before the next command.
     # Drag tests keep constructing ActionChains directly so their motion duration remains deliberate.
     return ActionChains(browser, duration=50)
+
+
+def settle_browser_frames(browser, count=2):
+    """Wait for a deterministic number of rendered frames using the document helper."""
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const count = arguments[0];
+        const settle = window.__yolomuxTestHelpers?.settle;
+        if (typeof settle !== 'function') {
+          done({error: 'missing __yolomuxTestHelpers.settle'});
+          return;
+        }
+        settle(count).then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
+        """,
+        count,
+    )
+    assert result == {"ok": True}, result
+
+
+def assert_close(actual, expected, tol=1.0, *, context=None):
+    delta = abs(float(actual) - float(expected))
+    assert delta <= float(tol), context or f"expected {actual!r} to be within {tol} of {expected!r}; delta={delta}"
+
+
+def pause_animations_at_progress(browser, selector, progress=0.5):
+    """Freeze matching CSS animations at one reproducible point before measuring their paint."""
+    return browser.execute_script(
+        """
+        const nodes = Array.from(document.querySelectorAll(arguments[0]));
+        const progress = Math.max(0, Math.min(1, Number(arguments[1]) || 0));
+        let paused = 0;
+        for (const node of nodes) {
+          for (const animation of node.getAnimations({subtree: true})) {
+            const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+            if (!duration) continue;
+            animation.pause();
+            animation.currentTime = duration * progress;
+            paused += 1;
+          }
+        }
+        return paused;
+        """,
+        selector,
+        progress,
+    )
+
+
+def freeze_document_animations(browser, progress=0.5):
+    """Freeze every running document animation at a deterministic point for a golden capture."""
+    return browser.execute_script(
+        """
+        const progress = Math.max(0, Math.min(1, Number(arguments[0]) || 0));
+        let paused = 0;
+        for (const animation of document.getAnimations({subtree: true})) {
+          const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+          if (!duration) continue;
+          animation.pause();
+          animation.currentTime = duration * progress;
+          paused += 1;
+        }
+        return paused;
+        """,
+        progress,
+    )
+
+
+def animated_property_at_progress(browser, selector, property_name, progress=0.5):
+    """Freeze an animation and return its computed property, avoiding timing-sensitive samples."""
+    pause_animations_at_progress(browser, selector, progress)
+    return browser.execute_script(
+        "return getComputedStyle(document.querySelector(arguments[0])).getPropertyValue(arguments[1]).trim();",
+        selector,
+        property_name,
+    )
+
+
+def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
+    """Apply a small explicit visual profile; reset hook clears CDP device metrics afterwards."""
+    if theme not in {"dark", "light"}:
+        raise ValueError(f"unsupported visual theme: {theme!r}")
+    scale = float(dpr)
+    if scale <= 0:
+        raise ValueError(f"device pixel ratio must be positive: {dpr!r}")
+    size = browser.get_window_size()
+    width, height = size["width"], size["height"]
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": False},
+    )
+    browser.execute_script(
+        "document.body.classList.toggle('theme-light', arguments[0] === 'light');"
+        "document.body.classList.toggle('theme-dark', arguments[0] === 'dark');",
+        theme,
+    )
+    return browser.execute_script("return {theme: document.body.className, dpr: window.devicePixelRatio};")
+
+
+def _css_color_rgb(color):
+    value = str(color or "").strip()
+    if value.startswith("#"):
+        digits = value[1:]
+        if len(digits) == 3:
+            digits = "".join(character * 2 for character in digits)
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+            raise ValueError(f"unsupported CSS color: {color!r}")
+        return tuple(float(int(digits[index:index + 2], 16)) for index in (0, 2, 4))
+    srgb = re.fullmatch(
+        r"color\(\s*srgb\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)(?:\s*/\s*[^)]+)?\s*\)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if srgb:
+        return tuple(max(0.0, min(255.0, float(srgb.group(index)) * 255.0)) for index in (1, 2, 3))
+    match = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", value)
+    if not match:
+        raise ValueError(f"unsupported CSS color: {color!r}")
+    return tuple(max(0.0, min(255.0, float(match.group(index)))) for index in (1, 2, 3))
+
+
+def wcag_contrast_ratio(first, second):
+    def relative_luminance(color):
+        channels = []
+        for value in _css_color_rgb(color):
+            channel = value / 255.0
+            channels.append(channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    left = relative_luminance(first)
+    right = relative_luminance(second)
+    return (max(left, right) + 0.05) / (min(left, right) + 0.05)
 
 
 def app_css() -> str:
@@ -147,6 +389,39 @@ def app_english_strings() -> Mapping[str, str]:
             raise TypeError("English browser fixture catalog must contain only string values")
         _APP_ENGLISH_STRINGS_CACHE = MappingProxyType(catalog)
     return _APP_ENGLISH_STRINGS_CACHE
+
+
+def ui_pins() -> Mapping[str, object]:
+    """Read the shared cross-layer UI pin registry once and expose it as read-only fixture data."""
+    global _UI_PINS_CACHE
+    if _UI_PINS_CACHE is None:
+        pins = json.loads((REPO_ROOT / "tests" / "ui_pins.json").read_text(encoding="utf-8"))
+        if not isinstance(pins, dict):
+            raise TypeError("tests/ui_pins.json must contain one JSON object")
+        _UI_PINS_CACHE = MappingProxyType(pins)
+    return _UI_PINS_CACHE
+
+
+def ui_pin(name: str) -> str:
+    value = ui_pins().get(name)
+    if not isinstance(value, str) or not value:
+        raise KeyError(f"unknown string UI pin: {name}")
+    return value
+
+
+def css_hex_to_rgb(value: str) -> str:
+    """Convert a #rgb/#rrggbb pin into Selenium's computed `rgb(r, g, b)` spelling."""
+    digits = str(value or "").strip().removeprefix("#")
+    if len(digits) == 3:
+        digits = "".join(character * 2 for character in digits)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+        raise ValueError(f"expected #rgb or #rrggbb, got {value!r}")
+    red, green, blue = (int(digits[index:index + 2], 16) for index in (0, 2, 4))
+    return f"rgb({red}, {green}, {blue})"
+
+
+def ui_pin_rgb(name: str) -> str:
+    return css_hex_to_rgb(ui_pin(name))
 
 
 def page_html(body: str, *, extra_css: str = "") -> str:
@@ -171,6 +446,68 @@ def page_html(body: str, *, extra_css: str = "") -> str:
 def browser_screenshot_rgb(browser):
     image_mod = pytest.importorskip("PIL.Image")
     return image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+
+
+def local_golden_screenshot_dir():
+    """Return the ignored local baseline directory, optionally redirected for an isolated test."""
+    configured = os.environ.get(GOLDEN_DIR_ENV, "").strip()
+    return Path(configured).expanduser() if configured else LOCAL_GOLDEN_SCREENSHOT_DIR
+
+
+def assert_local_golden_screenshot(browser, name, *, rms_tolerance=6.0, changed_fraction_tolerance=0.015):
+    """Compare one browser screenshot with this machine's reviewed local baseline.
+
+    Golden PNGs deliberately stay out of git: Chrome font rasterization and app chrome are machine
+    specific, while this project runs its GUI gate locally.  Set YOLOMUX_UPDATE_GOLDENS=1 to create
+    or review-refresh them in one command.  A missing baseline is an explicit skip, never an empty
+    pixel assertion pretending to prove a visual result.
+    """
+    image_mod = pytest.importorskip("PIL.Image")
+    image_chops = pytest.importorskip("PIL.ImageChops")
+    image_stat = pytest.importorskip("PIL.ImageStat")
+    safe_name = str(name).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", safe_name):
+        raise ValueError(f"golden name must be a simple lowercase filename, got {name!r}")
+    directory = local_golden_screenshot_dir()
+    baseline_path = directory / f"{safe_name}.png"
+    actual = browser_screenshot_rgb(browser)
+    if os.environ.get(GOLDEN_UPDATE_ENV) == "1":
+        directory.mkdir(parents=True, exist_ok=True)
+        actual.save(baseline_path)
+        return {"status": "updated", "path": str(baseline_path), "size": actual.size}
+    if not baseline_path.is_file():
+        pytest.skip(
+            f"local golden baseline missing: {baseline_path}; run "
+            f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q"
+        )
+    expected = image_mod.open(baseline_path).convert("RGB")
+    assert actual.size == expected.size, {
+        "golden": safe_name,
+        "actual": actual.size,
+        "expected": expected.size,
+        "baseline": str(baseline_path),
+    }
+    difference = image_chops.difference(actual, expected)
+    stat = image_stat.Stat(difference)
+    rms = sum(float(value) ** 2 for value in stat.rms) ** 0.5 / (3 ** 0.5)
+    changed_pixels = sum(1 for pixel in difference.getdata() if pixel != (0, 0, 0))
+    changed_fraction = changed_pixels / max(1, actual.width * actual.height)
+    assert rms <= rms_tolerance and changed_fraction <= changed_fraction_tolerance, {
+        "golden": safe_name,
+        "baseline": str(baseline_path),
+        "rms": round(rms, 4),
+        "rmsTolerance": rms_tolerance,
+        "changedFraction": round(changed_fraction, 6),
+        "changedFractionTolerance": changed_fraction_tolerance,
+        "refresh": f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q",
+    }
+    return {
+        "status": "matched",
+        "path": str(baseline_path),
+        "size": actual.size,
+        "rms": rms,
+        "changedFraction": changed_fraction,
+    }
 
 
 def browser_auth_yaml() -> str:
@@ -350,8 +687,9 @@ def stop_browser_share_server(server, thread):
 
 
 def install_browser_websocket_tracker(driver):
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
+    register_browser_new_document_script(
+        driver,
+        """
         (() => {
           const NativeWebSocket = window.WebSocket;
           if (!NativeWebSocket || NativeWebSocket.__yolomuxTracked) return;
@@ -371,7 +709,7 @@ def install_browser_websocket_tracker(driver):
           window.WebSocket = TrackedWebSocket;
         })();
         """,
-    })
+    )
 
 
 def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
@@ -416,9 +754,11 @@ def _reset_browser_state(request):
     if driver is None:
         return
     try:
+        remove_browser_test_new_document_scripts(driver)
+        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         driver.delete_all_cookies()
         driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
-        driver.set_window_size(1000, 700)
+        driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
     except Exception:
         pass
 
@@ -429,8 +769,7 @@ def pane_fixture_html(width):
         f"""
         <button type="button" class="pane-tab {'active' if number == 5 else ''}">
           <span class="pane-tab-core">
-            <span class="session-button-prefix"><span class="session-button-number">YO</span></span>
-            <span class="session-button-name">{number}</span>
+            <span class="session-button-prefix"><span class="session-button-number">YO</span><strong class="session-button-number session-button-identifier">[{number}]</strong></span>
             <span class="session-button-text">
               <span class="tab-symbol session-state-badge">run</span>
               <span class="session-button-dir">fix: stabilize pane and Finder tab workflow</span>
@@ -522,7 +861,7 @@ def pc_controls_fixture_html():
           <button id="hash-tab" class="tab panel-detail-toggle">#</button>
           <button id="list-tab" class="tab terminal-tab">1.</button>
           <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
-          <button id="pane-zoom" class="tab pane-expand pc-window-control pc-zoom"></button>
+          <button id="pane-zoom" type="button" class="tab pane-expand pc-window-control pc-zoom" data-action="fixture-zoom"></button>
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
         <span id="working-yolo" class="session-yolo-marker active working">YO</span>
@@ -877,44 +1216,7 @@ def codemirror_todo_diff_overview_fixture_html():
             const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
             const content = view.scrollDOM.querySelector('.cm-content');
             if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
-            const normalizeOverviewColor = color => {{
-              const value = String(color || '').toLowerCase();
-              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
-              const rgb = /^rgb\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)$/.exec(value);
-              if (!rgb) return value;
-              const hex = rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('');
-              return `#${{hex}}`;
-            }};
-            const parseStops = gradient => {{
-              const value = String(gradient || '');
-              const stops = [];
-              const normalizeStopPosition = position => String(Number.parseFloat(position));
-              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
-              let match = rangePattern.exec(value);
-              while (match) {{
-                const color = normalizeOverviewColor(match[1]);
-                if (color !== 'transparent') {{
-                  stops.push({{color, start: normalizeStopPosition(match[2]), end: normalizeStopPosition(match[3])}});
-                }}
-                match = rangePattern.exec(value);
-              }}
-              if (stops.length) return stops;
-              const tokens = [];
-              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
-              match = tokenPattern.exec(value);
-              while (match) {{
-                tokens.push({{color: normalizeOverviewColor(match[1]), pos: normalizeStopPosition(match[2])}});
-                match = tokenPattern.exec(value);
-              }}
-              for (let index = 1; index < tokens.length; index += 1) {{
-                const prev = tokens[index - 1];
-                const next = tokens[index];
-                if (prev.color === next.color && prev.color !== 'transparent') {{
-                  stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
-                }}
-              }}
-              return stops;
-            }};
+            const {{parseStops}} = window.__yolomuxTestHelpers;
             const collectMetrics = () => {{
               const overview = container.querySelector('.cm-diff-overview');
               if (!overview) {{
@@ -979,6 +1281,8 @@ def codemirror_file_explorer_diff_overview_fixture_html():
     app_script = app_bundle_before_boot_script()
     original_json = json.dumps(original).replace("</script", "<\\/script")
     current_json = json.dumps(current).replace("</script", "<\\/script")
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
     return f"""
     <!doctype html>
     <html>
@@ -1023,45 +1327,21 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             panel._cmMode = 'diff';
             updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
 
-            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const {{settle, parseStops}} = window.__yolomuxTestHelpers;
             const normalizeColor = color => {{
               const value = String(color || '').toLowerCase();
-              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
+              if (value === 'transparent' || value === '{deleted_color}' || value === '{added_color}') return value;
               const rgb = /^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/.exec(value);
               if (!rgb) return value;
               return `#${{rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}}`;
-            }};
-            const parseStops = gradient => {{
-              const value = String(gradient || '');
-              const stops = [];
-              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
-              let match = rangePattern.exec(value);
-              while (match) {{
-                stops.push({{color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100}});
-                match = rangePattern.exec(value);
-              }}
-              if (stops.length) return stops;
-              const tokens = [];
-              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
-              match = tokenPattern.exec(value);
-              while (match) {{
-                tokens.push({{color: normalizeColor(match[1]), pos: Number(match[2]) / 100}});
-                match = tokenPattern.exec(value);
-              }}
-              for (let index = 1; index < tokens.length; index += 1) {{
-                const prev = tokens[index - 1];
-                const next = tokens[index];
-                if (next.pos > prev.pos) stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
-              }}
-              return stops;
             }};
             const changedStops = gradient => parseStops(gradient).filter(item => item.color !== 'transparent');
             const overview = () => container.querySelector('.cm-diff-overview');
             const railColorAt = fraction => {{
               const stop = parseStops(overview()?.style?.background || '').find(item => fraction >= item.start && fraction < item.end);
               if (!stop || stop.color === 'transparent') return 'normal';
-              if (stop.color === '#ff5d6c') return 'remove';
-              if (stop.color === '#38d878') return 'add';
+              if (stop.color === '{deleted_color}') return 'remove';
+              if (stop.color === '{added_color}') return 'add';
               return stop.color;
             }};
             const rowKind = node => {{
@@ -1243,7 +1523,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
             }});
             panel._cmView = view;
             panel._cmMode = 'diff';
-            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const {{settle}} = window.__yolomuxTestHelpers;
             window.__diffWrapMetrics = async function() {{
               await settle();
               const inserted = Array.from(container.querySelectorAll('.cm-insertedLine'))
@@ -1612,6 +1892,8 @@ def file_tree_status_alignment_fixture_html():
 
 def codemirror_scrollbar_overview_fixture_html():
     css = app_css()
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
     return f"""
     <!doctype html>
     <html>
@@ -1638,7 +1920,7 @@ def codemirror_scrollbar_overview_fixture_html():
               <div class="cm-content"></div>
             </div>
           </div>
-          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, #ff5d6c 0.000% 40.000%, #38d878 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
+          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, {deleted_color} 0.000% 40.000%, {added_color} 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
         </div>
       </body>
     </html>
@@ -2490,10 +2772,9 @@ def live_runtime_boot_health(browser):
 
 
 def install_live_runtime_boot_error_tracker(browser):
-    browser.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {
-            "source": """
+    register_browser_new_document_script(
+        browser,
+        """
               window.__bootErrors = [];
               window.__bootRejections = [];
               addEventListener('error', event => window.__bootErrors.push({
@@ -2505,7 +2786,6 @@ def install_live_runtime_boot_error_tracker(browser):
               }));
               addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
             """,
-        },
     )
 
 
@@ -2628,46 +2908,81 @@ def wait_for_visible_selector(browser, selector):
     )
 
 
-def click_visible_panel(browser, panel_id):
-    point = wait_for_visible_panel(browser, panel_id)
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
-    browser.execute_script(
+def _assert_browser_point_hits_target(browser, point, *, panel_id=None, selector=None):
+    result = browser.execute_script(
         """
-        const panel = document.getElementById(arguments[0]);
-        if (!panel) return;
-        const eventInit = {bubbles: true, cancelable: true, clientX: arguments[1], clientY: arguments[2], button: 0, buttons: 1};
-        panel.dispatchEvent(new PointerEvent('pointerdown', {...eventInit, pointerId: 1, pointerType: 'mouse'}));
-        panel.dispatchEvent(new PointerEvent('pointerup', {...eventInit, buttons: 0, pointerId: 1, pointerType: 'mouse'}));
-        panel.dispatchEvent(new MouseEvent('click', {...eventInit, buttons: 0}));
+        const panelId = arguments[0];
+        const selector = arguments[1];
+        const x = arguments[2];
+        const y = arguments[3];
+        const candidates = panelId
+          ? [document.getElementById(panelId)].filter(Boolean)
+          : [...document.querySelectorAll(selector || '')];
+        const target = candidates.find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        const hit = document.elementFromPoint(x, y);
+        const describe = node => node
+          ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${node.classList?.length ? `.${[...node.classList].join('.')}` : ''}`
+          : '<none>';
+        return {
+          ownsHit: Boolean(target && hit && (target === hit || target.contains(hit))),
+          target: describe(target),
+          hit: describe(hit),
+          x,
+          y,
+        };
         """,
         panel_id,
+        selector,
         point["x"],
         point["y"],
     )
+    assert result and result["ownsHit"], f"browser click point is occluded or off-screen: {result}"
+
+
+def _cdp_click_point(browser, point):
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mousePressed",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        },
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mouseReleased",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        },
+    )
+
+
+def click_visible_panel(browser, panel_id):
+    point = wait_for_visible_panel(browser, panel_id)
+    _assert_browser_point_hits_target(browser, point, panel_id=panel_id)
+    _cdp_click_point(browser, point)
 
 
 def click_visible_selector(browser, selector):
-    wait_for_visible_selector(browser, selector)
-    browser.execute_script(
-        """
-        const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
-          const rect = candidate.getBoundingClientRect();
-          const style = getComputedStyle(candidate);
-          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-        });
-        if (!node) return;
-        const rect = node.getBoundingClientRect();
-        const clientX = Math.round(rect.left + rect.width / 2);
-        const clientY = Math.round(rect.top + rect.height / 2);
-        const eventInit = {bubbles: true, cancelable: true, clientX, clientY, button: 0, buttons: 1};
-        node.dispatchEvent(new PointerEvent('pointerdown', {...eventInit, pointerId: 1, pointerType: 'mouse'}));
-        node.dispatchEvent(new PointerEvent('pointerup', {...eventInit, buttons: 0, pointerId: 1, pointerType: 'mouse'}));
-        node.dispatchEvent(new MouseEvent('click', {...eventInit, buttons: 0}));
-        """,
-        selector,
-    )
+    point = wait_for_visible_selector(browser, selector)
+    _assert_browser_point_hits_target(browser, point, selector=selector)
+    _cdp_click_point(browser, point)
 
 
 def move_to_visible_panel(browser, panel_id):
@@ -2708,36 +3023,16 @@ def cdp_drag(browser, start, end, steps=24):
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     for index in range(1, steps + 1):
         x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
         y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
         if index % 4 == 0:
-            browser.execute_async_script(
-                """
-                const done = arguments[arguments.length - 1];
-                requestAnimationFrame(done);
-                """
-            )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done))));
-        """
-    )
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 4)
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": end["x"], "y": end["y"], "button": "left", "buttons": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": end["x"], "y": end["y"], "button": "left", "buttons": 0, "clickCount": 1})
 
 
@@ -2746,29 +3041,14 @@ def cdp_drag_hold(browser, start, end, steps=24):
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     for index in range(1, steps + 1):
         x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
         y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
         if index % 4 == 0:
-            browser.execute_async_script(
-                """
-                const done = arguments[arguments.length - 1];
-                requestAnimationFrame(done);
-                """
-            )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done)));
-        """
-    )
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 3)
 
 
 def cdp_release(browser, point):

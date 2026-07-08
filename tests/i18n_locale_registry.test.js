@@ -4,6 +4,7 @@
 const assert = require('node:assert');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./layout_test_helper');
 
 const source = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
 const shareSource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
@@ -23,13 +24,6 @@ class ChromeNode {
   }
 
   setAttribute(name, value) { this.attributes[name] = String(value); }
-}
-
-function sourceBetween(text, startMarker, endMarker) {
-  const start = text.indexOf(startMarker);
-  const end = text.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0 && end > start, `missing source range ${startMarker} -> ${endMarker}`);
-  return text.slice(start, end);
 }
 
 function testChromeOwnerBehavior() {
@@ -52,7 +46,7 @@ function testChromeOwnerBehavior() {
     'update.badgeLabel': 'actualizar',
     'update.badgeTitle': 'Actualizacion oculta',
   };
-  const t = (key, params = {}) => String(strings[key] || key).replace(/\{(\w+)\}/g, (_match, name) => params[name] ?? '');
+  const t = makeCatalogT(strings);
 
   const brand = new ChromeNode();
   const brandYo = new ChromeNode();
@@ -224,7 +218,8 @@ vm.runInContext(
   context,
 );
 
-(async () => {
+async function runI18nLocaleRegistrySuite() {
+  await testAsync('locale registry normalizes locales and relocalizes global chrome', async () => {
   const api = context.api;
   assert.deepEqual([...api.i18nSupportedLocales()], ['en', 'he', 'pt-BR']);
   assert.deepEqual(
@@ -264,8 +259,11 @@ vm.runInContext(
   assert.match(shareSource, /const locale = String\(appearance\.locale[\s\S]*resolveLocalePref\(nextPref\)[\s\S]*applyLocale\(resolvedLocale\)/);
   assert.doesNotMatch(source, /navigator\.language|startsWith\('zh'\)|base === 'ar'/, 'the client has no parallel language-tag or RTL classifier');
   testChromeOwnerBehavior();
-  console.log('locale registry suite: 1 passed, 0 failed');
-})().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+  });
+}
+
+module.exports = {runI18nLocaleRegistrySuite};
+
+if (require.main === module) {
+  runSuites([runI18nLocaleRegistrySuite]);
+}

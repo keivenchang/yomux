@@ -8,3 +8,7 @@ package-lock.json
 
 # Scratch worklists — never committed (kept local only)
 DOIT*.md
+
+# Machine-local Selenium golden baselines and failure diffs. Refresh with
+# YOLOMUX_UPDATE_GOLDENS=1; screenshots are intentionally never source.
+.yolomux-test-goldens/

@@ -2,6 +2,16 @@ const assert = require('assert');
 const fs = require('fs');
 const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // shared color pins (see test_ui_pins.py)
 const vm = require('vm');
+
+// Node harness contract: this is a pure-logic VM, not a browser. It has no CSS engine or real layout;
+// getComputedStyle only supplies direction and default element rects are synthetic. ResizeObserver,
+// MutationObserver, scrolling metrics, and boot-section wiring are intentionally absent. Tests that need
+// computed paint, observer delivery, scroll geometry, or rendered placement belong in Selenium.
+const BUNDLE_SOURCE = fs.readFileSync('static/yolomux.js', 'utf8');
+const EN_CATALOG = Object.freeze(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
+const BUNDLE_BOOT_START = BUNDLE_SOURCE.indexOf("if (refreshMeta) {");
+assert.ok(BUNDLE_BOOT_START > 0, 'could not find browser boot section');
+let bundleScript = null;
 const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
@@ -252,10 +262,24 @@ class TestElement {
     return this.children.some(child => child?.contains?.(node));
   }
   getBoundingClientRect() { return this.rect; }
-  insertAdjacentHTML() {}
+  insertAdjacentHTML(position, html) {
+    if (position !== 'beforeend') throw new Error(`TestElement.insertAdjacentHTML does not support ${position}`);
+    this._innerHTML += String(html || '');
+  }
   matches(selector) {
     if (selector.includes(',')) return selector.split(',').some(part => this.matches(part.trim()));
-    if (selector === String(this.localName || '').toLowerCase()) return true;
+    const descendantMatch = selector.match(/^(.+?)\s+(.+)$/);
+    if (descendantMatch) {
+      const [, ancestorSelector, nodeSelector] = descendantMatch;
+      if (!this.matches(nodeSelector)) return false;
+      let ancestor = this.parentElement;
+      while (ancestor) {
+        if (ancestor.matches?.(ancestorSelector)) return true;
+        ancestor = ancestor.parentElement;
+      }
+      return false;
+    }
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(selector)) return selector === String(this.localName || '').toLowerCase();
     if (selector === ':hover') return this.hovered === true;
     if (selector.startsWith('#')) return this.id === selector.slice(1);
     const dataPaneTabMatch = selector.match(/^\.pane-tab\[data-pane-tab="([^"]+)"\]$/);
@@ -279,6 +303,17 @@ class TestElement {
       const key = testDatasetKeyForAttribute(attrName);
       return this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
     }
+    const attributeMatch = selector.match(/^\[([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+    if (attributeMatch) {
+      const [, attributeName, attributeValue] = attributeMatch;
+      return this.attributes[attributeName] !== undefined && (attributeValue === undefined || this.attributes[attributeName] === attributeValue);
+    }
+    const tagDataMatch = selector.match(/^([A-Za-z][A-Za-z0-9-]*)\[data-([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+    if (tagDataMatch) {
+      const [, tagName, attrName, attrValue] = tagDataMatch;
+      const key = testDatasetKeyForAttribute(attrName);
+      return this.localName === tagName && this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
+    }
     if (selector === 'textarea[data-setting-path]') return this.localName === 'textarea' && this.dataset.settingPath !== undefined;
     if (selector === 'input[type="text"][data-setting-path]') return this.localName === 'input' && this.attributes.type === 'text' && this.dataset.settingPath !== undefined;
     if (selector === '[role="tree"]') return this.attributes.role === 'tree';
@@ -289,8 +324,8 @@ class TestElement {
     if (/^\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(selector)) {
       return selector.slice(1).split('.').every(className => this.classList.contains(className));
     }
-    if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
-    return false;
+    if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
+    throw new Error(`TestElement.matches does not support selector: ${selector}`);
   }
   closest(selector) {
     let node = this;
@@ -416,10 +451,32 @@ function assertSingleCiBadge(html, label) {
   assert.equal((html.match(/>CI<\/span>/g) || []).length, 1, `${label} renders exactly one CI badge`);
 }
 
+function sourceBetween(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  const end = text.indexOf(endMarker, start + String(startMarker).length);
+  assert.ok(start >= 0 && end > start, `missing source range ${startMarker} -> ${endMarker}`);
+  return text.slice(start, end);
+}
+
+function makeCatalogT(catalog) {
+  return (key, params = {}) => String(catalog[String(key)] || key).replace(/\{(\w+)\}/g, (_match, name) => params[name] ?? '');
+}
+
+function deferredFetch() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return {promise, resolve, reject};
+}
+
+function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
+  return {defaults, settings, mtime_ns: 1};
+}
+
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
-  const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  const bootStart = source.indexOf("if (refreshMeta) {");
-  assert.ok(bootStart > 0, 'could not find browser boot section');
   const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'hoverCapable', 'viewport'].includes(key)));
   const fireAllTimeouts = options.fireAllTimeouts === true;
   const coarsePointer = options.coarsePointer === true;
@@ -454,7 +511,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     },
     // Seed the en catalog the way production inlines bootstrap.strings, so localized labels (the brand
     // tab labels infoTabLabel()/yoagentTabLabel() etc.) resolve synchronously at first render under en.
-    strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
+    strings: {en: EN_CATALOG},
     settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {}, mtime_ns: 1},
     ...bootstrapOverrides,
   };
@@ -492,6 +549,16 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const testClearTimeout = options.clearTimeout || (() => {});
   const testSetInterval = options.setInterval || (() => {});
   const testClearInterval = options.clearInterval || (() => {});
+  // Product code deliberately logs recoverable transport failures. Capture those VM logs so green
+  // node runs stay readable and the test which triggers a failure can assert its diagnostic.
+  const vmConsoleErrors = [];
+  const vmConsole = {
+    log() {},
+    info() {},
+    debug() {},
+    warn(...args) { vmConsoleErrors.push(args.map(String).join(' ')); },
+    error(...args) { vmConsoleErrors.push(args.map(String).join(' ')); },
+  };
   const notification = {permission: 'denied'};
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
@@ -500,7 +567,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     return node;
   };
   const context = {
-    console,
+    console: vmConsole,
     EventSource: TestEventSource,
     File: TestFile,
     FormData: TestFormData,
@@ -643,7 +710,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   context.globalThis = context;
   context.__openedWindows = [];
   vm.createContext(context);
-  vm.runInContext(`${source.slice(0, bootStart)}
+  (bundleScript ||= new vm.Script(`${BUNDLE_SOURCE.slice(0, BUNDLE_BOOT_START)}
 globalThis.__layoutTestApi = {
   safeDecodeURIComponent,
   utf8ByteLength,
@@ -2674,14 +2741,15 @@ globalThis.__layoutTestApi = {
   documentElementStyleForTest() {
     return document.documentElement.style;
   },
-};`, context);
+};`, {filename: 'yolomux-test-bundle.js'})).runInContext(context);
   context.document.__listeners = documentListeners;
   const api = context.__layoutTestApi;
   // Mirror production boot: preload the en catalog so t() resolves to English in tests (fetch is
   // disabled here, so the live applyLocale() never runs).
   try {
-    api.i18nSetCatalogForTest('en', JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
+    api.i18nSetCatalogForTest('en', EN_CATALOG);
   } catch (_) {}
+  api.vmConsoleErrorsForTest = () => [...vmConsoleErrors];
   return api;
 }
 
@@ -2843,7 +2911,8 @@ function test(label, fn) {
   // Per-test isolation: a failing assertion is recorded and the rest of the suite still runs, so one
   // failure no longer hides every later check. A pass/fail summary + non-zero exit print at the end.
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') throw new Error('async fn passed to sync test(); use testAsync');
     __testPass++;
   } catch (error) {
     __testFail++;
@@ -2917,6 +2986,10 @@ module.exports = {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
+  sourceBetween,
+  makeCatalogT,
+  deferredFetch,
+  settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
   loadYolomuxWithFileExplorerClosed,

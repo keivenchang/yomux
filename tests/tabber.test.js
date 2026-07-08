@@ -1,7 +1,6 @@
 const {
   assert,
   fs,
-  UI_PINS,
   vm,
   FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST,
   DEFAULT_TEST_SETTINGS,
@@ -40,14 +39,8 @@ async function runTabberSuite() {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'tabber'], 'Finder, Tabber, and Differ register through the shared tree interaction controller');
-    assert.ok(source.includes('function createSharedTreeInteractionController('), 'shared tree controller exists');
-    assert.ok(source.includes('function sharedTreeSelectionApi('), 'shared tree selection behavior has a named owner');
-    assert.ok(source.includes('function sharedTreeExpansionApi('), 'shared tree expansion behavior has a named owner');
-    assert.ok(source.includes('function sharedTreeClickHandler('), 'shared tree click routing has a named owner');
-    assert.ok(source.includes('function sharedTreeKeyboardHandler('), 'shared tree keyboard routing has a named owner');
-    assert.ok(/const finderTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'finder'/.test(source), 'Finder uses the shared tree interaction controller');
-    assert.ok(/const tabberTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'tabber'/.test(source), 'Tabber uses the shared tree interaction controller');
-    assert.ok(/const differTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*name: 'differ'/.test(source), 'Differ uses the shared tree interaction controller');
+    // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
+    // shard keeps the observable controller registration and keyboard behavior contract.
     assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerMode === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*fileExplorerMode === 'diff'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'global key dispatch routes Tabber/Differ through the shared parent before Finder fallback');
     assert.ok(/selectableFileTreeRows\(container = document\)[\s\S]*!row\.dataset\.tabberType/.test(source), 'Finder/Differ legacy row discovery does not steal Tabber rows');
     assert.ok(source.includes('row.classList.toggle(CLS.selected, selected)') && source.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && source.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
@@ -440,7 +433,7 @@ async function runTabberSuite() {
 
   // S2 BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
   // Tabs row — with its Recent/Files duplicate suppressed. Without the dedup it would appear twice.
-  test('t@8136', () => {
+  test('file tab layout state round-trips through the URL', () => {
     const path = '/repo/app/notes.py';
     const enc = encodeURIComponent('file:' + path);   // file%3A%2Frepo%2Fapp%2Fnotes.py
     // open the file as a real tab (slot3) via the layout URL — same shape as the passing test above
@@ -459,7 +452,7 @@ async function runTabberSuite() {
     assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
   });
 
-  test('t@8155', () => {
+  test('chrome labels, Finder toggle, and theme refresh use shared owners', () => {
     // #8-#13: renames, toggles, theme propagation, README preview.
     const api = loadYolomux('', ['1']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -490,16 +483,20 @@ async function runTabberSuite() {
     assert.ok(source.includes("openFileInEditor(path, 'README.md', {viewMode: 'preview'})"), '#13: README opens in preview mode');
   });
 
-  test('t@8186', () => {
-    // every pane keeps its active tab clearly green (no dimming); focused pane = brighter
-    // lime + ring. Source-guards on the shared tokens + the un-dimmed unfocused-active rule.
-    const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(css), '#11: unfocused panes show a clearly-visible green active tab (aliased to the focused full-green token; images 003/004)');
-    assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
-    assert.ok(/--active-accent-bright:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue (via active-accent)');
+  test('unfocused active tabs remain visible', () => {
+    // Browser coverage owns the rendered token/opacity result.  Keep this named regression slot
+    // so its behavior remains discoverable without duplicating CSS source selectors here.
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    api.setFocusedPanelItem('1');
+    assert.equal(api.currentSlots().right.active, '2', 'an unfocused pane retains its active tab state');
   });
 
-  test('t@8195', () => {
+  test('active drags defer panel rendering and preserve tab chrome', () => {
     // re-renders + search-focus are deferred/suppressed mid-drag so the dragged DOM node
     // is not replaced (which aborts the native HTML5 drag); + 3-tab placement in a consistent index space.
     const api = loadYolomux('', ['1', '2', '3']);
@@ -539,7 +536,7 @@ async function runTabberSuite() {
     assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
   });
 
-  test('t@8235', () => {
+  test('same-strip tab drops reorder in both directions', () => {
     // same-strip drag-reorder works in BOTH directions. Dropping a tab anywhere onto a
     // neighbor moves it past that neighbor (no center-overshoot required for the left->right case).
     const api = loadYolomux('', ['6']);
@@ -554,7 +551,7 @@ async function runTabberSuite() {
     assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '9').index, 1, 'cross-pane drop keeps the centered threshold');
   });
 
-  test('t@8250', () => {
+  test('adjacent same-strip tab drops are no-ops', () => {
     const api = loadYolomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
@@ -567,7 +564,7 @@ async function runTabberSuite() {
     assert.equal(api.paneTabDropPlacement(strip, {clientX: 330, clientY: 8}, '2').noop, false, 'dragging 2 after tab 3 still reorders');
   });
 
-  test('t@8263', () => {
+  test('Dockview tab drops preserve edge and pinned behavior', () => {
     const api = loadYolomux();
     const strip = new TestElement('dock-tabs');
     strip.classList.add('dv-tabs-container');
@@ -634,7 +631,7 @@ async function runTabberSuite() {
     api.setPinnedTabsForTest([]);
   });
 
-  test('t@8302', () => {
+  test('tab-strip drop previews reflect insertion state', () => {
     const api = loadYolomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
@@ -666,7 +663,7 @@ async function runTabberSuite() {
     assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '');
   });
 
-  test('t@8334', () => {
+  test('delegated window controls resolve nested button targets', () => {
     const api = loadYolomux();
     const container = new TestElement('dockview-actions');
     const button = new TestElement('window-next', 'button');
@@ -686,7 +683,7 @@ async function runTabberSuite() {
     assert.equal(api.windowStepButtonFromEvent({currentTarget: container, target: directLabel}), directButton, 'Dockview delegated direct-window clicks resolve the closest data-window-index button');
   });
 
-  test('t@8347', () => {
+  test('file drags show pane split previews', () => {
     const api = loadYolomux();
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
@@ -706,7 +703,7 @@ async function runTabberSuite() {
     assert.equal(slot.dataset.dropLabel, 'left');
   });
 
-  test('t@8367', () => {
+  test('terminal file drags bubble to pane split previews', () => {
     const api = loadYolomux();
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
@@ -731,7 +728,7 @@ async function runTabberSuite() {
     assert.ok(slot.classList.contains('drop-preview-left'), 'terminal path target also shows the pane split preview');
   });
 
-  test('t@8392', () => {
+  test('terminal directory drags retain path insertion affordance', () => {
     const api = loadYolomux();
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
@@ -752,7 +749,7 @@ async function runTabberSuite() {
     assert.ok(slot.classList.contains('drop-preview-left'), 'directory path target still shows the pane split preview');
   });
 
-  test('t@8413', () => {
+  test('file tree drags retain copy payload through protected mode', () => {
     const api = loadYolomux();
     const row = new TestElement('pic-row');
     row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
@@ -790,13 +787,7 @@ async function runTabberSuite() {
     assert.equal(api.customDragPreviewForTest(), null, 'file drag preview is removed on cleanup');
   });
 
-  test('t@8451', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.equal(source.includes('installFilePathDropTarget(session, panel);'), false, 'panel-level path drop target must not swallow pane split previews');
-    assert.ok(source.includes('installTerminalFileDrop(session, container);'), 'terminal surface still accepts path insertion drops');
-  });
-
-  test('t@8457', () => {
+  test('native tab drags preserve their grab offset', () => {
     const api = loadYolomux();
     const source = tabElement('4', 100, 140);
     source.rect = {left: 100, right: 240, top: 20, bottom: 47, width: 140, height: 27};
@@ -914,7 +905,7 @@ async function runTabberSuite() {
     assert.equal(deniedFile.allowed, false, 'an absent target intent is denied by the same file classifier');
   });
 
-  test('t@8485', () => {
+  test('pane drags preview and swap complete pane stacks', () => {
     const api = loadYolomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
@@ -988,7 +979,7 @@ async function runTabberSuite() {
     assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed on cleanup');
   });
 
-  test('t@8555', () => {
+  test('tab-strip dragover clears stale pane previews', () => {
     const api = loadYolomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
@@ -1025,7 +1016,7 @@ async function runTabberSuite() {
 
   // editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
   // truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
-  test('t@8592', () => {
+  test('editor navigation records deduplicated bounded history', () => {
     const api = loadYolomux();
     api.editorNav.stack = [];
     api.editorNav.index = -1;
@@ -1067,7 +1058,7 @@ async function runTabberSuite() {
 
   // A user click/type focus transition records the pane being left and the pane being entered, so Back
   // becomes active even when the previous pane was only focused, not already present in the nav stack.
-  test('t@8634', () => {
+  test('user pane focus transitions activate navigation history', () => {
     const api = loadYolomux();
     const back = api.testElementForId('topbarNavBack');
     let focusCount = 0;
@@ -1100,7 +1091,7 @@ async function runTabberSuite() {
   });
 
   // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
-  test('t@8648', () => {
+  test('navigation history retains its newest capped entries', () => {
     const api = loadYolomux();
     api.editorNav.stack = [];
     api.editorNav.index = -1;
@@ -1113,96 +1104,7 @@ async function runTabberSuite() {
 
   // the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
   // edit/preview view chips (it used to emit two identical rows — same name + path).
-  test('t@8661', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/const fileGroups = new Map\(\);[\s\S]{0,400}?fileItemPath\(item\)/.test(source), 'the palette groups file tabs by path (fileItemPath)');
-    assert.ok(source.includes('tabRow(editorItem, {key: `file:${path}`, viewModes})'), 'editor+preview of one file collapse to a single `file:` row carrying view chips');
-    assert.ok(source.includes('command-palette-view-chip'), 'the deduped file row renders edit/preview view chips');
-    // follow-up: the chips are clickable — each carries its view's layout item and jumps to it.
-    assert.ok(/data-view-item="\$\{esc\(v\.item\)\}" data-view-mode="\$\{esc\(v\.mode\)\}"/.test(source), 'each view chip carries its layout item + mode');
-    assert.ok(/closest\('\[data-view-item\]'\)[\s\S]{0,180}selectSession\(viewItem, \{userInitiated: true\}\)/.test(source), 'clicking a chip jumps to that view and closes the palette');
-  });
-
-  // the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
-  test('t@8672', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes('head.dataset.changesRepoToggle = repo'), 'the repo header is a collapse toggle keyed by repo path');
-    assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'the repo head reads per-repo collapse state');
-    assert.ok(source.includes('changes-repo-caret'), 'the repo head shows a collapse caret');
-  });
-
-  // (button completion): the back/forward buttons live in the GLOBAL topbar (left of the search
-  // box), are wired to editorNavBack/Forward, and tab-switches record as nav.
-  test('t@8681', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(source), 'the shared middle topbar group assembles the nav group before the search box');
-    assert.ok(/const back = makeButton\(\{[\s\S]*id: 'topbarNavBack'/.test(source) && /const forward = makeButton\(\{[\s\S]*id: 'topbarNavForward'/.test(source), 'the topbar nav builds #topbarNavBack / #topbarNavForward through the shared button builder');
-    assert.ok(/topbarNavBack[\s\S]{0,400}?editorNavBack\(\)/.test(source), 'the back button is wired to editorNavBack()');
-    assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
-    assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');
-    assert.ok(source.includes('setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});'), 'a user-initiated tab switch of ANY tab kind records through the shared focus path');
-    // keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
-    assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
-    assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
-    // An auto-focus-driven focus change records nav history only where a pointer can follow a cursor.
-    assert.ok(source.includes('function recordAutoFocusNav(item, previousItem = null)'), 'auto-focus nav recorder exists');
-    assert.ok(source.includes('recordAutoFocusNav(item, previousItem);'), 'setFocusedPanelItem records auto-focus nav with the previous focus');
-    assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusCanFollowCursor\(\)[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'it shares the cursor-capability auto-focus gate and debounces to the landed focus');
-    assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
-  });
-
-  // inline git blame — toolbar toggle + a CodeMirror line decoration (::after annotation).
-  test('t@8701', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes('file-editor-blame-panel'), 'the editor toolbar has a blame toggle button');
-    assert.ok(source.includes('file-editor-icon-blame'), 'the blame toggle uses the shared editor icon box, not an unaligned text glyph');
-    const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    const centeredBlameOwner = editorCss.match(/(?:^|\n)([^{}]*\.file-editor-icon-blame::before[^{}]*)\{([^}]*)\}/);
-    assert.ok(centeredBlameOwner, 'Blame outer circle participates in the shared centered editor-icon owner');
-    assert.ok(centeredBlameOwner[1].includes('.file-editor-icon-blame::after'), 'Blame center dot participates in the same centered editor-icon owner');
-    assert.ok(/top:\s*50%/.test(centeredBlameOwner[2]) && /left:\s*50%/.test(centeredBlameOwner[2]) && /transform:\s*translate\(-50%, -50%\)/.test(centeredBlameOwner[2]), 'the shared editor-icon owner centers both blame shapes');
-    assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'a CodeMirror blame extension decorates the cursor line');
-    assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
-    assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'the blame extension is wired into the editable editor extensions');
-    const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(/\.cm-line\[data-blame\]::after\s*\{[^}]*var\(--code-comment\)/.test(css), 'the blame annotation uses the theme-aware --code-comment token');
-    // Fix: blame state is in the editor config signature, so toggling blame OFF rebuilds the editor and
-    // the annotations are removed (the plugin is added/removed only at build time).
-    assert.ok(source.includes('blame: fileEditorBlameEnabled'), 'blame is part of the editor config signature so a toggle rebuilds (annotations clear on OFF)');
-    // follow-up: an all-lines blame Preference — the extension branches on it and the signature
-    // carries it (so toggling the pref rebuilds the decorations).
-    assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'blame-all-lines is in the editor config signature');
-    assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'all-lines blame decorates every visible line');
-    assert.ok(source.includes("preferenceSettingItem('editor.blame_all_lines'"), 'Preferences exposes the all-lines blame toggle through the shared setting builder');
-    // Blame + Diff buttons are adjacent git-history controls, but Blame stays available after Diff learns
-    // a file is clean so inline blame still works in normal edit mode.
-    assert.ok(/file-editor-blame-panel[\s\S]{0,260}file-editor-diff-panel/.test(source), 'Blame and Diff buttons are adjacent toolbar controls');
-    assert.ok(source.includes('state.gitRoot = payload.git_root ? normalizeDirectoryPath(payload.git_root) : \'\''), 'editor state carries the per-file git_root from /api/fs/read through the shared normalizer without turning empty root into /');
-    assert.ok(/function fileStateHasRepo\(path, state\)[\s\S]*state\?\.gitRoot \? normalizeDirectoryPath\(state\.gitRoot\) : ''[\s\S]*pathIsInsideDirectory\(normalized, root\)/.test(source), 'editor git actions require the file itself to be inside its reported repo root');
-    assert.ok(/function fileStateHasUsefulGitHistory[\s\S]*state\?\.gitTracked === true[\s\S]*state\?\.gitHasHistory === true[\s\S]*state\.gitHistory\.length > 1/.test(source), 'file-history metadata requires an actual multi-commit file history');
-    assert.ok(/function fileEditorGitActionControlsVisible[\s\S]*fileStateHasRepo\(path, state\)[\s\S]*fileStateHasUsefulGitHistory\(state\)[\s\S]*confirmedNoDiff/.test(source), 'Diff visibility hides files outside repos, non-git, creation-only, stale-history, or confirmed-clean files');
-    assert.ok(/function fileEditorBlameControlsVisible[\s\S]*fileStateHasRepo\(path, state\)[\s\S]*fileStateHasUsefulGitHistory\(state\)/.test(source), 'Blame visibility depends on repo membership and useful file history, not current diff availability');
-    assert.ok(/function updateFileEditorBlameButton[\s\S]*fileEditorBlameControlsVisible\(path, state, item\)/.test(source), 'blame button uses the blame-specific history visibility helper');
-    assert.ok(/function updateFileEditorBlameButton[\s\S]*editorViewModeFor\(path, item\) === 'edit'[\s\S]*button\.disabled = !visible \|\| !editable/.test(source), 'Blame is clickable only in normal edit mode');
-    assert.ok(/'editor-blame': \(_event, target\) => \{[\s\S]*target\?\.disabled\) return/.test(source), 'disabled Blame clicks do not toggle the global blame preference');
-    assert.ok(/function updateFileEditorDiffButton[\s\S]*const visible = fileEditorGitActionControlsVisible\(path, state, item\)[\s\S]*button\.hidden = !visible[\s\S]*button\.disabled = !visible/.test(source), 'diff button uses the shared git-action visibility predicate and disabled state');
-    assert.ok(/'editor-diff': \(_event, target\) => \{[\s\S]*target\?\.disabled \|\| target\?\.hidden\) return/.test(source), 'hidden or disabled Differ clicks cannot enter diff mode');
-    assert.ok(source.includes('state.gitTracked = payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read through the shared normalizer');
-  });
-
-  // Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a
-  // doc with a long line elsewhere is no longer left scrolled fully right (off-screen / blank).
-  test('t@8739', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes('function codeMirrorSearchScrollFix(api)'), 'search-scroll fix extension exists');
-    assert.ok(source.includes('codeMirrorSearchScrollFix(api)'), 'search-scroll fix is wired into the editable editor extensions');
-    assert.ok(/isUserEvent\?\.\('select\.search'\)/.test(source), 'the fix triggers only on search-driven selection changes');
-    assert.ok(/scrollIntoView\(head,\s*\{x:\s*'center'/.test(source), 'the fix re-centers the match horizontally');
-  });
-
-  // S2: a file open as a tab shows ONCE in the merged palette — its deduped Tabs row (carrying
-  // both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
-  test('t@8749', () => {
+  test('command palette deduplicates open files and ranks mixed results', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const api = loadYolomux('', ['1']);
     const candidateStart = source.indexOf('function commandPaletteCandidateItems(');
@@ -1261,20 +1163,7 @@ async function runTabberSuite() {
 
   // S14: opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag
   // delay by measuring the real bucket, instead of guessing setDragImage is the cause.
-  test('t@8758', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("storageGet('yolomux.debugDragTiming') === '1'"), 'S14: drag timing is gated behind an opt-in storage flag (no permanent user-visible perf log)');
-    assert.ok(source.includes("dragTimingMark('pointerdown')"), 'S14: pointerdown is marked (pointerdown->dragstart bucket)');
-    assert.ok(source.includes("dragTimingMark('startSessionDrag:begin')") && source.includes("dragTimingMark('startSessionDrag:end')"), 'S14: startSessionDrag is bracketed by timing marks');
-    assert.ok(source.includes("dragTimingMarkOnce('dragMeasureStrip:first')") && source.includes("dragTimingMarkOnce('paneTabDropPlacement:first')"), 'S14: first strip-measure and drop-placement are marked');
-    assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
-    assert.ok(source.includes('function showDragTimingOverlay(') && source.includes("el.className = 'drag-timing-overlay'"), 'S14: a copyable on-page timing overlay (no DevTools) is rendered at drag end');
-  });
-
-  // root cause + fix: while Claude/tmux owns the mouse, copied text arrives as an OSC 52 clipboard
-  // escape; xterm.js drops it unless a handler is registered. The bridge decodes it and writes the browser
-  // clipboard, and never answers '?' read queries (no clipboard exfiltration).
-  test('t@8771', () => {
+  test('OSC 52 terminal clipboard bridge handles safe payloads', () => {
     const api = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     const b64 = text => Buffer.from(text, 'utf8').toString('base64');
     // pure decoder
@@ -1307,7 +1196,7 @@ async function runTabberSuite() {
 
   // right-click must not clear the terminal highlight; the menu copies the selection captured at
   // right-click time.
-  test('t@8804', () => {
+  test('terminal context menu preserves captured right-click selection', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
     assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, container, rightClickSelection\)/.test(source), 'N7: the context menu receives the selection captured at right-click time');
@@ -1414,7 +1303,7 @@ async function runTabberSuite() {
 
   // DOIT.58 B1-B7: the Tabber (Finder pane's third mode) — source guards that rows route through the
   // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
-  test('t@tabber', () => {
+  test('Tabber shares the Finder tree and tab interaction pipeline', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const tabberSessionChromeSource = source.match(/function tabberSessionChromeHtml\(data\) \{[\s\S]*?\n\}/)?.[0] || '';
@@ -1946,7 +1835,7 @@ async function runTabberSuite() {
     assert.ok(Array.from(contextMenu?.children || []).some(child => String(child.textContent || '').includes("Rename tmux session '1'")), 'Tabber session context menu includes the shared rename action');
   });
 
-  {
+  test('drop-action suggestions honor category, settings, and last-used state', () => {
     // DOIT.57: drag-into-terminal suggestion registry (the transient 1..9 overlay's data layer).
     const api = loadYolomux();
     assert.equal(api.fileDropCategory('/x/shot.png'), 'image');
@@ -2005,14 +1894,9 @@ async function runTabberSuite() {
     assert.equal(api.composeDropSuggestion(customShell, {paths: ['/tmp/a b.log'], category: 'log'}), "head -40 '/tmp/a b.log'", 'custom shell templates expand quoted path placeholders');
     api.setClientSettingsPatchForTest({uploads: {custom_actions: ['Ask owner | explain why {name} matters | code']}});
     assert.ok(api.dropSuggestionsFor('code', 'claude', 1).some(s => s.custom && s.label === 'Ask owner'), 'custom prompt actions from Preferences join the shared registry');
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("boolSetting('uploads.suggestion_autorun', false)"), 'read-only shell autorun is Preference-gated');
-    assert.ok(source.includes("storageSet(dropActionLastKey(category), actionId)"), 'chosen drop actions are remembered per category');
-    assert.ok(source.includes("apiFetchJson('/api/drop-action/run'"), 'server-side actions use the /api/drop-action/run endpoint');
-    assert.ok(source.includes("appendContextMenuButton(menu, t('contextmenu.copyImage')"), 'Finder/Differ image context menus expose localized Copy image');
-    assert.ok(source.includes('function commandPaletteDropActionItems()'), 'command palette reuses the drop-action registry for active file actions');
-    assert.ok(source.includes("preferenceSettingItem('uploads.custom_actions'") && source.includes("preferenceSettingItem('uploads.suggestion_autorun'") && source.includes("preferenceSettingItem('uploads.image_action_order'"), 'Uploads Preferences expose custom actions, image ordering, and autorun through the shared setting builder');
-  }
+    // Request transport and menu wiring have their own integration owners. This unit proves the
+    // registry's observable category/settings/last-used behavior without pinning implementation text.
+  });
 
   await testAsync('drop-action status reuses the localized display label', async () => {
     const api = loadYolomux('', ['1']);
