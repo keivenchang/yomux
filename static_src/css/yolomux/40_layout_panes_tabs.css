@@ -1412,14 +1412,12 @@ body.layout-resizing {
   display: inline-grid;
   place-items: center;
   opacity: 1;
-  background: var(--accent-gold);
-  border-radius: var(--radius-control);
 }
 .pane-tab-pin-icon::before {
   content: "";
   width: 14px;
   height: 14px;
-  background: var(--auto-text);
+  background: currentColor;
   -webkit-mask: var(--icon-pin) center / contain no-repeat;
   mask: var(--icon-pin) center / contain no-repeat;
 }

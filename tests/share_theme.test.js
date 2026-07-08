@@ -5490,7 +5490,7 @@ async function runShareThemeSuite() {
     assert.equal(unpinTabRow?.getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
     const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
     const contextMenuCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(/\.pane-tab-pin-icon\s*\{[\s\S]*flex:\s*0 0 18px;[\s\S]*place-items:\s*center;[\s\S]*background:\s*var\(--accent-gold\)[\s\S]*border-radius:\s*var\(--radius-control\)[\s\S]*\.pane-tab-pin-icon::before\s*\{[\s\S]*width:\s*14px;[\s\S]*background:\s*var\(--auto-text\)[\s\S]*mask:\s*var\(--icon-pin\) center \/ contain no-repeat/.test(paneTabsCss), 'every pinned tab uses the same compact gold badge with one thin dark pin regardless of active state');
+    assert.ok(/\.pane-tab-pin-icon\s*\{[\s\S]*flex:\s*0 0 18px;[\s\S]*place-items:\s*center;[\s\S]*\.pane-tab-pin-icon::before\s*\{[\s\S]*width:\s*14px;[\s\S]*background:\s*currentColor;[\s\S]*mask:\s*var\(--icon-pin\) center \/ contain no-repeat/.test(paneTabsCss), 'every pinned tab uses one plain thin pin icon through the shared component without state-specific badge styling');
     assert.equal(/\.terminal-context-menu button\[data-checked="true"\]::before/.test(contextMenuCss), false, 'checked context-menu rows rely on their stateful icon instead of adding a duplicate star marker');
     const filePathForMenu = '/home/test/yolomux.dev/README.md';
     api.setOpenFileStateForTest(filePathForMenu, {mtime: 1, kind: 'text', original: '# hello', content: '# hello', dirty: false});
