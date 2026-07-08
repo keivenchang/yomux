@@ -4310,7 +4310,6 @@ function appendTabSplitCommands(menu, item, options = {}) {
   appendDirectionalActions('move', t('tab.actions.move'), zone => moveLayoutItemDirectional(item, sourceSlot, zone));
   appendDirectionalActions('swap', t('layout.drop.swap'), zone => swapLayoutItemDirectional(item, sourceSlot, zone));
   menu.appendChild(actionGroups);
-  appendContextMenuSeparator(menu);
 }
 
 function appendTabActionCommands(menu, item, options = {}) {
