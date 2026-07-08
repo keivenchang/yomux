@@ -3471,7 +3471,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
 
 function persistIndexedDirsSetting(op = {}) {
   // C11: MERGE the change into the current shared file_explorer.indexed_dirs rather than overwriting it
-  // with this page's whole set. Two browser origins (:7000 vs :7001) do NOT share localStorage, so a
+  // with this page's whole set. Two browser origins (:7770 vs :7771) do NOT share localStorage, so a
   // whole-list save from one would drop the other's dirs and make rows flip indexed/un-indexed on the
   // next settings poll. An explicit {add}/{remove} applies just that one op to the shared list; a bare
   // save (initial localStorage->setting migration) only UNIONS this page's dirs in, never removing.

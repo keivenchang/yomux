@@ -222,14 +222,14 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
     monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
-    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 7002}, {"port": 7000}])
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 7772}, {"port": 7770}])
     monkeypatch.setattr(check, "lower_current_process_priority", lambda records: events.append(("nice", records)) or True)
     monkeypatch.setattr(check, "run_parallel", fake_run_parallel)
 
     assert check.main([]) == 0
 
     assert events[0] == ("lock", True, check.DEFAULT_TOOL_LOCK_PATH)
-    assert events[1] == ("nice", [{"port": 7002}, {"port": 7000}])
+    assert events[1] == ("nice", [{"port": 7772}, {"port": 7770}])
     assert events[2][0] == "run"
     assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
     output = capsys.readouterr().out

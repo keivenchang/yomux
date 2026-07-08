@@ -1095,7 +1095,7 @@ def session_touched_dirs(info: SessionInfo) -> list[str]:
     transcript (the same edit-tool scan the Modified-files / Tabber panes use, so it counts edits, not
     reads). This is the signal that lets repo detection find the real project repo even when the live
     pane cwd is $HOME or another non-repo: a claude launched from ~ but editing files in
-    ~/yolomux.dev8003 still surfaces that repo. Returns unique containing directories in first-seen
+    ~/yolomux.dev7773 still surfaces that repo. Returns unique containing directories in first-seen
     order; git-root resolution and dedupe across repos happen in the caller's repo_summary pass."""
     dirs: list[str] = []
     seen: set[str] = set()

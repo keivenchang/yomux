@@ -4715,7 +4715,7 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
       <article id="panel" class="panel active-pane" style="width: 900px; height: 300px;">
         <div id="info-bar" class="pane-info-bar panel-detail-row">
           <div id="zone" class="pane-info-bar-popover-zone panel-popover-zone popover-open">
-            <div class="panel-session-label"><span class="session-button-dir">7001</span></div>
+            <div class="panel-session-label"><span class="session-button-dir">7771</span></div>
             <div class="pane-info-bar-meta meta">short metadata</div>
             <div id="popover" class="session-popover" role="tooltip"><div class="popover-title">Extra session information</div><div class="popover-desc">This card should use all available pane width.</div></div>
           </div>

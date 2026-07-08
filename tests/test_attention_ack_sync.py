@@ -262,7 +262,7 @@ def test_fresh_server_hydrates_shared_cooldown_transition(monkeypatch, tmp_path,
     patch_shared_path(monkeypatch, tmp_path)
     owner = make_app()
     follower = make_app()
-    scope = ("7003", "1", "%27", "claude")
+    scope = ("7773", "1", "%27", "claude")
 
     owner.agent_window_working_stopped_ts(*scope, "working", 100.0)
     owner_stopped = owner.agent_window_working_stopped_ts(*scope, "idle", 200.0)

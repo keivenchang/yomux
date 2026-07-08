@@ -699,22 +699,22 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=1,7000&layout=left&tabs=left:1,7000",
-        sessions=["1", "7000"],
+        "?sessions=1,7770&layout=left&tabs=left:1,7770",
+        sessions=["1", "7770"],
         transcript_sessions={
             "1": {"panes": [{"target": "%1", "window": 1, "window_name": "claude", "active": True, "process_label": "claude"}]},
-            "7000": {"panes": [{"target": "%77", "window": 77, "window_name": "codex", "active": True, "process_label": "codex"}]},
+            "7770": {"panes": [{"target": "%77", "window": 77, "window_name": "codex", "active": True, "process_label": "codex"}]},
         },
         auto_approve_payload={
-            "session_order": ["1", "7000"],
+            "session_order": ["1", "7770"],
             "sessions": {
                 "1": {
                     "target": "1",
                     "enabled": False,
                     "agent_windows": [{"kind": "claude", "state": "idle", "window_index": 1, "working_stopped_ts": stopped_ts}],
                 },
-                "7000": {
-                    "target": "7000",
+                "7770": {
+                    "target": "7770",
                     "enabled": False,
                     "agent_windows": [
                         {"kind": "codex", "state": "working", "window_index": 77},
@@ -729,7 +729,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
     metrics = browser.execute_script(
         """
-        return ['1', '7000'].map(item => {
+        return ['1', '7770'].map(item => {
           const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
           const core = tab?.querySelector('.pane-tab-core');
           const status = tab?.querySelector('.session-agent-activity-marker');

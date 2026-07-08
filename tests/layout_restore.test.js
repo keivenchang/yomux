@@ -90,7 +90,7 @@ async function runLayoutRestoreSuite() {
     const warning = api.httpsWarningForTest();
     assert.equal(warning.hidden, false);
     assert.ok(warning.dataset.tip.includes('Highly recommend that you restart with'));
-    assert.ok(warning.dataset.tip.includes('--port 7000 --self-signed'));
+    assert.ok(warning.dataset.tip.includes('--port 7770 --self-signed'));
     assert.equal(warning.dataset.tip.includes('--host 0.0.0.0'), false);
 
     const secureApi = loadYolomux('', ['1'], 'https:');

@@ -531,7 +531,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
     removeItem(key) { sessionStorageMap.delete(String(key)); },
   };
-  const locationPort = String(options.locationPort || '7000');
+  const locationPort = String(options.locationPort || '7770');
   const location = {
     search,
     pathname: '/',

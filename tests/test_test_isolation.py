@@ -5,7 +5,7 @@ import conftest as suite_conftest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_YOLOMUX_PORTS = ("7000", "7001", "7002", "7003")
+LIVE_YOLOMUX_PORTS = ("7770", "7771", "7772", "7773")
 
 
 def automated_test_source_paths():
