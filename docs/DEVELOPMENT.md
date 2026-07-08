@@ -189,7 +189,7 @@ Production and development instances can run side-by-side. The project does not 
 
 | Role | Directory | Port | Purpose |
 |---|---|---|---|
-| prod | Production checkout, for example `~/yolomux/` | Stable HTTPS port | Stable copy, synced from dev after verification |
+| prod | Production checkout | Stable HTTPS port | Stable copy, synced from dev after verification |
 | dev | Any development checkout or git worktree | Non-conflicting HTTPS port | Active development server |
 
 Development servers are HTTPS in normal use. Launch them with `--self-signed --dang --dev` on the port you selected; avoid plain HTTP unless you are testing that path explicitly. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
@@ -210,7 +210,7 @@ Use `boot.sh` from the checkout you want to serve. It restarts only the requeste
 ./boot.sh
 ```
 
-The script defaults to HTTPS `7000`, `--self-signed`, and `--dang`. For a dev worktree, run the script from that checkout and pass the port you chose; non-`7000` ports use `--dev` automatically:
+The script starts HTTPS with `--self-signed` and `--dang`. Its default port is configurable through `YOLOMUX_PORT`; for a dev worktree, run the script from that checkout and pass the port you chose. Ports other than the script's default use `--dev` automatically:
 
 ```bash
 (cd ~/path/to/dev-checkout && ./boot.sh <dev-port>)
@@ -246,7 +246,7 @@ If you intentionally started with `YOLOMUX_TEST_AUTH_BYPASS=1`, `/api/ping` and 
 - **LOCAL (default — "cps" / "yolo-cps" with no qualifier):** rebase the dev branch onto LOCAL `main` and land it on local `main`. NO version bump, NO push.
 - **ORIGIN ("cps origin" / "cps remote"):** rebase onto `origin/main`, bump the version, land on local `main`, then push to `origin/main`.
 
-Edits happen in a dev checkout; the integration/production checkout (`~/yolomux`, which holds `main`) is read-only during sync and shares the same `origin`. Because `main` is checked out in `~/yolomux`, you cannot check it out in a dev worktree — land work by committing on the dev branch, rebasing it onto `main` / `origin/main`, then fast-forwarding `main` from `~/yolomux`.
+Edits happen in a dev checkout; the integration/production checkout (which holds `main`) is read-only during sync and shares the same `origin`. Because `main` is checked out in the production checkout, you cannot check it out in a dev worktree — land work by committing on the dev branch, rebasing it onto `main` / `origin/main`, then fast-forwarding `main` from the production checkout.
 
 ORIGIN-mode sequence from the dev checkout:
 
@@ -256,8 +256,8 @@ git fetch origin && git rebase origin/main   # rebase onto the published tip
 # bump YOLOMUX_VERSION in yolomux_lib/common.py, folded into the work commit
 git add -- <explicit-files>
 git commit -m "<message including Version: 0.4.N>"
-git -C ~/yolomux merge --ff-only <branch>    # land on local main — its OWN exit-checked command
-git -C ~/yolomux push origin main            # only after the ff-merge succeeds
+git -C <production-checkout> merge --ff-only <branch>    # land on local main — its OWN exit-checked command
+git -C <production-checkout> push origin main            # only after the ff-merge succeeds
 ```
 
 LOCAL mode is the same minus the version bump and the final `push` (stop after the ff-merge).
@@ -266,9 +266,9 @@ Rules:
 
 - ORIGIN mode MUST bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
-- The `merge --ff-only` into `~/yolomux` MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
+- The `merge --ff-only` into the production checkout MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
 - This is a shared multi-worktree: local `main` can advance from another worktree mid-`cps`, so your ff-merge can suddenly refuse (diverged). Recovery: `git fetch origin`, `git rebase origin/main` your dev branch (disjoint files rebase clean), re-run the gate, then ff-merge + push. No force-push, nothing lost — the other commit is usually a sibling off the same base.
-- Production pull/merge is `--ff-only`. Never edit, stage, or commit inside `~/yolomux`.
+- Production pull/merge is `--ff-only`. Never edit, stage, or commit inside the production checkout.
 - Restart is NOT part of `cps` itself. After code changes in a dev worktree, restart the active dev server before reporting ready; restart prod only when explicitly asked (see Restart workflow above), then verify `/api/ping`, the process cwd, and `YOLOMUX_VERSION`. The login page may not expose the version to unauthenticated curl; do not rely on a blank version grep alone.
 
 ## xterm.js Assets
@@ -368,11 +368,11 @@ In-process caches follow the same record rule. `StatsSampleRecord` owns the proc
 
 `python3 yolomux.py --print-runtime-report` reports the elected owner, accepted/coalesced refresh counters, and a rolling 60-second performance summary. Session-files phase rows have these meanings: `phase:transcript-attribution` maps transcript events to touched files; `phase:repository-discovery` resolves session paths to repositories; `phase:git-signature` reads the complete invalidation identity; `phase:git-snapshot` builds or reuses repository-wide diff/ref facts; `phase:session-merge-render` combines shared Git facts with session attribution; and `phase:cache-serialization` signs and writes the result. A `phase:git-snapshot` cache hit must report zero Git compute. Phase details are bounded and omit composite values so runtime reports do not become another payload or secret store.
 
-For an accepted before/after comparison, restart only the dev port being measured, confirm that port is `owner.current_owner.port`, keep the same visible Tabber/YO!info workload, save `--print-runtime-report` output under `/tmp`, and run `pidstat -u -p <7000-pid>,<7001-pid>,<7002-pid>,<7003-pid> 1 60` for both windows. Compare the owner's CPU against the mean of the three non-owners as well as absolute CPU, because live agent output changes every process's baseline. For each role/surface, compute seconds per minute as `count * compute_ms_avg / 1000`; also compare `compute_ms_max`, accepted/coalesced counts, and cache status. A valid freshness check must change a real worktree input, observe the complete session-files payload within the documented refresh interval, remove it, and confirm stale-while-refresh never substitutes an empty Differ/Tabber payload.
+For an accepted before/after comparison, restart only the dev port being measured, confirm that port is `owner.current_owner.port`, keep the same visible Tabber/YO!info workload, save `--print-runtime-report` output under `/tmp`, and run `pidstat -u -p <owner-pid>,<peer-pid>,<peer-pid>,<peer-pid> 1 60` for both windows. Compare the owner's CPU against the mean of the three non-owners as well as absolute CPU, because live agent output changes every process's baseline. For each role/surface, compute seconds per minute as `count * compute_ms_avg / 1000`; also compare `compute_ms_max`, accepted/coalesced counts, and cache status. A valid freshness check must change a real worktree input, observe the complete session-files payload within the documented refresh interval, remove it, and confirm stale-while-refresh never substitutes an empty Differ/Tabber payload.
 
-The 2026-07-03 equal-duration live sample used owner port 8001. Before the change, owner CPU was 33.66% versus 27.66%, 26.31%, and 25.05% for the non-owners; after the change, overall workload was higher at 41.43% versus 41.17%, 36.23%, and 34.12%, but the owner premium over peer mean narrowed from 7.32 to 4.26 CPU points (42%). In the comparable rolling report, session-files `payload` work fell from 3.61 to 2.54 CPU-seconds/minute and `cache-entry` work fell from 5.31 to 3.38 CPU-seconds/minute; maximum payload time fell from 2367ms to 752ms. A visible unchanged Tabber refresh reused the existing snapshot in 0.904ms. An untracked-file probe appeared in the live 8001 session-files payload in 0.79 seconds (621 to 622 rows), and its removal served the complete 621-row last-known-good payload while the replacement refresh ran. This workload realized the expected session-files reduction and a smaller owner-premium reduction than the older 105% leader sample because the accepted pre-change owner was already only 33.66% and live agent CPU rose during the post-change window.
+The 2026-07-03 equal-duration live sample used one dev owner. Before the change, owner CPU was 33.66% versus 27.66%, 26.31%, and 25.05% for the non-owners; after the change, overall workload was higher at 41.43% versus 41.17%, 36.23%, and 34.12%, but the owner premium over peer mean narrowed from 7.32 to 4.26 CPU points (42%). In the comparable rolling report, session-files `payload` work fell from 3.61 to 2.54 CPU-seconds/minute and `cache-entry` work fell from 5.31 to 3.38 CPU-seconds/minute; maximum payload time fell from 2367ms to 752ms. A visible unchanged Tabber refresh reused the existing snapshot in 0.904ms. An untracked-file probe appeared in the live owner payload in 0.79 seconds (621 to 622 rows), and its removal served the complete 621-row last-known-good payload while the replacement refresh ran. This workload realized the expected session-files reduction and a smaller owner-premium reduction than the older 105% leader sample because the accepted pre-change owner was already only 33.66% and live agent CPU rose during the post-change window.
 
-The required final cold-restart stress window deliberately kept Tabber visible every 10 seconds. Port 8001 was the owner at 50.72% CPU versus a 35.81% non-owner mean, and the phase rows explained why this window did not retain the warm-cache improvement: first-use transcript attribution for active transcripts up to 140.9 MB consumed 70.8 CPU-seconds/minute, while shared Git snapshots consumed 2.3 seconds/minute. Tabber consumed 4.3 seconds/minute including its one cold build; 7 of 8 refreshes were unchanged-cache hits, all 11 session rows appeared by the first 10-second follow-up, and no later response lost a row or reported an error. Treat this as a separate cold transcript-attribution target; it does not justify undoing the shared Git, per-row reuse, or single-flight paths.
+The required final cold-restart stress window deliberately kept Tabber visible every 10 seconds. The owner was at 50.72% CPU versus a 35.81% non-owner mean, and the phase rows explained why this window did not retain the warm-cache improvement: first-use transcript attribution for active transcripts up to 140.9 MB consumed 70.8 CPU-seconds/minute, while shared Git snapshots consumed 2.3 seconds/minute. Tabber consumed 4.3 seconds/minute including its one cold build; 7 of 8 refreshes were unchanged-cache hits, all 11 session rows appeared by the first 10-second follow-up, and no later response lost a row or reported an error. Treat this as a separate cold transcript-attribution target; it does not justify undoing the shared Git, per-row reuse, or single-flight paths.
 
 Transcript attribution now resumes large Claude and Codex JSONL scans from schema-versioned records under `STATE_DIR/transcript-scan-cache-v1/`. One provider-neutral owner validates parser version, device/inode, resolved path, options, a bounded first-line digest, parsed-tail bytes, truncation, and replacement before reusing an offset; invalid records reparse from byte zero. Records contain only derived path markers and bounded usage counters, never raw transcript lines, command bodies, or patch text. Files below 64 KiB remain memory-only because reparsing them is cheaper than durable fsync; large initial scans persist immediately, then active append state checkpoints at most every 30 seconds or 256 KiB. Per-record atomic writes, newer-offset protection, 0600 files in a 0700 directory, and count/64 MiB eviction keep rolling multi-server use bounded.
 

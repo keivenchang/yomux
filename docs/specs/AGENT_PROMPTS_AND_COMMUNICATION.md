@@ -181,7 +181,7 @@ This stale example is idle, not `needs-input`, because the current bottom prompt
 ```text
 ❯ Where are the DOIT files?
 
-● They're gone from ~/yolomux.dev8002 — and that's by the project's design, not a loss.
+● They're gone from <dev-worktree> — and that's by the project's design, not a loss.
 
 ✻ Baked for 1m 33s · 1 shell still running
 
@@ -237,7 +237,7 @@ Codex can show a working row above an input-looking composer and model line. The
 │ Use /skills to list available skills       │
 │ >                                          │
 ╰────────────────────────────────────────────╯
-gpt-5.5 xhigh   ~/yolomux.dev8002
+gpt-5.5 xhigh   <dev-worktree>
 ```
 
 The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
@@ -296,7 +296,7 @@ Codex may select option 2 by default for remembered prefixes. The detector must 
 ```text
   Would you like to run the following command?
 
-  $ curl -sk -u yolomux:yolomux https://localhost:7000/
+  $ curl -sk -u yolomux:yolomux https://localhost:<port>/
 
   1. Yes, proceed (y)
 › 2. Yes, and don't ask again for commands that start with `curl -sk -u` (p)

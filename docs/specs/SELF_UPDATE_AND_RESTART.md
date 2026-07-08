@@ -6,15 +6,15 @@ How YOLOmux updates its own running code, when it auto-restarts vs asks for a ma
 
 YOLOmux is developed across several git **worktrees** that share one repository and one `origin`:
 
-- `~/yolomux/` holds the canonical `main` branch — the "local main" / integration + production checkout. The prod server (port 7000) runs from here. Code is never edited here; `main` only advances by `git -C ~/yolomux merge --ff-only <branch>` or `git pull --ff-only`.
-- `~/yolomux.dev8001/`, `~/yolomux.dev8002/`, `~/yolomux.dev8003/` are dev worktrees. Each has its own local branch handle (`yolomux.dev800N`) and maps to ports 7001/7002/7003. All edits happen in a dev worktree.
+- The production checkout holds the canonical `main` branch — the local integration and production checkout. The production server runs from here. Code is never edited here; `main` advances only through a fast-forward merge or pull.
+- Development worktrees hold their own branch handles and run on independently configured ports. All edits happen in a development worktree.
 
-Because `main` is checked out in `~/yolomux`, it cannot also be checked out in a dev worktree. Two consequences that are easy to get wrong:
+Because `main` is checked out in the production checkout, it cannot also be checked out in a dev worktree. Two consequences that are easy to get wrong:
 
-- **Landing work on main** means: commit on the dev branch, `git rebase main` (or `origin/main`), then fast-forward `main` from `~/yolomux`. You do not commit to `main` directly from a dev worktree.
-- **Advancing `main` does not move the other worktrees' branch handles.** After main moves, `~/yolomux.dev8003` is simply *behind* main (a strict ancestor), not diverged. Realign it with `git -C ~/yolomux.dev8003 merge --ff-only main`. This is why two worktrees can legitimately show different HEADs right after a landing — it is staleness, not divergence.
+- **Landing work on main** means: commit on the dev branch, `git rebase main` (or `origin/main`), then fast-forward `main` from the production checkout. You do not commit to `main` directly from a dev worktree.
+- **Advancing `main` does not move the other worktrees' branch handles.** After main moves, a dev worktree can simply be *behind* main (a strict ancestor), not diverged. Realign it from that worktree with `git merge --ff-only main`. This is why two worktrees can legitimately show different HEADs right after a landing — it is staleness, not divergence.
 
-`common.PROJECT_ROOT` is the directory the running server was launched from, i.e. which worktree this process is. Several behaviors below branch on whether `PROJECT_ROOT` equals the prod root `~/yolomux`.
+`common.PROJECT_ROOT` is the directory the running server was launched from, i.e. which worktree this process is. Several behaviors below branch on whether `PROJECT_ROOT` equals the configured production root.
 
 ## Self-update: when the toast fires and what each message means
 
@@ -31,7 +31,7 @@ The toast text reports the restart outcome:
 
 ## Auto-restart condition: running checkout only
 
-`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `~/yolomux.dev8001/yolomux.py`, update pulls and builds in `~/yolomux.dev8001`, then the helper restarts that same checkout from `~/yolomux.dev8001`. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches the resolved current argv from the same `PROJECT_ROOT`.
+`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `<dev-worktree>/yolomux.py`, update pulls and builds in that worktree, then the helper restarts that same checkout. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches the resolved current argv from the same `PROJECT_ROOT`.
 
 The mechanism, when it does fire, is intentionally portable — no systemd, no broad `pkill`:
 
