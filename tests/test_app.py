@@ -3993,6 +3993,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
     old_polled = threading.Event()
     new_polled = threading.Event()
     release_old = threading.Event()
+    release_replacement = threading.Event()
     poll_threads = []
 
     def poll_files():
@@ -4002,11 +4003,12 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
             old_polled.set()
             assert release_old.wait(timeout=2.0)
             return
+        new_polled.set()
+        assert release_replacement.wait(timeout=2.0)
         with webapp.client_watch_service.lock:
             record = webapp.client_watch_service.event_watcher_record
             record.stop_event.set()
             record.wake_event.set()
-        new_polled.set()
 
     monkeypatch.setattr(webapp, "poll_client_file_events_once", poll_files)
     monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: None)
@@ -4038,6 +4040,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         assert replacement.stop_event is not old_record.stop_event
         assert replacement.wake_event is not old_record.wake_event
         assert new_polled.wait(timeout=1.0)
+        release_replacement.set()
         replacement_worker.join(timeout=1.0)
 
         release_old.set()
@@ -4049,6 +4052,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         assert poll_threads == [old_worker, replacement_worker]
     finally:
         release_old.set()
+        release_replacement.set()
         webapp.client_events.unsubscribe(subscriber_id)
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()

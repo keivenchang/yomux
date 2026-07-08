@@ -1935,8 +1935,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   max-width: 28px;
   padding-inline: var(--space-3);
 }
-/* Active-window paint comes from the shared base selector. This scoped weight still beats the generic
-   `.tab.active` fallback without duplicating the theme-aware paint declarations. */
+/* The selected subwindow label is slightly stronger; its tint/ring paint is owned in the final
+   pane-control state block so generic control paint cannot override it. */
 .tmux-window-bar .tmux-window-button.active {
   font-weight: 600;
 }

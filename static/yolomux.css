@@ -7819,8 +7819,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   max-width: 28px;
   padding-inline: var(--space-3);
 }
-/* Active-window paint comes from the shared base selector. This scoped weight still beats the generic
-   `.tab.active` fallback without duplicating the theme-aware paint declarations. */
+/* The selected subwindow label is slightly stronger; its tint/ring paint is owned in the final
+   pane-control state block so generic control paint cannot override it. */
 .tmux-window-bar .tmux-window-button.active {
   font-weight: 600;
 }
@@ -14415,6 +14415,16 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
   background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
   border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+}
+/* Subwindow selection is intentionally quieter than a pressed toolbar control: a tint retains its
+   surrounding context, normal chrome text stays readable, and a two-pixel bottom underline makes the
+   chosen window unambiguous. This comes after the shared pane-control owner because the subwindow is also a .tabs .tab. */
+:is(.tabs .tmux-window-bar, .tmux-window-bar) .tmux-window-button.active,
+:is(.tabs .tmux-window-bar, .tmux-window-bar) .tmux-window-button[aria-pressed="true"] {
+  color: var(--pane-ctl-fg, var(--text));
+  background: color-mix(in srgb, var(--active-control-bg) 14%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border-color: color-mix(in srgb, var(--active-control-border) 78%, var(--pane-ctl-border, var(--pane-tab-control-border)));
+  box-shadow: inset 0 -2px 0 var(--active-control-border), inset 0 0 0 1px color-mix(in srgb, var(--active-control-border) 38%, transparent);
 }
 .file-editor-theme-panel.theme-dark,
 .file-editor-theme-panel.theme-light,

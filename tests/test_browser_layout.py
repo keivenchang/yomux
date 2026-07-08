@@ -4805,7 +4805,7 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
-        const ids = ['tab-meta', 'language', 'menu-icon', 'notify', 'session-state', 'preferences-search', 'tmux-window', 'rename', 'info-preset', 'finder-toggle', 'preview-zoom', 'search-toggle'];
+        const ids = ['tab-meta', 'language', 'menu-icon', 'notify', 'session-state', 'preferences-search', 'rename', 'info-preset', 'finder-toggle', 'preview-zoom', 'search-toggle'];
         const paneIds = ['pane-tab-pressed', 'attention-pressed', 'legacy-mode-pressed', 'blame-pressed', 'diff-expand-pressed', 'mode-panel-pressed', 'gutter-pressed', 'wrap-pressed', 'find-pressed', 'diff-pressed'];
         document.getElementById('tab-meta').id = 'tabMetaToggle';
         const readPaint = element => {
@@ -4845,6 +4845,7 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
           return {
             expected,
             paneExpected,
+            tmuxWindow: readPaint(document.getElementById('tmux-window')),
             controls: Object.fromEntries(ids.map(id => {
               const resolvedId = id === 'tab-meta' ? 'tabMetaToggle' : id;
               return [id, readPaint(document.getElementById(resolvedId))];
@@ -4869,6 +4870,9 @@ def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
         expected = metrics[theme]["expected"]
         for control, paint in metrics[theme]["controls"].items():
             assert paint == expected, {"theme": theme, "control": control, "paint": paint, "expected": expected}
+        tmux_window = metrics[theme]["tmuxWindow"]
+        assert tmux_window["color"] != expected["color"], {"theme": theme, "tmuxWindow": tmux_window, "expected": expected}
+        assert tmux_window["background"] != expected["background"], {"theme": theme, "tmuxWindow": tmux_window, "expected": expected}
         for control, paint in metrics[theme]["paneControls"].items():
             assert paint == metrics[theme]["paneExpected"], {"theme": theme, "control": control, "paint": paint, "expected": metrics[theme]["paneExpected"]}
         for icon, geometry in metrics[theme]["icons"].items():
@@ -11528,7 +11532,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
           const inactiveActiveTab = inactivePanel.querySelector('.pane-tab.active');
           const inactiveTab = panel.querySelector('.pane-tab:not(.active)');
           const panelHead = panel.querySelector('.panel-head');
-          const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle)');
+          const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle):not(.tmux-window-button)');
           const activeWindow = panel.querySelector('.tmux-window-button.active[data-window-agent]');
           const inactiveWindow = panel.querySelector('.tmux-window-button[data-window-agent]:not(.active)');
           const paneControl = panel.querySelector('.tabs .pane-minimize');
@@ -11550,6 +11554,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
             activeWindowBg: getComputedStyle(activeWindow).backgroundColor,
             activeWindowBorder: getComputedStyle(activeWindow).borderTopColor,
             activeWindowColor: getComputedStyle(activeWindow).color,
+            activeWindowShadow: getComputedStyle(activeWindow).boxShadow,
             inactiveWindowBg: getComputedStyle(inactiveWindow).backgroundColor,
             paneControlBg: getComputedStyle(paneControl).backgroundColor,
             paneControlBorder: getComputedStyle(paneControl).borderTopColor,
@@ -11585,27 +11590,31 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # dark keeps #285a2f, so it must NOT be required equal across themes.
     # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
     # dark #86d600); Info Bar bg now follows --pane-bar-bg so it is theme-specific too.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "inactiveWindowBg"}
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "activeWindowShadow", "inactiveWindowBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
-    # The active pane tab shares the active accent with the pressed control tab (one --active-accent
-    # source) and stands out from the unpressed control bg — true for any active-color preset.
+    # Pane tabs retain the existing full active accent. Only subwindow buttons use tint/ring.
     assert theme_metrics["dark"]["activeTabBg"] == theme_metrics["dark"]["toolbarActiveBg"]
     assert theme_metrics["light"]["activeTabBg"] == theme_metrics["light"]["toolbarActiveBg"]
-    assert theme_metrics["dark"]["activeWindowBg"] == theme_metrics["dark"]["activeTabBg"]
-    assert theme_metrics["light"]["activeWindowBg"] == theme_metrics["light"]["activeTabBg"]
+    # The subwindow sits in the compact control strip rather than the pane-tab strip, so its low-alpha
+    # tint blends with a different neutral base. It must still be visibly selected through both tint and ring.
     assert theme_metrics["light"]["activeWindowBg"] != theme_metrics["light"]["inactiveWindowBg"]
+    assert theme_metrics["dark"]["activeWindowBg"] != theme_metrics["dark"]["inactiveWindowBg"]
+    assert theme_metrics["light"]["activeWindowBg"] != theme_metrics["light"]["toolbarActiveBg"]
+    assert theme_metrics["dark"]["activeWindowBg"] != theme_metrics["dark"]["toolbarActiveBg"]
+    assert theme_metrics["light"]["activeWindowShadow"] != "none"
+    assert theme_metrics["dark"]["activeWindowShadow"] != "none"
+    assert "0px -2px" in theme_metrics["light"]["activeWindowShadow"]
+    assert "0px -2px" in theme_metrics["dark"]["activeWindowShadow"]
     assert theme_metrics["light"]["activeWindowColor"] != theme_metrics["light"]["activeWindowBg"]
-    assert theme_metrics["dark"]["activeTabBg"] != theme_metrics["dark"]["paneControlBg"]
     assert theme_metrics["light"]["activeTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["light"]["inactiveActiveTabBg"] != theme_metrics["dark"]["inactiveActiveTabBg"]
     # Active-tab text stays legible against its (theme-specific) accent in BOTH modes.
     assert theme_metrics["light"]["activeTabColor"] != theme_metrics["light"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabColor"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
-    # images 003/004: an unfocused pane's active tab now uses the SAME full green as the focused pane's
-    # active tab (no lightening) — the unfocused-active tokens are aliased to the focused ones.
+    # Unfocused pane tabs retain the same full accent as focused panes; focus is shown by the pane ring.
     assert theme_metrics["dark"]["inactiveActiveTabBg"] == theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
     # REGRESSION GUARD (image 008): the inactive-tab branch/dir TEXT must contrast with the tab bg in BOTH
