@@ -362,8 +362,10 @@ function sessionAgentWindowHasWorkingSignal(session, info = null, autoPayload = 
 function sessionAgentWindowStatusSummary(session, info = null, autoPayload = null) {
   const model = sessionAgentWindowStatusModel(session, info, autoPayload);
   const {agents, hasAttributedWindows} = model;
-  if (!agents.length) return {agents, hasAttributedWindows, agent: null, item: null};
+  if (!agents.length) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
   let selected = null;
+  let acknowledging = null;
+  let acknowledgement = null;
   const visibleItems = [];
   for (const agent of agents) {
     const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session);
@@ -375,8 +377,17 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
     visibleItems.push({agent, item, tone});
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+    if (tone === 'acknowledged') acknowledging = {agent, item};
+    if (['attention', 'cooldown'].includes(tone)) {
+      const acknowledgementRank = acknowledgement ? agentWindowStatusItemVisualRank(acknowledgement.item) : 99;
+      const acknowledgementCurrent = acknowledgement ? agentWindowPayloadCurrent(acknowledgement.agent) === true : false;
+      if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
+    }
   }
-  if (!selected) return {agents, hasAttributedWindows, agent: null, item: null};
+  if (!selected) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
+  // A parent tab briefly mirrors the gray acknowledgement of the child the user just acted on.
+  // This feedback must not be hidden by a sibling that remains green and working.
+  if (acknowledging) selected = acknowledging;
   const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES
     .filter(tone => visibleItems.some(entry => entry.tone === tone));
   const item = {
@@ -390,6 +401,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     agents,
     hasAttributedWindows,
     ...selected,
+    acknowledgement,
     item,
     label: item.label || agentLabel(selected.agent?.kind),
   };
@@ -806,9 +818,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   let summaryIndex = null;
   if (explicitIndex === null && options.preferSummary === true) {
     const summary = sessionAgentWindowStatusSummary(sessionKey, info, autoApproveStates.get(sessionKey));
-    if (['attention', 'cooldown'].includes(summary?.item?.state)) {
-      summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
-    }
+    summaryIndex = tmuxWindowIndexKey(summary?.acknowledgement?.agent?.window_index ?? summary?.acknowledgement?.agent?.window);
   }
   const activeIndex = explicitIndex !== null
     ? explicitIndex

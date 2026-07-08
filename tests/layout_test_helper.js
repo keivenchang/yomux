@@ -2135,6 +2135,7 @@ globalThis.__layoutTestApi = {
   preferencesStatusPulseExampleHtmlForTest: preferencesStatusPulseExampleHtml,
   setWorkflowTransitionGlowSecondsForTest(value) { workflowTransitionGlowSeconds = Math.max(0, Number(value) || 0); },
   acknowledgeAgentWindowActivityForTest(session, windowIndex = null, options = {}) { return acknowledgeAgentWindowActivity(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
+  acknowledgeTerminalAttentionFromUserActionForTest(session, windowIndex = null, options = {}) { return acknowledgeTerminalAttentionFromUserAction(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
   acknowledgeAgentWindowStoppedTransitionForTest: acknowledgeAgentWindowStoppedTransition,
   agentWindowAcknowledgementVisualActiveForTest: agentWindowAcknowledgementVisualActive,
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,

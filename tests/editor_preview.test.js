@@ -946,8 +946,8 @@ async function runEditorPreviewSuite() {
     assert.ok(/const AGENT_WINDOW_VISIBLE_TONES = Object\.freeze\(\[STATE_KEY\.working, 'attention', 'cooldown'\]\)[\s\S]*function agentWindowVisibleTone\(value\)[\s\S]*AGENT_WINDOW_VISIBLE_TONES\.includes\(value\)[\s\S]*function agentWindowStatusToneForItem\(item\)[\s\S]*item\?\.acknowledging === true\) return 'acknowledged';[\s\S]*item\?\.acknowledged === true\) return ''[\s\S]*agentWindowActivityTone\(item\.state\)[\s\S]*agentWindowVisibleTone\(tone\)/.test(activitySource), 'one shared status-tone classifier renders the temporary gray acknowledgement before removing an acknowledged window from every surface');
     assert.equal((activitySource.match(/AGENT_WINDOW_VISIBLE_TONES\.includes/g) || []).length, 1, 'every visible-tone membership check routes through the one shared helper');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, resolvedWindowIndex[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'sub-window acknowledgement captures its gray visual before the shared prompt acknowledgement can hide the glyph');
-    assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains every visible child tone while inheriting opacity pulse from any visible child');
+    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, explicitWindowIndex \? windowIndex : null, \{[\s\S]*preferSummary: options\.preferSummary === true \|\| !explicitWindowIndex,[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'parent-tab acknowledgement targets its visible attention summary while a direct sub-window keeps its exact target');
+    assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*let acknowledging = null;[\s\S]*let acknowledgement = null;[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*if \(tone === 'acknowledged'\) acknowledging = \{agent, item\};[\s\S]*\['attention', 'cooldown'\]\.includes\(tone\)[\s\S]*acknowledgement = \{agent, item\};[\s\S]*if \(acknowledging\) selected = acknowledging;[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains every visible child tone, briefly mirrors a child acknowledgement, and retains the highest-priority acknowledgeable child');
     assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
     assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const acknowledged = item\?\.acknowledged === true;[\s\S]*if \(acknowledged && statusOnly\) return ''[\s\S]*const markerHtml = acknowledged \? '' : agentWindowStatusDotHtml/.test(activitySource), 'acknowledgement removes the transient ball/play/pause/stop glyph while preserving the stable sub-window agent identity');
@@ -1800,6 +1800,25 @@ async function runEditorPreviewSuite() {
     assert.equal(retiredAcknowledgementRecord.acknowledgementVisual, null, 'retiring the gray visual clears only its field on the shared record');
     assert.equal(retiredAcknowledgementRecord.activity.stoppedAt, 4000, 'retiring the gray visual does not erase the matching activity generation');
 
+    const mixedApi = loadYolomux('', ['1']);
+    const mixedSession = '1';
+    const mixedStoppedAt = Math.floor(Date.now() / 1000) - 2;
+    mixedApi.setTranscriptInfoForTest(mixedSession, {panes: [
+      {window: '0', process_label: 'claude', window_active: false, active: true},
+      {window: '1', process_label: 'codex', window_active: true, active: true},
+    ]});
+    mixedApi.setAutoApproveStateForTest(mixedSession, {agent_windows: [
+      {kind: 'claude', state: 'idle', window_index: 0, window_label: '0:claude', working_stopped_ts: mixedStoppedAt},
+      {kind: 'codex', state: 'working', window_index: 1, window_label: '1:codex'},
+    ]});
+    assert.equal(mixedApi.acknowledgeTerminalAttentionFromUserActionForTest(mixedSession, null, {refresh: false, delayMs: 0}), true, 'clicking a parent session tab acknowledges its stopped child even while another tmux window is active');
+    const mixedStopped = mixedApi.agentWindowActivityIconForTest('claude', 'idle', 0, {session: mixedSession, window_index: 0, working_stopped_ts: mixedStoppedAt, nowSeconds: mixedStoppedAt + 2, scheduleRefresh: false});
+    const mixedWorking = mixedApi.agentWindowActivityIconForTest('codex', 'working', 0, {session: mixedSession, window_index: 1, nowSeconds: mixedStoppedAt + 2, scheduleRefresh: false});
+    assert.equal(mixedStopped.acknowledging, true, 'parent-tab acknowledgement turns the yellow stopped child gray');
+    assert.equal(mixedWorking.state, 'working', 'parent-tab acknowledgement does not alter the active working child');
+    assert.equal(mixedApi.sessionAgentWindowStatusSummaryForTest(mixedSession).item?.acknowledging, true, 'the parent session marker inherits the stopped child gray acknowledgement state');
+    assert.equal(mixedApi.acknowledgeTerminalAttentionFromUserActionForTest(mixedSession, 1, {refresh: false, delayMs: 0}), false, 'a direct click on the active working child does not acknowledge a different stopped window');
+
     let nextActivityTimer = 1;
     const scheduledActivityTimers = [];
     const clearedActivityTimers = [];
@@ -2103,7 +2122,7 @@ async function runEditorPreviewSuite() {
     assert.ok(/const chromeTarget = event\.target\?\.closest\?\.\(`[^`]*\$\{repoSelectorControlSelector\}/.test(source), 'Info Bar repo controls are pane chrome and do not acknowledge terminal attention');
     assert.ok(/if \(windowTarget\) \{[\s\S]*windowTarget\.dataset\.pointerActionHandled = '1'[\s\S]*handleWindowStepButtonClick\(\{target: windowTarget, currentTarget: windowTarget\}\)[\s\S]*return;[\s\S]*\}/.test(source), 'focused and unfocused pane sub-window clicks activate the original target once during pointer capture');
     assert.ok(source.includes("if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;"), 'YO!stats graph gestures bypass panel focus rerenders that replace native controls');
-    assert.ok(/function tmuxWindowUserInteractionIndex\(session\)[\s\S]*querySelectorAll\('\.tmux-window-bar \.tmux-window-button\.active'\)[\s\S]*resolvedWindowIndex/.test(source), 'terminal attention acknowledgement follows the visibly active tmux sub-window when metadata is stale');
+    assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\)[\s\S]*const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;[\s\S]*explicitWindowIndex \? windowIndex : null/.test(source), 'direct sub-window actions preserve their explicit target while parent tabs use the canonical actionable-status summary');
     assert.ok(/const autoTarget = event\.target\.closest\('\[data-auto-session\]'\);[\s\S]*if \(item === activeItemForSide\(side\)\) setFocusedPanelItem\(item, \{userInitiated: true\}\);[\s\S]*'pane-tab-auto-approve':[\s\S]*if \(shouldRefocus\) focusPanel\(item, \{userInitiated: true\}\);/.test(source), 'pane-tab YO pointer gestures route through the same user-initiated focus transaction as tab clicks and keyboard activation');
     assert.ok(/\.panel\.details-collapsed \.pane-info-bar,[\s\S]*\.panel\.details-collapsed \.panel-detail-row\s*\{[\s\S]*display:\s*none/.test(yoloCss), 'Info Bar window bar collapses with the Info Bar');
     assert.equal(yoloCss.includes('.panel-agent-badge'), false, 'DOIT.57 T1: the duplicate Info Bar agent-badge CSS is removed');
@@ -3359,8 +3378,8 @@ async function runEditorPreviewSuite() {
     assert.equal(api.activateTmuxWindowFromUserActionForTest('4', 1, '1:codex', {acknowledgeAgentWindowDelayMs: 0}), true, 'Tabber-style direct-window activation uses the shared acknowledge-then-switch path');
     const acknowledgedYellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
     const acknowledgedYellowMarkerHtml = tabActivityMarkerHtml(acknowledgedYellowTabHtml);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--working)/.test(acknowledgedYellowMarkerHtml), 'acknowledging the yellow child preserves its concurrently working green sibling');
-    assert.equal(acknowledgedYellowMarkerHtml.includes('agent-window-status-dot--segmented'), false, 'acknowledging the yellow child immediately turns the yellow-green parent into a solid green ball');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--acknowledged)/.test(acknowledgedYellowMarkerHtml), 'acknowledging the yellow child gives the parent tab immediate gray feedback even while a sibling remains green');
+    assert.equal(acknowledgedYellowMarkerHtml.includes('agent-window-status-dot--segmented'), false, 'the temporary gray acknowledgement does not retain a stale yellow-green segment');
     const tabberSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const paneSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
     assert.ok(/function handleTabberRowActivate\(row, event\)[\s\S]*activateTmuxWindowFromUserAction\(session, windowIndex/.test(tabberSource) && /function handleWindowStepButtonClick\(event\)[\s\S]*tmuxWindowStepTarget\(session, key\)[\s\S]*activateTmuxWindowFromUserAction\(session, target\.index[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null\)[\s\S]*tmuxWindow\(session, key, label\)/.test(paneSource), 'Tabber, indexed window buttons, and prev/next fallback all use the shared acknowledgement transaction before switching');
