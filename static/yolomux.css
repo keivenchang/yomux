@@ -7722,13 +7722,20 @@ body.layout-resizing {
   opacity: 1;
 }
 .pane-tab-pin-icon {
-  flex: 0 0 14px;
-  width: 14px;
-  height: 14px;
-  display: inline-block;
-  color: var(--accent-gold);
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
   opacity: 1;
   background: var(--accent-gold);
+  border-radius: var(--radius-control);
+}
+.pane-tab-pin-icon::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: var(--auto-text);
   -webkit-mask: var(--icon-pin) center / contain no-repeat;
   mask: var(--icon-pin) center / contain no-repeat;
 }
