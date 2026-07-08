@@ -306,8 +306,9 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
         worker, status = app.start_auto_approve_worker(session, takeover=True)
         assert worker is not None, f"auto-approve worker did not start: {status}"
 
-        # The worker now runs hands-free in its own thread — NO manual keystrokes. Poll for completion.
-        completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower(), 60)
+        # Claude can paint its completion line before the worker observes the final queued prompt.
+        # Completion is only useful evidence once the requested hands-free approvals arrived too.
+        completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower() and worker.approved >= steps, 60)
         assert completed, (
             f"YO did not auto-approve {agent}.py --mock hands-free; "
             f"approved={worker.approved} blocked={worker.blocked} last_action={worker.last_action!r}\n{pane}"

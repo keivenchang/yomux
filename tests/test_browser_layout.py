@@ -840,6 +840,23 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
     assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
 
 
+def test_debug_graph_narrow_controls_wrap_without_overlap(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "debug-graph-narrow-controls.html", page_html("""
+      <div id="controls" class="js-debug-graph-controls" style="width:480px">
+        <div class="js-debug-range-slider-control" data-js-debug-range-control><span class="js-debug-range-prefix">Range:</span><input class="js-debug-range-slider" type="range"><span class="js-debug-range-label">1h</span></div>
+        <label class="js-debug-resolution-label">Resolution: 30s <select><option>AUTO</option></select></label>
+        <div class="js-debug-chart-layout-control"><span>Charts:</span><button>AUTO</button><button>S</button><button>M</button><button>L</button><button>MAX</button></div>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script("""
+      const controls = document.getElementById('controls').getBoundingClientRect();
+      const nodes = [...document.querySelectorAll('#controls > *')].map(node => { const box = node.getBoundingClientRect(); return {left:box.left,right:box.right,top:box.top,bottom:box.bottom}; });
+      return {controls, nodes};
+    """)
+    assert all(node["left"] >= metrics["controls"]["left"] - 0.5 and node["right"] <= metrics["controls"]["right"] + 0.5 for node in metrics["nodes"]), metrics
+    assert metrics["nodes"][2]["top"] >= metrics["nodes"][0]["bottom"] - 0.5, metrics
+
+
 def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
@@ -10006,7 +10023,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
         """
         const done = arguments[arguments.length - 1];
         const bar = document.querySelector('.topbar');
-        const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-owner', 'hide-nav', 'compact-menu'];
+        const steps = ['hide-version', 'compact-brand', 'hide-owner', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'compact-menu'];
         const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const snapshot = async width => {
           bar.style.width = `${width}px`;
@@ -10032,7 +10049,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
     assert metrics.get("error") is None, metrics
     assert metrics["narrow"]["overflow"] is False, metrics
     assert metrics["narrow"]["steps"], metrics
-    expected_order = ["hide-version", "compact-brand", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-owner", "hide-nav", "compact-menu"]
+    expected_order = ["hide-version", "compact-brand", "hide-owner", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "compact-menu"]
     assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
     assert metrics["narrow"]["refresh"] != "none", metrics
     assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics

@@ -1397,12 +1397,14 @@ def test_background_status_includes_performance_summary():
             owner_role="owner",
         )
         payload, status = webapp.background_owner_status_payload()
+        diagnostics = webapp.performance_diagnostics_payload()
         control_response = webapp.handle_control_request({"action": "background_status"})
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
-    perf = payload["perf"]
+    assert "perf" not in payload
+    perf = diagnostics["perf"]
     assert perf["record_count"] == 1
     assert perf["recent"][0]["cache_key_kind"] == "payload"
     assert perf["recent"][0]["cache_hit"] is True
@@ -1417,7 +1419,7 @@ def test_background_status_includes_performance_summary():
         "cache": {"hit:fresh": 1},
     }]
     assert control_response["ok"] is True
-    assert control_response["status"]["perf"]["record_count"] == 1
+    assert "perf" not in control_response["status"]
 
 
 def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
@@ -2326,8 +2328,7 @@ def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
         assert result["acknowledged"] == [key]
 
         payload = webapp.auto_approve_session_status("1", discovered_sessions={})
-        assert payload["attention_acks"]["keys"] == [key]
-        assert payload["attention_acks"]["acknowledged_at"][key] > 0
+        assert "attention_acks" not in payload
         assert payload["prompt_attention_acknowledged"] is True
         assert payload["prompt"]["attention_acknowledged"] is True
     finally:

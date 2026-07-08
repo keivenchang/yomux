@@ -62285,7 +62285,7 @@ function autoApproveSnapshotIsFresh() {
 
 function loadAutoStatuses(options = {}) {
   if (loadAutoStatuses.request) return loadAutoStatuses.request;
-  if (options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
+  if (options.force !== true && options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
   const request = (async () => {
   let result = null;
   try {
@@ -63978,7 +63978,7 @@ function openClientEventStream(descriptor) {
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({preferFresh: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
     if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
     if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });

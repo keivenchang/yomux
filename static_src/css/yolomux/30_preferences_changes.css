@@ -205,6 +205,7 @@
   gap: var(--space-6);
   justify-self: stretch;
   min-width: 0;
+  container-type: inline-size;
 }
 .js-debug-resolution-label {
   min-width: 0;
@@ -223,7 +224,10 @@
 .js-debug-chart-layout-control {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
+  min-width: 0;
+  max-width: 100%;
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
@@ -236,6 +240,17 @@
   color: inherit;
   background: var(--panel2);
   font: inherit;
+}
+@container (max-width: 56rem) {
+  .js-debug-graph-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .js-debug-resolution-label {
+    justify-self: start;
+  }
+  .js-debug-chart-layout-control {
+    grid-column: 1;
+  }
 }
 .js-debug-subtab:not(.active):hover,
 .js-debug-subtab:not(.active):focus-visible {

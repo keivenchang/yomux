@@ -666,7 +666,7 @@ def test_browser_fixture_wait_loops_have_one_injected_owner():
     assert "BROWSER_WAIT_HELPER_SOURCE" in helper
     assert "Page.addScriptToEvaluateOnNewDocument" in helper
     assert "Timed out after ${timeoutMs}ms waiting for ${description}" in helper
-    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 41
+    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 40
     for path, source in fixture_sources.items():
         assert "const waitFor = async" not in source, path
         assert "const waitFor = predicate" not in source, path
