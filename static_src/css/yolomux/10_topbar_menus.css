@@ -726,8 +726,9 @@ body.topbar-pack-hide-nav .topbar-nav {
 }
 body.topbar-pack-compact-search .topbar-search {
   display: inline-flex;
-  flex: 0 1 auto;
-  min-inline-size: 0;
+  flex: 0 1 8ch;
+  min-inline-size: 7ch;
+  max-inline-size: 8ch;
   margin-inline: var(--space-6) 0;
 }
 body.topbar-pack-compact-search .topbar-search-label {

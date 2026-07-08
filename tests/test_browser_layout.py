@@ -6496,7 +6496,9 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     )
     metrics = browser.execute_script(
         """
-        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100');
+        // The fixture has no application bundle to run syncTopbarPacking(). Model the measured
+        // presentation that the live packer selected for this narrow topbar.
+        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100', 'topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav');
         const actions = document.getElementById('touch-actions');
         const activityNode = document.getElementById('touch-activity');
         activityNode.classList.add('topbar-activity--mobile-count-balls');
@@ -6599,6 +6601,9 @@ def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser,
     )
     metrics = browser.execute_script(
         """
+        // This static fixture has no application bundle. Match the measured packing state that
+        // places compact activity ahead of Refresh after optional desktop chrome has yielded.
+        document.body.classList.add('topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify');
         const rect = node => {
           const box = node.getBoundingClientRect();
           return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height, display: getComputedStyle(node).display};
@@ -6773,7 +6778,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
           </div>
           <div id="matrix-right" class="topbar-right-tools"><button class="topbar-language">English</button><button class="topbar-owner-status">IDX: leader</button><button class="topbar-activity">1 running</button></div>
         </div>
-        <div id="matrix-actions" class="actions"><button id="matrix-notify">Notify</button><button id="refreshMeta">Refresh</button><button id="matrix-logout">Log out</button></div>
+            <div id="matrix-actions" class="actions"><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button></div>
       </header>
     """, extra_css="""
       body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
@@ -6801,7 +6806,9 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
             for (const breakpoint of [1280, 1100, 980, 760, 720, 600]) {
               if (width <= breakpoint) body.classList.add(`app-vw-lte-${breakpoint}`);
             }
-            if (compact) body.classList.add('app-topbar-menu-compact');
+                if (compact) body.classList.add('app-topbar-menu-compact');
+                if (compact) body.classList.add('topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav', 'topbar-pack-compact-menu');
+                else if (width <= 980) body.classList.add('topbar-pack-hide-notify');
             document.documentElement.style.setProperty('--matrix-width', `${width}px`);
             document.documentElement.style.setProperty('--ui-font-size', `${fontSize}px`);
             const topbar = document.getElementById('matrix-topbar');
@@ -6830,7 +6837,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
               center,
               actions,
               refresh: rect(document.getElementById('refreshMeta')),
-              notifyVisible: visible(document.getElementById('matrix-notify')),
+                  notifyVisible: visible(document.getElementById('notifyToggle')),
               searchVisible: visible(document.getElementById('matrix-search')),
             };
             """,
