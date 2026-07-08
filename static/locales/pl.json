@@ -230,6 +230,7 @@
   "debug.graph.control.bucketSize": "Rozmiar kubełka grafów",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Rozdzielczość: {resolution}",
+  "debug.graph.control.size": "Rozmiar",
   "debug.graph.control.timeRange": "Zakres:",
   "debug.graph.control.zoom": "Powiększenie",
   "debug.graph.history.error": "Nie udało się wczytać historii dla {range}: {error}",

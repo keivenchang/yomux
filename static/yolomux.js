@@ -41604,7 +41604,7 @@ function debugGraphControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-graph-controls">
     ${debugGraphRangeControlsHtml(nowMs)}
     ${debugGraphResolutionLabelHtml(nowMs)}
-    <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}"><span>${esc(t('debug.graph.control.charts'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
+    <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
     ${debugGraphChartToggleControlsHtml()}
   </div>`;
 }
@@ -42334,11 +42334,11 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
     const loadingShell = jsDebugHistoryReadiness.overlayVisible === true || jsDebugHistoryReadinessBusy()
       ? debugGraphChartShellHtml('', debugGraphDomain(nowMs))
       : '';
-    return `${controls}${meta}${clientPerf}${empty}${loadingShell}`;
+    return `${controls}${clientPerf}${empty}${loadingShell}${meta}`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
-  return `${controls}${meta}${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}`;
+  return `${controls}${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}${meta}`;
 }
 
 function debugGraphHtml() {

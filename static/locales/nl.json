@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "Grootte van de graafbak",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolutie: {resolution}",
+  "debug.graph.control.size": "Grootte",
   "debug.graph.control.timeRange": "Bereik:",
   "debug.graph.control.zoom": "Vergroten",
   "debug.graph.history.error": "Geschiedenis voor {range} kon niet worden geladen: {error}",

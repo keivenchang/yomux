@@ -217,6 +217,7 @@
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "グラフバケットサイズ",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "サイズ",
   "debug.graph.control.resolution": "解像度: {resolution}",
   "debug.graph.control.timeRange": "範囲:",
   "debug.graph.control.zoom": "ズーム",

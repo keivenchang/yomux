@@ -242,6 +242,7 @@
   "debug.graph.control.bucketSize": "حجم دلو الرسم البياني",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "الدقة: {resolution}",
+  "debug.graph.control.size": "الحجم",
   "debug.graph.control.timeRange": "النطاق:",
   "debug.graph.control.zoom": "تكبير",
   "debug.graph.history.error": "تعذر تحميل السجل لمدة {range}: {error}",

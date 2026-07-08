@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "ขนาดถังกราฟ",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "ความละเอียด: {resolution}",
+  "debug.graph.control.size": "ขนาด",
   "debug.graph.control.timeRange": "ช่วง:",
   "debug.graph.control.zoom": "การลบ",
   "debug.graph.history.error": "ไม่สามารถโหลดประวัติสำหรับ {range}: {error}",

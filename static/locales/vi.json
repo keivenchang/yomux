@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "Kích thước thùng đồ thị",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Độ phân giải: {resolution}",
+  "debug.graph.control.size": "Kích thước",
   "debug.graph.control.timeRange": "Phạm vi:",
   "debug.graph.control.zoom": "Thu phóng",
   "debug.graph.history.error": "Không thể tải lịch sử cho {range}: {error}",

@@ -229,6 +229,7 @@
   "debug.graph.clientWorkTiming": " średnia {average} ms max {max}ms",
   "debug.graph.control.bucketSize": "Rozmiar kubełka grafów",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "Rozmiar",
   "debug.graph.control.resolution": "Rozdzielczość: {resolution}",
   "debug.graph.control.timeRange": "Zakres:",
   "debug.graph.control.zoom": "Powiększenie",

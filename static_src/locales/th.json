@@ -217,6 +217,7 @@
   "debug.graph.clientWorkTiming": " เฉลี่ย {average}ms สูงสุด {max}ms",
   "debug.graph.control.bucketSize": "ขนาดถังกราฟ",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "ขนาด",
   "debug.graph.control.resolution": "ความละเอียด: {resolution}",
   "debug.graph.control.timeRange": "ช่วง:",
   "debug.graph.control.zoom": "การลบ",

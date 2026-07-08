@@ -3391,6 +3391,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('data-js-debug-chart-kind="bar"') && html.includes('data-js-debug-chart-bucket-seconds="60"'), 'YO!stats renders Agent tokens/min as fixed one-minute bars');
     assert.ok(html.includes('data-js-debug-uptime="2m 5s"') && html.includes('yolomux.py uptime 2m 5s') && html.includes('PID=4242') && html.includes('rss 128 MiB'), 'YO!stats graph shows yolomux.py uptime and process stats');
     assert.ok(html.includes('total 123/456 MB up/down'), 'YO!stats graph shows cumulative upload/download totals in MB');
+    assert.ok(html.indexOf('data-js-debug-chart-shell') < html.indexOf('data-js-debug-uptime="2m 5s"'), 'YO!stats renders the process metadata row below the chart grid');
     assert.ok(html.includes('GET /api/ping'), 'debug panel renders API timing rows');
     assert.ok(html.includes('Slow API by max latency') && html.includes('GET /api/activity-summary'), 'debug panel summarizes slow API endpoints by path');
     assert.ok(html.includes('Slow SSE server work') && html.includes('Slow SSE receive latency'), 'debug panel summarizes SSE server time and receive latency');

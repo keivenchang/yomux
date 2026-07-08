@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "圖表取樣間隔",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "解析度：{resolution}",
+  "debug.graph.control.size": "大小",
   "debug.graph.control.timeRange": "範圍：",
   "debug.graph.control.zoom": "縮放",
   "debug.graph.history.error": "無法載入 {range} 的歷史資料：{error}",

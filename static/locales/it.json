@@ -224,6 +224,7 @@
   "debug.graph.control.bucketSize": "Dimensione del contenitore del grafico",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Risoluzione: {resolution}",
+  "debug.graph.control.size": "Dimensione",
   "debug.graph.control.timeRange": "Intervallo:",
   "debug.graph.control.zoom": "Ingrandimento",
   "debug.graph.history.error": "Impossibile caricare la cronologia per {range}: {error}",

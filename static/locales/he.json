@@ -224,6 +224,7 @@
   "debug.graph.control.bucketSize": "גודל דלי גרף",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "רזולוציה: {resolution}",
+  "debug.graph.control.size": "גודל",
   "debug.graph.control.timeRange": "טווח:",
   "debug.graph.control.zoom": "זום",
   "debug.graph.history.error": "לא ניתן לטעון היסטוריה עבור {range}: {error}",

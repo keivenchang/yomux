@@ -223,6 +223,7 @@
   "debug.graph.clientWorkTiming": " moyenne {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Taille du bucket graphique",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "Taille",
   "debug.graph.control.resolution": "Résolution : {resolution}",
   "debug.graph.control.timeRange": "Plage:",
   "debug.graph.control.zoom": "Zoomer",

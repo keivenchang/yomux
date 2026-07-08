@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "グラフバケットサイズ",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "解像度: {resolution}",
+  "debug.graph.control.size": "サイズ",
   "debug.graph.control.timeRange": "範囲:",
   "debug.graph.control.zoom": "ズーム",
   "debug.graph.history.error": "{range} の履歴を読み込めませんでした: {error}",

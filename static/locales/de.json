@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "Diagramm-Bucket-Größe",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Auflösung: {resolution}",
+  "debug.graph.control.size": "Größe",
   "debug.graph.control.timeRange": "Bereich:",
   "debug.graph.control.zoom": "Zoomen",
   "debug.graph.history.error": "Verlauf für {range} konnte nicht geladen werden: {error}",

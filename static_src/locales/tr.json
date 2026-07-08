@@ -217,6 +217,7 @@
   "debug.graph.clientWorkTiming": " ort. {average} ms, maks. {max} ms",
   "debug.graph.control.bucketSize": "Grafik kovası boyutu",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "Boyut",
   "debug.graph.control.resolution": "Çözünürlük: {resolution}",
   "debug.graph.control.timeRange": "Aralık:",
   "debug.graph.control.zoom": "Yakınlaştır",

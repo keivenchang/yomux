@@ -217,6 +217,7 @@
   "debug.graph.clientWorkTiming": " औसत {average}ms अधिकतम {max}ms",
   "debug.graph.control.bucketSize": "बाल्टी का आकार ग्राफ़ करें",
   "debug.graph.control.charts": "Charts",
+  "debug.graph.control.size": "आकार",
   "debug.graph.control.resolution": "रिज़ॉल्यूशन: {resolution}",
   "debug.graph.control.timeRange": "सीमा:",
   "debug.graph.control.zoom": "ज़ूम करें",

@@ -224,6 +224,7 @@
   "debug.graph.control.bucketSize": "Tamaño del cubo del gráfico",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolución: {resolution}",
+  "debug.graph.control.size": "Tamaño",
   "debug.graph.control.timeRange": "Rango:",
   "debug.graph.control.zoom": "Ampliar",
   "debug.graph.history.error": "No se pudo cargar el historial de {range}: {error}",

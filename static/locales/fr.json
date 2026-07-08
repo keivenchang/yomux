@@ -224,6 +224,7 @@
   "debug.graph.control.bucketSize": "Taille du bucket graphique",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Résolution : {resolution}",
+  "debug.graph.control.size": "Taille",
   "debug.graph.control.timeRange": "Plage:",
   "debug.graph.control.zoom": "Zoomer",
   "debug.graph.history.error": "Impossible de charger l’historique sur {range} : {error}",

@@ -1156,20 +1156,20 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
       <section class="js-debug-graph-view">
         <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
           <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
-          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {client_perf}
           {chart_shell}
+          <div class="js-debug-graph-meta">yolomux.py uptime 1s | PID=123 | rss 55.8 MiB | server seq 3049542 | total 0.01/0.57 MB up/down</div>
         </div>
         <div id="graph-without-client-work" class="js-debug-graph" data-js-debug-graph>
           <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
-          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
           {chart_shell}
+          <div class="js-debug-graph-meta">yolomux.py uptime 1s | PID=123 | rss 55.8 MiB | server seq 3049542 | total 0.01/0.57 MB up/down</div>
         </div>
         <div id="graph-empty-with-client-work" class="js-debug-graph js-debug-graph--empty" data-js-debug-graph>
           <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
-          <div class="js-debug-graph-meta">waiting for server stats</div>
           {client_perf}
           <div class="js-debug-graph-empty">No data</div>
+          <div class="js-debug-graph-meta">waiting for server stats</div>
         </div>
       </section>
     """, extra_css="""
@@ -1194,16 +1194,19 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
             graph: rect('#graph-with-client-work'),
             client: rect('#graph-with-client-work .js-debug-client-perf'),
             chart: rect('#graph-with-client-work .js-debug-chart-shell'),
+            meta: rect('#graph-with-client-work .js-debug-graph-meta'),
             rowGap: rowGap('#graph-with-client-work'),
           },
           withoutClientWork: {
             graph: rect('#graph-without-client-work'),
             chart: rect('#graph-without-client-work .js-debug-chart-shell'),
+            meta: rect('#graph-without-client-work .js-debug-graph-meta'),
           },
           emptyWithClientWork: {
             graph: rect('#graph-empty-with-client-work'),
             client: rect('#graph-empty-with-client-work .js-debug-client-perf'),
             empty: rect('#graph-empty-with-client-work .js-debug-graph-empty'),
+            meta: rect('#graph-empty-with-client-work .js-debug-graph-meta'),
             rowGap: rowGap('#graph-empty-with-client-work'),
           },
         };
@@ -1213,13 +1216,16 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert with_client["client"]["height"] < with_client["graph"]["height"] * 0.4, metrics
     assert with_client["chart"]["height"] > with_client["graph"]["height"] * 0.45, metrics
     assert with_client["chart"]["top"] >= with_client["client"]["bottom"], metrics
+    assert with_client["meta"]["top"] >= with_client["chart"]["bottom"], metrics
     assert with_client["rowGap"] <= 6, metrics
     without_client = metrics["withoutClientWork"]
     assert without_client["chart"]["height"] > without_client["graph"]["height"] * 0.55, metrics
     assert without_client["chart"]["bottom"] <= without_client["graph"]["bottom"], metrics
+    assert without_client["meta"]["top"] >= without_client["chart"]["bottom"], metrics
     empty = metrics["emptyWithClientWork"]
     assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
     assert empty["empty"]["height"] > empty["graph"]["height"] * 0.45, metrics
+    assert empty["meta"]["top"] >= empty["empty"]["bottom"], metrics
     assert empty["rowGap"] <= 6, metrics
 
 
@@ -2260,6 +2266,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         };
         const activeSubtabPaint = paint(panel?.querySelector('.js-debug-subtab.active'));
         const resolutionLabel = panel?.querySelector('[data-js-debug-resolution]')?.textContent.trim();
+        const layoutLabel = panel?.querySelector('.js-debug-chart-layout-control > span')?.textContent.trim();
         const toggleLabels = [...panel.querySelectorAll('[data-js-debug-chart-toggle]')].map(button => button.textContent.trim());
         let cpuToggle = panel?.querySelector('[data-js-debug-chart-toggle="cpu"]');
         cpuToggle?.focus({focusVisible: true});
@@ -2282,6 +2289,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
           memoryShown,
           activeSubtabPaint,
           resolutionLabel,
+          layoutLabel,
           toggleLabels,
           toggleFocusPaint,
           saved: JSON.parse(localStorage.getItem(preferencesKey) || '{}'),
@@ -2293,6 +2301,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["restored"] is True, metrics
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
+    assert metrics["layoutLabel"] == "Size:", metrics
     assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {

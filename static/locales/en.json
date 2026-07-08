@@ -218,6 +218,7 @@
   "debug.graph.control.bucketSize": "Graph bucket size",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolution: {resolution}",
+  "debug.graph.control.size": "Size",
   "debug.graph.control.timeRange": "Range:",
   "debug.graph.control.zoom": "Zoom",
   "debug.graph.history.error": "Could not load history for {range}: {error}",
