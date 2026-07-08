@@ -228,7 +228,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'latency', labelKey: 'common.clientLatency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, bucketSeconds: 10},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
 ]);
 
@@ -2879,7 +2879,8 @@ function debugGraphStackedSeries(seriesItems) {
 function debugGraphChartAxisMax(group, rawMax) {
   const fixedMax = Number(group.fixedMax);
   if (Number.isFinite(fixedMax) && fixedMax > 0) return fixedMax;
-  if (group.exactIntegerAxisMax === true) return Math.max(0, Math.ceil(Number(rawMax) || 0));
+  const minimumAxisMax = Math.max(0, Number(group.minimumAxisMax) || 0);
+  if (group.exactIntegerAxisMax === true) return Math.max(minimumAxisMax, Math.ceil(Number(rawMax) || 0));
   return debugGraphNiceAxisMax(rawMax, group.unit);
 }
 

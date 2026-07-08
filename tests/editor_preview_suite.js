@@ -4431,8 +4431,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
     assert.ok(agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:') < agentTokenChartHtml.indexOf('js-debug-chart-body'), 'agent token legend uses the shared position above the plot body');
-    assert.ok(/data-js-debug-axis-max="activity"[^>]*>3</.test(html), 'agent status Y axis uses the exact stacked attention+working+Transition total');
-    for (const value of [3, 2, 1, 0]) {
+    assert.ok(/data-js-debug-axis-max="activity"[^>]*>4</.test(html), 'agent status Y axis reserves at least four agents even when the stacked total is smaller');
+    for (const value of [4, 3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
       assert.ok(html.includes(`data-js-debug-grid-line="activity" data-js-debug-grid-value="${value}"`), `activity chart draws a horizontal grid line for whole-number tick ${value}`);
       const axisMatch = html.match(new RegExp(`data-js-debug-axis-value="${value}"[^>]*--js-debug-axis-y: ([0-9.]+)%`));

@@ -2413,6 +2413,7 @@ async function runShareThemeSuite() {
       assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
+      assert.equal(api.sessionFileRelativeTimeText(1000, 1000 + (366 * 86400)), '1.0 year(s) ago', 'file-tree relative dates switch to decimal years after one year instead of continuing in days');
     }
     api.setTerminalThemeModeForTest('light');
     assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');

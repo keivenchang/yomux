@@ -1162,6 +1162,10 @@ function sessionFileRelativeTimeText(mtime, nowSeconds = fileTreeRecencyNowMs() 
     const hoursText = compactAgeNumber(age / 3600);
     return compactRelativeFileTimeText('hour', hoursText);
   }
+  if (age >= 365 * 86400) {
+    const yearsText = Number(compactAgeNumber(age / (365 * 86400))).toFixed(1);
+    return t('relative.year', {count: yearsText});
+  }
   const daysText = compactAgeNumber(age / 86400);
   return compactRelativeFileTimeText('day', daysText);
 }
