@@ -628,6 +628,10 @@ function sessionStatusBallPlaceholderHtml() {
   return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
 }
 
+function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {}) {
+  return `<span class="session-tab-leading-activity">${sessionTabLeadingActivityHtml(session, info, auto, options)}</span>`;
+}
+
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
@@ -657,6 +661,27 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
     })
     : '';
   return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
+}
+
+// Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the
+// status marker: its color is shared live state and must agree with the Tabber row immediately.
+function syncSessionTabLeadingActivityChrome() {
+  if (typeof document === 'undefined') return 0;
+  let updated = 0;
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
+    const session = String(tab.dataset?.paneTab || '').trim();
+    if (!session || !isTmuxSession(session)) continue;
+    const leading = tab.querySelector?.(':scope > .session-tab-leading-activity, .pane-tab-core > .session-tab-leading-activity');
+    if (!leading) continue;
+    const info = transcriptMetadataState.payload.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const html = sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: !readOnlyMode, state});
+    if (leading.innerHTML === html) continue;
+    leading.innerHTML = html;
+    updated += 1;
+  }
+  return updated;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {

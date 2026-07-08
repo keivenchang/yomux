@@ -1138,6 +1138,8 @@ async function runEditorPreviewSuite() {
     const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(/function agentWindowStatusItemVisualRank\(item\)[\s\S]*agentWindowStatusToneForItem\(item\)[\s\S]*agentWindowActivityVisualRank\(tone\)/.test(activitySource), 'one item-rank owner resolves attention, working, cooldown, and acknowledged precedence for every aggregate surface');
     assert.ok(/function sessionTabLeadingActivityHtml\(session, info, auto, options = \{\}\)[\s\S]*sessionAgentWindowStatusSummary\(session, info, payload\)/.test(popoverSource), 'the parent Tab calls the canonical status summary directly');
+    assert.ok(/function syncSessionTabLeadingActivityChrome\(\)[\s\S]*\.pane-tab\[data-pane-tab\], \.tmux-pane-tab-token\[data-pane-tab\][\s\S]*sessionTabLeadingActivityHtml\(session, info, auto/.test(popoverSource), 'a preserved pane or Tabber tab refreshes only its shared status chrome instead of retaining a stale hover/popover snapshot');
+    assert.ok(/function renderAutoApproveStatusSurfaces[\s\S]*syncSessionTabLeadingActivityChrome\(\)/.test(terminalSource) && /function refreshAgentWindowActivityDisplays\(\)[\s\S]*syncSessionTabLeadingActivityChrome\(\)/.test(activitySource), 'both authoritative auto-status and local acknowledgement transitions patch preserved Tab and Tabber markers in place');
     assert.equal(/function sessionStatusAgentWindow(?:Summary)?ForTab/.test(popoverSource + activitySource), false, 'no Tab-specific status wrapper remains between consumers and the canonical model');
     assert.ok(/function infoRecordAgentActivityItem\(record\)[\s\S]*agentWindowActivityIconForStatusItem\(agent, record\.aiKind, record\.tabSession/.test(terminalSource), 'YO!info builds each candidate through the canonical item classifier');
     assert.ok(/function infoTabGroupStatusRecord\(group = \{\}\)[\s\S]*agentWindowStatusItemVisualRank\(item\)/.test(terminalSource), 'YO!info group selection uses the canonical item-rank owner');
@@ -3822,7 +3824,7 @@ async function runEditorPreviewSuite() {
     assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client SSE keeps the stable solid line');
     assert.match(html, /data-js-debug-series="latency"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client latency keeps the stable solid line');
     assert.match(html, /data-js-debug-series="bandwidth"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client bandwidth keeps the stable solid line');
-    assert.match(html, /data-js-debug-series="client:other-clients-average:api"[^>]*--js-debug-series-color: var\(--bad\)/, 'peer API average uses the system-average red token');
+    assert.match(html, /data-js-debug-series="client:other-clients-average:apiSse"[^>]*--js-debug-series-color: var\(--bad\)/, 'peer API+SSE average uses one system-average red token');
     assert.equal(/data-js-debug-series="client:client-(?:alpha|beta|gamma):/.test(html), false, 'individual peer lines are not rendered');
     assert.ok(/data-js-debug-axis-max="count"[^>]*>[0-9.]+</.test(html), 'count chart Y axis stays terse');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>[0-9.]+(?:ms|s)</.test(html), 'latency chart Y axis uses compact time units');
@@ -4393,19 +4395,18 @@ async function runEditorPreviewSuite() {
       }],
     });
     const clientSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.clientMetric === true);
-    assert.equal(clientSeries.length, 8, 'the Client charts show this-client and other-client-average series for every metric when peers exist');
+    assert.equal(clientSeries.length, 7, 'the Client charts show this-client metrics plus one combined API+SSE peer comparison when peers exist');
     const metric = (metricKey, aggregate) => clientSeries.find(series => series.metricKey === metricKey && series.clientAggregate === aggregate);
     const current = metric('api', 'thisClient');
     assert.equal(current.values.at(-1), 8, 'this-client API rate stays separate from peer activity');
     assert.equal(metric('sse', 'thisClient').values.at(-1), 4, 'this-client SSE rate stays separate from peer activity');
     assert.equal(metric('latency', 'thisClient').values.at(-1), 10, 'this-client latency stays separate from peer latency');
     assert.equal(metric('bandwidth', 'thisClient').values.at(-1), 500, 'this-client bandwidth stays separate from peer bandwidth');
-    assert.equal(metric('api', 'otherClientsAverage').values.at(-1), 2, 'peer API averages all other retained clients, including a zero-valued sample');
-    assert.equal(metric('sse', 'otherClientsAverage').values.at(-1), 2 / 3, 'peer SSE averages all other retained clients, including zero-valued samples');
+    assert.equal(metric('apiSse', 'otherClientsAverage').values.at(-1), 8 / 3, 'peer API and SSE averages are summed into one comparison, including zero-valued samples');
     assert.equal(metric('latency', 'otherClientsAverage').values.at(-1), 25, 'peer latency averages only peers with real latency samples');
     assert.equal(metric('bandwidth', 'otherClientsAverage').values.at(-1), 400 / 3, 'peer bandwidth averages all other retained clients, including a zero-valued sample');
     assert.equal(current.hasDataValues.at(-2), false, 'a disconnected historic peer does not masquerade as this-client data');
-    assert.equal(metric('api', 'otherClientsAverage').values.at(-2), 5, 'a disconnected historic peer remains in the other-client average');
+    assert.equal(metric('apiSse', 'otherClientsAverage').values.at(-2), 6, 'a disconnected historic peer remains in the combined other-client comparison');
     const html = api.debugPanelHtmlForTest();
     assert.match(html, /data-js-debug-displayed-client-request-sum="26"[^>]*>\(26, Σ displayed reqs\)<\/span>/, 'Client API & SSE shows the displayed all-client request sum across connected and disconnected clients');
     assert.match(html, /data-js-debug-displayed-bandwidth-sum="1150"[^>]*>\(1\.1 KB, Σ displayed\)<\/span>/, 'Client bandwidth shows the displayed all-client bandwidth sum across connected and disconnected clients');

@@ -12121,7 +12121,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -19190,6 +19190,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
 }
 
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
@@ -25599,6 +25600,10 @@ function sessionStatusBallPlaceholderHtml() {
   return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
 }
 
+function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {}) {
+  return `<span class="session-tab-leading-activity">${sessionTabLeadingActivityHtml(session, info, auto, options)}</span>`;
+}
+
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
@@ -25628,6 +25633,27 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
     })
     : '';
   return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
+}
+
+// Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the
+// status marker: its color is shared live state and must agree with the Tabber row immediately.
+function syncSessionTabLeadingActivityChrome() {
+  if (typeof document === 'undefined') return 0;
+  let updated = 0;
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
+    const session = String(tab.dataset?.paneTab || '').trim();
+    if (!session || !isTmuxSession(session)) continue;
+    const leading = tab.querySelector?.(':scope > .session-tab-leading-activity, .pane-tab-core > .session-tab-leading-activity');
+    if (!leading) continue;
+    const info = transcriptMetadataState.payload.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const html = sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: !readOnlyMode, state});
+    if (leading.innerHTML === html) continue;
+    leading.innerHTML = html;
+    updated += 1;
+  }
+  return updated;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -33298,7 +33324,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
@@ -41406,7 +41432,8 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
 }
 
 function debugGraphClientMetricSeriesDefs(buckets) {
-  return jsDebugGraphClientMetrics
+  const peerSeries = jsDebugGraphClientMetrics
+    .filter(metric => !['api', 'sse'].includes(metric.key))
     .filter(metric => buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, metric).length > 0))
     .map(metric => debugGraphClientSeriesDef(metric, {
       key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
@@ -41416,6 +41443,27 @@ function debugGraphClientMetricSeriesDefs(buckets) {
       clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
       color: 'var(--bad)',
     }));
+  const apiMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'api');
+  const sseMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'sse');
+  if (!apiMetric || !sseMetric || !buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, apiMetric).length > 0)) return peerSeries;
+  // API and SSE are two transports for the same request-rate comparison. A single red peer
+  // line shows their summed per-client average rather than misleading parallel red averages.
+  return [{
+    key: `client:${jsDebugGraphOtherClientsAverageId}:apiSse`,
+    chartMetricKey: 'api',
+    metricKey: 'apiSse',
+    cssKey: 'api',
+    labelKey: 'debug.graph.series.otherClientsAverage',
+    metricLabelKey: 'debug.graph.chart.clientApiSse',
+    clientMetric: true,
+    clientId: jsDebugGraphOtherClientsAverageId,
+    clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
+    clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
+    unit: 'countPerSecond',
+    color: 'var(--bad)',
+    value: bucket => debugGraphOtherClientMetricAverage(bucket, apiMetric) + debugGraphOtherClientMetricAverage(bucket, sseMetric),
+    hasData: bucket => debugGraphOtherClientMetricBuckets(bucket, apiMetric).length > 0,
+  }, ...peerSeries];
 }
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
@@ -62344,6 +62392,7 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   // updated the title but never re-synced the markers).
     renderAutoApproveButtons();
     updateSessionButtonStates();
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
     refreshActivePanelHeaders();
     trackSessionStateChanges();
     syncTerminalAttentionHighlights();

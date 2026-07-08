@@ -778,6 +778,7 @@ function refreshAgentWindowActivityDisplays() {
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
 }
 
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {

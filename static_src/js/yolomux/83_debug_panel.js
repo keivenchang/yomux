@@ -2145,7 +2145,8 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
 }
 
 function debugGraphClientMetricSeriesDefs(buckets) {
-  return jsDebugGraphClientMetrics
+  const peerSeries = jsDebugGraphClientMetrics
+    .filter(metric => !['api', 'sse'].includes(metric.key))
     .filter(metric => buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, metric).length > 0))
     .map(metric => debugGraphClientSeriesDef(metric, {
       key: `client:${jsDebugGraphOtherClientsAverageId}:${metric.key}`,
@@ -2155,6 +2156,27 @@ function debugGraphClientMetricSeriesDefs(buckets) {
       clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
       color: 'var(--bad)',
     }));
+  const apiMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'api');
+  const sseMetric = jsDebugGraphClientMetrics.find(metric => metric.key === 'sse');
+  if (!apiMetric || !sseMetric || !buckets.some(bucket => debugGraphOtherClientMetricBuckets(bucket, apiMetric).length > 0)) return peerSeries;
+  // API and SSE are two transports for the same request-rate comparison. A single red peer
+  // line shows their summed per-client average rather than misleading parallel red averages.
+  return [{
+    key: `client:${jsDebugGraphOtherClientsAverageId}:apiSse`,
+    chartMetricKey: 'api',
+    metricKey: 'apiSse',
+    cssKey: 'api',
+    labelKey: 'debug.graph.series.otherClientsAverage',
+    metricLabelKey: 'debug.graph.chart.clientApiSse',
+    clientMetric: true,
+    clientId: jsDebugGraphOtherClientsAverageId,
+    clientAggregate: jsDebugGraphOtherClientsAverageAggregate,
+    clientLinePattern: jsDebugGraphOtherClientsAverageLinePattern,
+    unit: 'countPerSecond',
+    color: 'var(--bad)',
+    value: bucket => debugGraphOtherClientMetricAverage(bucket, apiMetric) + debugGraphOtherClientMetricAverage(bucket, sseMetric),
+    hasData: bucket => debugGraphOtherClientMetricBuckets(bucket, apiMetric).length > 0,
+  }, ...peerSeries];
 }
 
 function debugGraphProcessCpuSeriesDefs(buckets) {

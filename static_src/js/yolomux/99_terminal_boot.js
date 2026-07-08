@@ -4469,6 +4469,7 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   // updated the title but never re-synced the markers).
     renderAutoApproveButtons();
     updateSessionButtonStates();
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
     refreshActivePanelHeaders();
     trackSessionStateChanges();
     syncTerminalAttentionHighlights();
