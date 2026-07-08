@@ -527,11 +527,6 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: inherit;
   background: transparent;
 }
-.terminal-context-menu button[data-checked="true"]::before {
-  content: "* ";
-  color: #b8ee5c;
-  font-weight: 900;
-}
 .terminal-context-menu-separator {
   height: 1px;
   margin: var(--space-4) var(--space-2);

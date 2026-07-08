@@ -5475,6 +5475,7 @@ async function runShareThemeSuite() {
     assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
     assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
     assert.ok(pinTabRow?.innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
+    assert.equal((pinTabRow?.innerHTML.match(/app-menu-ui-icon-pin/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
     assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
@@ -5487,6 +5488,10 @@ async function runShareThemeSuite() {
     const unpinTabRow = Array.from(pinnedContextMenu.children).find(child => child.getAttribute('aria-label') === 'Unpin Tab');
     assert.ok(unpinTabRow?.innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
     assert.equal(unpinTabRow?.getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
+    const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const contextMenuCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/\.pane-tab-pin-icon\s*\{[\s\S]*color:\s*var\(--accent-gold\)[\s\S]*background:\s*var\(--accent-gold\)/.test(paneTabsCss), 'pinned tabs use a high-contrast gold pin that remains visible on active tabs');
+    assert.equal(/\.terminal-context-menu button\[data-checked="true"\]::before/.test(contextMenuCss), false, 'checked context-menu rows rely on their stateful icon instead of adding a duplicate star marker');
     const filePathForMenu = '/home/test/yolomux.dev/README.md';
     api.setOpenFileStateForTest(filePathForMenu, {mtime: 1, kind: 'text', original: '# hello', content: '# hello', dirty: false});
     const fileItemForMenu = api.registerFileEditorLayoutItem(filePathForMenu);

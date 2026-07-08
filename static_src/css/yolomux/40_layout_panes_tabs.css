@@ -1410,9 +1410,9 @@ body.layout-resizing {
   width: 14px;
   height: 14px;
   display: inline-block;
-  color: currentColor;
-  opacity: 0.86;
-  background: currentColor;
+  color: var(--accent-gold);
+  opacity: 1;
+  background: var(--accent-gold);
   -webkit-mask: var(--icon-pin) center / contain no-repeat;
   mask: var(--icon-pin) center / contain no-repeat;
 }
