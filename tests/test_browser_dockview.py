@@ -194,6 +194,24 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
     assert result["sheetTop"] >= result["tabBottom"] and result["sheetTop"] - result["tabBottom"] <= 12, result
 
 
+def test_dockview_touch_tap_cancels_long_press_after_tab_activation(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const rect = tab.getBoundingClientRect();
+        const touch = {bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 29, button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+        tab.dispatchEvent(new PointerEvent('pointerdown', touch));
+        activatePaneTab('left', '2');
+        document.dispatchEvent(new PointerEvent('pointerup', touch));
+        setTimeout(() => done({active: activeItemForSide('left'), sheet: document.querySelector('.tab-action-sheet') !== null}), tabTouchLongPressDelayMs + 80);
+        """
+    )
+    assert result == {"active": "2", "sheet": False}, result
+
+
 def test_dockview_touch_tab_drag_cancels_long_press_sheet(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)

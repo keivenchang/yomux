@@ -360,6 +360,25 @@ function tabInteractionControllerForApp() {
   if (tabInteractionController) return tabInteractionController;
   let touchPress = null;
   let suppressContextUntil = 0;
+  const cancelCurrentTouchPress = event => {
+    if (!touchPress) return;
+    const opened = touchPress.opened;
+    clearTimer(touchPress.timer);
+    touchPress = null;
+    // A tab activation may replace its anchor before pointerup reaches that anchor. Own the
+    // terminal touch event at document capture so a short tap cannot leave its long-press timer
+    // behind to open the action sheet after the selected panel has rendered.
+    if (opened && event?.cancelable) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+  document.addEventListener('pointerup', event => {
+    if (event.pointerType === 'touch') cancelCurrentTouchPress(event);
+  }, true);
+  document.addEventListener('pointercancel', event => {
+    if (event.pointerType === 'touch') cancelCurrentTouchPress(event);
+  }, true);
   const currentDescriptor = descriptor => descriptor?.anchor?.__yolomuxTabInteractionDescriptor || descriptor;
   const close = () => {
     touchPress = null;
@@ -422,8 +441,7 @@ function tabInteractionControllerForApp() {
     const detail = bindDetail(descriptor);
     const cancelTouchPress = () => {
       if (!touchPress || touchPress.anchor !== anchor) return;
-      clearTimer(touchPress.timer);
-      touchPress = null;
+      cancelCurrentTouchPress();
     };
     const movedBeyondThreshold = event => {
       if (!touchPress || touchPress.anchor !== anchor) return false;
