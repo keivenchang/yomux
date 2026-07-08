@@ -663,6 +663,17 @@ fixtures:
   fixture_id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
   id: claude-compacting-conversation-real
   provenance: real Claude Code 2.1.198 compaction frame with animated spinner and decorated composer title
+- case_name: compacting_conversation_progress_bar
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
+  fixture_id: compacting_conversation_progress_bar__claude-code-2.1.198_20260707
+  id: claude-compacting-conversation-progress-real
+  provenance: real Claude Code 2.1.198 compaction progress-bar capture from tmux session 1:0.0
 - case_name: working_command_counter
   expected:
     approval_visible: false
@@ -868,6 +879,9 @@ parity_groups:
   - agent: claude
     case_name: compacting_conversation_unicode_ellipsis
     file: captures/compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  - agent: claude
+    case_name: compacting_conversation_progress_bar
+    file: captures/compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
   - agent: codex
     case_name: working_command_counter
     file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml

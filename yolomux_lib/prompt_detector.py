@@ -532,6 +532,7 @@ _WORKING_LINE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_CLAUDE_COMPACTION_PROGRESS_RE = re.compile(r"^\s*[▰▱]+\s*\d{1,3}%?\s*$")
 _CLAUDE_MULTI_AGENT_HEADER_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+Running\s+\d+\s+agents?\s*(?:…|\.{{3}})\s*$",
     re.IGNORECASE,
@@ -1322,6 +1323,10 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     # Claude Code auto-compact countdown footer: "Ns until auto-compact · /model sonnet[Nm"
     if re.search(r"\buntil\s+auto-compact\b", stripped, re.IGNORECASE):
+        return True
+    # Claude's compaction view inserts a block-character progress row between its live spinner
+    # and the otherwise normal empty composer. It is status chrome, not new assistant output.
+    if _CLAUDE_COMPACTION_PROGRESS_RE.fullmatch(stripped):
         return True
     return False
 

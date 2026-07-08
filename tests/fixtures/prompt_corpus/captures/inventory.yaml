@@ -320,6 +320,26 @@ fixtures:
   id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
   scenario: compacting_conversation_unicode_ellipsis
   source: real Claude Code 2.1.198 compaction frame captured from tmux session 1:0.0 and screenshot 20260701-027.png
+- agent: claude
+  capture_date: '2026-07-07'
+  case_name: compacting_conversation_progress_bar
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude compaction spinner and progress bar remain working above an empty composer
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
+  id: compacting_conversation_progress_bar__claude-code-2.1.198_20260707
+  scenario: compacting_conversation_progress_bar
+  source: real Claude Code 2.1.198 tmux capture from session 1:0.0 on 2026-07-07
 - agent: codex
   capture_date: '2026-06-20'
   case_name: choice_question

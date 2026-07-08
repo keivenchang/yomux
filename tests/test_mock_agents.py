@@ -569,6 +569,23 @@ def test_claude_mock_lists_and_replays_compacting_spinner_capture(monkeypatch, c
     assert "compacting_conversation_unicode_ellipsis [Working]" in capsys.readouterr().out
 
 
+def test_claude_mock_replays_compaction_progress_bar_as_working(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+
+    case = mock_agent_common.find_mock_fixture_case("compacting_conversation_progress_bar")
+
+    assert case is not None
+    assert "▰▰▰" in str(case["raw_capture"])
+    assert classify_agent_pane(
+        {"pane_target": "%mock-compacting-progress", "agent_kind": "claude"},
+        capture_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        capture_styled_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        include_composer=False,
+        include_transcript_activity=False,
+    ).screen["key"] == "working"
+
+
 def test_mock_fixture_list_dedupes_same_fixture_identity(monkeypatch, capsys):
     duplicate_path = PROMPT_CORPUS_DIR / "captures" / "choice_question_real__codex-cli-0.141.0_20260620.yaml"
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 160)
