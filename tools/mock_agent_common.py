@@ -713,11 +713,10 @@ def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
         tok_shown = min(tokens, max(1, int(elapsed * (tokens / max(0.1, seconds)))))
         frame = FRAMES[i % len(FRAMES)]
         line = f"{frame} {verb}… ({sec_shown}s · ↓ {tok_shown} tokens · thinking with {EFFORT} effort · esc to interrupt)"
-        sys.stdout.write("\r\x1b[2K" + line)
-        sys.stdout.flush()
+        write_anchored_working_status_block([line])
         if i < total_ticks:
             time.sleep(tick)
-    sys.stdout.write("\r\x1b[2K")
+    sys.stdout.write("\x1b7\r\x1b[2K\x1b8")
     sys.stdout.flush()
 
 
@@ -1260,6 +1259,26 @@ def write_claude_working_block(seconds: float, state: dict[str, str]) -> int:
     footer_top = live_composer_footer_top(text, False, state)
     status_lines = claude_live_working_block_lines(seconds, state)
     working_row = max(1, footer_top - len(status_lines))
+    render_signature = "\x1f".join([
+        str(terminal_width()),
+        str(terminal_height()),
+        text,
+        str(cursor),
+        str(footer_top),
+        str(working_row),
+        state.get("claude_working_status_lines", ""),
+        state.get("claude_working_composer_label", ""),
+        state.get("claude_working_footer_status", ""),
+    ])
+    if state.get("claude_working_render_signature") == render_signature:
+        # The real Claude TUI leaves its composer and cursor in place while the spinner advances.
+        # Redraw only the working rows, restoring the terminal cursor after each frame.
+        for offset, line in enumerate(status_lines):
+            row = working_row + offset
+            if row < footer_top:
+                sys.stdout.write(f"\x1b7\x1b[{row};1H\x1b[2K{clipped(line, terminal_width())}\x1b8")
+        sys.stdout.flush()
+        return working_row
     if "claude_working_body_lines" in state:
         body_text = state.get("claude_working_body_lines", "")
         render_lines_above_row(body_text.split("\n") if body_text else [], max(1, working_row - 1))
@@ -1279,6 +1298,7 @@ def write_claude_working_block(seconds: float, state: dict[str, str]) -> int:
     bottom = max(1, working_row - 1)
     sys.stdout.write(f"\x1b7\x1b[1;{bottom}r\x1b8")
     state["claude_working_row"] = str(working_row)
+    state["claude_working_render_signature"] = render_signature
     sys.stdout.flush()
     return working_row
 
@@ -1293,6 +1313,7 @@ def clear_claude_working_block(state: dict[str, str], working_row: int | None = 
         previous_working_row = working_row
     state.pop("claude_working", None)
     state.pop("claude_working_row", None)
+    state.pop("claude_working_render_signature", None)
     state.pop("claude_working_body_lines", None)
     prefill = state.get("composer_prefill", "")
     idle_footer_top = live_composer_footer_top(prefill, False, state)
@@ -1464,17 +1485,25 @@ def agent_working_status_lines(frame: int, started_at: float, verb: str, tip: st
     return claude_working_status_lines(frame, started_at, verb, tip)
 
 
-def write_working_status_block(lines: list[str]) -> None:
-    sys.stdout.write("\r\x1b[2K" + lines[0])
+def write_anchored_working_status_block(lines: list[str]) -> None:
+    """Update a transient status block without moving an application's input cursor."""
+    if not lines:
+        return
+    sys.stdout.write("\x1b7\r\x1b[2K" + lines[0])
     for line in lines[1:]:
         sys.stdout.write("\n\r\x1b[2K" + line)
     if len(lines) > 1:
         sys.stdout.write(f"\x1b[{len(lines) - 1}A")
+    sys.stdout.write("\x1b8")
     sys.stdout.flush()
 
 
 def finish_working_status_block(lines: list[str]) -> None:
-    write_working_status_block(lines)
+    if not lines:
+        return
+    sys.stdout.write("\r\x1b[2K" + lines[0])
+    for line in lines[1:]:
+        sys.stdout.write("\n\r\x1b[2K" + line)
     if len(lines) > 1:
         sys.stdout.write(f"\x1b[{len(lines) - 1}B")
     sys.stdout.write("\n")
@@ -1483,11 +1512,18 @@ def finish_working_status_block(lines: list[str]) -> None:
 
 def agent_working_status(stop_event: threading.Event, started_at: float, verb: str, tip: str) -> None:
     frame = 0
+    codex_render_key: tuple[object, ...] | None = None
+    codex_start_row: int | None = None
     while not stop_event.is_set():
         if PERMISSION_STYLE == "codex":
-            write_codex_working_block(max(1, time.time() - started_at), background=True)
+            codex_start_row, _line_count, codex_render_key = refresh_codex_working_block(
+                max(1, time.time() - started_at),
+                background=True,
+                previous_key=codex_render_key,
+                previous_start_row=codex_start_row,
+            )
         else:
-            write_working_status_block(agent_working_status_lines(frame, started_at, verb, tip))
+            write_anchored_working_status_block(agent_working_status_lines(frame, started_at, verb, tip))
         frame += 1
         stop_event.wait(0.12)
 

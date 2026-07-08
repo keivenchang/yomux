@@ -960,6 +960,46 @@ def test_codex_working_refresh_updates_only_status_row_on_steady_tick(monkeypatc
     assert f"\x1b[{prompt_row};1H\x1b[2K" not in rendered
 
 
+def test_claude_anchored_working_status_restores_the_existing_cursor(capsys):
+    mock_agent_common.write_anchored_working_status_block([
+        "✢ Compacting conversation… (2s · ↑ 1.1k tokens)",
+        "  ▰▰▰▱▱ 40%",
+    ])
+
+    rendered = capsys.readouterr().out
+    assert rendered.startswith("\x1b7\r\x1b[2K")
+    assert rendered.endswith("\x1b[1A\x1b8")
+
+
+def test_background_codex_working_animation_reuses_its_status_row(monkeypatch):
+    source = Path(mock_agent_common.__file__).read_text(encoding="utf-8")
+
+    assert "def agent_working_status" in source
+    assert "refresh_codex_working_block(" in source.split("def agent_working_status", 1)[1].split("def run_with_agent_working_status", 1)[0]
+    assert "write_codex_working_block(max(1, time.time() - started_at), background=True)" not in source
+
+
+def test_all_mock_timer_paths_obey_the_no_repaint_contract():
+    source = Path(mock_agent_common.__file__).read_text(encoding="utf-8")
+    client_docs = (REPO_ROOT / "tools" / "CLIENTS.md").read_text(encoding="utf-8")
+    claude_loop = source.split("def handle_claude_live_working_tty", 1)[1].split("def handle_codex_live_working_tty", 1)[0]
+    codex_loop = source.split("def handle_codex_live_working_tty", 1)[1].split("def handle_codex_goal_active_tty", 1)[0]
+    background_loop = source.split("def agent_working_status", 1)[1].split("def run_with_agent_working_status", 1)[0]
+    composer_loop = source.split("def read_live_composer", 1)[1].split("def preview_verb", 1)[0]
+    fixture_loop = source.split("if state.get(\"pending\") == \"fixture\"", 1)[1].split("pending = state.get", 1)[0]
+
+    assert "timer-driven mock animation may update only its owned status cells" in client_docs
+    assert "write_claude_working_block(elapsed, state)" in claude_loop
+    assert "render_live_composer(" not in claude_loop
+    assert "refresh_codex_working_block(" in codex_loop
+    assert "write_codex_working_block(" not in codex_loop
+    assert "refresh_codex_working_block(" in background_loop
+    assert "write_anchored_working_status_block(" in background_loop
+    assert "render_live_composer(" not in background_loop
+    assert "if key is None:" in composer_loop and "maybe_redraw_live_composer_for_resize(" in composer_loop
+    assert "render_fixture_screen(" not in fixture_loop
+
+
 def test_plain_claude_working_fixture_replaces_captured_footer(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
@@ -1074,6 +1114,30 @@ def test_claude_working_frame_clears_previous_owned_row(monkeypatch, capsys):
     assert "\x1b7\x1b[8;1H\x1b[2K· Clauding… (11s · ↓ 471 tokens)" in output
     assert working_row == 8
     assert state["claude_working_row"] == "8"
+
+
+def test_claude_working_frame_keeps_the_composer_cursor_anchored(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    state = {
+        "claude_working_base_seconds": "11",
+        "claude_working_base_tokens": "471",
+        "claude_working_marker": "·",
+        "claude_working_verb": "Compacting conversation",
+        "claude_working_footer_status": "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt",
+    }
+
+    mock_agent_common.write_claude_working_block(11, state)
+    capsys.readouterr()
+    mock_agent_common.write_claude_working_block(12, state)
+
+    output = capsys.readouterr().out
+    assert "Compacting conversation" in output
+    assert "accept edits on" not in output
+    assert "\x1b[9;1H" not in output
+    assert "\x1b7\x1b[8;1H\x1b[2K" in output
 
 
 def test_clear_claude_working_block_erases_owned_footer_rows(monkeypatch, capsys):
