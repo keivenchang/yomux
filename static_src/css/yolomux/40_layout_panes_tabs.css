@@ -495,12 +495,7 @@ body.layout-resizing {
 }
 .drop-slot.drag-over {
   border-color: var(--pane-resizer-hover-bg);
-  background: #1a2230;
-}
-/* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
-   border already uses the theme-aware pane separator token. */
-body.theme-light .drop-slot.drag-over {
-  background: var(--paint-overlay-slate-06);
+  background: var(--40-layout-panes-tabs-drop-slot-bg-1);
 }
 .drop-slot.drop-preview::before,
 .yolomux-dockview .dv-groupview.drop-preview::before,
@@ -775,8 +770,11 @@ body.theme-light .drop-slot.drag-over {
   grid-template-rows: none;
   padding: var(--space-10);
   border: 1px dashed #7a8799;
-  background: #101722;
+  background: var(--40-layout-panes-tabs-panel-bg-19);
   box-shadow: none;
+
+
+  border-color: var(--40-layout-panes-tabs-panel-border-20);
 }
 .split-column > .layout-column:has(+ .layout-resizer) > .panel {
   border-bottom-width: 0;
@@ -872,7 +870,7 @@ body.theme-light .drop-slot.drag-over {
   min-width: 0;
   max-width: 100%;
   padding: var(--space-1) var(--space-2) var(--space-1) var(--space-8);
-  color: var(--pane-meta-path);
+  color: var(--40-layout-panes-tabs-panel-detail-row-fg-21);
   background: var(--pane-bar-bg);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
@@ -906,8 +904,8 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel-detail-close:hover,
 .panel-detail-close:focus-visible {
-  color: var(--paint-white);
-  background: var(--paint-white-08);
+  color: var(--40-layout-panes-tabs-panel-detail-close-fg-24);
+  background: var(--40-layout-panes-tabs-panel-detail-close-bg-25);
 }
 .panel-detail-close::before {
   transform: translate(-50%, -50%) rotate(45deg);
@@ -1394,11 +1392,6 @@ body.theme-light .drop-slot.drag-over {
 .pane-tab.active .session-button-detail {
   color: inherit;
 }
-body.theme-light .tmux-pane-tab-token:not(.active) .session-button-name,
-body.theme-light .tmux-pane-tab-token:not(.active) .session-button-dir,
-body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
-  color: currentColor;
-}
 .pane-tab.active {
   color: var(--pane-tab-unfocused-active-text);
   background: var(--pane-tab-unfocused-active-bg);
@@ -1442,29 +1435,21 @@ body.theme-light .tmux-pane-tab-token:not(.active) .session-button-detail {
 .tmux-pane-tab-token-action:not(.active):hover,
 .tmux-pane-tab-token-action:not(.active):focus-visible {
   background: var(--pane-inactive-tab-bg-hover);
-  border-color: var(--paint-white-92);
-}
-/* image 008: the inactive-tab name/dir/detail hardcode near-white colors (tuned for the dark tab bg),
-   so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text
-   (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */
-body.theme-light .pane-tab:not(.active) .session-button-name,
-body.theme-light .pane-tab:not(.active) .session-button-dir,
-body.theme-light .pane-tab:not(.active) .session-button-detail {
-  color: var(--pc-control-fg);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
 }
 .pane-tab.file-missing {
-  color: #ffdbe1;
-  background: #55313a;
-  border-color: var(--danger-border-soft);
+  color: var(--40-layout-panes-tabs-pane-tab-fg-8);
+  background: var(--40-layout-panes-tabs-pane-tab-bg-9);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-10);
 }
 .pane-tab.file-missing:hover {
-  background: #653843;
-  border-color: #f08a98;
+  background: var(--40-layout-panes-tabs-pane-tab-bg-11);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-12);
 }
 .pane-tab.file-missing.active {
-  color: #fff2f4;
+  color: var(--40-layout-panes-tabs-pane-tab-fg-13);
   background: var(--file-missing-active-bg);
-  border-color: #ff9aa8;
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-14);
   border-bottom-color: var(--file-missing-active-bg);
 }
 .pane-tab.file-missing .session-button-dir {
@@ -1474,31 +1459,11 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 }
 .pane-tab.file-missing .file-tab-missing-badge {
   flex: 0 0 auto;
-  color: #ffb3bd;
+  color: var(--40-layout-panes-tabs-pane-tab-fg-15);
   font: 800 var(--ui-font-size-2xs)/1 var(--control-font);
 }
 .pane-tab.file-missing.active .file-tab-missing-badge {
-  color: #ffe0e5;
-}
-/* Light mode: the file-missing tab is a dark-maroon box and the inactive
-   YO marker inside an active tab is a dark-slate box — both unreadable on the white head.
-   Repaint as a light error tint (dark-red text) / light neutral chip. */
-body.theme-light .pane-tab.file-missing {
-  color: #9b2c3a;
-  background: #fdecee;
-  border-color: #e8a9b2;
-}
-body.theme-light .pane-tab.file-missing:hover {
-  background: #fbe0e4;
-  border-color: var(--danger-border-soft);
-}
-body.theme-light .pane-tab.file-missing.active {
-  color: #7a1f2c;
-  border-color: #cf5566;
-}
-body.theme-light .pane-tab.file-missing .file-tab-missing-badge,
-body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
-  color: #b3263a;
+  color: var(--40-layout-panes-tabs-pane-tab-fg-16);
 }
 .pane-tab-close {
   position: relative;
@@ -1595,6 +1560,9 @@ body.app-topbar-touch-compact .pane-tab-close {
 }
 .pane-tab:not(.active) .session-button-dir {
   max-width: none;
+
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-6);
 }
 .pane-tab .ci-indicator {
   padding: var(--space-1) var(--space-3);
@@ -2015,7 +1983,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tabs .pane-actions:focus-visible,
 .tabs .panel-tab-overflow:hover,
 .tabs .panel-tab-overflow:focus-visible {
-  color: var(--paint-white);
+  color: var(--40-layout-panes-tabs-tabs-fg-27);
   background: var(--pc-control-hover-bg);
   border-color: var(--pc-control-hover-border);
 }
@@ -2118,15 +2086,9 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 /* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
 .tab.active:not(.tmux-window-button) {
   color: var(--text);
-  background: #263044;
-  border-color: #566176;
+  background: var(--40-layout-panes-tabs-tab-bg-17);
+  border-color: var(--40-layout-panes-tabs-tab-border-18);
   font-weight: 700;
-}
-/* Keep the theme qualifier specificity-free so a component's shared pressed-state owner can override
-   this detached-tab fallback without adding a parallel light-mode rule. */
-:where(body.theme-light) .tab.active:not(.tmux-window-button) {
-  background: #dce3ec;
-  border-color: #b3bdcb;
 }
 .tab.auto-toggle.active {
   color: var(--pane-tab-yolo-text);
@@ -2135,41 +2097,36 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   font-weight: 700;
   box-shadow: 0 0 0 1px rgb(var(--active-accent-rgb) / 0.28), 0 0 14px var(--active-control-focus-ring);
 }
-body.theme-light .panel.empty-pane-panel {
-  background: var(--panel2);
-  border-color: var(--pc-control-border);
-}
-body.theme-light .panel-detail-row {
-  /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
-  color: var(--text);
-}
-/* the Info Bar header LABEL (.session-button-name, e.g. "YO!info") is the one header
-   element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
-   so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the
-   --pane-tab-panel-head-text light override.) */
-body.theme-light .panel-detail-row .session-button-name,
-body.theme-light .panel.active-pane .panel-detail-row .session-button-name {
-  color: var(--text);
-}
-body.theme-light .panel-detail-close:hover,
-body.theme-light .panel-detail-close:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: var(--paint-overlay-slate-08);
-}
-/* Light-mode contrast fixes for the near-white tab-hover border and white hover-glyph text on
-   the light control hover bg. Saturated-chip light text (red/dark-blue badges) is left as-is. */
-body.theme-light .pane-tab:not(.active):hover,
-body.theme-light .pane-tab:not(.active):focus-visible,
-body.theme-light .tmux-pane-tab-token-action:not(.active):hover,
-body.theme-light .tmux-pane-tab-token-action:not(.active):focus-visible {
-  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
-}
-body.theme-light .tabs .pane-actions:hover,
-body.theme-light .tabs .pane-actions:focus-visible,
-body.theme-light .tabs .panel-tab-overflow:hover,
-body.theme-light .tabs .panel-tab-overflow:focus-visible {
-  color: var(--pc-control-hover-fg);
-}
 /* (removed) a light-mode gray var(--pc-control-border) border on focused terminals — the light twin of the dark #465267
    gray focus bug. Focused terminals now fall through to the shared green focus border (var(--pane-tab-
    panel-ring)) like every other focused pane, in both light and dark. */
+
+/* Theme-token consumers without a pre-existing local owner. */
+.tmux-pane-tab-token:not(.active) .session-button-name {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-2);
+}
+.tmux-pane-tab-token:not(.active) .session-button-dir {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-3);
+}
+.tmux-pane-tab-token:not(.active) .session-button-detail {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-4);
+}
+so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */ .pane-tab:not(.active) .session-button-name {
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-5);
+}
+.pane-tab:not(.active) .session-button-detail {
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-7);
+}
+so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the --pane-tab-panel-head-text light override.) */ .panel-detail-row .session-button-name {
+
+  color: var(--40-layout-panes-tabs-panel-detail-row-fg-22);
+}
+.panel.active-pane .panel-detail-row .session-button-name {
+
+  color: var(--40-layout-panes-tabs-panel-fg-23);
+}

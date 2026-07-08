@@ -63,25 +63,57 @@ async function runLayoutAsyncSuite() {
 
     const first = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
     const second = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    assert.equal(pending.length, 2, 'a forced refresh starts a replacement generation');
-    pending[1].resolve(jsonResponse({marker: 'new-http'}));
-    await second;
-    pending[0].resolve(jsonResponse({marker: 'old-http'}));
+    assert.equal(pending.length, 1, 'a forced refresh joins the in-flight snapshot instead of starting a replacement generation');
+    pending[0].resolve(jsonResponse({marker: 'new-http'}));
     await first;
     assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'new-http', 'older HTTP completion cannot replace the newer generation');
     assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'only the current request clears the record handle');
 
     const third = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
     api.applyBackgroundOwnerStatusPayloadForTest({marker: 'push'}, {render: false});
-    pending[2].resolve(jsonResponse({marker: 'stale-after-push'}));
+    pending[1].resolve(jsonResponse({marker: 'stale-after-push'}));
     await third;
     assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'push', 'an SSE payload invalidates the older HTTP generation');
 
     const fourth = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    pending[3].reject(new Error('owner offline'));
+    pending[2].reject(new Error('owner offline'));
     await fourth;
     assert.ok(api.backgroundOwnerStatusStateForTest().error, 'the current request records its failure');
     assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
+  });
+
+  await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/auto-approve');
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const boot = api.loadAutoStatusesForTest({render: false});
+    const ready = api.loadAutoStatusesForTest({render: false});
+    assert.equal(boot, ready, 'boot and SSE ready share one auto-approve snapshot owner');
+    assert.equal(pending.length, 1, 'duplicate startup consumers issue exactly one auto-approve request');
+    pending[0](jsonResponse({sessions: {}}));
+    await boot;
+
+    await api.loadAutoStatusesForTest({preferFresh: true, render: false});
+    assert.equal(pending.length, 1, 'a ready event immediately after boot reuses the fresh auto-approve snapshot');
+  });
+
+  await testAsync('Tabber snapshot owner coalesces repeated rendering consumers', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerModeForTest('tabber');
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const first = api.fetchTabberActivityForTest({visible: true});
+    const second = api.fetchTabberActivityForTest({visible: true});
+    const third = api.fetchTabberActivityForTest({visible: true});
+    assert.equal(pending.length, 1, 'repeated Tabber renders start exactly one /api/activity request');
+    pending[0](jsonResponse({activity: {}, agents: []}));
+    await Promise.all([first, second, third]);
   });
 
   await testAsync('activity-summary request record rejects stale responses after a newer push', async () => {
@@ -2738,6 +2770,50 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 1, 'one missing terminal file token occupies one bounded target-cache entry');
       assert.equal(await api.terminalFileReferenceTarget('1', fileRef), null, 'fresh user resolution still reports the missing target');
       assert.ok(requestCount > requestsAfterFirstResolution, 'fresh context-menu resolution bypasses a passive cached miss');
+      api.invalidateTerminalFileReferenceTargetsForTest(['/home/test/cache-misses']);
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', fileRef), false, 'filesystem changes invalidate matching cached terminal misses before their TTL');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-ttl'}});
+      let now = 1_000_000;
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({
+            id: request.id,
+            ok: request.path.endsWith('positive.js'),
+            status: request.path.endsWith('positive.js') ? 200 : 404,
+            payload: request.path.endsWith('positive.js') ? {kind: 'file', name: 'positive.js', path: request.path} : undefined,
+            error: request.path.endsWith('positive.js') ? undefined : 'not found',
+          })),
+        }));
+      });
+      const clock = () => now;
+      const missing = {type: 'file', path: 'negative.js', text: 'negative.js'};
+      const existing = {type: 'file', path: 'positive.js', text: 'positive.js'};
+
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'the fake-clock negative lookup initially misses');
+      const afterNegative = requestCount;
+      now += 4_999;
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'a negative result remains cached before its bounded TTL expires');
+      assert.equal(requestCount, afterNegative, 'the fake-clock pre-expiry negative lookup sends no new fs batch request');
+      now += 1;
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'an expired negative result is resolved again');
+      assert.ok(requestCount > afterNegative, 'the fake clock proves missing candidates retry only after their TTL');
+
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'the fake-clock positive lookup resolves');
+      const afterPositive = requestCount;
+      now += 29_999;
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'a positive result remains cached before its longer TTL expires');
+      assert.equal(requestCount, afterPositive, 'the fake-clock pre-expiry positive lookup sends no new fs batch request');
+      now += 1;
+      api.invalidateFileExplorerFsCachesForTest();
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'an expired positive result is resolved again');
+      assert.ok(requestCount > afterPositive, 'the fake clock proves existing candidates retry only after their TTL');
     }
 
     {

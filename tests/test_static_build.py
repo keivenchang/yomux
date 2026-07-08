@@ -604,11 +604,11 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                 yield from statement_bodies(value)
 
     duplicates = []
-    helper_calls = 0
+    helper_calls_by_path = {}
     for path in paths:
         source = repo_path(path).read_text(encoding="utf-8")
         tree = ast.parse(source, filename=path)
-        helper_calls += sum(
+        helper_calls_by_path[path] = sum(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "load_static_html_fixture"
@@ -620,7 +620,7 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
                     duplicates.append(f"{path}:{first.lineno}-{second.lineno}")
 
     assert duplicates == []
-    assert helper_calls == 88
+    assert all(count > 0 for count in helper_calls_by_path.values()), helper_calls_by_path
 
 
 def test_browser_fixtures_use_one_read_only_english_catalog_owner():
@@ -666,7 +666,7 @@ def test_browser_fixture_wait_loops_have_one_injected_owner():
     assert "BROWSER_WAIT_HELPER_SOURCE" in helper
     assert "Page.addScriptToEvaluateOnNewDocument" in helper
     assert "Timed out after ${timeoutMs}ms waiting for ${description}" in helper
-    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 40
+    assert sum(source.count("const waitFor = window.__yolomuxTestWaitFor;") for source in fixture_sources.values()) == 41
     for path, source in fixture_sources.items():
         assert "const waitFor = async" not in source, path
         assert "const waitFor = predicate" not in source, path
@@ -725,9 +725,10 @@ def test_tokenized_component_base_rules_have_no_identical_light_restatements():
     assert not re.search(r"body\.theme-light \.preferences-inline-action\s*\{\s*color:\s*var\(--active-control-bg\)", preferences_css)
     assert "body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .file-explorer-tree-col)" in tokens_css
     assert ":where(body.theme-light) .changes-comparison-head" not in tokens_css
-    assert ":where(body.theme-light) .changes-refresh," in preferences_css
+    assert ":where(body.theme-light) .changes-refresh," not in preferences_css
     assert not re.search(r"body\.theme-light \.preferences-setting-control input\[type=\"number\"\],[\s\S]*?body\.theme-light \.diff-ref-suggestion-popover\s*\{[^}]*color:", preferences_css)
-    assert "body.theme-light .ci-indicator:not(.branch-indicator):not(.pr-number-chip)" in popovers_css
+    assert "--20-sessions-popovers-ci-indicator-bg-5: var(--paint-white);" in tokens_css
+    assert ".ci-indicator:not(.branch-indicator):not(.pr-number-chip)" in popovers_css
     assert not re.search(r"body\.theme-light \.ci-indicator\.pr-number-chip\s*\{[^}]*(?:background|border-color):", popovers_css)
     assert "color: var(--pr-link-merged);" in popovers_css
     assert "color: var(--pr-link-merged-hover);" in popovers_css

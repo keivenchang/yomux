@@ -694,10 +694,12 @@ globalThis.__layoutTestApi = {
   setBackgroundOwnerStatusPayloadForTest(payload) {
     backgroundOwnerStatusState.guard.invalidate();
     backgroundOwnerStatusState.payload = payload;
+    backgroundOwnerStatusState.updatedAt = Date.now();
     backgroundOwnerStatusState.loading = false;
     backgroundOwnerStatusState.error = '';
   },
   refreshBackgroundOwnerStatusForTest: refreshBackgroundOwnerStatus,
+  loadAutoStatusesForTest: loadAutoStatuses,
   applyBackgroundOwnerStatusPayloadForTest: applyBackgroundOwnerStatusPayload,
   backgroundOwnerStatusStateForTest() {
     return {
@@ -705,6 +707,7 @@ globalThis.__layoutTestApi = {
       loading: backgroundOwnerStatusState.loading,
       error: backgroundOwnerStatusState.error,
       request: backgroundOwnerStatusState.request,
+      updatedAt: backgroundOwnerStatusState.updatedAt,
     };
   },
   i18nActiveLocaleId,
@@ -1858,6 +1861,9 @@ globalThis.__layoutTestApi = {
     return pruneTerminalTmuxInputState(session);
   },
   tmuxWindowForTest: tmuxWindow,
+  activateTmuxWindowFromUserActionForTest(session, windowIndex, label = '', options = {}) {
+    return activateTmuxWindowFromUserAction(session, windowIndex, label, {...options, localOnly: options.localOnly !== false});
+  },
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
   currentFileStateForTest(path) {
@@ -2069,6 +2075,7 @@ globalThis.__layoutTestApi = {
   terminalFileReferenceTarget,
   terminalFileReferenceTargetCacheSizeForTest: () => terminalFileReferenceTargetCache.size,
   terminalFileReferenceTargetCacheHasForTest: (session, reference) => terminalFileReferenceTargetCache.has(terminalFileReferenceCacheKey(session, reference)),
+  invalidateTerminalFileReferenceTargetsForTest: invalidateTerminalFileReferenceTargets,
   terminalPositionFromClientPoint,
   requestFileEditorLineTarget,
   applyPendingFileEditorLineTarget,
@@ -2088,6 +2095,7 @@ globalThis.__layoutTestApi = {
   dockviewTabStripEndDropIntent,
   dockviewTabDropViolatesPinnedPartitionForTest: dockviewTabDropViolatesPinnedPartition,
   windowStepButtonFromEvent,
+  tmuxWindowStepTargetForTest: tmuxWindowStepTarget,
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
   tmuxWindowBarHtml,
@@ -2255,8 +2263,9 @@ globalThis.__layoutTestApi = {
     if (record) record.socket = socket;
   },
   shareHostQueueForTest(token) { return [...(shareHostConnectionRecord(token)?.queue || [])]; },
-  shareHostConnectionCountForTest() { return shareHostConnectionRecords.size; },
+  shareHostConnectionCountForTest() { return shareSenderRecordEntries('connection').length; },
   shareHostConnectionRecordForTest(token) { return shareHostConnectionRecord(token); },
+  shareSenderRecordForTest(key) { return shareSenderRecord(key, {create: false}); },
   enqueueShareHostMessageForTest: enqueueShareHostMessage,
   ensureShareHostSocketForTest: ensureShareHostSocket,
   ensureShareHostSocketsForTest: ensureShareHostSockets,
@@ -2295,10 +2304,10 @@ globalThis.__layoutTestApi = {
   shareReplayApplyPointerForTest: shareReplayApplyPointer,
   renderSharePointerGhostForTest: renderSharePointerGhost,
   sharePointerRecordsForTest() {
-    return Array.from(sharePointerRecords.entries()).map(([sender, record]) => ({
+    return shareSenderRecordEntries('pointer').map(([sender, record]) => ({
       sender,
-      ghost: record.ghost,
-      hideTimer: record.hideTimer,
+      ghost: record.pointer.ghost,
+      hideTimer: record.pointer.hideTimer,
     }));
   },
   shareReplayDeltaSequenceStatusForTest: shareReplayDeltaSequenceStatus,
@@ -2337,13 +2346,13 @@ globalThis.__layoutTestApi = {
   shareMirrorLastFrameForTest(sender = '', family = '') {
     const cleanSender = String(sender || 'host');
     const key = family ? cleanSender + ':' + family : cleanSender;
-    const state = shareMirrorLastFrameBySender.get(key) || null;
+    const state = shareSenderRecord(key, {create: false})?.lastFrame || null;
     return state ? {...state} : null;
   },
   shareCreateUiStateSnapshotForTest: shareCreateUiStateSnapshot,
   sharePopupLayerPayloadForTest: sharePopupLayerPayload,
   applySharePopupLayerForTest: applySharePopupLayer,
-  sharePopupLayerLastSeqForTest(owner = '') { return sharePopupLayerLastSeqBySender.get(String(owner || 'host')) || 0; },
+  sharePopupLayerLastSeqForTest(owner = '') { return shareSenderRecord(String(owner || 'host'), {create: false})?.popupSequence || 0; },
   sharePopupLayerNodeForTest() { return sharePopupLayerNode; },
   shareUiStateSnapshotForTest: shareUiStateSnapshot,
   shareGeometryDigestSnapshotForTest: shareGeometryDigestSnapshot,
@@ -2369,15 +2378,15 @@ globalThis.__layoutTestApi = {
     record.payload = {...payload, target: cleanTarget, ...cleanState};
   },
   shareScrollTargetPositionForTest(target) {
-    const state = shareScrollTargetRecords.get(String(target || ''));
+    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
     return state ? {top: state.top, left: state.left} : null;
   },
   shareScrollTargetPayloadForTest(target) {
-    const state = shareScrollTargetRecords.get(String(target || ''))?.payload;
+    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget?.payload;
     return state ? {...state} : null;
   },
   shareScrollTargetRecordForTest(target) {
-    const record = shareScrollTargetRecords.get(String(target || ''));
+    const record = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
     return record ? {...record, payload: {...record.payload}} : null;
   },
   restoreShareReadonlyScrollTargetForTest: restoreShareReadonlyScrollTarget,

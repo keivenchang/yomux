@@ -38,6 +38,50 @@ def test_list_directory_returns_entries(tmp_path):
     assert names["big.dat"]["kind"] == "file"
 
 
+def test_listing_reuses_child_canonicalization_for_security_and_identity(monkeypatch, tmp_path):
+    (tmp_path / "first.txt").write_text("first\n", encoding="utf-8")
+    (tmp_path / "second.txt").write_text("second\n", encoding="utf-8")
+    # Warm immutable root/secret policy caches.  The measured baseline used to resolve
+    # every visible entry once for the secret filter and again for physical identity.
+    filesystem.list_directory(str(tmp_path))
+    calls: list[Path] = []
+    original = filesystem.listing.paths._normalized_scope_path
+
+    def counting_normalize(path):
+        calls.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(filesystem.listing.paths, "_normalized_scope_path", counting_normalize)
+    payload = filesystem.list_directory(str(tmp_path))
+
+    assert {entry["name"] for entry in payload["entries"]} == {"first.txt", "second.txt"}
+    assert calls.count(tmp_path / "first.txt") == 1
+    assert calls.count(tmp_path / "second.txt") == 1
+
+
+def test_listing_does_not_cache_stale_identity_after_inode_replacement(tmp_path):
+    target = tmp_path / "replace.txt"
+    target.write_text("old\n", encoding="utf-8")
+    before = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}["replace.txt"]
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("new\n", encoding="utf-8")
+    replacement.replace(target)
+
+    after = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}["replace.txt"]
+
+    assert before["file_id"] != after["file_id"]
+    assert after["realpath"] == str(target)
+
+
+def test_filesystem_mutation_invalidates_canonical_security_policy(monkeypatch, tmp_path):
+    invalidations: list[None] = []
+    monkeypatch.setattr(filesystem.paths, "invalidate_path_policy_caches", lambda: invalidations.append(None))
+
+    filesystem.write_file(str(tmp_path / "created.txt"), "created\n")
+
+    assert invalidations == [None]
+
+
 def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

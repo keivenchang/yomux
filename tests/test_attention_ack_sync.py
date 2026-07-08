@@ -3,6 +3,7 @@
 import json
 import time
 from http import HTTPStatus
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,7 +86,53 @@ def test_auto_approve_read_merges_peer_ack_without_event_subscriber(monkeypatch,
     assert status == HTTPStatus.OK
     assert payload["prompt_attention_key"] == key
     assert payload["prompt_attention_acknowledged"] is True
-    assert payload["attention_acks"]["keys"] == [key]
+    assert "attention_acks" not in payload
+    assert payload["attention_ack_revision"] >= 1
+
+
+def test_auto_approve_change_invalidates_local_cache_and_pushes_to_peer_without_poll(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-client-events.json")
+    first = make_app()
+    second = make_app()
+    _subscriber_id, subscriber_queue = second.client_events.subscribe("status", "browser-b")
+    worker = SimpleNamespace(alive=lambda: True, stop=lambda: True)
+    first.auto_worker_records["1:%1"] = SimpleNamespace(session="1", worker=worker)
+    first.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
+    second.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
+    monkeypatch.setattr(first, "auto_approve_session_status", lambda session: {"session": session, "enabled": False})
+    monkeypatch.setattr(first, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        first,
+        "notify_background_client_event_followers",
+        lambda event_type, payload, _shared_event: second.handle_background_client_event({"event_type": event_type, "payload": payload}),
+    )
+
+    payload, status = first.set_auto_approve("1", False, persist=False)
+
+    assert status == HTTPStatus.OK
+    assert payload["enabled"] is False
+    assert first.auto_approve_cache_record.payload is None
+    assert second.auto_approve_cache_record.payload is None
+    assert subscriber_queue.get_nowait()["type"] == "auto_approve_changed"
+
+
+def test_shared_state_policy_pushes_settings_and_yoagent_conversation_to_peer(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-client-events.json")
+    first = make_app()
+    second = make_app()
+    _subscriber_id, subscriber_queue = second.client_events.subscribe("core,yoagent", "browser-b")
+    monkeypatch.setattr(
+        first,
+        "notify_background_client_event_followers",
+        lambda event_type, payload, _shared_event: second.handle_background_client_event({"event_type": event_type, "payload": payload}),
+    )
+
+    first.publish_background_client_event("settings_changed", {"mtime_ns": 7}, trigger="test")
+    first.publish_yoagent_conversation_changed("test")
+
+    assert [subscriber_queue.get_nowait()["type"] for _ in range(2)] == ["settings_changed", "yoagent_conversation_changed"]
 
 
 def test_auto_approve_roster_read_discards_cache_from_before_peer_ack(monkeypatch, tmp_path, make_app):
@@ -111,7 +158,8 @@ def test_auto_approve_roster_read_discards_cache_from_before_peer_ack(monkeypatc
     assert before_status == after_status == HTTPStatus.OK
     assert before["sessions"]["1"]["prompt_attention_acknowledged"] is False
     assert after["sessions"]["1"]["prompt_attention_acknowledged"] is True
-    assert after["sessions"]["1"]["attention_acks"]["keys"] == [key]
+    assert "attention_acks" not in after["sessions"]["1"]
+    assert after["sessions"]["1"]["attention_ack_revision"] >= 1
 
 
 def test_attention_ack_union_does_not_clobber_peer_keys(monkeypatch, tmp_path, make_app):

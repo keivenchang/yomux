@@ -29,6 +29,7 @@ const dockviewLayoutState = {
   panePointerDrag: null,
   panePointerDragSuppressedUntil: 0,
   tabActivationPerf: null,
+  pendingUserPanelActivation: '',
 };
 
 function dockviewEmptyPaneItem(slot) {
@@ -66,6 +67,18 @@ function dockviewFinishTabActivationPerf(item) {
     }
     dockviewLayoutState.tabActivationPerf = null;
   });
+}
+
+function dockviewCommitPanelActivation(item, options = {}) {
+  const panelItem = String(item || '');
+  if (!panelItem) return false;
+  const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
+  if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
+  const userInitiated = options.userInitiated === true || pendingUserGesture;
+  if (isTmuxSession(panelItem) && userInitiated) noteFileExplorerChangesSessionInteraction(panelItem);
+  setFocusedPanelItem(panelItem, {userInitiated});
+  dockviewFinishTabActivationPerf(panelItem);
+  return true;
 }
 
 function dockviewCore() {
@@ -962,8 +975,7 @@ function dockviewInit() {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
-      setFocusedPanelItem(item);
-      dockviewFinishTabActivationPerf(item);
+      dockviewCommitPanelActivation(item);
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
@@ -1669,8 +1681,7 @@ function createDockviewTabRenderer() {
     disposables = [];
   };
   const commitExplicitTabInteraction = () => {
-    if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
-    setFocusedPanelItem(item, {userInitiated: true});
+    dockviewCommitPanelActivation(item, {userInitiated: true});
   };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
@@ -1679,6 +1690,7 @@ function createDockviewTabRenderer() {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
       dockviewBeginTabActivationPerf(item);
+      dockviewLayoutState.pendingUserPanelActivation = item;
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewBeginTabPointerDrag(event, item);
     }

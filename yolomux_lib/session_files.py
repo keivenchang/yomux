@@ -53,23 +53,22 @@ from .workdir import session_workdir
 
 CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 CODEX_PATCH_RE = re.compile(r"\*\*\* (Add|Update|Delete) File: ([^\"\\\n]+)")
+CODEX_USAGE_VALUE_RE = re.compile(r'"(?:output_tokens|outputTokens|completion_tokens|completionTokens|generated_tokens|generatedTokens|reasoning_output_tokens|reasoningOutputTokens)"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
 CODEX_PATCH_STATUS = {"Add": "A", "Update": "M", "Delete": "D"}
 CODEX_SHELL_TOOL_NAMES = {"exec_command", "shell_command", "shell"}
 SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
 SESSION_FILES_CUTOFF_GRACE_SECONDS = 60.0
-# Historical attribution checks both the newest filename and newest-mtime candidate windows for
-# every live repo cwd. The old 64-entry cap was smaller than one candidate window, so each ordered
-# pass evicted the entries the next pass needed and reparsed every JSONL file from byte zero.
-_TRANSCRIPT_SCAN_CACHE_CWD_BUDGET = 16
-_TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2 * _TRANSCRIPT_SCAN_CACHE_CWD_BUDGET
+# Keep both newest filename and newest-mtime candidate windows resident. Raw Codex state no longer
+# multiplies by caller cwd, so this covers the full shared historical window without cache churn.
+_TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2
 _TRANSCRIPT_SCAN_PREFIX_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _TRANSCRIPT_REVERSE_SCAN_BYTES = 64 * 1024
-_CODEX_TRANSCRIPT_SCAN_VERSION = 4
+_CODEX_TRANSCRIPT_SCAN_VERSION = 5
 _CLAUDE_TRANSCRIPT_SCAN_VERSION = 4
-_TRANSCRIPT_SCAN_STORE_VERSION = 1
+_TRANSCRIPT_SCAN_STORE_VERSION = 2
 _TRANSCRIPT_SCAN_STORE_MAX_BYTES = 64 * 1024 * 1024
 _TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS = 60.0
 _TRANSCRIPT_SCAN_MESSAGE_ID_MAX = 4096
@@ -96,10 +95,23 @@ class TranscriptUsageEvent:
     tokens: float
 
 
+@dataclass(frozen=True)
+class HistoricalCodexTranscriptRecord:
+    """One bounded, raw-parsed candidate used by historical cwd lookups."""
+
+    path: Path
+    mtime: float
+    raw_shell_changes: dict[str, set[str]]
+
+
 _TRANSCRIPT_SCAN_CACHE: dict[tuple[Any, ...], TranscriptScanRecord] = {}
 _TRANSCRIPT_SCAN_CACHE_GUARD = threading.RLock()
 _TRANSCRIPT_SCAN_CACHE_STATE_DIR: Path | None = None
 _TRANSCRIPT_SCAN_STORE_NEXT_PRUNE = 0.0
+_HISTORICAL_CODEX_TRANSCRIPT_INDEX: dict[tuple[tuple[str, int, int, int, int], ...], tuple[HistoricalCodexTranscriptRecord, ...]] = {}
+_HISTORICAL_CODEX_TRANSCRIPT_INDEX_GUARD = threading.RLock()
+_HISTORICAL_CODEX_TRANSCRIPT_INDEX_MAX = 4
+_CODEX_RELATIVE_CWD_SENTINEL = "/__yolomux_codex_relative_cwd__"
 
 logger = logging.getLogger(__name__)
 
@@ -186,17 +198,20 @@ def scan_codex_transcript(path: Path, cwd: str | None = None, include_patch_text
 
 
 def scan_codex_transcript_details(path: Path, cwd: str | None = None, include_patch_text: bool = True, include_usage: bool = True) -> dict[str, Any]:
+    # Codex records relative paths. Parse those bytes once with a synthetic cwd, then resolve the
+    # raw paths for the caller. This mirrors Claude's raw-state owner and prevents one growing
+    # rollout from being reparsed for every pane/repo cwd.
     cache_key = codex_transcript_scan_cache_key(path, cwd, include_patch_text, include_usage)
     return incremental_transcript_scan_details(
         path,
         cache_key,
         new_codex_transcript_scan_state,
-        update=lambda state, line: update_codex_transcript_scan_state(state, line, cwd, include_patch_text, include_usage),
-        details=codex_transcript_scan_state_details,
+        update=lambda state, line: update_codex_transcript_scan_state(state, line),
+        details=lambda state: codex_transcript_scan_state_details(state, cwd, include_patch_text, include_usage),
     )
 
 
-def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> tuple[str, int, int, int, str, str, bool, bool] | None:
+def codex_transcript_scan_cache_key(path: Path, cwd: str | None = None, include_patch_text: bool = True, include_usage: bool = True) -> tuple[str, int, int, int, str] | None:
     try:
         stat = path.stat()
     except OSError:
@@ -207,9 +222,6 @@ def codex_transcript_scan_cache_key(path: Path, cwd: str | None, include_patch_t
         int(stat.st_dev),
         int(stat.st_ino),
         str(path.expanduser().resolve(strict=False)),
-        str(cwd or ""),
-        bool(include_patch_text),
-        bool(include_usage),
     )
 
 
@@ -217,7 +229,8 @@ def new_codex_transcript_scan_state() -> dict[str, Any]:
     return {
         "offset": 0,
         "size": 0,
-        "changes": {},
+        "patch_changes": {},
+        "shell_changes": {},
         "last_token_total": None,
         "summed_last_generated_tokens": 0.0,
         "parsed_tail": b"",
@@ -283,7 +296,8 @@ def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, A
         })
     elif provider == "codex":
         payload.update({
-            "changes": serialized_transcript_marker_map(state.get("changes")),
+            "patch_changes": serialized_transcript_marker_map(state.get("patch_changes")),
+            "shell_changes": serialized_transcript_marker_map(state.get("shell_changes")),
             "last_token_total": positive_finite_number(state.get("last_token_total")) if state.get("last_token_total") is not None else None,
             "summed_last_generated_tokens": positive_finite_number(state.get("summed_last_generated_tokens")),
         })
@@ -312,7 +326,8 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
                 for key, value in list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]
             }
     elif provider == "codex":
-        state["changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("changes")).items()}
+        state["patch_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("patch_changes")).items()}
+        state["shell_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("shell_changes")).items()}
         state["last_token_total"] = positive_finite_number(payload.get("last_token_total")) if payload.get("last_token_total") is not None else None
         state["summed_last_generated_tokens"] = positive_finite_number(payload.get("summed_last_generated_tokens"))
     return state
@@ -574,18 +589,17 @@ def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None)
     return transcript_scan_details(changes, positive_finite_number(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
 
 
-def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: str | None, include_patch_text: bool, include_usage: bool = True) -> None:
-    changes = state.get("changes")
-    if not isinstance(changes, dict):
-        changes = {}
-        state["changes"] = changes
-    if include_patch_text:
-        for verb, raw_path in CODEX_PATCH_RE.findall(line):
-            resolved = resolved_change_path(raw_path, cwd)
-            if resolved is None:
-                continue
-            changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
-    has_usage = include_usage and ('"total_token_usage"' in line or '"last_token_usage"' in line)
+def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: str | None = None, _include_patch_text: bool = True, _include_usage: bool = True) -> None:
+    """Accumulate provider-neutral raw Codex state; caller options are derived at read time."""
+    patch_changes = state.get("patch_changes")
+    if not isinstance(patch_changes, dict):
+        patch_changes = {}
+        state["patch_changes"] = patch_changes
+    for verb, raw_path in CODEX_PATCH_RE.findall(line):
+        resolved = resolved_change_path(raw_path, _CODEX_RELATIVE_CWD_SENTINEL)
+        if resolved is not None:
+            patch_changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+    has_usage = '"total_token_usage"' in line or '"last_token_usage"' in line
     has_shell_call = (
         ('"function_call"' in line or '"custom_tool_call"' in line)
         and any(f'"{tool}"' in line for tool in CODEX_SHELL_TOOL_NAMES)
@@ -593,26 +607,71 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, cwd: st
     has_git_change = has_shell_call and codex_line_may_contain_git_change(line)
     if not has_usage and not has_git_change:
         return
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        return
-    total_generated, last_generated = codex_record_usage_generated_tokens(record)
+    record: dict[str, Any] | None = None
+    if has_git_change:
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        record = parsed if isinstance(parsed, dict) else None
+    if has_usage and not has_git_change:
+        total_generated, last_generated = codex_line_usage_generated_tokens(line)
+    else:
+        total_generated, last_generated = codex_record_usage_generated_tokens(record)
     if total_generated is not None:
         state["last_token_total"] = total_generated
     elif last_generated is not None:
         state["summed_last_generated_tokens"] = float(state.get("summed_last_generated_tokens") or 0.0) + last_generated
     if not has_git_change:
         return
-    for path_text, markers in scan_codex_tool_call_changes_from_record(record, cwd).items():
-        changes.setdefault(path_text, set()).update(markers)
+    shell_changes = state.get("shell_changes")
+    if not isinstance(shell_changes, dict):
+        shell_changes = {}
+        state["shell_changes"] = shell_changes
+    for path_text, markers in scan_codex_tool_call_changes_from_record(record, _CODEX_RELATIVE_CWD_SENTINEL).items():
+        shell_changes.setdefault(path_text, set()).update(markers)
 
 
-def codex_transcript_scan_state_details(state: dict[str, Any]) -> dict[str, Any]:
-    changes = state.get("changes") if isinstance(state, dict) else {}
+def codex_line_usage_generated_tokens(line: str) -> tuple[float | None, float | None]:
+    values = [positive_finite_number(value) for value in CODEX_USAGE_VALUE_RE.findall(line)]
+    generated = max(values, default=0.0)
+    if generated <= 0:
+        return None, None
+    return (generated, None) if '"total_token_usage"' in line else (None, generated)
+
+
+def resolve_codex_raw_change_path(raw_path: str, cwd: str | None) -> Path | None:
+    path = Path(raw_path)
+    sentinel = Path(_CODEX_RELATIVE_CWD_SENTINEL)
+    try:
+        relative = path.relative_to(sentinel)
+    except ValueError:
+        return path
+    return resolved_change_path(str(relative), cwd)
+
+
+def resolved_codex_raw_changes(raw_changes: dict[str, set[str]], cwd: str | None) -> dict[str, set[str]]:
+    changes: dict[str, set[str]] = {}
+    for raw_path, markers in raw_changes.items():
+        resolved = resolve_codex_raw_change_path(str(raw_path), cwd)
+        if resolved is not None:
+            changes.setdefault(str(resolved), set()).update(markers)
+    return changes
+
+
+def codex_transcript_scan_state_details(state: dict[str, Any], cwd: str | None = None, include_patch_text: bool = True, include_usage: bool = True) -> dict[str, Any]:
+    raw_changes: dict[str, set[str]] = {}
+    if isinstance(state, dict):
+        for key in ("shell_changes", "patch_changes") if include_patch_text else ("shell_changes",):
+            source = state.get(key)
+            if isinstance(source, dict):
+                for path_text, markers in source.items():
+                    if isinstance(markers, set):
+                        raw_changes.setdefault(str(path_text), set()).update(markers)
+    changes = resolved_codex_raw_changes(raw_changes, cwd)
     last_token_total = state.get("last_token_total") if isinstance(state, dict) else None
     summed_last_generated_tokens = float(state.get("summed_last_generated_tokens") or 0.0) if isinstance(state, dict) else 0.0
-    generated_tokens = positive_finite_number(last_token_total) if last_token_total is not None else summed_last_generated_tokens
+    generated_tokens = (positive_finite_number(last_token_total) if last_token_total is not None else summed_last_generated_tokens) if include_usage else 0.0
     return transcript_scan_details(changes if isinstance(changes, dict) else {}, generated_tokens)
 
 
@@ -1699,16 +1758,55 @@ def historical_codex_transcript_for_cwd(cwd: str, cutoff: float) -> Path | None:
     if direct is not None:
         candidates.append(direct)
     candidates.extend(recent_codex_transcript_candidates())
+    for record in historical_codex_transcript_index(candidates):
+        if record.mtime < cutoff:
+            continue
+        changes = resolved_codex_raw_changes(record.raw_shell_changes, cwd)
+        if any(path_is_under_text(path_text, cwd) for path_text in changes):
+            return record.path
+    return None
+
+
+def historical_codex_transcript_index(candidates: list[Path]) -> tuple[HistoricalCodexTranscriptRecord, ...]:
+    """Return one bounded, raw-parsed candidate window shared by all cwd lookups."""
+    unique: list[tuple[Path, tuple[str, int, int, int, int]]] = []
     seen: set[str] = set()
     for transcript in candidates:
-        transcript_text = str(transcript)
-        if transcript_text in seen or file_mtime(transcript) < cutoff:
+        try:
+            stat = transcript.stat()
+        except OSError:
             continue
-        seen.add(transcript_text)
-        changes = scan_codex_transcript(transcript, cwd, include_patch_text=False)
-        if any(path_is_under_text(path_text, cwd) for path_text in changes):
-            return transcript
-    return None
+        resolved = str(transcript.expanduser().resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append((transcript, (resolved, int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))))
+    identity = tuple(item[1] for item in unique)
+    with _HISTORICAL_CODEX_TRANSCRIPT_INDEX_GUARD:
+        cached = _HISTORICAL_CODEX_TRANSCRIPT_INDEX.get(identity)
+        if cached is not None:
+            return cached
+    records: list[HistoricalCodexTranscriptRecord] = []
+    for transcript, _signature in unique:
+        raw = codex_transcript_raw_shell_changes(transcript)
+        records.append(HistoricalCodexTranscriptRecord(transcript, file_mtime(transcript), raw))
+    result = tuple(records)
+    with _HISTORICAL_CODEX_TRANSCRIPT_INDEX_GUARD:
+        _HISTORICAL_CODEX_TRANSCRIPT_INDEX[identity] = result
+        while len(_HISTORICAL_CODEX_TRANSCRIPT_INDEX) > _HISTORICAL_CODEX_TRANSCRIPT_INDEX_MAX:
+            _HISTORICAL_CODEX_TRANSCRIPT_INDEX.pop(next(iter(_HISTORICAL_CODEX_TRANSCRIPT_INDEX)))
+    return result
+
+
+def codex_transcript_raw_shell_changes(path: Path) -> dict[str, set[str]]:
+    cache_key = codex_transcript_scan_cache_key(path)
+    return incremental_transcript_scan_details(
+        path,
+        cache_key,
+        new_codex_transcript_scan_state,
+        update=lambda state, line: update_codex_transcript_scan_state(state, line),
+        details=lambda state: copy_change_set(state.get("shell_changes") if isinstance(state.get("shell_changes"), dict) else {}),
+    )
 
 
 def path_is_under_text(path_text: str, root_text: str) -> bool:

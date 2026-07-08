@@ -2422,8 +2422,7 @@ function syncTopbarActivityPlacement() {
   const actions = document.querySelector('.actions');
   if (!activity || !normalHost || !actions) return false;
   if (topbarActivityUsesActionsRail()) {
-    const refresh = actions.querySelector('#refreshMeta');
-    if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    if (activity.parentElement !== actions || activity !== actions.firstElementChild) actions.prepend(activity);
     scheduleTopbarActionCapacity();
     return true;
   }
@@ -2604,6 +2603,10 @@ function updateTopbarOwnerStatus() {
   } else {
     node.title = t('backgroundOwner.refresh');
   }
+  // The owner label grows after the background status request resolves. Route that dynamic
+  // content change through the same measured packer as activity updates so it cannot overlap
+  // the adjacent action rail at a narrow CSS viewport or high browser zoom.
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
@@ -4816,7 +4819,7 @@ async function focusAgentToastTarget(session, agent) {
   await selectSession(session, {userInitiated: true});
   const windowIndex = agentWindowIndex(agent);
   if (windowIndex === null) return;
-  tmuxWindow(session, {windowIndex}, t('terminal.window.title', {name: windowIndex}));
+  activateTmuxWindowFromUserAction(session, windowIndex, t('terminal.window.title', {name: windowIndex}));
 }
 
 function agentToastTargetLine(session, agent, options = {}) {
@@ -4962,13 +4965,6 @@ function sendTestNotification(options = {}) {
   }
 }
 
-function notifyCurrentAttentionStates() {
-  for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
-    if (shouldNotifyState(state)) maybeNotifyState(session, state, {force: true});
-  }
-}
-
 function eventMessageForState(session, state) {
   return `${sessionLabel(session)} ${state.label}: ${state.reason}`;
 }
@@ -4991,45 +4987,8 @@ function trackSessionStateChanges() {
       to: state.key,
       reason: state.reason,
     });
-    maybeNotifyState(session, state);
   }
   stateTrackingReady = true;
-}
-
-function maybeNotifyState(session, state, options = {}) {
-  if (!notificationDeliveryEnabled()) return;
-  if (!shouldNotifyState(state)) return;
-  // A green->red agent transition belongs to the dedicated per-window notification path below.
-  // Letting the generic session-state path handle it too duplicates the popup and bypasses the
-  // user's working-AI attention preference when that preference is off.
-  if (workingAgentTransitionOwnsSessionStateNotification(session, state)) return;
-  const key = `state:${stateSignature(state)}`;
-  const now = Date.now();
-  if (attentionAlreadyVisible(session)) {
-    recordSessionNotificationSent(session, key, now);
-    dismissAttentionAlertsForSession(session);
-    postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
-      state: state.key,
-      reason: state.reason,
-    });
-    return;
-  }
-  const lastSent = sessionNotificationLastSentAt(session, key);
-  if (options.force !== true && now - lastSent < 60_000) return;
-  recordSessionNotificationSent(session, key, now);
-  const body = `${state.reason} · ${projectDirName(session, transcriptMetadataState.payload.sessions?.[session])}`;
-  if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
-  postEvent(session, 'alert_shown', eventMessageForState(session, state), {
-    state: state.key,
-    reason: state.reason,
-  });
-  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    emitNotification('sessionAttention', {session, title: attentionToastTitle(session, state), body, systemTitle: sessionNotificationTitle(session, state), systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
-    postEvent(session, 'notification_sent', eventMessageForState(session, state), {state: state.key, reason: state.reason});
-  } catch (error) {
-    postEvent(session, 'notification_error', `notification failed: ${error}`, {state: state.key});
-  }
 }
 
 const workingAgentTransitionNotificationDescriptors = Object.freeze({
@@ -5182,12 +5141,6 @@ function workingAgentTransitionSnapshot(session, agent) {
   const tone = workingAgentNotificationTone(agent);
   const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
   return {agent, kind, options, key, tone, previousTone: toneMap?.get(key) || ''};
-}
-
-function workingAgentTransitionOwnsSessionStateNotification(session, state) {
-  const agent = attentionToastAgent(session, state)?.agent;
-  const transition = workingAgentTransitionSnapshot(session, agent);
-  return transition?.tone === 'attention';
 }
 
 // Notifications are driven by one authoritative auto-approve payload, never by a surface renderer.

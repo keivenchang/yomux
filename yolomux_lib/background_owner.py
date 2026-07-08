@@ -23,6 +23,9 @@ from .control import send_yolomux_control_request
 
 
 BACKGROUND_OWNER_DIR = STATE_DIR / "background-owner"
+GENERATION_INDEX_FILENAME = "index.json"
+GENERATION_INDEX_VERSION = 1
+GENERATION_INDEX_MAX_RECORDS = 64
 BACKGROUND_OWNER_STALE_SECONDS = 10.0
 BACKGROUND_OWNER_HEARTBEAT_SECONDS = 1.0
 BACKGROUND_RELEASE_TIMEOUT_SECONDS = 2.0
@@ -95,6 +98,7 @@ class BackgroundOwnerRegistry:
     ):
         self.owner_dir = owner_dir
         self.generations_dir = owner_dir / "generations"
+        self.generation_index_path = self.generations_dir / GENERATION_INDEX_FILENAME
         self.owner_path = owner_dir / "owner.json"
         self.owner_lock_path = owner_dir / "owner.lock"
         self.roles = tuple(dict.fromkeys(roles))
@@ -160,9 +164,73 @@ class BackgroundOwnerRegistry:
     def publish_generation(self) -> None:
         self.generations_dir.mkdir(parents=True, exist_ok=True)
         self.generations_dir.chmod(0o700)
-        atomic_write_text(self.record_path, json.dumps(self.generation_record(), sort_keys=True) + "\n", mode=0o600)
+        record = self.generation_record()
+        atomic_write_text(self.record_path, json.dumps(record, sort_keys=True) + "\n", mode=0o600)
+        # Status reads happen far more often than processes start.  Keep the live set in one
+        # compact record so they do not decode every historical generation file on each poll.
+        # A missing/corrupt index is deliberately recoverable from those files below.
+        try:
+            with file_lock(self.generation_index_path, dir_mode=0o700):
+                index = self._read_generation_index_unlocked()
+                records = index["records"]
+                records[self.generation_id] = record
+                self._write_generation_index_unlocked(self._compact_generation_records(records))
+        except OSError:
+            # The per-generation record remains the recovery source when an index write races
+            # with shutdown or a filesystem failure.
+            pass
+
+    def _empty_generation_index(self) -> dict[str, Any]:
+        return {"version": GENERATION_INDEX_VERSION, "records": {}}
+
+    def _read_generation_index_unlocked(self) -> dict[str, Any]:
+        try:
+            index = json.loads(self.generation_index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return self._recover_generation_index_unlocked()
+        records = index.get("records") if isinstance(index, dict) else None
+        if not isinstance(records, dict):
+            return self._recover_generation_index_unlocked()
+        return {"version": GENERATION_INDEX_VERSION, "records": {str(key): value for key, value in records.items() if isinstance(value, dict)}}
+
+    def _recover_generation_index_unlocked(self) -> dict[str, Any]:
+        records: dict[str, dict[str, Any]] = {}
+        try:
+            paths = self.generations_dir.glob("*.json")
+        except OSError:
+            paths = ()
+        for path in paths:
+            if path.name == GENERATION_INDEX_FILENAME:
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(record, dict) and record.get("generation_id"):
+                records[str(record["generation_id"])] = record
+        compacted = self._compact_generation_records(records)
+        self._write_generation_index_unlocked(compacted)
+        return {"version": GENERATION_INDEX_VERSION, "records": compacted}
+
+    def _write_generation_index_unlocked(self, records: dict[str, dict[str, Any]]) -> None:
+        atomic_write_text(
+            self.generation_index_path,
+            json.dumps({"version": GENERATION_INDEX_VERSION, "records": records}, sort_keys=True, separators=(",", ":")) + "\n",
+            mode=0o600,
+        )
+
+    def _compact_generation_records(self, records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        ordered = sorted(records.items(), key=lambda item: _generation_sort_key(item[1]), reverse=True)
+        return dict(ordered[:GENERATION_INDEX_MAX_RECORDS])
 
     def read_generation_record_items(self) -> list[tuple[Path, dict[str, Any]]]:
+        try:
+            with file_lock(self.generation_index_path, dir_mode=0o700):
+                records = self._read_generation_index_unlocked()["records"]
+        except OSError:
+            records = {}
+        if records:
+            return [(self.generations_dir / f"{generation_id}.json", record) for generation_id, record in records.items()]
         records: list[tuple[Path, dict[str, Any]]] = []
         try:
             paths = sorted(self.generations_dir.glob("*.json"))
@@ -183,6 +251,7 @@ class BackgroundOwnerRegistry:
     def live_generation_records(self) -> list[dict[str, Any]]:
         now = self.clock()
         records = []
+        stale_paths: list[Path] = []
         for path, record in self.read_generation_record_items():
             try:
                 pid = int(record.get("pid") or 0)
@@ -190,15 +259,32 @@ class BackgroundOwnerRegistry:
             except (TypeError, ValueError):
                 continue
             if not pid_is_alive(pid):
-                try:
-                    path.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
+                stale_paths.append(path)
                 continue
             if heartbeat and now - heartbeat > BACKGROUND_OWNER_STALE_SECONDS:
+                stale_paths.append(path)
                 continue
             records.append(record)
+        if stale_paths:
+            self._prune_generation_records(stale_paths)
         return records
+
+    def _prune_generation_records(self, paths: list[Path]) -> None:
+        names = {path.stem for path in paths}
+        try:
+            with file_lock(self.generation_index_path, dir_mode=0o700):
+                index = self._read_generation_index_unlocked()
+                records = index["records"]
+                for name in names:
+                    records.pop(name, None)
+                self._write_generation_index_unlocked(records)
+        except OSError:
+            pass
+        for path in paths:
+            try:
+                path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
 
     def latest_live_generation(self) -> dict[str, Any] | None:
         records = self.live_generation_records()

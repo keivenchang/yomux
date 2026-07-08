@@ -37,7 +37,7 @@
   max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #f2f5f8;
+  color: var(--session-label-fg);
   font-size: var(--tab-label-size);
   font-weight: 500;
 }
@@ -515,14 +515,7 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
 .session-yolo-marker.locked {
   color: #ffd75d;
   background: #3a3524;
-  border-color: #f0b85d;
-}
-/* Light mode repaints only neutral state badges. Specialized states keep their own shared paint; a
-   generic higher-specificity theme rule previously turned danger/review/test badges neutral. */
-body.theme-light .session-state-badge:not(:is(.session-state-needs-approval, .session-state-needs-input, .session-state-blocked, .session-state-disconnected, .session-state-tests-running, .session-state-ready-review, .session-state-yolo-approval)) {
-  color: var(--neutral-text-strong);
-  background: var(--neutral-surface-subtle-light);
-  border-color: #cdd5e0;
+  border-color: var(--accent-gold);
 }
 /* The session YO marker is always static; the pulsing green ball beside the agent symbol signals
    session work, while transient model work uses the shared moving ellipsis. */
@@ -549,7 +542,7 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   display: none;
 }
 .ci-indicator.pr-number-chip {
-  color: #e9edf3;
+  color: var(--20-sessions-popovers-ci-indicator-fg-7);
   background: var(--pr-number-chip-bg);
   border-color: var(--pr-number-chip-bg);
   padding: 0 var(--space-4);
@@ -565,32 +558,36 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   text-decoration: none;
 }
 .session-state-needs-approval,
-.session-state-needs-input,
-.ci-indicator.pr-status-failing,
-.ci-indicator.pr-review-changes {
+.session-state-needs-input {
   color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
+}
+.ci-indicator.pr-status-failing,
+.ci-indicator.pr-review-changes {
+  color: var(--20-sessions-popovers-ci-indicator-fg-11);
+  background: var(--20-sessions-popovers-ci-indicator-bg-12);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-13);
 }
 .ci-indicator.pr-status-failing {
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
 .ci-indicator.pr-status-draft {
-  color: #161000;
-  background: var(--pane-tab-badge-gold);
-  border-color: var(--warning-border-strong);
+  color: var(--20-sessions-popovers-ci-indicator-fg-14);
+  background: var(--20-sessions-popovers-ci-indicator-bg-15);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-16);
 }
 .ci-indicator.pr-status-passing,
 .ci-indicator.pr-review-approved {
-  color: #051408;
-  background: var(--pr-status-passing);
-  border-color: #8ff2a7;
+  color: var(--20-sessions-popovers-ci-indicator-fg-8);
+  background: var(--20-sessions-popovers-ci-indicator-bg-9);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-10);
 }
 .ci-indicator.pr-status-merged {
-  color: #170326;
-  background: var(--pr-status-merged);
-  border-color: #e9d5ff;
+  color: var(--20-sessions-popovers-ci-indicator-fg-17);
+  background: var(--20-sessions-popovers-ci-indicator-bg-18);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-19);
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
 .ci-indicator.pr-review-chip {
@@ -598,61 +595,19 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   font-weight: 700;
 }
 .ci-indicator.pr-review-required {
-  color: #172033;
+  color: var(--20-sessions-popovers-ci-indicator-fg-20);
   background: #e7ebf1;
   border-color: #aab4c4;
   text-decoration: line-through;
   opacity: 1;
 }
 .ci-indicator.branch-indicator {
-  --branch-indicator-text: #071321;
-  --branch-indicator-bg: var(--accent-sky-strong);
-  --branch-indicator-border: #c9ebff;
+  --branch-indicator-text: var(--20-sessions-popovers-ci-indicator-branch-indicator-text-21);
+  --branch-indicator-bg: var(--20-sessions-popovers-ci-indicator-branch-indicator-bg-22);
+  --branch-indicator-border: var(--20-sessions-popovers-ci-indicator-branch-indicator-border-23);
   color: var(--branch-indicator-text);
   background: var(--branch-indicator-bg);
   border-color: var(--branch-indicator-border);
-}
-/* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
-   are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
-   theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
-body.theme-light .ci-indicator:not(.branch-indicator):not(.pr-number-chip) {
-  color: #1c2430;
-  background: var(--paint-white);
-  border-color: #b9c2d0;
-}
-body.theme-light .ci-indicator.pr-number-chip {
-  color: var(--paint-white);
-}
-body.theme-light .ci-indicator.pr-status-passing,
-body.theme-light .ci-indicator.pr-review-approved {
-  color: #06340f;
-  background: #6fe08a;
-  border-color: #3fae5e;
-}
-body.theme-light .ci-indicator.pr-status-failing,
-body.theme-light .ci-indicator.pr-review-changes {
-  color: var(--paint-white);
-  background: #d83048;
-  border-color: #b21f34;
-}
-body.theme-light .ci-indicator.pr-status-pending,
-body.theme-light .ci-indicator.pr-status-draft {
-  color: #3a2c00;
-  background: #ffcf4d;
-  border-color: #d9a400;
-}
-body.theme-light .ci-indicator.pr-status-merged {
-  color: #2b0a45;
-  background: #c79bf5;
-  border-color: #9a5fd0;
-}
-body.theme-light .ci-indicator.pr-review-required {
-  color: #41506a;
-}
-body.theme-light .ci-indicator.branch-indicator {
-  --branch-indicator-text: #07314f;
-  --branch-indicator-bg: #bfe3ff;
-  --branch-indicator-border: #7fb8e0;
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
@@ -689,21 +644,24 @@ body.theme-light .ci-indicator.branch-indicator {
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
   padding: var(--space-8) var(--space-10);
-  color: var(--text);
+  color: var(--20-sessions-popovers-session-popover-fg-24);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: var(--panel2);
+  background: var(--20-sessions-popovers-session-popover-bg-25);
   border: 1px solid var(--active-control-soft-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 50px var(--paint-shadow-42);
+  box-shadow: var(--20-sessions-popovers-session-popover-shadow-27);
   transform: translateY(-2px);
   transition:
     opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
     transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
     visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
+
+
+  border-color: var(--20-sessions-popovers-session-popover-border-26);
 }
 .session-popover::before {
   content: "";
@@ -713,9 +671,13 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: var(--panel2);
+  background: var(--20-sessions-popovers-session-popover-bg-28);
   border-inline-start: 1px solid var(--active-control-soft-border);
   border-top: 1px solid var(--active-control-soft-border);
+
+
+  border-inline-start-color: var(--20-sessions-popovers-session-popover-border-inline-start-29);
+  border-top-color: var(--20-sessions-popovers-session-popover-border-top-30);
 }
 /* S14: opt-in drag-timing readout — a copyable on-page box so the timing can be captured
    without DevTools. Only shown after a tab drag while the yolomux.debugDragTiming flag is set; click
@@ -739,38 +701,6 @@ body.theme-light .ci-indicator.branch-indicator {
   user-select: text;
   cursor: text;
 }
-/* Light mode: use a neutral card with the active accent only as border/labels. */
-body.theme-light .session-popover {
-  color: var(--pc-control-fg);
-  background: var(--paint-white);
-  border-color: var(--active-control-soft-border);
-  box-shadow: 0 18px 50px var(--paint-overlay-slate-16);
-}
-body.theme-light .session-popover::before {
-  background: var(--paint-white);
-  border-inline-start-color: var(--active-control-soft-border);
-  border-top-color: var(--active-control-soft-border);
-}
-body.theme-light .popover-row {
-  border-top-color: var(--paint-overlay-slate-10);
-}
-body.theme-light .popover-subtitle,
-body.theme-light .popover-label,
-body.theme-light .popover-desc-body,
-body.theme-light .state-legend-item,
-body.theme-light .session-popover .meta-muted {
-  color: var(--lt-muted);
-}
-body.theme-light .session-popover .meta-sep {
-  color: #9aa3b2;
-}
-body.theme-light .popover-desc {
-  color: var(--pc-control-fg);
-}
-body.theme-light .session-popover a,
-body.theme-light .branch-link {
-  color: var(--accent);
-}
 .popover-head {
   display: flex;
   align-items: flex-start;
@@ -784,13 +714,16 @@ body.theme-light .branch-link {
 }
 .popover-subtitle {
   margin-top: var(--space-1);
-  color: var(--muted);
+
   font: inherit;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-4);
   overflow-wrap: anywhere;
+
+
+  color: var(--20-sessions-popovers-popover-subtitle-fg-32);
 }
 .popover-subtitle-text {
   min-width: 0;
@@ -872,14 +805,19 @@ body.theme-light .branch-link {
   gap: var(--space-6);
   padding: var(--space-2) 0;
   border-top: 1px solid var(--line);
+
+
+  border-top-color: var(--20-sessions-popovers-popover-row-border-top-31);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
   gap: var(--space-6) var(--space-8);
 }
 .popover-label {
-  color: var(--active-accent-bright);
   font-weight: 500;
+
+
+  color: var(--20-sessions-popovers-popover-label-fg-33);
 }
 .popover-value {
   min-width: 0;
@@ -892,10 +830,10 @@ body.theme-light .branch-link {
   overflow-wrap: anywhere;
 }
 .session-popover .meta-muted {
-  color: var(--muted);
+  color: var(--20-sessions-popovers-session-popover-fg-36);
 }
 .session-popover .meta-sep {
-  color: var(--muted);
+  color: var(--20-sessions-popovers-session-popover-fg-37);
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -1024,20 +962,26 @@ body.theme-light .branch-link {
   display: inline-flex;
   align-items: center;
   gap: var(--space-4);
-  color: var(--muted);
+
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
+
+
+  color: var(--20-sessions-popovers-state-legend-item-fg-35);
 }
 .popover-desc {
-  color: var(--text);
   line-height: 1.35;
+
+
+  color: var(--20-sessions-popovers-popover-desc-fg-38);
 }
 .popover-desc-title {
   font-weight: 700;
 }
 .popover-desc-body {
   margin-top: var(--space-4);
-  color: var(--muted);
+
+  color: var(--20-sessions-popovers-popover-desc-body-fg-34);
 }
 .popover-desc-line + .popover-desc-line {
   margin-top: var(--space-4);
@@ -1095,4 +1039,26 @@ body :is(
 .meta a.pr-status-closed,
 .summary-context a.pr-status-closed {
   color: var(--pr-status-closed);
+}
+
+/* Theme-token consumers without a pre-existing local owner. */
+.session-state-badge:not(:is(.session-state-needs-approval, .session-state-needs-input, .session-state-blocked, .session-state-disconnected, .session-state-tests-running, .session-state-ready-review, .session-state-yolo-approval)) {
+
+  color: var(--20-sessions-popovers-session-state-badge-fg-1);
+  background: var(--20-sessions-popovers-session-state-badge-bg-2);
+  border-color: var(--20-sessions-popovers-session-state-badge-border-3);
+}
+.ci-indicator:not(.branch-indicator):not(.pr-number-chip):not(:is(.pr-status-failing, .pr-review-changes, .pr-status-pending, .pr-status-draft, .pr-status-passing, .pr-review-approved, .pr-status-merged, .pr-review-required)) {
+
+  color: var(--20-sessions-popovers-ci-indicator-fg-4);
+  background: var(--20-sessions-popovers-ci-indicator-bg-5);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-6);
+}
+.session-popover a {
+
+  color: var(--20-sessions-popovers-session-popover-fg-39);
+}
+.branch-link {
+
+  color: var(--20-sessions-popovers-branch-link-fg-40);
 }

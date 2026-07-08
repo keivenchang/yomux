@@ -400,6 +400,70 @@ def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypat
     assert second["usage"]["generated_tokens"] == 12
 
 
+def test_codex_transcript_raw_scan_is_shared_across_cwds_and_derives_paths(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    line = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "git add relative.py"}),
+        },
+    }) + "\n"
+    transcript.write_text(line, encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    first = session_files.scan_codex_transcript_details(transcript, str(first_cwd), include_patch_text=False)
+    second = session_files.scan_codex_transcript_details(transcript, str(second_cwd), include_patch_text=False)
+
+    assert session_files.codex_transcript_scan_cache_key(transcript, str(first_cwd), False) == session_files.codex_transcript_scan_cache_key(transcript, str(second_cwd), True)
+    assert first["changes"] == {str(first_cwd / "relative.py"): {"M"}}
+    assert second["changes"] == {str(second_cwd / "relative.py"): {"M"}}
+    assert [value for value in parsed_lines if isinstance(value, str) and value.endswith("\n")] == [line]
+
+
+def test_historical_codex_index_reuses_warm_raw_candidates_without_decoding(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    session_files._HISTORICAL_CODEX_TRANSCRIPT_INDEX.clear()
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    first_repo.mkdir()
+    second_repo.mkdir()
+
+    def transcript(path, repo, name):
+        path.write_text(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {name}", "workdir": str(repo)}),
+            },
+        }) + "\n", encoding="utf-8")
+
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    transcript(first, first_repo, "one.py")
+    transcript(second, second_repo, "two.py")
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda _cwd: None)
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [first, second])
+
+    assert session_files.historical_codex_transcript_for_cwd(str(first_repo), cutoff=0) == first
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    monkeypatch.setattr(session_files.json, "loads", lambda _value: (_ for _ in ()).throw(AssertionError("warm historical lookup must use the index")))
+    assert session_files.historical_codex_transcript_for_cwd(str(second_repo), cutoff=0) == second
+
+
 def test_codex_transcript_scan_cache_holds_full_recent_candidate_window(tmp_path, monkeypatch):
     session_files._TRANSCRIPT_SCAN_CACHE.clear()
     line = json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n"

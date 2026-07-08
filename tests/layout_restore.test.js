@@ -1746,8 +1746,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?t\(fileExplorerIndexStatus\.get\(normalized\) === 'building' \? 'finder\.index\.indexing' : 'finder\.index\.indexed'\)/.test(source), '#31: the indexed badge title keeps the full localized status text');
     assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true[\s\S]*state === 'ready'/.test(source), '#31: ready/follower-owned indexes stay "indexed", not "indexing"');
     assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
-    const loadAutoStatusesFn = source.slice(source.indexOf('async function loadAutoStatuses'), source.indexOf('async function loadAutoStatuses') + 1700);
-    assert.ok(loadAutoStatusesFn.includes('updateDocumentTitle();') && loadAutoStatusesFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll re-syncs the YO markers (renderAutoApproveButtons) alongside the tab title, so a done pane stops spinning on the same poll');
+    const loadAutoStatusesFn = source.slice(source.indexOf('function loadAutoStatuses'), source.indexOf('function renderAutoApproveStatusSurfaces'));
+    const autoStatusRenderFn = source.slice(source.indexOf('function renderAutoApproveStatusSurfaces'), source.indexOf('function applyAutoApprovePayload'));
+    assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll routes through the shared status renderer, which re-syncs the title and YO markers together so a done pane stops spinning on the same poll');
     assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
     assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
@@ -2536,10 +2537,10 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomux('', ['5']);
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
-    assert.ok(/\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*#172033[\s\S]*background:\s*#e7ebf1[\s\S]*opacity:\s*1/.test(css), '#6: review-required chip is filled with dark text, readable on bright active tabs');
-    assert.ok(/body\.theme-light \.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*#41506a/.test(css), '#6: review-required chip has readable light-theme text');
+    assert.ok(/:root\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-20:\s*#172033/.test(css) && /\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*var\(--20-sessions-popovers-ci-indicator-fg-20\)[\s\S]*background:\s*#e7ebf1[\s\S]*opacity:\s*1/.test(css), '#6: review-required chip is filled with centralized dark text, readable on bright active tabs');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-20:\s*#41506a/.test(css) && /\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*var\(--20-sessions-popovers-ci-indicator-fg-20\)/.test(css), '#6: review-required chip consumes the centralized readable light-theme text token');
     assert.equal((css.match(/background:\s*#e7ebf1/g) || []).length, 1, '#6: review-required fill has one shared owner instead of a repeated light-theme copy');
-    assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-7:\s*var\(--paint-white\)[\s\S]*--20-sessions-popovers-ci-indicator-fg-8:\s*#06340f/.test(css), '#6: centralized light tokens cover number + review chips');
     // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); red attention states use balls/rings instead of text badges.
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
     assert.equal(api.sessionStateHtml({key: 'idle', short: '-', label: 'Idle', reason: 'no active work'}), '', '#7: idle state does not add a meaningless dash before branch metadata');

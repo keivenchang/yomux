@@ -285,6 +285,10 @@ class AutoApproveCacheRecord:
     payload: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]] | None = None
     worker: object | None = None
     generation: int = 0
+    # Agent-window state is classified while building the auto-approve roster.  Consumers
+    # must be able to identify that immutable classification rather than independently
+    # reclassifying the same tmux screen during the same refresh.
+    agent_window_snapshot_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -350,11 +354,18 @@ SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
+SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE = 256
+SESSION_FILES_DISK_CACHE_INDEX_FILENAME = "cache-index.json"
+SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
 TABBER_ACTIVITY_CACHE_VERSION = 1
 TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
 TABBER_ACTIVITY_CONSUMER_TTL_SECONDS = 30.0
 TABBER_ACTIVITY_IDLE_REFRESH_SECONDS = 60.0
-SESSION_FILES_BATCH_MAX_WORKERS = 8
+# Session-files cold rebuilds parse transcripts and run Git at the same time.  Two
+# workers was the best p95 on the captured eight-session shape; more workers only
+# increase disk/GIL/subprocess contention.  Preferences may reduce or raise this
+# within the deliberately small safe range.
+SESSION_FILES_BATCH_MAX_WORKERS = 2
 SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
@@ -816,13 +827,24 @@ PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
-BACKGROUND_CLIENT_EVENT_TYPES = frozenset({
-    "attention_acks_changed",
-    "background_owner_changed",
-    "background_refresh_done",
-    "chat_messages_changed",
-    "chat_typing_changed",
-})
+# The event's storage owner determines whether another server must be notified immediately.
+# Keep this table next to the transport rather than letting each write path choose between a
+# local publish and a poll-dependent refresh.
+BACKGROUND_CLIENT_EVENT_POLICIES: dict[str, dict[str, str]] = {
+    "attention_acks_changed": {"truth": "tmux-ai-status", "delivery": "push"},
+    "auto_approve_changed": {"truth": "tmux workers and yolomux state", "delivery": "push"},
+    "background_owner_changed": {"truth": "background-owner", "delivery": "push"},
+    "background_refresh_done": {"truth": "background owner", "delivery": "push"},
+    "chat_messages_changed": {"truth": "chat database", "delivery": "push"},
+    "chat_typing_changed": {"truth": "chat database", "delivery": "push"},
+    "settings_changed": {"truth": "settings file", "delivery": "push"},
+    "yoagent_conversation_changed": {"truth": "yoagent conversation", "delivery": "push"},
+}
+BACKGROUND_CLIENT_EVENT_TYPES = frozenset(
+    event_type
+    for event_type, policy in BACKGROUND_CLIENT_EVENT_POLICIES.items()
+    if policy["delivery"] == "push"
+)
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
 BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
 CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
@@ -981,8 +1003,8 @@ class BackgroundRefreshEventLogRecord:
     last_emit_count: int = 0
 
 
-def session_files_batch_worker_count(count: int) -> int:
-    return max(1, min(SESSION_FILES_BATCH_MAX_WORKERS, count))
+def session_files_batch_worker_count(count: int, maximum: int = SESSION_FILES_BATCH_MAX_WORKERS) -> int:
+    return max(1, min(max(1, int(maximum)), count))
 
 
 def tmux_command_failure_payload(session: str, diagnostic: str, **fields: Any) -> dict[str, Any]:
@@ -1022,6 +1044,10 @@ class SharedWatchRootIndex:
         self._clock = clock or (lambda: time.time())
         self._truncated_signature: tuple[Any, ...] | None = None
         self.owner_dir = self.path.with_name(f"{self.path.name}.owners")
+        # Root interest is written per server, while only the elected background owner is
+        # allowed to sample the directories.  Keep that sample in a separate atomic record so
+        # followers can compare the owner's delta without lstat/iterdir work of their own.
+        self.signature_path = self.path.with_name(f"{self.path.name}.signatures.json")
         owner_digest = hashlib.sha256(self.owner_id.encode("utf-8", errors="replace")).hexdigest()[:24]
         self.owner_path = self.owner_dir / f"{owner_digest}.json"
 
@@ -1237,6 +1263,38 @@ class SharedWatchRootIndex:
             logger.warning("shared watch-root index truncated from %s live roots across %s owners to %s", total, len(owners), self.limit)
             self._truncated_signature = signature
         return sorted(selected)
+
+    @staticmethod
+    def _freeze_signature(value: Any) -> Any:
+        if isinstance(value, (list, tuple)):
+            return tuple(SharedWatchRootIndex._freeze_signature(item) for item in value)
+        if isinstance(value, dict):
+            return tuple(sorted((str(key), SharedWatchRootIndex._freeze_signature(item)) for key, item in value.items()))
+        return value
+
+    def publish_signature_snapshot(self, signature: tuple[Any, ...]) -> bool:
+        """Atomically publish the one owner-scanned signature when it actually changes."""
+
+        frozen = self._freeze_signature(signature)
+        if not isinstance(frozen, tuple):
+            frozen = ()
+        with file_lock(self.signature_path):
+            previous = self.signature_snapshot()
+            if previous == frozen:
+                return False
+            payload = {"version": 1, "signature": frozen, "updated_at": self._clock()}
+            atomic_write_text(self.signature_path, json.dumps(payload, separators=(",", ":"), sort_keys=True), mode=0o600)
+        return True
+
+    def signature_snapshot(self) -> tuple[Any, ...]:
+        try:
+            raw = json.loads(self.signature_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return ()
+        if not isinstance(raw, dict):
+            return ()
+        frozen = self._freeze_signature(raw.get("signature"))
+        return frozen if isinstance(frozen, tuple) else ()
 
 
 def file_stat_signature(path: Path) -> tuple[str, int, int]:
@@ -3190,32 +3248,17 @@ class TmuxWebtermApp:
             return {"ok": True, "history": self.stats_history_payload_locked(response_since, client_id=client_id)}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
-        cached_payload = self.fresh_auto_approve_payload_for_stats()
-        if cached_payload is not None:
-            return self.stats_agent_window_rows_from_auto_approve_payload(cached_payload)
-        self.refresh_sessions(maintenance=False)
+        # The stats sampler deliberately joins the roster owner.  Falling back to its own
+        # discovery/classification path made one tmux window simultaneously report different
+        # states to auto-approve, Tabber, and YO!stats.
         if not self.sessions:
             return []
-        sessions, _errors = discover_sessions(self.sessions)
-        if not sessions:
-            return []
-        activity_snapshot = self.activity_snapshot_with_recency()
-        rows: list[dict[str, Any]] = []
-        for session in self.sessions:
-            info = sessions.get(session)
-            if info is None:
-                continue
-            for row in self.agent_window_status_payloads(
-                session,
-                info=info,
-                discovered_sessions=sessions,
-                activity_snapshot=activity_snapshot,
-                include_path_metadata=False,
-            ):
-                item = dict(row)
-                item["session"] = session
-                rows.append(item)
-        return rows
+        cached_payload = self.fresh_auto_approve_payload_for_stats()
+        if cached_payload is None:
+            cached_payload, status = self.refresh_auto_approve_cache_sync()
+            if status != HTTPStatus.OK:
+                return []
+        return self.stats_agent_window_rows_from_auto_approve_payload(cached_payload)
 
     def fresh_auto_approve_payload_for_stats(self) -> AutoApproveStatusPayload | None:
         with self.auto_approve_cache_condition:
@@ -3233,6 +3276,33 @@ class TmuxWebtermApp:
         if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
             self.start_auto_approve_cache_refresh()
         return copy.deepcopy(payload)
+
+    @staticmethod
+    def agent_window_snapshot_rows_by_target(payload: AutoApproveStatusPayload) -> tuple[int, dict[tuple[str, str, str], dict[str, Any]]]:
+        """Return the roster-owned state rows keyed by session, pane target, and client kind."""
+
+        try:
+            revision = max(0, int(payload.get("agent_window_snapshot_revision") or 0))
+        except (TypeError, ValueError):
+            revision = 0
+        rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+        sessions_payload = payload.get("sessions")
+        if not isinstance(sessions_payload, dict):
+            return revision, rows
+        for session, session_payload in sessions_payload.items():
+            if not isinstance(session_payload, dict):
+                continue
+            window_rows = session_payload.get("agent_windows")
+            if not isinstance(window_rows, list):
+                continue
+            for row in window_rows:
+                if not isinstance(row, dict):
+                    continue
+                target = str(row.get("pane_target") or "")
+                kind = str(row.get("kind") or "").lower()
+                if target and kind:
+                    rows[(str(session), target, kind)] = copy.deepcopy(row)
+        return revision, rows
 
     @staticmethod
     def stats_agent_window_rows_from_auto_approve_payload(payload: AutoApproveStatusPayload) -> list[dict[str, Any]]:
@@ -4080,9 +4150,43 @@ class TmuxWebtermApp:
         return self.background_owner.can_run(role)
 
     def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
-        payload = self.background_owner.status_payload()
-        payload["perf"] = self.performance_metrics_payload()
-        return payload, HTTPStatus.OK
+        # This path is polled by the topbar.  Diagnostics have a bounded, explicit admin
+        # endpoint so routine owner state never serializes the recent profiling ring.
+        return self.background_owner.status_payload(), HTTPStatus.OK
+
+    def performance_diagnostics_payload(self) -> dict[str, Any]:
+        """Return bounded profiling summaries without making status polling expensive."""
+
+        metrics = self.performance_metrics_payload()
+        phase_rows = [
+            dict(row)
+            for row in metrics.get("summary", [])
+            if isinstance(row, dict) and str(row.get("surface") or "").startswith("phase:")
+        ]
+        repeated_work = []
+        for row in metrics.get("summary", []):
+            if not isinstance(row, dict):
+                continue
+            cache = row.get("cache")
+            if not isinstance(cache, dict):
+                continue
+            avoided_recomputes = sum(
+                max(0, int(value or 0))
+                for status, value in cache.items()
+                if str(status).startswith("hit") or str(status) == "coalesced"
+            )
+            if avoided_recomputes:
+                repeated_work.append({
+                    "role": str(row.get("role") or ""),
+                    "surface": str(row.get("surface") or ""),
+                    "avoided_recomputes": avoided_recomputes,
+                })
+        repeated_work.sort(key=lambda row: (-int(row["avoided_recomputes"]), row["role"], row["surface"]))
+        return {
+            "perf": metrics,
+            "shared_phase_counters": phase_rows[:64],
+            "repeated_work": repeated_work[:64],
+        }
 
     def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         was_owner = self.background_owner.is_owner()
@@ -5429,6 +5533,10 @@ class TmuxWebtermApp:
                 cache="ready",
             )
             return {"ok": True, "accepted": True, "event": {"type": event_type}}
+        if event_type == "auto_approve_changed":
+            # The worker records are process-local, but every status response is cached. A
+            # follower must discard that cache before it tells its SSE clients to refresh.
+            self.invalidate_auto_approve_cache()
         raw_payload = request.get("payload")
         payload = raw_payload if isinstance(raw_payload, dict) else {}
         event = self.publish_client_event(event_type, payload, trigger="background-fanout", cache="ready")
@@ -5477,6 +5585,14 @@ class TmuxWebtermApp:
         performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
         value = performance.get(key, default) if isinstance(performance, dict) else default
         return max(minimum, min(maximum, self.float_value(value, default)))
+
+    def session_files_max_workers(self) -> int:
+        """Return the bounded cold-rebuild queue width, not a request fan-out width."""
+        default = SESSION_FILES_BATCH_MAX_WORKERS
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get("session_files_max_workers", default) if isinstance(performance, dict) else default
+        return max(1, min(8, int(self.float_value(value, default))))
 
     def server_event_poll_seconds(self) -> float:
         return self.performance_setting_ms_as_seconds("server_event_poll_ms", 0.25, 60.0)
@@ -6206,13 +6322,14 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         roots = self.filesystem_roots_for_watch(sessions)
         signature = tuple((root, filesystem_watch_signature(root)) for root in roots)
+        changed = self.watch_root_index.publish_signature_snapshot(signature)
         self.record_performance_sample(
             BACKGROUND_ROLE_WATCH_ROOTS,
             "watch-signature",
             trigger="poll",
             compute_ms=(time.perf_counter() - started) * 1000,
             payload={"roots": roots, "signature_count": len(signature)},
-            cache_status="computed",
+            cache_status="changed" if changed else "unchanged",
             count=len(roots),
         )
         return signature
@@ -6226,6 +6343,9 @@ class TmuxWebtermApp:
     def follower_filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         roots = self.filesystem_roots_for_watch(sessions)
         self.request_watch_roots_owner_refresh(roots, "poll")
+        shared_signature = self.watch_root_index.signature_snapshot()
+        if shared_signature:
+            return shared_signature
         with self.client_watch_service.lock:
             return self.client_watch_service.filesystem_signature or (("watch-roots", "follower"),)
 
@@ -6301,7 +6421,10 @@ class TmuxWebtermApp:
             if self.client_watch_service.filesystem_history and not refresh:
                 return copy.deepcopy(self.client_watch_service.filesystem_history[-1])
         sessions, _errors = discover_sessions(self.sessions)
-        signature = self.filesystem_roots_watch_signature(sessions)
+        if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
+            signature = self.filesystem_roots_watch_signature(sessions)
+        else:
+            signature = self.follower_filesystem_roots_watch_signature(sessions)
         if not signature:
             return None
         token = self.record_filesystem_watch_snapshot(signature)
@@ -7059,6 +7182,80 @@ class TmuxWebtermApp:
     def session_files_disk_manifest_path(self, signature: str) -> Path:
         return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
 
+    def session_files_disk_cache_index_path(self) -> Path:
+        return SESSION_FILES_CACHE_DIR / SESSION_FILES_DISK_CACHE_INDEX_FILENAME
+
+    def empty_session_files_disk_cache_index(self) -> dict[str, Any]:
+        return {"version": SESSION_FILES_DISK_CACHE_INDEX_VERSION, "entries": {}, "recovery_cursor": ""}
+
+    def read_session_files_disk_cache_index_unlocked(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.session_files_disk_cache_index_path().read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            return self.empty_session_files_disk_cache_index()
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        if not isinstance(entries, dict):
+            return self.empty_session_files_disk_cache_index()
+        return {
+            "version": SESSION_FILES_DISK_CACHE_INDEX_VERSION,
+            "entries": {str(signature): value for signature, value in entries.items() if isinstance(value, dict)},
+            "recovery_cursor": str(payload.get("recovery_cursor") or ""),
+        }
+
+    def write_session_files_disk_cache_index_unlocked(self, index: dict[str, Any]) -> None:
+        atomic_write_text(
+            self.session_files_disk_cache_index_path(),
+            json.dumps(index, sort_keys=True, separators=(",", ":")),
+            mode=0o600,
+        )
+
+    def update_session_files_disk_cache_index(self, signature: str, *, size: int, mtime: float) -> None:
+        index_path = self.session_files_disk_cache_index_path()
+        try:
+            with file_lock(index_path, dir_mode=0o700):
+                index = self.read_session_files_disk_cache_index_unlocked()
+                index["entries"][signature] = {"size": max(0, int(size)), "mtime": max(0.0, float(mtime))}
+                self.write_session_files_disk_cache_index_unlocked(index)
+        except OSError as exc:
+            logger.debug("failed to update session-files cache index: %s", exc)
+
+    def recover_session_files_disk_cache_index_batch(self, index: dict[str, Any]) -> int:
+        """Adopt a bounded number of old cache files when the shared index is absent/corrupt."""
+        adopted = 0
+        try:
+            paths = SESSION_FILES_CACHE_DIR.iterdir()
+        except OSError:
+            return 0
+        for path in paths:
+            name = path.name
+            if not name.endswith(".json") or name.endswith(".manifest.json") or name == SESSION_FILES_DISK_CACHE_INDEX_FILENAME:
+                continue
+            signature = path.stem
+            if signature in index["entries"]:
+                continue
+            try:
+                payload_stat = path.stat()
+            except OSError:
+                continue
+            manifest_path = self.session_files_disk_manifest_path(signature)
+            size = int(payload_stat.st_size)
+            mtime = float(payload_stat.st_mtime)
+            try:
+                manifest_stat = manifest_path.stat()
+                size += int(manifest_stat.st_size)
+                mtime = max(mtime, float(manifest_stat.st_mtime))
+            except OSError:
+                pass
+            index["entries"].setdefault(signature, {"size": size, "mtime": mtime})
+            adopted += 1
+            if adopted >= SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE:
+                break
+        # Filesystem directory order is not stable, so use the indexed signatures rather than a
+        # lexical cursor.  Each pass stats only newly discovered entries and stops at the batch
+        # limit; a later maintenance pass adopts the next missing entries safely.
+        index["recovery_cursor"] = ""
+        return adopted
+
     def session_files_disk_cache_entries(self) -> list[dict[str, Any]]:
         try:
             paths = sorted(SESSION_FILES_CACHE_DIR.glob("*.json"))
@@ -7066,7 +7263,7 @@ class TmuxWebtermApp:
             return []
         entries: list[dict[str, Any]] = []
         for path in paths:
-            if path.name.endswith(".manifest.json"):
+            if path.name.endswith(".manifest.json") or path.name == SESSION_FILES_DISK_CACHE_INDEX_FILENAME:
                 continue
             signature = path.stem
             manifest_path = self.session_files_disk_manifest_path(signature)
@@ -7110,7 +7307,28 @@ class TmuxWebtermApp:
         max_age = SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max(0.0, float(max_age_seconds))
         byte_cap = SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max(0, int(max_bytes))
         current_time = time.time() if now is None else float(now)
-        entries = self.session_files_disk_cache_entries()
+        index_path = self.session_files_disk_cache_index_path()
+        try:
+            with file_lock(index_path, dir_mode=0o700):
+                index = self.read_session_files_disk_cache_index_unlocked()
+                recovered_entries = self.recover_session_files_disk_cache_index_batch(index)
+                indexed_entries = index["entries"]
+                entries = [
+                    {
+                        "path": SESSION_FILES_CACHE_DIR / f"{signature}.json",
+                        "manifest_path": self.session_files_disk_manifest_path(signature),
+                        "signature": signature,
+                        "size": max(0, int(self.float_value(metadata.get("size"), 0.0))),
+                        "mtime": max(0.0, self.float_value(metadata.get("mtime"), 0.0)),
+                    }
+                    for signature, metadata in indexed_entries.items()
+                ]
+                self.write_session_files_disk_cache_index_unlocked(index)
+        except OSError:
+            # Keep the old recovery path for a transient index lock/filesystem failure.
+            entries = self.session_files_disk_cache_entries()
+            recovered_entries = 0
+        total_indexed_bytes = sum(max(0, int(self.float_value(entry.get("size"), 0.0))) for entry in entries)
         kept: list[dict[str, Any]] = []
         to_remove: list[dict[str, Any]] = []
         for entry in entries:
@@ -7129,7 +7347,7 @@ class TmuxWebtermApp:
         removed_files = 0
         removed_bytes = 0
         seen_paths: set[Path] = set()
-        for entry in to_remove:
+        for entry in to_remove[:SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE]:
             path = entry.get("path")
             if isinstance(path, Path):
                 if path in seen_paths:
@@ -7138,12 +7356,22 @@ class TmuxWebtermApp:
             files, bytes_removed = self.remove_session_files_disk_cache_entry(entry)
             removed_files += files
             removed_bytes += bytes_removed
+        if seen_paths:
+            try:
+                with file_lock(index_path, dir_mode=0o700):
+                    index = self.read_session_files_disk_cache_index_unlocked()
+                    for entry in to_remove[:SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE]:
+                        index["entries"].pop(str(entry.get("signature") or ""), None)
+                    self.write_session_files_disk_cache_index_unlocked(index)
+            except OSError:
+                pass
         return {
             "entries": len(entries),
+            "recovered_entries": recovered_entries,
             "removed_entries": len(seen_paths),
             "removed_files": removed_files,
             "removed_bytes": removed_bytes,
-            "kept_bytes": max(0, total_bytes),
+            "kept_bytes": max(0, total_indexed_bytes - removed_bytes),
             "max_age_seconds": max_age,
             "max_bytes": byte_cap,
         }
@@ -7297,6 +7525,17 @@ class TmuxWebtermApp:
             "last_error": "",
         }
         atomic_write_text(self.session_files_disk_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
+        try:
+            payload_size = path.stat().st_size
+        except OSError:
+            payload_size = 0
+        try:
+            manifest_stat = self.session_files_disk_manifest_path(signature).stat()
+            payload_size += manifest_stat.st_size
+            mtime = max(stored_at, float(manifest_stat.st_mtime))
+        except OSError:
+            mtime = stored_at
+        self.update_session_files_disk_cache_index(signature, size=payload_size, mtime=mtime)
         self.request_session_files_disk_cache_prune("write")
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
@@ -7452,6 +7691,7 @@ class TmuxWebtermApp:
         started = time.perf_counter()
         path, signature = self.session_files_disk_cache_path(key)
         compute_attempted = False
+        compute_slot_acquired = False
         computed_result: tuple[SessionFilesPayload, HTTPStatus] | None = None
         try:
             with file_lock(path, dir_mode=0o700):
@@ -7472,6 +7712,17 @@ class TmuxWebtermApp:
                     result = (payload, status, True, age_seconds)
                     self.complete_session_files_work(key, work_record, result=result)
                     return result
+                # Only a true cache miss enters the owner-wide queue.  Hits and
+                # followers remain cheap, while unrelated HTTP handlers never
+                # contend for these transcript/Git slots.
+                queue_started = time.perf_counter()
+                self.session_files_service.acquire_compute_slot(self.session_files_max_workers())
+                compute_slot_acquired = True
+                self.record_session_files_phase(
+                    "cold-rebuild-queue",
+                    (time.perf_counter() - queue_started) * 1000,
+                    {"cache_key_kind": self.performance_cache_key_kind(key)},
+                )
                 compute_attempted = True
                 payload, status = compute()
                 computed_result = (payload, status)
@@ -7508,6 +7759,15 @@ class TmuxWebtermApp:
                 self.complete_session_files_work(key, work_record, result=result)
                 return result
             try:
+                queue_started = time.perf_counter()
+                self.session_files_service.acquire_compute_slot(self.session_files_max_workers())
+                compute_slot_acquired = True
+                self.record_session_files_phase(
+                    "cold-rebuild-queue",
+                    (time.perf_counter() - queue_started) * 1000,
+                    {"cache_key_kind": self.performance_cache_key_kind(key), "lock_fallback": True},
+                )
+                compute_attempted = True
                 payload, status = compute()
             except Exception as compute_exc:
                 self.complete_session_files_work(key, work_record, error=compute_exc)
@@ -7530,6 +7790,9 @@ class TmuxWebtermApp:
         except Exception as exc:
             self.complete_session_files_work(key, work_record, error=exc)
             raise
+        finally:
+            if compute_slot_acquired:
+                self.session_files_service.release_compute_slot()
 
     def get_session_files_cache(
         self,
@@ -7879,7 +8142,7 @@ class TmuxWebtermApp:
                 for session, info in infos.items()
             }
         payloads: dict[str, SessionFilesPayload] = {}
-        with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(infos)), thread_name_prefix="session-files-warm") as executor:
+        with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(infos), self.session_files_max_workers()), thread_name_prefix="session-files-warm") as executor:
             futures = {
                 executor.submit(self.cached_session_files_payload_for_info, info, hours, from_ref, to_ref, repo_refs): session
                 for session, info in infos.items()
@@ -8511,7 +8774,7 @@ class TmuxWebtermApp:
         return yoagent_conversation.append_message(message)
 
     def publish_yoagent_conversation_changed(self, trigger: str = "yoagent") -> None:
-        self.publish_client_event("yoagent_conversation_changed", {"reason": trigger}, trigger=trigger, cache="ready")
+        self.publish_background_client_event("yoagent_conversation_changed", {"reason": trigger}, trigger=trigger, cache="ready")
 
     def publish_yoagent_stream_delta(
         self,
@@ -8578,7 +8841,7 @@ class TmuxWebtermApp:
                 previous_retention_days=previous_retention_days,
             )
         self.sync_tmux_theme_from_settings(payload, force=patch_updates_active_color(patch))
-        self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
+        self.publish_background_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.wake_client_event_watcher()
         return payload
 
@@ -9057,6 +9320,11 @@ class TmuxWebtermApp:
         owner_control_response: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        # Remote control responses from older servers may still carry perf, while the current
+        # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
+        diagnostic_status = dict(status)
+        if not isinstance(diagnostic_status.get("perf"), dict):
+            diagnostic_status.update(self.performance_diagnostics_payload())
         transcript_payload = self.transcripts_payload(force=True)
         client_events = self.client_events.snapshot()
         chat_events = {
@@ -9083,8 +9351,8 @@ class TmuxWebtermApp:
                 "activity": self.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
                 "search_index": self.runtime_cache_dir_stats(file_index.INDEX_DIR),
             },
-            "top_endpoints": self.runtime_top_endpoints(status),
-            "top_background_work": self.runtime_top_background_work(status),
+            "top_endpoints": self.runtime_top_endpoints(diagnostic_status),
+            "top_background_work": self.runtime_top_background_work(diagnostic_status),
             "top_event_types": self.runtime_top_event_types(),
             "client_events": client_events,
             "chat": {
@@ -9439,6 +9707,17 @@ class TmuxWebtermApp:
         agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
         session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
         activity_snapshot = self.activity_snapshot_with_recency()
+        # Auto-approve owns prompt/screen classification.  Reuse its immutable roster rows
+        # here so activity cannot publish a contradictory state for the same observation.
+        # Do not make activity's cold path synchronously build a second roster.  At startup the
+        # roster refresh owns the first classification; until it commits, activity keeps its
+        # existing path and joins the owned revision on the next refresh.
+        roster_payload = self.fresh_auto_approve_payload_for_stats()
+        snapshot_revision, owned_agent_rows = (
+            self.agent_window_snapshot_rows_by_target(roster_payload)
+            if roster_payload is not None
+            else (0, {})
+        )
         self.merge_shared_attention_acks()
         with self.client_watch_service.lock:
             attention_ack_rev = self.client_watch_service.attention_ack_rev
@@ -9487,6 +9766,8 @@ class TmuxWebtermApp:
                     activity_snapshot=activity_snapshot,
                     preclassified_by_target=preclassified_by_session.get(session),
                     files_payload=files_payload,
+                    owned_rows_by_target=owned_agent_rows,
+                    snapshot_revision=snapshot_revision,
                 ),
             }
             rebuilt += 1
@@ -9523,6 +9804,7 @@ class TmuxWebtermApp:
             "errors": errors,
             "session_scope": scope,
             "session_file_hours": bounded_hours,
+            "agent_window_snapshot_revision": snapshot_revision,
         }
 
     def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str:
@@ -10259,7 +10541,7 @@ class TmuxWebtermApp:
             payloads[session] = payload
             statuses[session] = int(status)
         elif batch_infos:
-            with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(batch_infos)), thread_name_prefix="session-files-batch") as executor:
+            with ThreadPoolExecutor(max_workers=session_files_batch_worker_count(len(batch_infos), self.session_files_max_workers()), thread_name_prefix="session-files-batch") as executor:
                 futures = {executor.submit(load_session_payload, session, info): session for session, info in batch_infos.items()}
                 for future in as_completed(futures):
                     session = futures[future]
@@ -10367,6 +10649,7 @@ class TmuxWebtermApp:
             {"requester": requester},
             message_key="events.message.yolo.released",
         )
+        self.commit_auto_approve_change(session, enabled=False, trigger="takeover-release")
         return {"ok": True, "session": session, "enabled": False}
 
     def build_session_metadata_payload(self, lightweight: bool = False) -> dict[str, Any]:
@@ -10991,6 +11274,8 @@ class TmuxWebtermApp:
         for worker in workers:
             worker.stop()
         self.set_persisted_auto_session(session, False)
+        if workers:
+            self.commit_auto_approve_change(session, enabled=False, trigger="worker-stop")
 
     @requires_known_session(refresh=True)
     def rename_session(self, session: str, new_name: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -11497,6 +11782,7 @@ class TmuxWebtermApp:
 
     @requires_known_session()
     def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
+        changed = False
         with self.auto_workers_lock:
             self.prune_auto_approve_workers_locked(session)
 
@@ -11516,6 +11802,7 @@ class TmuxWebtermApp:
                     return status, HTTPStatus.CONFLICT
                 if persist:
                     self.set_persisted_auto_session(session, True)
+                changed = True
                 self.log_event(
                     session,
                     "yolo_enabled",
@@ -11533,6 +11820,7 @@ class TmuxWebtermApp:
             if keys:
                 if persist:
                     self.set_persisted_auto_session(session, False)
+                changed = True
                 self.log_event(
                     session,
                     "yolo_disabled",
@@ -11540,7 +11828,20 @@ class TmuxWebtermApp:
                     {"persist": persist},
                     message_key="events.message.yolo.disabled",
                 )
-        return self.auto_approve_session_status(session), HTTPStatus.OK
+        status_payload = self.auto_approve_session_status(session)
+        if changed:
+            self.commit_auto_approve_change(session, enabled=bool(status_payload.get("enabled")), trigger="set-auto-approve")
+        return status_payload, HTTPStatus.OK
+
+    def commit_auto_approve_change(self, session: str, *, enabled: bool, trigger: str) -> None:
+        """Commit the visibility side of an already-applied YOLO worker-state mutation."""
+        self.invalidate_auto_approve_cache()
+        self.publish_background_client_event(
+            "auto_approve_changed",
+            {"session": session, "enabled": enabled},
+            trigger=trigger,
+            cache="ready",
+        )
 
     def prune_auto_approve_workers_locked(self, session: str | None = None) -> bool:
         removed = False
@@ -12277,20 +12578,6 @@ class TmuxWebtermApp:
                 return None
         return acknowledged_at if acknowledged_at > 0 else None
 
-    def attention_ack_payload_for_session(self, session: str) -> dict[str, Any]:
-        with self.attention_ack_lock:
-            self.prune_attention_ack_keys_locked()
-            acknowledged_at: dict[str, float] = {}
-            for key, ts in self.attention_ack_keys.items():
-                try:
-                    parts = json.loads(key)
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(parts, list) and len(parts) >= 2 and str(parts[1]) == str(session):
-                    acknowledged_at[key] = ts
-        keys = sorted(acknowledged_at)
-        return {"keys": keys, "acknowledged_at": {key: acknowledged_at[key] for key in keys}}
-
     def invalidate_auto_approve_cache(self) -> None:
         with self.auto_approve_cache_condition:
             record = self.auto_approve_cache_record
@@ -12544,6 +12831,8 @@ class TmuxWebtermApp:
         preclassified_by_target: dict[str, dict[str, Any]] | None = None,
         files_payload: dict[str, Any] | None = None,
         include_path_metadata: bool = True,
+        owned_rows_by_target: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+        snapshot_revision: int = 0,
     ) -> list[dict[str, Any]]:
         if info is None:
             info = discovered_sessions.get(session) if discovered_sessions is not None else None
@@ -12646,6 +12935,21 @@ class TmuxWebtermApp:
                 row["cooldown_attention_key"] = cooldown_attention_key
                 row["cooldown_acknowledged"] = self.attention_acknowledged(cooldown_attention_key)
                 row["cooldown_acknowledged_at"] = self.attention_acknowledged_at(cooldown_attention_key)
+            owned = (owned_rows_by_target or {}).get((session, str(agent.pane_target or ""), kind))
+            if owned is not None:
+                # Keep locally computed path metadata, but never publish a second prompt/screen
+                # classification while a roster revision is available.
+                for field_name in (
+                    "state", "working_elapsed_seconds", "idle_since", "last_active_ts",
+                    "working_stopped_ts", "observed_ts", "screen_text", "status_tokens",
+                    "attention_key", "attention_acknowledged", "attention_acknowledged_at",
+                    "cooldown_attention_key", "cooldown_acknowledged", "cooldown_acknowledged_at",
+                ):
+                    if field_name in owned:
+                        row[field_name] = copy.deepcopy(owned[field_name])
+                    else:
+                        row.pop(field_name, None)
+                row["agent_window_snapshot_revision"] = snapshot_revision
             rows.append(row)
         state_rank = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
         rows.sort(key=lambda item: (state_rank.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
@@ -12713,7 +13017,12 @@ class TmuxWebtermApp:
             prompt["attention_acknowledged"] = self.attention_acknowledged(prompt_attention_key)
         payload["prompt"] = prompt
         payload["screen"] = screen
-        payload["attention_acks"] = self.attention_ack_payload_for_session(session)
+        # Each prompt/window row below is the authority for its current key.
+        # Do not attach the historical seven-day ledger here: all clients get
+        # acknowledgement deltas through attention_acks_changed, and a compact
+        # revision lets an explicit refresh reconcile ownership.
+        with self.client_watch_service.lock:
+            payload["attention_ack_revision"] = self.client_watch_service.attention_ack_rev
         if prompt_attention_key:
             payload["prompt_attention_key"] = prompt_attention_key
             payload["prompt_attention_acknowledged"] = self.attention_acknowledged(prompt_attention_key)
@@ -12787,6 +13096,8 @@ class TmuxWebtermApp:
             "errors": [*refresh_errors, *discovery_errors],
             "rules": self.yolo_rules_payload(),
         }
+        with self.client_watch_service.lock:
+            payload["attention_ack_revision"] = self.client_watch_service.attention_ack_rev
         if timings:
             payload["timings"] = dict(timings)
         return payload, HTTPStatus.OK
@@ -12814,7 +13125,11 @@ class TmuxWebtermApp:
             record = self.auto_approve_cache_record
             if record.generation != generation or record.worker is not worker:
                 return False
-            record.payload = (time.monotonic(), (copy.deepcopy(payload), status))
+            cached_payload = copy.deepcopy(payload)
+            if status == HTTPStatus.OK:
+                record.agent_window_snapshot_revision += 1
+                cached_payload["agent_window_snapshot_revision"] = record.agent_window_snapshot_revision
+            record.payload = (time.monotonic(), (cached_payload, status))
             record.worker = None
             self.auto_approve_cache_condition.notify_all()
             return True

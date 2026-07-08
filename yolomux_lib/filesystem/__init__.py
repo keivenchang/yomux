@@ -197,19 +197,24 @@ def read_file(raw_path: str) -> dict[str, Any]:
 @normalize_os_errors
 def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
+    payload = io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
 @normalize_os_errors
 def delete_path(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.delete_path(raw_path)
+    payload = io_ops.delete_path(raw_path)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
 @normalize_os_errors
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.rename_path(raw_path, new_name)
+    paths.invalidate_path_policy_caches()
     payload["reindex_roots"] = search.reindex_roots_for_path(payload["old_path"], reason="fs-rename")
     return payload
 
@@ -217,7 +222,9 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 @normalize_os_errors
 def create_directory(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.create_directory(raw_path)
+    payload = io_ops.create_directory(raw_path)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
 @normalize_os_errors

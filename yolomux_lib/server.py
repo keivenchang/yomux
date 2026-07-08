@@ -955,6 +955,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     server: "TmuxWebtermHTTPServer"
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self) -> None:
+        # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive requests. Route
+        # handlers attach optional timing/details while building a response, so clear them at the
+        # request boundary instead of letting a homepage sample become a later API sample.
+        self._http_response_compute_ms = None
+        self._http_response_performance_details = None
+        self._http_request_started_at = time.perf_counter()
+        self._http_request_dispatch_started_at = None
+        super().handle_one_request()
+
     def setup(self) -> None:
         preparer = getattr(self.server, "prepare_request_socket", None)
         if callable(preparer):
@@ -993,6 +1003,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
             "content_type": content_type_base(content_type),
         }
+        request_started = getattr(self, "_http_request_started_at", None)
+        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
+        response_started = time.perf_counter()
+        if isinstance(request_started, (int, float)):
+            details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
+        if isinstance(request_started, (int, float)) and isinstance(dispatch_started, (int, float)):
+            # ThreadingHTTPServer accepts the socket before Handler.handle_one_request.  This is
+            # therefore the observable accept-to-route delay, rather than a made-up queue time.
+            details["accept_to_route_ms"] = round(max(0.0, (dispatch_started - request_started) * 1000), 3)
         extra_details = getattr(self, "_http_response_performance_details", None)
         if isinstance(extra_details, dict):
             details.update(extra_details)
@@ -1002,7 +1021,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "http-endpoint",
             endpoint,
             trigger=endpoint,
-            compute_ms=getattr(self, "_http_response_compute_ms", None),
+            compute_ms=getattr(self, "_http_response_compute_ms", None) if getattr(self, "_http_response_compute_ms", None) is not None else (
+                max(0.0, (response_started - dispatch_started) * 1000) if isinstance(dispatch_started, (int, float)) else None
+            ),
             payload_bytes=max(0, int(body_bytes or 0)),
             cache_key={"kind": endpoint},
             cache_status=str(status_code),

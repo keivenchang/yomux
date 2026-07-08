@@ -99,6 +99,19 @@ def test_background_owner_prunes_dead_generation_records(monkeypatch, tmp_path):
     assert live_path.exists() is True
 
 
+def test_background_owner_generation_index_recovers_from_corruption_without_losing_live_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda pid: pid == 100)
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    registry.publish_generation()
+    registry.generation_index_path.write_text("{broken", encoding="utf-8")
+
+    records = registry.live_generation_records()
+
+    assert [record["generation_id"] for record in records] == [registry.generation_id]
+    recovered = json.loads(registry.generation_index_path.read_text(encoding="utf-8"))
+    assert recovered["records"][registry.generation_id]["pid"] == 100
+
+
 def test_background_owner_takeover_requests_release_then_acquires(monkeypatch, tmp_path):
     registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
     registry.started_at_ns = 20

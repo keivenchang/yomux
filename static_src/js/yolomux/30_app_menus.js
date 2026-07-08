@@ -853,16 +853,28 @@ let topbarPackingIsApplying = false;
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
+  'hide-owner',
   'compact-search',
   'compact-activity',
   'hide-latency',
   'hide-logout',
   'hide-notify',
   'hide-language',
-  'hide-owner',
   'hide-nav',
+  'icon-search',
   'compact-menu',
 ]);
+const topbarPackingVisualItemSelectors = Object.freeze([
+  '.brand-cell',
+  '.app-menu-bar',
+  '.topbar-nav',
+  '.topbar-search',
+  '.topbar-language-menu',
+  '#topbarOwnerStatus',
+  '#topbarActivity',
+  '.actions > :not(#topbarActivity):not(#status)',
+]);
+const topbarPackingMinGapPx = 2;
 
 function topbarPackingTargets() {
   return [document.body, appRootElement()].filter(Boolean);
@@ -893,15 +905,73 @@ function applyTopbarPackingSteps(steps = []) {
   }
 }
 
-function topbarPackingOverflows() {
+function topbarPackingVisualItems() {
+  const seen = new Set();
+  return topbarPackingVisualItemSelectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))
+    .filter(node => {
+      if (seen.has(node)) return false;
+      seen.add(node);
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    });
+}
+
+function topbarPackingLayoutState() {
   const bar = document.querySelector('.topbar');
-  if (!bar) return false;
-  const rect = bar.getBoundingClientRect();
-  const childrenOverflow = Array.from(bar.children).some(child => {
-    const childRect = child.getBoundingClientRect();
-    return childRect.left < rect.left - 1 || childRect.right > rect.right + 1;
-  });
-  return childrenOverflow || bar.scrollWidth > bar.clientWidth + 1;
+  if (!bar) return {overflow: false, outside: [], collisions: [], clipped: []};
+  const barRect = bar.getBoundingClientRect();
+  const items = topbarPackingVisualItems()
+    .map(node => ({node, rect: node.getBoundingClientRect()}))
+    .sort((a, b) => a.rect.left - b.rect.left || a.rect.right - b.rect.right);
+  const outside = items.filter(item => item.rect.left < barRect.left - 1 || item.rect.right > barRect.right + 1);
+  const collisions = [];
+  for (let index = 1; index < items.length; index += 1) {
+    const previous = items[index - 1];
+    const current = items[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const compactActivity = document.querySelector('#topbarActivity.topbar-activity--mobile-count-balls');
+  const compactActivityRect = compactActivity?.getBoundingClientRect();
+  const activityBalls = compactActivity
+    ? Array.from(compactActivity.querySelectorAll('.topbar-activity-count.active .topbar-activity-ball'))
+      .filter(node => getComputedStyle(node).display !== 'none')
+      .map(node => ({node, rect: node.getBoundingClientRect()}))
+      .sort((a, b) => a.rect.left - b.rect.left)
+    : [];
+  if (compactActivityRect) {
+    outside.push(...activityBalls.filter(item => item.rect.left < compactActivityRect.left - 1 || item.rect.right > compactActivityRect.right + 1));
+  }
+  for (let index = 1; index < activityBalls.length; index += 1) {
+    const previous = activityBalls[index - 1];
+    const current = activityBalls[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const searchLabel = document.querySelector('.topbar-search-label');
+  const compactSearchLabel = document.querySelector('.topbar-search-label-short');
+  const searchLabelRect = searchLabel?.getBoundingClientRect();
+  const compactSearchLabelRect = compactSearchLabel?.getBoundingClientRect();
+  const compactSearchClipped = Boolean(searchLabel && compactSearchLabel && getComputedStyle(compactSearchLabel).display !== 'none' && (
+    searchLabel.scrollWidth > searchLabel.clientWidth + 1
+    || compactSearchLabelRect.left < searchLabelRect.left - 1
+    || compactSearchLabelRect.right > searchLabelRect.right + 1
+  ));
+  const clipped = compactSearchClipped
+    ? [searchLabel]
+    : [];
+  return {
+    // scrollWidth includes clipped/focused descendants and stale popover geometry, so it can stay
+    // wider after expansion even when every painted control fits. Visible control rectangles are
+    // the layout contract and make the result independent of resize direction.
+    overflow: outside.length > 0 || collisions.length > 0 || clipped.length > 0,
+    outside,
+    collisions,
+    clipped,
+  };
+}
+
+function topbarPackingOverflows() {
+  return topbarPackingLayoutState().overflow;
 }
 
 function topbarPackingSyncNavigation(steps) {
@@ -914,7 +984,7 @@ function topbarPackingSyncNavigation(steps) {
 }
 
 function syncTopbarPacking() {
-  if (appMenuIsOpen() || topbarControlIsActive()) return topbarPackingStepsApplied.slice();
+  if (appMenuIsOpen()) return topbarPackingStepsApplied.slice();
   if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
   topbarPackingIsApplying = true;
   try {
@@ -1060,7 +1130,7 @@ function renderSessionButtonsMeasured(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
-  // In phone mode the activity control is temporarily reparented beside Refresh. Remove that
+  // In compact mode the activity control is temporarily reparented before the action rail. Remove that
   // prior rendered instance before replacing the menu subtree, or each chrome refresh leaves a
   // duplicate button in the actions rail.
   document.querySelectorAll('.actions > #topbarActivity').forEach(activity => activity.remove());

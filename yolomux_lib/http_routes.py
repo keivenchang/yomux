@@ -79,6 +79,16 @@ def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> 
     return values[0] if values else default
 
 
+def request_query(request: Any, parsed: Any) -> dict[str, list[str]]:
+    """Return the request's parsed query once, for every route helper that needs it."""
+    cached = getattr(request, "_route_query_cache", None)
+    if cached is not None and cached[0] is parsed:
+        return cached[1]
+    qs = parse_qs(parsed.query)
+    setattr(request, "_route_query_cache", (parsed, qs))
+    return qs
+
+
 def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
     values: list[str] = []
     for raw_value in qs.get(name, []):
@@ -218,6 +228,10 @@ def route_for_request(method: str, path: str) -> Route | None:
 
 
 def dispatch_http_route(request: Any, method: str) -> None:
+    # A Handler instance can serve many HTTP/1.1 requests.  The server resets its request
+    # record before parsing each request; route dispatch supplies the per-request start used
+    # for ordinary endpoints which do not have a more specific build timer.
+    setattr(request, "_http_request_dispatch_started_at", time.perf_counter())
     parsed = urlparse(request.path)
     if request.redirect_plaintext_to_https_if_needed(parsed):
         return
@@ -303,7 +317,7 @@ def get_ping(request: Any, parsed: Any, route: Route) -> None:
 def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     del route
     started = time.perf_counter()
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     since, error = parse_query_int(qs, "since", 0, min_value=0)
     if error:
         request.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
@@ -361,7 +375,7 @@ def get_update_status(request: Any, parsed: Any, route: Route) -> None:
     if request.auth_readonly():
         request.reject_forbidden(request.auth_identity(), "admin")
         return
-    request.write_json(request.server.app.update_status_payload(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+    request.write_json(request.server.app.update_status_payload(dryrun=query_bool(request_query(request, parsed), "dryrun")))
 
 
 def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
@@ -372,12 +386,12 @@ def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
             status=HTTPStatus.NOT_FOUND,
         )
         return
-    request.stream_dev_reload(str(query_one(parse_qs(parsed.query), "bundle_revision", "") or ""))
+    request.stream_dev_reload(str(query_one(request_query(request, parsed), "bundle_revision", "") or ""))
 
 
 def get_client_events(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.stream_client_events(
         channels=str(query_one(qs, "channels", "") or ""),
         client_id=str(query_one(qs, "client_id", "") or ""),
@@ -423,7 +437,7 @@ def get_pane_popout(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     payload_fn = getattr(request.server.app, "session_metadata_payload", None) or request.server.app.transcripts_payload
     scoped_fn = getattr(request, "share_scoped_session_metadata_payload", None) or request.share_scoped_transcripts_payload
     request.write_json(scoped_fn(payload_fn(force=query_bool(qs, "force"))))
@@ -435,20 +449,20 @@ def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
 
 def get_tmux_session_exists(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.tmux_session_exists_payload(session))
 
 
 def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.agent_auth_payload(force=query_bool(qs, "force")))
 
 
 def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.activity_summary_payload(
         force=query_bool(qs, "force"),
         locale=str(query_one(qs, "locale", "en") or "en"),
@@ -460,6 +474,11 @@ def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
 def get_background_status(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_app_result(request.server.app.background_owner_status_payload())
+
+
+def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.performance_diagnostics_payload())
 
 
 def post_background_claim(request: Any, parsed: Any, route: Route) -> None:
@@ -474,7 +493,7 @@ def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
 
 def get_yoagent_skill_files(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     payload, status = request.server.app.yoagent_skill_files_payload(
         str(query_one(qs, "kind", "") or ""),
         str(query_one(qs, "name", "") or ""),
@@ -506,12 +525,12 @@ def get_tmux(request: Any, parsed: Any, route: Route) -> None:
 
 def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=str(query_one(qs, "session", "") or "")))
 
 def get_tmux_status(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_app_result(request.server.app.tmux_status_mode(str(query_one(qs, "session", "") or "")))
 
 
@@ -560,7 +579,7 @@ def get_summary_stream(request: Any, parsed: Any, route: Route) -> None:
 
 def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     request.write_app_result(request.server.app.auto_approve_status(session))
 
@@ -617,14 +636,14 @@ def get_search(request: Any, parsed: Any, route: Route) -> None:
 
 def get_run_history(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     request.write_app_result(request.server.app.run_history_payload(session))
 
 
 def get_activity(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     visible = query_bool(qs, "visible", True)
     request.write_validated_float_result(
         qs,
@@ -637,7 +656,7 @@ def get_activity(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
@@ -664,7 +683,7 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_files(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
@@ -692,7 +711,7 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
 
 def get_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.summary(session))
 
@@ -720,7 +739,7 @@ def _chat_write_result(request: Any, operation: Callable[[], dict[str, Any]], *,
 
 def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     identity = request.auth_identity()
     client_ip = str(request.client_address[0]) if isinstance(request.client_address, tuple) and request.client_address else ""
 
@@ -741,7 +760,7 @@ def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
 
 def get_chat_page(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     _chat_write_result(
         request,
         lambda: request.server.app.chat_page(
@@ -754,7 +773,7 @@ def get_chat_page(request: Any, parsed: Any, route: Route) -> None:
 
 def get_chat_delta(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     _chat_write_result(
         request,
         lambda: request.server.app.chat_delta(
@@ -767,7 +786,7 @@ def get_chat_delta(request: Any, parsed: Any, route: Route) -> None:
 
 def get_chat_context(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     _chat_write_result(
         request,
         lambda: request.server.app.chat_context(
@@ -781,7 +800,7 @@ def get_chat_context(request: Any, parsed: Any, route: Route) -> None:
 
 def get_chat_search(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     _chat_write_result(
         request,
         lambda: request.server.app.chat_search(
@@ -891,7 +910,7 @@ def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
 
 def get_fs_watch_diff(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.filesystem_watch_diff_payload(
         since_token=str(query_one(qs, "since", "") or ""),
         force_full=query_bool(qs, "full"),
@@ -953,19 +972,19 @@ def post_self_update(request: Any, parsed: Any, route: Route) -> None:
     if request.auth_readonly():
         request.reject_forbidden(request.auth_identity(), "admin")
         return
-    request.write_json(request.server.app.perform_self_update(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+    request.write_json(request.server.app.perform_self_update(dryrun=query_bool(request_query(request, parsed), "dryrun")))
 
 
 def post_ensure_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.ensure_session(session))
 
 
 def post_create_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     agent = str(query_one(qs, "agent", "claude") or "claude")
     dangerously_yolo = query_bool(qs, "dangerously_yolo", request.server.app.dangerously_yolo)
     terminal = str(query_one(qs, "terminal", "") or "")
@@ -974,7 +993,7 @@ def post_create_session(request: Any, parsed: Any, route: Route) -> None:
 
 def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     new_name = str(query_one(qs, "new_name", "") or "")
     request.write_app_result(request.server.app.rename_session(session, new_name))
@@ -982,14 +1001,14 @@ def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
 
 def post_kill_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.kill_session(session))
 
 
 def post_upload(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     editor_path = str(query_one(qs, "editor_path", "") or "")
     base_dir = str(query_one(qs, "base_dir", "") or "")
@@ -998,7 +1017,7 @@ def post_upload(request: Any, parsed: Any, route: Route) -> None:
 
 def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     enabled = query_bool(qs, "enabled")
     request.write_app_result(request.server.app.set_auto_approve(session, enabled))
@@ -1014,7 +1033,7 @@ def post_attention_ack(request: Any, parsed: Any, route: Route) -> None:
 
 def post_notify(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     enabled = query_bool(qs, "enabled")
     request.write_json(request.server.app.set_notify(enabled))
 
@@ -1036,7 +1055,7 @@ def post_share_create(request: Any, parsed: Any, route: Route) -> None:
 
 
 def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
     if not token_or_short_id:
         payload = _json_body(request, route, allow_empty=True, allow_missing=True)
@@ -1237,19 +1256,19 @@ def post_yolo_rules_open(request: Any, parsed: Any, route: Route) -> None:
 
 def post_tmux_next(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = qs.get("session", [""])[0]
     request.write_app_result(request.server.app.tmux_next_window(session))
 
 def post_tmux_status(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_app_result(request.server.app.cycle_tmux_status_mode(str(query_one(qs, "session", "") or "")))
 
 
 def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = qs.get("session", [""])[0]
     window = qs.get("window", [""])[0]
     payload, status = request.server.app.tmux_select_window(session, window)
@@ -1258,7 +1277,7 @@ def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
 
 def post_tmux_copy_selection(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.tmux_copy_selection(session))
 
@@ -1316,6 +1335,7 @@ CORE_ROUTES = (
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
     Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
+    Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
     Route("GET", "/api/notify", "readonly", get_notify, group="core"),
     Route("GET", "/api/settings", "readonly", get_settings, group="core"),

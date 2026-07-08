@@ -775,6 +775,7 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   backgroundOwnerStatusState.guard.invalidate();
   backgroundOwnerStatusState.payload = payload;
+  backgroundOwnerStatusState.updatedAt = Date.now();
   backgroundOwnerStatusState.error = '';
   backgroundOwnerStatusState.loading = false;
   if (options.render !== false) renderInfoPanel();
@@ -782,9 +783,19 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   return true;
 }
 
+const startupSnapshotFreshnessMs = 5_000;
+
+function backgroundOwnerStatusIsFresh() {
+  return Boolean(backgroundOwnerStatusState.payload)
+    && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
 async function refreshBackgroundOwnerStatus(options = {}) {
   if (shareViewMode) return false;
-  if (backgroundOwnerStatusState.request && options.force !== true) return backgroundOwnerStatusState.request;
+  // Every consumer observes the same current snapshot. A reconnect may require a new request
+  // after this settles, but must not discard and duplicate the request boot already owns.
+  if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
   const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
   backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
   backgroundOwnerStatusState.error = '';
@@ -4403,18 +4414,28 @@ async function setAutoApprove(session, enabled) {
   }
 }
 
-async function refreshAutoStatuses() {
-  const result = await loadAutoStatuses({render: false});
+async function refreshAutoStatuses(options = {}) {
+  const result = await loadAutoStatuses({...options, render: false});
   renderAutoApproveStatusSurfaces(result);
   bindClipboardPaste();
   refreshOpenEventLogs();
 }
 
-async function loadAutoStatuses(options = {}) {
+function autoApproveSnapshotIsFresh() {
+  return loadAutoStatuses.lastResult !== null
+    && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
+function loadAutoStatuses(options = {}) {
+  if (loadAutoStatuses.request) return loadAutoStatuses.request;
+  if (options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
+  const request = (async () => {
   let result = null;
   try {
     const payload = await apiFetchJson('/api/auto-approve');
     result = applyAutoApprovePayload(payload, options);
+    loadAutoStatuses.lastResult = result;
+    loadAutoStatuses.updatedAt = Date.now();
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -4426,7 +4447,16 @@ async function loadAutoStatuses(options = {}) {
   }
   if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
   return result;
+  })();
+  const settledRequest = request.finally(() => {
+    if (loadAutoStatuses.request === settledRequest) loadAutoStatuses.request = null;
+  });
+  loadAutoStatuses.request = settledRequest;
+  return settledRequest;
 }
+loadAutoStatuses.request = null;
+loadAutoStatuses.lastResult = null;
+loadAutoStatuses.updatedAt = 0;
 
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
@@ -4659,7 +4689,7 @@ const selfUpdateReloadState = {
   timer: null,
   deferredToastShown: false,
 };
-const selfUpdateReloadPollMs = 1500;
+const selfUpdateReloadPollMs = 1501;
 const selfUpdateReloadMaxAttempts = 120;
 
 function dismissToastNode(node) {
@@ -6091,8 +6121,8 @@ function openClientEventStream(descriptor) {
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({preferFresh: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
     if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });
   source.addEventListener('ping', event => {

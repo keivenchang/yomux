@@ -2093,7 +2093,7 @@ function focusPanel(session, options = {}) {
 
 function shareHostTerminalSize(session) {
   if (!shareViewMode) return null;
-  const dims = shareHostDimensions.get(String(session || ""));
+  const dims = shareSenderRecord(session, {create: false})?.dimensions;
   const rawRows = Math.floor(Number(dims?.rows) || 0);
   const rawCols = Math.floor(Number(dims?.cols) || 0);
   if (rawRows <= 0 || rawCols <= 0) return null;
@@ -2102,10 +2102,10 @@ function shareHostTerminalSize(session) {
 
 function updateShareHostTerminalSize(session, rows, cols) {
   if (!shareViewMode || !session) return;
-  shareHostDimensions.set(String(session), {
+  shareSenderRecord(session).dimensions = {
     rows: Math.max(10, Math.floor(Number(rows) || 0)),
     cols: Math.max(40, Math.floor(Number(cols) || 0)),
-  });
+  };
   fitTerminal(session);
 }
 

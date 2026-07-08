@@ -678,7 +678,7 @@ function createPaneTab(side, item, displayContext = {}) {
     if (!autoTarget) return;
     event.preventDefault();
     event.stopPropagation();
-    if (item === activeItemForSide(side)) setFocusedPanelItem(item);
+    if (item === activeItemForSide(side)) setFocusedPanelItem(item, {userInitiated: true});
   });
   bindActionDispatcher(tab, {
     'pane-tab-close': () => {
@@ -688,7 +688,7 @@ function createPaneTab(side, item, displayContext = {}) {
     'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
       await toggleAutoApprove(autoTarget.dataset.autoSession);
-      if (shouldRefocus) focusPanel(item);
+      if (shouldRefocus) focusPanel(item, {userInitiated: true});
     },
   });
   tab.addEventListener('keydown', event => {
@@ -2053,17 +2053,45 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    if (typeof acknowledgeTerminalAttentionFromUserAction === 'function') {
-      acknowledgeTerminalAttentionFromUserAction(button.dataset.windowSession, button.dataset.windowIndex);
-    } else if (typeof acknowledgeAgentWindowActivity === 'function') {
-      acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
-    }
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, t('terminal.window.title', {name: label}));
+    activateTmuxWindowFromUserAction(
+      button.dataset.windowSession,
+      button.dataset.windowIndex,
+      t('terminal.window.title', {name: label}),
+    );
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? t('terminal.window.previous') : t('terminal.window.next');
-  tmuxWindow(button.dataset.windowSession, key, label);
+  const session = String(button.dataset.windowSession || '').trim();
+  const target = tmuxWindowStepTarget(session, key);
+  if (target) {
+    activateTmuxWindowFromUserAction(session, target.index, t('terminal.window.title', {name: target.label}));
+    return;
+  }
+  // A collapsed or not-yet-rendered window bar cannot name the next target. It must still use the
+  // user-action transaction so leaving the current attention window never bypasses acknowledgement.
+  acknowledgeTerminalAttentionFromUserAction(session, null);
+  tmuxWindow(session, key, label);
+}
+
+function tmuxWindowStepTarget(session, direction) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || typeof document === 'undefined') return null;
+  const records = [];
+  const seen = new Set();
+  for (const button of document.querySelectorAll('.tmux-window-bar [data-window-index][data-window-session]')) {
+    if (String(button.dataset.windowSession || '').trim() !== sessionKey) continue;
+    const index = tmuxWindowIndexKey(button.dataset.windowIndex);
+    if (index === null || seen.has(index)) continue;
+    seen.add(index);
+    records.push({index, label: button.dataset.windowLabel || button.dataset.windowIndex || index});
+  }
+  if (!records.length) return null;
+  const current = tmuxWindowUserInteractionIndex(sessionKey);
+  const currentPosition = records.findIndex(record => record.index === current);
+  if (currentPosition < 0) return null;
+  const delta = direction === 'p' ? -1 : 1;
+  return records[(currentPosition + delta + records.length) % records.length] || null;
 }
 
 function windowStepButtonFromEvent(event) {

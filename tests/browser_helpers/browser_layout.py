@@ -1662,7 +1662,7 @@ def split_seam_fixture_html():
     )
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
@@ -2088,6 +2088,10 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           return jsonResponse({ok: true, acknowledged, auto_approve: autoPayload, status: 200});
         }
         if (url.pathname === '/api/auto-approve') {
+          if (window.__fixtureHoldAutoApprove) {
+            await new Promise(resolve => { window.__fixtureReleaseAutoApprove = resolve; });
+            window.__fixtureReleaseAutoApprove = null;
+          }
           return jsonResponse(window.__fixtureAutoApprovePayload || {
             session_order: window.__fixtureSessions,
             sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
@@ -2211,6 +2215,8 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           window.__fixtureSessionFilesPayloads = {json.dumps(session_files_payloads or {}, separators=(",", ":"))};
           window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
+          window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
+          window.__fixtureReleaseAutoApprove = null;
           window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
           window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};

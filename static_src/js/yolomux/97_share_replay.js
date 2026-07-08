@@ -1611,12 +1611,13 @@ function shareDropStaleMirrorFrame(message = {}) {
   const current = shareMirrorFrameNumbers(message);
   if (!current) return false;
   const sender = shareMirrorSenderKey(message);
-  const previous = shareMirrorLastFrameBySender.get(sender);
+  const record = shareSenderRecord(sender);
+  const previous = record.lastFrame;
   if (previous) {
     if (current.epoch < previous.epoch) return true;
     if (current.epoch === previous.epoch && current.sequence <= previous.sequence) return true;
   }
-  shareMirrorLastFrameBySender.set(sender, current);
+  record.lastFrame = current;
   return false;
 }
 
@@ -1759,9 +1760,10 @@ function applySharePopupLayer(payload = {}, sender = '') {
   const owner = String(payload.owner || sender || 'host');
   const seq = Number(payload.seq);
   if (Number.isFinite(seq)) {
-    const previousSeq = Number(sharePopupLayerLastSeqBySender.get(owner) || 0);
+    const record = shareSenderRecord(owner);
+    const previousSeq = Number(record.popupSequence || 0);
     if (seq <= previousSeq) return;
-    sharePopupLayerLastSeqBySender.set(owner, seq);
+    record.popupSequence = seq;
   }
   const items = Array.isArray(payload.items) ? payload.items : [];
   layer.replaceChildren();
@@ -2464,12 +2466,10 @@ function sharePointerSenderColor(sender = '') {
 
 function ensureSharePointerGhost(sender = '') {
   const key = sharePointerSenderKey(sender);
-  let record = sharePointerRecords.get(key) || null;
+  const senderRecord = shareSenderRecord(key);
+  let record = senderRecord.pointer;
   if (record?.ghost?.isConnected) return record.ghost;
-  if (!record) {
-    record = {ghost: null, hideTimer: null};
-    sharePointerRecords.set(key, record);
-  }
+  if (!record) record = senderRecord.pointer = {ghost: null, hideTimer: null};
   if (record.hideTimer) clearTimeout(record.hideTimer);
   record.hideTimer = null;
   const ghost = document.createElement('div');
@@ -2501,12 +2501,12 @@ function renderSharePointerGhost(payload = {}) {
   if (!point) return;
   const sender = sharePointerSenderKey(payload.sender || '');
   const ghost = ensureSharePointerGhost(sender);
-  const record = sharePointerRecords.get(sender);
+  const record = shareSenderRecord(sender, {create: false})?.pointer;
   ghost.style.transform = `translate3d(${Math.round(point.x)}px, ${Math.round(point.y)}px, 0)`;
   ghost.classList.add('visible');
   if (record.hideTimer) clearTimeout(record.hideTimer);
   const timer = setTimeout(() => {
-    const current = sharePointerRecords.get(sender);
+    const current = shareSenderRecord(sender, {create: false})?.pointer;
     if (!current || current.hideTimer !== timer) return;
     current.hideTimer = null;
     current.ghost?.classList.remove('visible');
@@ -2624,16 +2624,18 @@ function scheduleShareScrollPublishForElement(element) {
   }
   const payload = shareScrollPayloadForElement(element);
   if (!payload?.target) return;
-  if (shareScrollPublishTimers.has(payload.target)) {
-    shareScrollPublishTimers.get(payload.target).payload = payload;
+  const senderRecord = shareSenderRecord(payload.target);
+  if (senderRecord.scrollPublish) {
+    senderRecord.scrollPublish.payload = payload;
     return;
   }
   const state = {payload};
   state.timer = setTimeout(() => {
-    shareScrollPublishTimers.delete(payload.target);
+    const current = shareSenderRecord(payload.target, {create: false});
+    if (current?.scrollPublish === state) current.scrollPublish = null;
     if (shareCanPublishScroll()) sharePublish('scroll', state.payload);
   }, 50);
-  shareScrollPublishTimers.set(payload.target, state);
+  senderRecord.scrollPublish = state;
 }
 
 function scheduleShareReplayScrollPublishForElement(element) {
@@ -2641,16 +2643,18 @@ function scheduleShareReplayScrollPublishForElement(element) {
   const entry = shareReplayScrollEntryForElement(element);
   if (!entry?.nodeId) return;
   const key = String(entry.nodeId);
-  if (shareReplayScrollPublishTimers.has(key)) {
-    shareReplayScrollPublishTimers.get(key).entry = entry;
+  const senderRecord = shareSenderRecord(key);
+  if (senderRecord.replayScrollPublish) {
+    senderRecord.replayScrollPublish.entry = entry;
     return;
   }
   const state = {entry};
   state.timer = setTimeout(() => {
-    shareReplayScrollPublishTimers.delete(key);
+    const current = shareSenderRecord(key, {create: false});
+    if (current?.replayScrollPublish === state) current.replayScrollPublish = null;
     shareReplayPublishDeltaPayload({scroll: [state.entry]}, 'scroll');
   }, 50);
-  shareReplayScrollPublishTimers.set(key, state);
+  senderRecord.replayScrollPublish = state;
 }
 
 function sharePublishFileVersion(path, options = {}) {
@@ -2722,7 +2726,8 @@ function applyShareScrollDescriptorPosition(descriptor, top, left) {
 function shareScrollTargetRecord(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return null;
-  let record = shareScrollTargetRecords.get(cleanTarget);
+  const senderRecord = shareSenderRecord(cleanTarget, {create: options.create !== false});
+  let record = senderRecord?.scrollTarget || null;
   if (!record && options.create !== false) {
     record = {
       top: 0,
@@ -2732,7 +2737,7 @@ function shareScrollTargetRecord(target, options = {}) {
       restoreGeneration: 0,
       remainingFrames: 0,
     };
-    shareScrollTargetRecords.set(cleanTarget, record);
+    senderRecord.scrollTarget = record;
   }
   return record || null;
 }
@@ -2781,8 +2786,8 @@ function applyShareScrollSnapshot(scroll = []) {
   const payloads = scroll.slice(0, 100).filter(payload => payload && typeof payload === 'object' && String(payload.target || ''));
   const currentTargets = new Set(payloads.map(payload => String(payload.target)));
   const snapshotGeneration = ++shareScrollSnapshotGeneration;
-  for (const target of shareScrollTargetRecords.keys()) {
-    if (!currentTargets.has(target)) shareScrollTargetRecords.delete(target);
+  for (const [target, senderRecord] of shareSenderRecordEntries('scrollTarget')) {
+    if (!currentTargets.has(target)) senderRecord.scrollTarget = null;
   }
   for (const payload of payloads) applyShareScrollState(payload, {snapshotGeneration});
 }

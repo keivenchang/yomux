@@ -14,7 +14,6 @@ let shareReplayShellState = {status: 'idle'};
 let shareReplayLastKeyframe = null;
 let shareReplayNodeMap = new Map();
 let shareReplayTerminalPlaceholders = new Map();
-const shareReplayScrollPublishTimers = new Map();
 let shareReplayLastKeyframeBytes = 0;
 let shareReplayLastDeltaBytes = 0;
 let shareReplayLastLatencyMs = null;
@@ -627,16 +626,14 @@ function shareViewerUiWsUrl(token) {
 function shareHostConnectionRecord(token, options = {}) {
   const cleanToken = String(token || '');
   if (!cleanToken) return null;
-  let record = shareHostConnectionRecords.get(cleanToken) || null;
-  if (!record && options.create === true) {
-    record = {socket: null, queue: []};
-    shareHostConnectionRecords.set(cleanToken, record);
-  }
-  return record;
+  const senderRecord = shareSenderRecord(cleanToken, {create: options.create === true});
+  if (!senderRecord) return null;
+  if (!senderRecord.connection && options.create === true) senderRecord.connection = {socket: null, queue: []};
+  return senderRecord.connection;
 }
 
 function shareHostConnectionSockets() {
-  return Array.from(shareHostConnectionRecords.values(), record => record.socket).filter(Boolean);
+  return shareSenderRecordEntries('connection').map(([, record]) => record.connection.socket).filter(Boolean);
 }
 
 function shareHostQueuedMessageCount(token) {
@@ -664,7 +661,7 @@ function closeShareHostSocket() {
   for (const socket of shareHostConnectionSockets()) {
     try { socket?.close?.(); } catch (_) {}
   }
-  shareHostConnectionRecords.clear();
+  for (const [token] of shareSenderRecordEntries('connection')) deleteShareSenderRecord(token);
 }
 
 function flushShareHostQueue(token) {
@@ -704,10 +701,11 @@ function ensureShareHostSockets() {
       : activeShares.map(share => share.token).filter(Boolean)
   );
   for (const token of activeTokens) ensureShareHostSocket(token);
-  for (const [token, record] of shareHostConnectionRecords.entries()) {
+  for (const [token, senderRecord] of shareSenderRecordEntries('connection')) {
+    const record = senderRecord.connection;
     if (activeTokens.has(token)) continue;
     try { record.socket?.close?.(); } catch (_) {}
-    shareHostConnectionRecords.delete(token);
+    deleteShareSenderRecord(token);
   }
 }
 

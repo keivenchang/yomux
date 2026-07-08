@@ -2029,6 +2029,17 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
   return acknowledged;
 }
 
+function activateTmuxWindowFromUserAction(session, windowIndex, label, options = {}) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || !isTmuxSession(sessionKey) || windowIndex === null || windowIndex === undefined || String(windowIndex).trim() === '') return false;
+  // Every visible direct-window surface must acknowledge the exact target before switching. The
+  // acknowledgement captures the red/yellow generation while the old window model is still live.
+  acknowledgeTerminalAttentionFromUserAction(sessionKey, windowIndex, options);
+  if (typeof tmuxWindow !== 'function') return false;
+  tmuxWindow(sessionKey, {windowIndex}, label);
+  return true;
+}
+
 function setFocusedTerminal(session, options = {}) {
   const perf = clientPerfStart('focusSet');
   try {
@@ -2450,6 +2461,9 @@ function stripTerminalQueryResponses(data) {
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
 const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferenceExtensions = new Set(['c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html', 'ini', 'java', 'js', 'json', 'jsx', 'lock', 'lua', 'md', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml']);
+const terminalFileReferenceNegativeCacheMs = 5_000;
+const terminalFileReferencePositiveCacheMs = 30_000;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -2527,6 +2541,7 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     const prefix = match[1] || '';
     const path = match[2] || '';
     if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) continue;
+    if (!terminalTextLooksLikeFileReference(path)) continue;
     const line = Number(match[3] || 0);
     const startIndex = (match.index || 0) + prefix.length;
     const endIndex = startIndex + path.length + (match[3] ? match[3].length + 1 : 0);
@@ -2545,6 +2560,17 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     });
   }
   return refs;
+}
+
+// Terminal output frequently contains dotted JavaScript symbols and slash-separated status
+// labels. Only probe paths that carry an explicit path prefix or a conventional file suffix.
+function terminalTextLooksLikeFileReference(path) {
+  const value = String(path || '');
+  if (/^(?:~\/|\.{1,2}\/|\/)/.test(value)) return true;
+  const basename = value.split('/').pop() || '';
+  const extension = basename.includes('.') ? basename.split('.').pop().toLowerCase() : '';
+  if (!terminalFileReferenceExtensions.has(extension)) return false;
+  return value.includes('/') || basename.includes('.');
 }
 
 function terminalTextReferences(lineText, rangeForOffsets, y = null) {
@@ -2733,10 +2759,15 @@ async function terminalReferenceProviderLinks(session, term, y) {
 const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
 
 function terminalFileReferenceViewportSignature(term) {
+  const references = terminalVisibleFileReferences(term)
+    .map(terminalFileReferenceKey)
+    .sort()
+    .join('\x1e');
   return [
     Math.max(0, Math.floor(Number(term?.cols || 0))),
     Math.max(0, Math.floor(Number(term?.rows || 0))),
     Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+    references,
   ].join(':');
 }
 
@@ -2896,6 +2927,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   let existingReferenceKeys = new Set();
   const existingReferenceTargets = new Map();
   let hoverKey = '';
+  let refreshRequest = null;
 
   const active = () => !disposed && Boolean(isActive(session, container));
 
@@ -2941,7 +2973,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
-  const refresh = async () => {
+  const refreshNow = async () => {
     if (disposed) return 0;
     if (!active()) return clearInactive();
     if (timer) {
@@ -2981,6 +3013,16 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
+  const refresh = () => {
+    if (refreshRequest) return refreshRequest;
+    const request = refreshNow();
+    refreshRequest = request;
+    request.finally(() => {
+      if (refreshRequest === request) refreshRequest = null;
+    });
+    return request;
+  };
+
   const scheduleCachedRender = () => {
     if (!active()) {
       clearInactive();
@@ -3001,9 +3043,8 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     }
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
-    if (viewportChanged || contentChanged) scheduleCachedRender();
-    if (!timer) {
+    if (viewportChanged) scheduleCachedRender();
+    if (viewportChanged && !timer) {
       timer = setTimeout(() => {
         timer = 0;
         if (active()) refresh();
@@ -3768,11 +3809,15 @@ function terminalFileReferenceAbsolutePath(session, reference) {
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
   const canReuse = options.fresh === false;
+  const now = typeof options.now === 'function' ? options.now : Date.now;
   const cacheKey = terminalFileReferenceCacheKey(session, reference);
   if (canReuse && terminalFileReferenceTargetCache.has(cacheKey)) {
     const cached = terminalFileReferenceTargetCache.get(cacheKey);
-    setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
-    return cached;
+    if (cached.expiresAt > now()) {
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+      return cached.promise || cached.value;
+    }
+    terminalFileReferenceTargetCache.delete(cacheKey);
   }
   const fetchOptions = {
     user: options.user !== false,
@@ -3790,17 +3835,36 @@ async function terminalFileReferenceTarget(session, reference, options = {}) {
     return null;
   })();
   if (!canReuse) return targetPromise;
-  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, targetPromise, fileExplorerMemoryCacheLimit);
+  const cacheEntry = {promise: targetPromise, value: null, expiresAt: Number.POSITIVE_INFINITY, paths: terminalFileReferenceCandidatePaths(session, reference)};
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
   try {
     const target = await targetPromise;
-    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) {
-      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, target, fileExplorerMemoryCacheLimit);
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) {
+      cacheEntry.promise = null;
+      cacheEntry.value = target;
+      cacheEntry.expiresAt = now() + (target ? terminalFileReferencePositiveCacheMs : terminalFileReferenceNegativeCacheMs);
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
     }
     return target;
   } catch (error) {
-    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) terminalFileReferenceTargetCache.delete(cacheKey);
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) terminalFileReferenceTargetCache.delete(cacheKey);
     throw error;
   }
+}
+
+function invalidateTerminalFileReferenceTargets(roots = []) {
+  const normalizedRoots = (Array.isArray(roots) ? roots : [roots])
+    .map(path => normalizeDirectoryPath(String(path || '')))
+    .filter(Boolean);
+  if (!normalizedRoots.length) return 0;
+  let invalidated = 0;
+  for (const [key, entry] of terminalFileReferenceTargetCache) {
+    const paths = Array.isArray(entry?.paths) ? entry.paths : [key.split('\x1f')[0]];
+    if (!paths.some(path => normalizedRoots.some(root => pathIsInsideDirectory(path, root)))) continue;
+    terminalFileReferenceTargetCache.delete(key);
+    invalidated += 1;
+  }
+  return invalidated;
 }
 
 function requestFileEditorLineTarget(item, line) {

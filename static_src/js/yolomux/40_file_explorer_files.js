@@ -375,6 +375,7 @@ function invalidateFileExplorerRoots(roots = []) {
   for (const cache of [fileExplorerDirectoryRecords, fileExplorerNewEntryUntil]) {
     for (const key of Array.from(cache.keys())) if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
   }
+  if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(normalizedRoots);
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
 
@@ -459,6 +460,13 @@ async function refreshOpenFilesFromPush(payload = {}) {
 async function refreshFileExplorerFromPush(payload = {}) {
   const nextToken = payload?.token ? String(payload.token || '') : '';
   const treeVisible = fileExplorerTreePaneIsVisible();
+  const changedPaths = [
+    ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
+    ...(Array.isArray(payload?.removed_roots) ? payload.removed_roots : []),
+  ];
+  // File links are a consumer of the same filesystem truth even when Finder is hidden.
+  // Invalidate only affected entries so a create/rename can become clickable immediately.
+  if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(changedPaths);
   const changedRoots = Array.isArray(payload?.directories)
     ? payload.directories.length
     : Math.max(0, Number(payload?.change_summary?.roots_changed || 0));
@@ -4432,8 +4440,7 @@ function handleTabberRowActivate(row, event) {
   }
   const switchWindow = () => {
     if (session && windowIndex !== null) {
-      tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
-      return true;
+      return activateTmuxWindowFromUserAction(session, windowIndex, row.querySelector('.file-tree-name')?.textContent || session);
     }
     return false;
   };

@@ -121,38 +121,70 @@ function shareBootstrapFinderSession() {
   const session = String(shareBootstrapFinderState().session || '').trim();
   return session && sessions.includes(session) ? session : '';
 }
-const shareHostDimensions = new Map();
+// One lifecycle record owns all state associated with a share sender/session.  In
+// particular, teardown removes the record rather than trying to remember every
+// independent replay map that may have acquired state for that key.
+const shareSenderRecords = new Map();
+function shareSenderRecord(key, options = {}) {
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return null;
+  let record = shareSenderRecords.get(cleanKey) || null;
+  if (!record && options.create !== false) {
+    record = {
+      connection: null,
+      dimensions: null,
+      lastFrame: null,
+      pointer: null,
+      popupSequence: 0,
+      replayScrollPublish: null,
+      scrollPublish: null,
+      scrollTarget: null,
+    };
+    shareSenderRecords.set(cleanKey, record);
+  }
+  return record;
+}
+function deleteShareSenderRecord(key) {
+  const cleanKey = String(key || '').trim();
+  const record = shareSenderRecords.get(cleanKey);
+  if (!record) return;
+  for (const state of [record.pointer, record.scrollPublish, record.replayScrollPublish]) {
+    if (state?.hideTimer) clearTimeout(state.hideTimer);
+    if (state?.timer) clearTimeout(state.timer);
+  }
+  record.pointer?.ghost?.remove?.();
+  shareSenderRecords.delete(cleanKey);
+}
+function shareSenderRecordEntries(field) {
+  return Array.from(shareSenderRecords.entries()).filter(([, record]) => record?.[field] != null);
+}
 if (shareViewMode && shareBootstrap?.session && shareBootstrap?.hostDims) {
-  shareHostDimensions.set(String(shareBootstrap.session), {
+  shareSenderRecord(shareBootstrap.session).dimensions = {
     rows: Number(shareBootstrap.hostDims.rows) || 0,
     cols: Number(shareBootstrap.hostDims.cols) || 0,
-  });
+  };
 }
 if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.hostDimsBySession === 'object') {
   for (const [session, dims] of Object.entries(shareBootstrap.hostDimsBySession)) {
-    shareHostDimensions.set(String(session), {
+    shareSenderRecord(session).dimensions = {
       rows: Number(dims?.rows) || 0,
       cols: Number(dims?.cols) || 0,
-    });
+    };
   }
 }
 let activeShare = null;
 let activeShares = [];
 let shareCreateErrorPayload = null;
-const shareHostConnectionRecords = new Map();
 let shareMirrorEpoch = 1;
 let shareMirrorSequence = 0;
 let shareReplayMirrorEpoch = 1;
 let shareReplayMirrorSequence = 0;
-const shareMirrorLastFrameBySender = new Map();
 let shareUiStatePublishTimer = null;
 let shareViewportPublishTimer = null;
 let shareAppearancePublishTimer = null;
 let sharePointerFramePending = false;
 let sharePointerLastEvent = null;
 let sharePointerLastPublishedAt = -Infinity;
-const shareScrollPublishTimers = new Map();
-const shareScrollTargetRecords = new Map();
 let shareScrollSnapshotGeneration = 0;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
@@ -164,7 +196,6 @@ let shareGeometryResyncInFlight = false;
 let shareGeometryResyncLastStartedAt = 0;
 let shareGeometryRepairInFlight = false;
 const shareAppliedTextWrapMetricsByKey = new Map();
-const sharePointerRecords = new Map();
 let applyingShareRemoteScroll = false;
 let applyingShareRemoteUiState = 0;
 let sharePopupLayerNode = null;
@@ -198,7 +229,6 @@ let shareReplayHostKeyframeSuppressedCount = 0;
 let shareReplayTopologyKeyframeTimer = null;
 let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
-const sharePopupLayerLastSeqBySender = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -542,7 +572,7 @@ const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
-const fileExplorerRefreshIdleMs = 1500;
+const fileExplorerRefreshIdleMs = 1501;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
@@ -1481,6 +1511,7 @@ const backgroundOwnerStatusState = {
   loading: false,
   error: '',
   request: null,
+  updatedAt: 0,
   guard: makeGenerationGuard(),
 };
 const yoagentStartupState = {
@@ -4052,6 +4083,17 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
   return acknowledged;
 }
 
+function activateTmuxWindowFromUserAction(session, windowIndex, label, options = {}) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || !isTmuxSession(sessionKey) || windowIndex === null || windowIndex === undefined || String(windowIndex).trim() === '') return false;
+  // Every visible direct-window surface must acknowledge the exact target before switching. The
+  // acknowledgement captures the red/yellow generation while the old window model is still live.
+  acknowledgeTerminalAttentionFromUserAction(sessionKey, windowIndex, options);
+  if (typeof tmuxWindow !== 'function') return false;
+  tmuxWindow(sessionKey, {windowIndex}, label);
+  return true;
+}
+
 function setFocusedTerminal(session, options = {}) {
   const perf = clientPerfStart('focusSet');
   try {
@@ -4473,6 +4515,9 @@ function stripTerminalQueryResponses(data) {
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
 const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferenceExtensions = new Set(['c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html', 'ini', 'java', 'js', 'json', 'jsx', 'lock', 'lua', 'md', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml']);
+const terminalFileReferenceNegativeCacheMs = 5_000;
+const terminalFileReferencePositiveCacheMs = 30_000;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -4550,6 +4595,7 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     const prefix = match[1] || '';
     const path = match[2] || '';
     if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) continue;
+    if (!terminalTextLooksLikeFileReference(path)) continue;
     const line = Number(match[3] || 0);
     const startIndex = (match.index || 0) + prefix.length;
     const endIndex = startIndex + path.length + (match[3] ? match[3].length + 1 : 0);
@@ -4568,6 +4614,17 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     });
   }
   return refs;
+}
+
+// Terminal output frequently contains dotted JavaScript symbols and slash-separated status
+// labels. Only probe paths that carry an explicit path prefix or a conventional file suffix.
+function terminalTextLooksLikeFileReference(path) {
+  const value = String(path || '');
+  if (/^(?:~\/|\.{1,2}\/|\/)/.test(value)) return true;
+  const basename = value.split('/').pop() || '';
+  const extension = basename.includes('.') ? basename.split('.').pop().toLowerCase() : '';
+  if (!terminalFileReferenceExtensions.has(extension)) return false;
+  return value.includes('/') || basename.includes('.');
 }
 
 function terminalTextReferences(lineText, rangeForOffsets, y = null) {
@@ -4756,10 +4813,15 @@ async function terminalReferenceProviderLinks(session, term, y) {
 const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
 
 function terminalFileReferenceViewportSignature(term) {
+  const references = terminalVisibleFileReferences(term)
+    .map(terminalFileReferenceKey)
+    .sort()
+    .join('\x1e');
   return [
     Math.max(0, Math.floor(Number(term?.cols || 0))),
     Math.max(0, Math.floor(Number(term?.rows || 0))),
     Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+    references,
   ].join(':');
 }
 
@@ -4919,6 +4981,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   let existingReferenceKeys = new Set();
   const existingReferenceTargets = new Map();
   let hoverKey = '';
+  let refreshRequest = null;
 
   const active = () => !disposed && Boolean(isActive(session, container));
 
@@ -4964,7 +5027,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
-  const refresh = async () => {
+  const refreshNow = async () => {
     if (disposed) return 0;
     if (!active()) return clearInactive();
     if (timer) {
@@ -5004,6 +5067,16 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
+  const refresh = () => {
+    if (refreshRequest) return refreshRequest;
+    const request = refreshNow();
+    refreshRequest = request;
+    request.finally(() => {
+      if (refreshRequest === request) refreshRequest = null;
+    });
+    return request;
+  };
+
   const scheduleCachedRender = () => {
     if (!active()) {
       clearInactive();
@@ -5024,9 +5097,8 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     }
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
-    if (viewportChanged || contentChanged) scheduleCachedRender();
-    if (!timer) {
+    if (viewportChanged) scheduleCachedRender();
+    if (viewportChanged && !timer) {
       timer = setTimeout(() => {
         timer = 0;
         if (active()) refresh();
@@ -5791,11 +5863,15 @@ function terminalFileReferenceAbsolutePath(session, reference) {
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
   const canReuse = options.fresh === false;
+  const now = typeof options.now === 'function' ? options.now : Date.now;
   const cacheKey = terminalFileReferenceCacheKey(session, reference);
   if (canReuse && terminalFileReferenceTargetCache.has(cacheKey)) {
     const cached = terminalFileReferenceTargetCache.get(cacheKey);
-    setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
-    return cached;
+    if (cached.expiresAt > now()) {
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+      return cached.promise || cached.value;
+    }
+    terminalFileReferenceTargetCache.delete(cacheKey);
   }
   const fetchOptions = {
     user: options.user !== false,
@@ -5813,17 +5889,36 @@ async function terminalFileReferenceTarget(session, reference, options = {}) {
     return null;
   })();
   if (!canReuse) return targetPromise;
-  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, targetPromise, fileExplorerMemoryCacheLimit);
+  const cacheEntry = {promise: targetPromise, value: null, expiresAt: Number.POSITIVE_INFINITY, paths: terminalFileReferenceCandidatePaths(session, reference)};
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
   try {
     const target = await targetPromise;
-    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) {
-      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, target, fileExplorerMemoryCacheLimit);
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) {
+      cacheEntry.promise = null;
+      cacheEntry.value = target;
+      cacheEntry.expiresAt = now() + (target ? terminalFileReferencePositiveCacheMs : terminalFileReferenceNegativeCacheMs);
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
     }
     return target;
   } catch (error) {
-    if (terminalFileReferenceTargetCache.get(cacheKey) === targetPromise) terminalFileReferenceTargetCache.delete(cacheKey);
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) terminalFileReferenceTargetCache.delete(cacheKey);
     throw error;
   }
+}
+
+function invalidateTerminalFileReferenceTargets(roots = []) {
+  const normalizedRoots = (Array.isArray(roots) ? roots : [roots])
+    .map(path => normalizeDirectoryPath(String(path || '')))
+    .filter(Boolean);
+  if (!normalizedRoots.length) return 0;
+  let invalidated = 0;
+  for (const [key, entry] of terminalFileReferenceTargetCache) {
+    const paths = Array.isArray(entry?.paths) ? entry.paths : [key.split('\x1f')[0]];
+    if (!paths.some(path => normalizedRoots.some(root => pathIsInsideDirectory(path, root)))) continue;
+    terminalFileReferenceTargetCache.delete(key);
+    invalidated += 1;
+  }
+  return invalidated;
 }
 
 function requestFileEditorLineTarget(item, line) {
@@ -8748,8 +8843,7 @@ function syncTopbarActivityPlacement() {
   const actions = document.querySelector('.actions');
   if (!activity || !normalHost || !actions) return false;
   if (topbarActivityUsesActionsRail()) {
-    const refresh = actions.querySelector('#refreshMeta');
-    if (activity.parentElement !== actions || activity.nextElementSibling !== refresh) actions.insertBefore(activity, refresh || null);
+    if (activity.parentElement !== actions || activity !== actions.firstElementChild) actions.prepend(activity);
     scheduleTopbarActionCapacity();
     return true;
   }
@@ -8930,6 +9024,10 @@ function updateTopbarOwnerStatus() {
   } else {
     node.title = t('backgroundOwner.refresh');
   }
+  // The owner label grows after the background status request resolves. Route that dynamic
+  // content change through the same measured packer as activity updates so it cannot overlap
+  // the adjacent action rail at a narrow CSS viewport or high browser zoom.
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
@@ -11142,7 +11240,7 @@ async function focusAgentToastTarget(session, agent) {
   await selectSession(session, {userInitiated: true});
   const windowIndex = agentWindowIndex(agent);
   if (windowIndex === null) return;
-  tmuxWindow(session, {windowIndex}, t('terminal.window.title', {name: windowIndex}));
+  activateTmuxWindowFromUserAction(session, windowIndex, t('terminal.window.title', {name: windowIndex}));
 }
 
 function agentToastTargetLine(session, agent, options = {}) {
@@ -11288,13 +11386,6 @@ function sendTestNotification(options = {}) {
   }
 }
 
-function notifyCurrentAttentionStates() {
-  for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
-    if (shouldNotifyState(state)) maybeNotifyState(session, state, {force: true});
-  }
-}
-
 function eventMessageForState(session, state) {
   return `${sessionLabel(session)} ${state.label}: ${state.reason}`;
 }
@@ -11317,45 +11408,8 @@ function trackSessionStateChanges() {
       to: state.key,
       reason: state.reason,
     });
-    maybeNotifyState(session, state);
   }
   stateTrackingReady = true;
-}
-
-function maybeNotifyState(session, state, options = {}) {
-  if (!notificationDeliveryEnabled()) return;
-  if (!shouldNotifyState(state)) return;
-  // A green->red agent transition belongs to the dedicated per-window notification path below.
-  // Letting the generic session-state path handle it too duplicates the popup and bypasses the
-  // user's working-AI attention preference when that preference is off.
-  if (workingAgentTransitionOwnsSessionStateNotification(session, state)) return;
-  const key = `state:${stateSignature(state)}`;
-  const now = Date.now();
-  if (attentionAlreadyVisible(session)) {
-    recordSessionNotificationSent(session, key, now);
-    dismissAttentionAlertsForSession(session);
-    postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
-      state: state.key,
-      reason: state.reason,
-    });
-    return;
-  }
-  const lastSent = sessionNotificationLastSentAt(session, key);
-  if (options.force !== true && now - lastSent < 60_000) return;
-  recordSessionNotificationSent(session, key, now);
-  const body = `${state.reason} · ${projectDirName(session, transcriptMetadataState.payload.sessions?.[session])}`;
-  if (notificationDeliveryEnabled('inApp')) showAttentionAlert(session, state);
-  postEvent(session, 'alert_shown', eventMessageForState(session, state), {
-    state: state.key,
-    reason: state.reason,
-  });
-  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    emitNotification('sessionAttention', {session, title: attentionToastTitle(session, state), body, systemTitle: sessionNotificationTitle(session, state), systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
-    postEvent(session, 'notification_sent', eventMessageForState(session, state), {state: state.key, reason: state.reason});
-  } catch (error) {
-    postEvent(session, 'notification_error', `notification failed: ${error}`, {state: state.key});
-  }
 }
 
 const workingAgentTransitionNotificationDescriptors = Object.freeze({
@@ -11508,12 +11562,6 @@ function workingAgentTransitionSnapshot(session, agent) {
   const tone = workingAgentNotificationTone(agent);
   const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
   return {agent, kind, options, key, tone, previousTone: toneMap?.get(key) || ''};
-}
-
-function workingAgentTransitionOwnsSessionStateNotification(session, state) {
-  const agent = attentionToastAgent(session, state)?.agent;
-  const transition = workingAgentTransitionSnapshot(session, agent);
-  return transition?.tone === 'attention';
 }
 
 // Notifications are driven by one authoritative auto-approve payload, never by a surface renderer.
@@ -12712,16 +12760,28 @@ let topbarPackingIsApplying = false;
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
+  'hide-owner',
   'compact-search',
   'compact-activity',
   'hide-latency',
   'hide-logout',
   'hide-notify',
   'hide-language',
-  'hide-owner',
   'hide-nav',
+  'icon-search',
   'compact-menu',
 ]);
+const topbarPackingVisualItemSelectors = Object.freeze([
+  '.brand-cell',
+  '.app-menu-bar',
+  '.topbar-nav',
+  '.topbar-search',
+  '.topbar-language-menu',
+  '#topbarOwnerStatus',
+  '#topbarActivity',
+  '.actions > :not(#topbarActivity):not(#status)',
+]);
+const topbarPackingMinGapPx = 2;
 
 function topbarPackingTargets() {
   return [document.body, appRootElement()].filter(Boolean);
@@ -12752,15 +12812,73 @@ function applyTopbarPackingSteps(steps = []) {
   }
 }
 
-function topbarPackingOverflows() {
+function topbarPackingVisualItems() {
+  const seen = new Set();
+  return topbarPackingVisualItemSelectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))
+    .filter(node => {
+      if (seen.has(node)) return false;
+      seen.add(node);
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    });
+}
+
+function topbarPackingLayoutState() {
   const bar = document.querySelector('.topbar');
-  if (!bar) return false;
-  const rect = bar.getBoundingClientRect();
-  const childrenOverflow = Array.from(bar.children).some(child => {
-    const childRect = child.getBoundingClientRect();
-    return childRect.left < rect.left - 1 || childRect.right > rect.right + 1;
-  });
-  return childrenOverflow || bar.scrollWidth > bar.clientWidth + 1;
+  if (!bar) return {overflow: false, outside: [], collisions: [], clipped: []};
+  const barRect = bar.getBoundingClientRect();
+  const items = topbarPackingVisualItems()
+    .map(node => ({node, rect: node.getBoundingClientRect()}))
+    .sort((a, b) => a.rect.left - b.rect.left || a.rect.right - b.rect.right);
+  const outside = items.filter(item => item.rect.left < barRect.left - 1 || item.rect.right > barRect.right + 1);
+  const collisions = [];
+  for (let index = 1; index < items.length; index += 1) {
+    const previous = items[index - 1];
+    const current = items[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const compactActivity = document.querySelector('#topbarActivity.topbar-activity--mobile-count-balls');
+  const compactActivityRect = compactActivity?.getBoundingClientRect();
+  const activityBalls = compactActivity
+    ? Array.from(compactActivity.querySelectorAll('.topbar-activity-count.active .topbar-activity-ball'))
+      .filter(node => getComputedStyle(node).display !== 'none')
+      .map(node => ({node, rect: node.getBoundingClientRect()}))
+      .sort((a, b) => a.rect.left - b.rect.left)
+    : [];
+  if (compactActivityRect) {
+    outside.push(...activityBalls.filter(item => item.rect.left < compactActivityRect.left - 1 || item.rect.right > compactActivityRect.right + 1));
+  }
+  for (let index = 1; index < activityBalls.length; index += 1) {
+    const previous = activityBalls[index - 1];
+    const current = activityBalls[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const searchLabel = document.querySelector('.topbar-search-label');
+  const compactSearchLabel = document.querySelector('.topbar-search-label-short');
+  const searchLabelRect = searchLabel?.getBoundingClientRect();
+  const compactSearchLabelRect = compactSearchLabel?.getBoundingClientRect();
+  const compactSearchClipped = Boolean(searchLabel && compactSearchLabel && getComputedStyle(compactSearchLabel).display !== 'none' && (
+    searchLabel.scrollWidth > searchLabel.clientWidth + 1
+    || compactSearchLabelRect.left < searchLabelRect.left - 1
+    || compactSearchLabelRect.right > searchLabelRect.right + 1
+  ));
+  const clipped = compactSearchClipped
+    ? [searchLabel]
+    : [];
+  return {
+    // scrollWidth includes clipped/focused descendants and stale popover geometry, so it can stay
+    // wider after expansion even when every painted control fits. Visible control rectangles are
+    // the layout contract and make the result independent of resize direction.
+    overflow: outside.length > 0 || collisions.length > 0 || clipped.length > 0,
+    outside,
+    collisions,
+    clipped,
+  };
+}
+
+function topbarPackingOverflows() {
+  return topbarPackingLayoutState().overflow;
 }
 
 function topbarPackingSyncNavigation(steps) {
@@ -12773,7 +12891,7 @@ function topbarPackingSyncNavigation(steps) {
 }
 
 function syncTopbarPacking() {
-  if (appMenuIsOpen() || topbarControlIsActive()) return topbarPackingStepsApplied.slice();
+  if (appMenuIsOpen()) return topbarPackingStepsApplied.slice();
   if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
   topbarPackingIsApplying = true;
   try {
@@ -12919,7 +13037,7 @@ function renderSessionButtonsMeasured(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
-  // In phone mode the activity control is temporarily reparented beside Refresh. Remove that
+  // In compact mode the activity control is temporarily reparented before the action rail. Remove that
   // prior rendered instance before replacing the menu subtree, or each chrome refresh leaves a
   // duplicate button in the actions rail.
   document.querySelectorAll('.actions > #topbarActivity').forEach(activity => activity.remove());
@@ -14072,6 +14190,7 @@ function invalidateFileExplorerRoots(roots = []) {
   for (const cache of [fileExplorerDirectoryRecords, fileExplorerNewEntryUntil]) {
     for (const key of Array.from(cache.keys())) if (shouldDrop(normalizeDirectoryPath(key))) cache.delete(key);
   }
+  if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(normalizedRoots);
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
 
@@ -14156,6 +14275,13 @@ async function refreshOpenFilesFromPush(payload = {}) {
 async function refreshFileExplorerFromPush(payload = {}) {
   const nextToken = payload?.token ? String(payload.token || '') : '';
   const treeVisible = fileExplorerTreePaneIsVisible();
+  const changedPaths = [
+    ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
+    ...(Array.isArray(payload?.removed_roots) ? payload.removed_roots : []),
+  ];
+  // File links are a consumer of the same filesystem truth even when Finder is hidden.
+  // Invalidate only affected entries so a create/rename can become clickable immediately.
+  if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(changedPaths);
   const changedRoots = Array.isArray(payload?.directories)
     ? payload.directories.length
     : Math.max(0, Number(payload?.change_summary?.roots_changed || 0));
@@ -18129,8 +18255,7 @@ function handleTabberRowActivate(row, event) {
   }
   const switchWindow = () => {
     if (session && windowIndex !== null) {
-      tmuxWindow(session, {windowIndex}, row.querySelector('.file-tree-name')?.textContent || session);
-      return true;
+      return activateTmuxWindowFromUserAction(session, windowIndex, row.querySelector('.file-tree-name')?.textContent || session);
     }
     return false;
   };
@@ -28730,7 +28855,7 @@ function focusPanel(session, options = {}) {
 
 function shareHostTerminalSize(session) {
   if (!shareViewMode) return null;
-  const dims = shareHostDimensions.get(String(session || ""));
+  const dims = shareSenderRecord(session, {create: false})?.dimensions;
   const rawRows = Math.floor(Number(dims?.rows) || 0);
   const rawCols = Math.floor(Number(dims?.cols) || 0);
   if (rawRows <= 0 || rawCols <= 0) return null;
@@ -28739,10 +28864,10 @@ function shareHostTerminalSize(session) {
 
 function updateShareHostTerminalSize(session, rows, cols) {
   if (!shareViewMode || !session) return;
-  shareHostDimensions.set(String(session), {
+  shareSenderRecord(session).dimensions = {
     rows: Math.max(10, Math.floor(Number(rows) || 0)),
     cols: Math.max(40, Math.floor(Number(cols) || 0)),
-  });
+  };
   fitTerminal(session);
 }
 
@@ -30233,6 +30358,7 @@ const dockviewLayoutState = {
   panePointerDrag: null,
   panePointerDragSuppressedUntil: 0,
   tabActivationPerf: null,
+  pendingUserPanelActivation: '',
 };
 
 function dockviewEmptyPaneItem(slot) {
@@ -30270,6 +30396,18 @@ function dockviewFinishTabActivationPerf(item) {
     }
     dockviewLayoutState.tabActivationPerf = null;
   });
+}
+
+function dockviewCommitPanelActivation(item, options = {}) {
+  const panelItem = String(item || '');
+  if (!panelItem) return false;
+  const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
+  if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
+  const userInitiated = options.userInitiated === true || pendingUserGesture;
+  if (isTmuxSession(panelItem) && userInitiated) noteFileExplorerChangesSessionInteraction(panelItem);
+  setFocusedPanelItem(panelItem, {userInitiated});
+  dockviewFinishTabActivationPerf(panelItem);
+  return true;
 }
 
 function dockviewCore() {
@@ -31166,8 +31304,7 @@ function dockviewInit() {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
-      setFocusedPanelItem(item);
-      dockviewFinishTabActivationPerf(item);
+      dockviewCommitPanelActivation(item);
     }),
     api.onWillShowOverlay(event => dockviewTrackRootBoundaryOverlay(event)),
     api.onWillDrop(event => {
@@ -31873,8 +32010,7 @@ function createDockviewTabRenderer() {
     disposables = [];
   };
   const commitExplicitTabInteraction = () => {
-    if (isTmuxSession(item)) noteFileExplorerChangesSessionInteraction(item);
-    setFocusedPanelItem(item, {userInitiated: true});
+    dockviewCommitPanelActivation(item, {userInitiated: true});
   };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
@@ -31883,6 +32019,7 @@ function createDockviewTabRenderer() {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
       dockviewBeginTabActivationPerf(item);
+      dockviewLayoutState.pendingUserPanelActivation = item;
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewBeginTabPointerDrag(event, item);
     }
@@ -32869,7 +33006,7 @@ function createPaneTab(side, item, displayContext = {}) {
     if (!autoTarget) return;
     event.preventDefault();
     event.stopPropagation();
-    if (item === activeItemForSide(side)) setFocusedPanelItem(item);
+    if (item === activeItemForSide(side)) setFocusedPanelItem(item, {userInitiated: true});
   });
   bindActionDispatcher(tab, {
     'pane-tab-close': () => {
@@ -32879,7 +33016,7 @@ function createPaneTab(side, item, displayContext = {}) {
     'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
       await toggleAutoApprove(autoTarget.dataset.autoSession);
-      if (shouldRefocus) focusPanel(item);
+      if (shouldRefocus) focusPanel(item, {userInitiated: true});
     },
   });
   tab.addEventListener('keydown', event => {
@@ -34244,17 +34381,45 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    if (typeof acknowledgeTerminalAttentionFromUserAction === 'function') {
-      acknowledgeTerminalAttentionFromUserAction(button.dataset.windowSession, button.dataset.windowIndex);
-    } else if (typeof acknowledgeAgentWindowActivity === 'function') {
-      acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
-    }
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, t('terminal.window.title', {name: label}));
+    activateTmuxWindowFromUserAction(
+      button.dataset.windowSession,
+      button.dataset.windowIndex,
+      t('terminal.window.title', {name: label}),
+    );
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
   const label = button.dataset.windowDir === 'prev' ? t('terminal.window.previous') : t('terminal.window.next');
-  tmuxWindow(button.dataset.windowSession, key, label);
+  const session = String(button.dataset.windowSession || '').trim();
+  const target = tmuxWindowStepTarget(session, key);
+  if (target) {
+    activateTmuxWindowFromUserAction(session, target.index, t('terminal.window.title', {name: target.label}));
+    return;
+  }
+  // A collapsed or not-yet-rendered window bar cannot name the next target. It must still use the
+  // user-action transaction so leaving the current attention window never bypasses acknowledgement.
+  acknowledgeTerminalAttentionFromUserAction(session, null);
+  tmuxWindow(session, key, label);
+}
+
+function tmuxWindowStepTarget(session, direction) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || typeof document === 'undefined') return null;
+  const records = [];
+  const seen = new Set();
+  for (const button of document.querySelectorAll('.tmux-window-bar [data-window-index][data-window-session]')) {
+    if (String(button.dataset.windowSession || '').trim() !== sessionKey) continue;
+    const index = tmuxWindowIndexKey(button.dataset.windowIndex);
+    if (index === null || seen.has(index)) continue;
+    seen.add(index);
+    records.push({index, label: button.dataset.windowLabel || button.dataset.windowIndex || index});
+  }
+  if (!records.length) return null;
+  const current = tmuxWindowUserInteractionIndex(sessionKey);
+  const currentPosition = records.findIndex(record => record.index === current);
+  if (currentPosition < 0) return null;
+  const delta = direction === 'p' ? -1 : 1;
+  return records[(currentPosition + delta + records.length) % records.length] || null;
 }
 
 function windowStepButtonFromEvent(event) {
@@ -34839,8 +35004,8 @@ function bindInfoPanel(panel) {
     const session = button.dataset.infoOpenAiTab || '';
     const windowIndex = button.dataset.infoOpenAiWindow || '';
     if (!session) return;
-    if (windowIndex !== '' && typeof tmuxWindow === 'function') {
-      tmuxWindow(session, {windowIndex}, button.textContent || t('terminal.window.title', {name: windowIndex}));
+    if (windowIndex !== '') {
+      activateTmuxWindowFromUserAction(session, windowIndex, button.textContent || t('terminal.window.title', {name: windowIndex}));
     }
     selectSession(session, {userInitiated: true});
   });
@@ -36755,8 +36920,10 @@ const chatIntroductionGreetingKeys = Object.freeze([
 const chatRecentEmojiStorageKey = 'yolomux.chat.recentEmoji';
 const chatRecentEmojiLimit = 24;
 const chatMessageMaxBytes = 8 * 1024;
-const chatTypingRefreshMs = 3000;
-const chatRelativeTimeRefreshMs = 5000;
+// Network-backed refreshes deliberately avoid round boundaries so independently opened
+// clients do not herd onto the same server tick.
+const chatTypingRefreshMs = 3001;
+const chatRelativeTimeRefreshMs = 5003;
 const chatRelativeTimeLimitSeconds = 4 * 60 * 60;
 const chatNotificationMaxAgeSeconds = 8 * 60 * 60;
 const chatTailThresholdPx = 32;
@@ -39176,11 +39343,11 @@ const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
-const jsDebugStatsPollFastMs = 2000;
-const jsDebugStatsPollMs = 30000;
+const jsDebugStatsPollFastMs = 2001;
+const jsDebugStatsPollMs = 30001;
 const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
-const jsDebugGraphRefreshMs = 30000;
+const jsDebugGraphRefreshMs = 30001;
 // A request-driven client can be quiet between normal polls. Only mark the portion
 // after this continuous silence as missing communication, rather than treating each
 // empty raw bucket as a connection failure.
@@ -52380,7 +52547,6 @@ let shareReplayShellState = {status: 'idle'};
 let shareReplayLastKeyframe = null;
 let shareReplayNodeMap = new Map();
 let shareReplayTerminalPlaceholders = new Map();
-const shareReplayScrollPublishTimers = new Map();
 let shareReplayLastKeyframeBytes = 0;
 let shareReplayLastDeltaBytes = 0;
 let shareReplayLastLatencyMs = null;
@@ -52993,16 +53159,14 @@ function shareViewerUiWsUrl(token) {
 function shareHostConnectionRecord(token, options = {}) {
   const cleanToken = String(token || '');
   if (!cleanToken) return null;
-  let record = shareHostConnectionRecords.get(cleanToken) || null;
-  if (!record && options.create === true) {
-    record = {socket: null, queue: []};
-    shareHostConnectionRecords.set(cleanToken, record);
-  }
-  return record;
+  const senderRecord = shareSenderRecord(cleanToken, {create: options.create === true});
+  if (!senderRecord) return null;
+  if (!senderRecord.connection && options.create === true) senderRecord.connection = {socket: null, queue: []};
+  return senderRecord.connection;
 }
 
 function shareHostConnectionSockets() {
-  return Array.from(shareHostConnectionRecords.values(), record => record.socket).filter(Boolean);
+  return shareSenderRecordEntries('connection').map(([, record]) => record.connection.socket).filter(Boolean);
 }
 
 function shareHostQueuedMessageCount(token) {
@@ -53030,7 +53194,7 @@ function closeShareHostSocket() {
   for (const socket of shareHostConnectionSockets()) {
     try { socket?.close?.(); } catch (_) {}
   }
-  shareHostConnectionRecords.clear();
+  for (const [token] of shareSenderRecordEntries('connection')) deleteShareSenderRecord(token);
 }
 
 function flushShareHostQueue(token) {
@@ -53070,10 +53234,11 @@ function ensureShareHostSockets() {
       : activeShares.map(share => share.token).filter(Boolean)
   );
   for (const token of activeTokens) ensureShareHostSocket(token);
-  for (const [token, record] of shareHostConnectionRecords.entries()) {
+  for (const [token, senderRecord] of shareSenderRecordEntries('connection')) {
+    const record = senderRecord.connection;
     if (activeTokens.has(token)) continue;
     try { record.socket?.close?.(); } catch (_) {}
-    shareHostConnectionRecords.delete(token);
+    deleteShareSenderRecord(token);
   }
 }
 
@@ -54711,12 +54876,13 @@ function shareDropStaleMirrorFrame(message = {}) {
   const current = shareMirrorFrameNumbers(message);
   if (!current) return false;
   const sender = shareMirrorSenderKey(message);
-  const previous = shareMirrorLastFrameBySender.get(sender);
+  const record = shareSenderRecord(sender);
+  const previous = record.lastFrame;
   if (previous) {
     if (current.epoch < previous.epoch) return true;
     if (current.epoch === previous.epoch && current.sequence <= previous.sequence) return true;
   }
-  shareMirrorLastFrameBySender.set(sender, current);
+  record.lastFrame = current;
   return false;
 }
 
@@ -54859,9 +55025,10 @@ function applySharePopupLayer(payload = {}, sender = '') {
   const owner = String(payload.owner || sender || 'host');
   const seq = Number(payload.seq);
   if (Number.isFinite(seq)) {
-    const previousSeq = Number(sharePopupLayerLastSeqBySender.get(owner) || 0);
+    const record = shareSenderRecord(owner);
+    const previousSeq = Number(record.popupSequence || 0);
     if (seq <= previousSeq) return;
-    sharePopupLayerLastSeqBySender.set(owner, seq);
+    record.popupSequence = seq;
   }
   const items = Array.isArray(payload.items) ? payload.items : [];
   layer.replaceChildren();
@@ -55564,12 +55731,10 @@ function sharePointerSenderColor(sender = '') {
 
 function ensureSharePointerGhost(sender = '') {
   const key = sharePointerSenderKey(sender);
-  let record = sharePointerRecords.get(key) || null;
+  const senderRecord = shareSenderRecord(key);
+  let record = senderRecord.pointer;
   if (record?.ghost?.isConnected) return record.ghost;
-  if (!record) {
-    record = {ghost: null, hideTimer: null};
-    sharePointerRecords.set(key, record);
-  }
+  if (!record) record = senderRecord.pointer = {ghost: null, hideTimer: null};
   if (record.hideTimer) clearTimeout(record.hideTimer);
   record.hideTimer = null;
   const ghost = document.createElement('div');
@@ -55601,12 +55766,12 @@ function renderSharePointerGhost(payload = {}) {
   if (!point) return;
   const sender = sharePointerSenderKey(payload.sender || '');
   const ghost = ensureSharePointerGhost(sender);
-  const record = sharePointerRecords.get(sender);
+  const record = shareSenderRecord(sender, {create: false})?.pointer;
   ghost.style.transform = `translate3d(${Math.round(point.x)}px, ${Math.round(point.y)}px, 0)`;
   ghost.classList.add('visible');
   if (record.hideTimer) clearTimeout(record.hideTimer);
   const timer = setTimeout(() => {
-    const current = sharePointerRecords.get(sender);
+    const current = shareSenderRecord(sender, {create: false})?.pointer;
     if (!current || current.hideTimer !== timer) return;
     current.hideTimer = null;
     current.ghost?.classList.remove('visible');
@@ -55724,16 +55889,18 @@ function scheduleShareScrollPublishForElement(element) {
   }
   const payload = shareScrollPayloadForElement(element);
   if (!payload?.target) return;
-  if (shareScrollPublishTimers.has(payload.target)) {
-    shareScrollPublishTimers.get(payload.target).payload = payload;
+  const senderRecord = shareSenderRecord(payload.target);
+  if (senderRecord.scrollPublish) {
+    senderRecord.scrollPublish.payload = payload;
     return;
   }
   const state = {payload};
   state.timer = setTimeout(() => {
-    shareScrollPublishTimers.delete(payload.target);
+    const current = shareSenderRecord(payload.target, {create: false});
+    if (current?.scrollPublish === state) current.scrollPublish = null;
     if (shareCanPublishScroll()) sharePublish('scroll', state.payload);
   }, 50);
-  shareScrollPublishTimers.set(payload.target, state);
+  senderRecord.scrollPublish = state;
 }
 
 function scheduleShareReplayScrollPublishForElement(element) {
@@ -55741,16 +55908,18 @@ function scheduleShareReplayScrollPublishForElement(element) {
   const entry = shareReplayScrollEntryForElement(element);
   if (!entry?.nodeId) return;
   const key = String(entry.nodeId);
-  if (shareReplayScrollPublishTimers.has(key)) {
-    shareReplayScrollPublishTimers.get(key).entry = entry;
+  const senderRecord = shareSenderRecord(key);
+  if (senderRecord.replayScrollPublish) {
+    senderRecord.replayScrollPublish.entry = entry;
     return;
   }
   const state = {entry};
   state.timer = setTimeout(() => {
-    shareReplayScrollPublishTimers.delete(key);
+    const current = shareSenderRecord(key, {create: false});
+    if (current?.replayScrollPublish === state) current.replayScrollPublish = null;
     shareReplayPublishDeltaPayload({scroll: [state.entry]}, 'scroll');
   }, 50);
-  shareReplayScrollPublishTimers.set(key, state);
+  senderRecord.replayScrollPublish = state;
 }
 
 function sharePublishFileVersion(path, options = {}) {
@@ -55822,7 +55991,8 @@ function applyShareScrollDescriptorPosition(descriptor, top, left) {
 function shareScrollTargetRecord(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return null;
-  let record = shareScrollTargetRecords.get(cleanTarget);
+  const senderRecord = shareSenderRecord(cleanTarget, {create: options.create !== false});
+  let record = senderRecord?.scrollTarget || null;
   if (!record && options.create !== false) {
     record = {
       top: 0,
@@ -55832,7 +56002,7 @@ function shareScrollTargetRecord(target, options = {}) {
       restoreGeneration: 0,
       remainingFrames: 0,
     };
-    shareScrollTargetRecords.set(cleanTarget, record);
+    senderRecord.scrollTarget = record;
   }
   return record || null;
 }
@@ -55881,8 +56051,8 @@ function applyShareScrollSnapshot(scroll = []) {
   const payloads = scroll.slice(0, 100).filter(payload => payload && typeof payload === 'object' && String(payload.target || ''));
   const currentTargets = new Set(payloads.map(payload => String(payload.target)));
   const snapshotGeneration = ++shareScrollSnapshotGeneration;
-  for (const target of shareScrollTargetRecords.keys()) {
-    if (!currentTargets.has(target)) shareScrollTargetRecords.delete(target);
+  for (const [target, senderRecord] of shareSenderRecordEntries('scrollTarget')) {
+    if (!currentTargets.has(target)) senderRecord.scrollTarget = null;
   }
   for (const payload of payloads) applyShareScrollState(payload, {snapshotGeneration});
 }
@@ -57559,7 +57729,7 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
 function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
   if (!descriptor?.target) return null;
-  const state = shareScrollTargetRecords.get(descriptor.target);
+  const state = shareSenderRecord(descriptor.target, {create: false})?.scrollTarget;
   if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
@@ -57583,7 +57753,7 @@ function restoreShareReadonlyScrollTarget(target) {
 function restoreShareScrollTargetByKey(target) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return false;
-  const state = shareScrollTargetRecords.get(cleanTarget);
+  const state = shareSenderRecord(cleanTarget, {create: false})?.scrollTarget;
   if (!state) return false;
   const payload = {
     ...(state.payload || {}),
@@ -57599,14 +57769,14 @@ function restoreShareScrollTargetByKey(target) {
 function scheduleShareScrollRestoreByKey(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!shareViewMode || !cleanTarget) return false;
-  const record = shareScrollTargetRecords.get(cleanTarget);
+  const record = shareSenderRecord(cleanTarget, {create: false})?.scrollTarget;
   if (!record) return false;
   const frames = Math.max(1, Math.min(8, Math.round(Number(options.frames || 4))));
   const restoreGeneration = record.restoreGeneration + 1;
   record.restoreGeneration = restoreGeneration;
   record.remainingFrames = frames;
   const run = () => {
-    if (shareScrollTargetRecords.get(cleanTarget) !== record || record.restoreGeneration !== restoreGeneration) return;
+    if (shareSenderRecord(cleanTarget, {create: false})?.scrollTarget !== record || record.restoreGeneration !== restoreGeneration) return;
     const previous = applyingShareRemoteScroll;
     applyingShareRemoteScroll = true;
     try {
@@ -57617,7 +57787,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
     record.remainingFrames -= 1;
     if (record.remainingFrames > 0) {
       requestAnimationFrame(run);
-    } else if (shareScrollTargetRecords.get(cleanTarget) === record && record.restoreGeneration === restoreGeneration) {
+    } else if (shareSenderRecord(cleanTarget, {create: false})?.scrollTarget === record && record.restoreGeneration === restoreGeneration) {
       record.remainingFrames = 0;
     }
   };
@@ -57628,7 +57798,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
 function restoreShareScrollTargetsByPrefix(prefix) {
   const cleanPrefix = String(prefix || '');
   if (!cleanPrefix) return;
-  for (const target of shareScrollTargetRecords.keys()) {
+  for (const [target] of shareSenderRecordEntries('scrollTarget')) {
     if (String(target).startsWith(cleanPrefix)) scheduleShareScrollRestoreByKey(target);
   }
 }
@@ -58462,6 +58632,7 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   backgroundOwnerStatusState.guard.invalidate();
   backgroundOwnerStatusState.payload = payload;
+  backgroundOwnerStatusState.updatedAt = Date.now();
   backgroundOwnerStatusState.error = '';
   backgroundOwnerStatusState.loading = false;
   if (options.render !== false) renderInfoPanel();
@@ -58469,9 +58640,19 @@ function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   return true;
 }
 
+const startupSnapshotFreshnessMs = 5_000;
+
+function backgroundOwnerStatusIsFresh() {
+  return Boolean(backgroundOwnerStatusState.payload)
+    && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
 async function refreshBackgroundOwnerStatus(options = {}) {
   if (shareViewMode) return false;
-  if (backgroundOwnerStatusState.request && options.force !== true) return backgroundOwnerStatusState.request;
+  // Every consumer observes the same current snapshot. A reconnect may require a new request
+  // after this settles, but must not discard and duplicate the request boot already owns.
+  if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
   const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
   backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
   backgroundOwnerStatusState.error = '';
@@ -62090,18 +62271,28 @@ async function setAutoApprove(session, enabled) {
   }
 }
 
-async function refreshAutoStatuses() {
-  const result = await loadAutoStatuses({render: false});
+async function refreshAutoStatuses(options = {}) {
+  const result = await loadAutoStatuses({...options, render: false});
   renderAutoApproveStatusSurfaces(result);
   bindClipboardPaste();
   refreshOpenEventLogs();
 }
 
-async function loadAutoStatuses(options = {}) {
+function autoApproveSnapshotIsFresh() {
+  return loadAutoStatuses.lastResult !== null
+    && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
+function loadAutoStatuses(options = {}) {
+  if (loadAutoStatuses.request) return loadAutoStatuses.request;
+  if (options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
+  const request = (async () => {
   let result = null;
   try {
     const payload = await apiFetchJson('/api/auto-approve');
     result = applyAutoApprovePayload(payload, options);
+    loadAutoStatuses.lastResult = result;
+    loadAutoStatuses.updatedAt = Date.now();
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -62113,7 +62304,16 @@ async function loadAutoStatuses(options = {}) {
   }
   if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
   return result;
+  })();
+  const settledRequest = request.finally(() => {
+    if (loadAutoStatuses.request === settledRequest) loadAutoStatuses.request = null;
+  });
+  loadAutoStatuses.request = settledRequest;
+  return settledRequest;
 }
+loadAutoStatuses.request = null;
+loadAutoStatuses.lastResult = null;
+loadAutoStatuses.updatedAt = 0;
 
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
@@ -62346,7 +62546,7 @@ const selfUpdateReloadState = {
   timer: null,
   deferredToastShown: false,
 };
-const selfUpdateReloadPollMs = 1500;
+const selfUpdateReloadPollMs = 1501;
 const selfUpdateReloadMaxAttempts = 120;
 
 function dismissToastNode(node) {
@@ -63778,8 +63978,8 @@ function openClientEventStream(descriptor) {
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
     if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    if (channels.has('core')) refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({preferFresh: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
     if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });
   source.addEventListener('ping', event => {

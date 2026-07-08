@@ -648,7 +648,7 @@ function shareReadonlyPointerEventHitsScrollContainer(event) {
 function shareReadonlyScrollStateForTarget(target) {
   const descriptor = shareScrollTargetForElement(target);
   if (!descriptor?.target) return null;
-  const state = shareScrollTargetRecords.get(descriptor.target);
+  const state = shareSenderRecord(descriptor.target, {create: false})?.scrollTarget;
   if (!state) return null;
   const top = Math.max(0, Math.round(Number(state.top || 0)));
   const left = Math.max(0, Math.round(Number(state.left || 0)));
@@ -672,7 +672,7 @@ function restoreShareReadonlyScrollTarget(target) {
 function restoreShareScrollTargetByKey(target) {
   const cleanTarget = String(target || '');
   if (!cleanTarget) return false;
-  const state = shareScrollTargetRecords.get(cleanTarget);
+  const state = shareSenderRecord(cleanTarget, {create: false})?.scrollTarget;
   if (!state) return false;
   const payload = {
     ...(state.payload || {}),
@@ -688,14 +688,14 @@ function restoreShareScrollTargetByKey(target) {
 function scheduleShareScrollRestoreByKey(target, options = {}) {
   const cleanTarget = String(target || '');
   if (!shareViewMode || !cleanTarget) return false;
-  const record = shareScrollTargetRecords.get(cleanTarget);
+  const record = shareSenderRecord(cleanTarget, {create: false})?.scrollTarget;
   if (!record) return false;
   const frames = Math.max(1, Math.min(8, Math.round(Number(options.frames || 4))));
   const restoreGeneration = record.restoreGeneration + 1;
   record.restoreGeneration = restoreGeneration;
   record.remainingFrames = frames;
   const run = () => {
-    if (shareScrollTargetRecords.get(cleanTarget) !== record || record.restoreGeneration !== restoreGeneration) return;
+    if (shareSenderRecord(cleanTarget, {create: false})?.scrollTarget !== record || record.restoreGeneration !== restoreGeneration) return;
     const previous = applyingShareRemoteScroll;
     applyingShareRemoteScroll = true;
     try {
@@ -706,7 +706,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
     record.remainingFrames -= 1;
     if (record.remainingFrames > 0) {
       requestAnimationFrame(run);
-    } else if (shareScrollTargetRecords.get(cleanTarget) === record && record.restoreGeneration === restoreGeneration) {
+    } else if (shareSenderRecord(cleanTarget, {create: false})?.scrollTarget === record && record.restoreGeneration === restoreGeneration) {
       record.remainingFrames = 0;
     }
   };
@@ -717,7 +717,7 @@ function scheduleShareScrollRestoreByKey(target, options = {}) {
 function restoreShareScrollTargetsByPrefix(prefix) {
   const cleanPrefix = String(prefix || '');
   if (!cleanPrefix) return;
-  for (const target of shareScrollTargetRecords.keys()) {
+  for (const [target] of shareSenderRecordEntries('scrollTarget')) {
     if (String(target).startsWith(cleanPrefix)) scheduleShareScrollRestoreByKey(target);
   }
 }

@@ -14,6 +14,15 @@ MAX_DIRECTORY_ENTRIES = 1_000
 REPO_MARKERS = (".git", ".hg", ".svn", ".jj")
 
 
+class _ResolvedDirectoryName(str):
+    """Directory entry name carrying the canonical path from the security scan."""
+
+    def __new__(cls, value: str, resolved: Path):
+        instance = super().__new__(cls, value)
+        instance.resolved = resolved
+        return instance
+
+
 def _repo_marker_is_real(marker_path: Path, marker: str) -> bool:
     if not marker_path.exists():
         return False
@@ -38,7 +47,13 @@ def _directory_is_repo(path: Path) -> bool:
     return False
 
 
-def _entry_info(path: Path, name: str) -> dict[str, Any]:
+def _entry_info(
+    path: Path,
+    name: str,
+    *,
+    resolved: Path | None = None,
+    repo_info_cache: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     try:
         st = path.lstat()
     except OSError as exc:
@@ -79,8 +94,19 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
     if kind == "dir":
         info["is_repo"] = _directory_is_repo(path)
         if info["is_repo"]:
-            info["repo"] = git_repo_info(path, include_status=False)
-    info.update(paths._physical_file_identity(path))
+            repo_key = resolved if resolved is not None else paths._normalized_scope_path(path)
+            if repo_info_cache is None:
+                info["repo"] = git_repo_info(path, include_status=False)
+            else:
+                repo = repo_info_cache.get(repo_key)
+                if repo is None:
+                    repo = git_repo_info(path, include_status=False)
+                    repo_info_cache[repo_key] = repo
+                info["repo"] = repo
+    # The directory scan already canonicalized the entry for its secret-path check.  Its
+    # target stat is the same stat needed for a symlink's physical identity.
+    identity_stat = target_st if stat.S_ISLNK(mode) and kind != "symlink-broken" else st
+    info.update(paths._physical_file_identity(path, resolved=resolved, stat_result=identity_stat))
     return info
 
 
@@ -91,12 +117,14 @@ def _visible_directory_names(path: Path) -> tuple[list[str], bool]:
     with os.scandir(path) as entries:
         for entry in entries:
             name = entry.name
-            if paths._path_is_secret(path / name):
+            entry_path = path / name
+            resolved = paths._normalized_scope_path(entry_path)
+            if paths._path_is_secret(entry_path, resolved=resolved):
                 continue
             if len(names) >= limit:
                 truncated = True
                 break
-            names.append(name)
+            names.append(_ResolvedDirectoryName(name, resolved))
     return names, truncated
 
 
@@ -107,7 +135,20 @@ def list_directory(raw_path: str) -> dict[str, Any]:
     if not path.is_dir():
         raise paths.FilesystemError.not_directory(path)
     names, truncated = _visible_directory_names(path)
-    entries = [_entry_info(path / name, name) for name in names]
+    repo_info_cache: dict[Path, dict[str, Any]] = {}
+    entries = []
+    for name in names:
+        entry_path = path / name
+        # Security must be checked for every child after resolving symlinks.  Reuse that
+        # canonical result for identity so a row does not resolve/stat the same entry twice.
+        resolved = name.resolved if isinstance(name, _ResolvedDirectoryName) else None
+        if resolved is None:
+            # Retain the standalone helper contract for callers/tests which provide plain
+            # names, while normal listings reuse the security scan's canonical result.
+            resolved = paths._normalized_scope_path(entry_path)
+            if paths._path_is_secret(entry_path, resolved=resolved):
+                continue
+        entries.append(_entry_info(entry_path, name, resolved=resolved, repo_info_cache=repo_info_cache))
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
     parent = str(path.parent) if str(path) != "/" else None
     return {

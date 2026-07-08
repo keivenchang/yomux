@@ -572,7 +572,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   padding: var(--space-7) var(--space-9) var(--space-9);
   color: #14171d;
   background: rgba(255, 244, 194, 0.58);
-  border: 1px solid var(--accent-gold);
+  border: 1px solid var(--50-terminal-file-tree-server-update-banner-border-88);
   border-radius: var(--radius-lg);
   box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
@@ -928,7 +928,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: var(--info-pane-bg);
+  background: var(--50-terminal-file-tree-info-pane-bg-5);
 }
 .info-tree-panel .info-pane.info-tree-pane-scrolled::before {
   content: "";
@@ -1060,7 +1060,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-height: 0;
   overflow: auto;
   padding: var(--space-8) var(--space-10);
-  background: var(--info-pane-bg);
+  background: var(--50-terminal-file-tree-info-list-bg-6);
 }
 .info-list > * {
   flex-shrink: 0;
@@ -1165,16 +1165,19 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   max-width: 100%;
   margin: 0 0 var(--space-10);
   padding: var(--space-8) var(--space-10);
-  color: var(--pane-tab-text);
-  background: #151d24;
+  color: var(--50-terminal-file-tree-yoagent-global-fg-7);
+  background: var(--50-terminal-file-tree-yoagent-global-bg-8);
   border: 1px solid #314154;
   border-inline-start: 3px solid var(--active-accent-bright);
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--mono-font);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-9);
 }
 .yoagent-global-head,
 .yoagent-headline {
-  color: #f4f7fb;
+  color: var(--50-terminal-file-tree-yoagent-global-head-fg-23);
 }
 .yoagent-global-head {
   display: flex;
@@ -1207,7 +1210,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-generated,
 .yoagent-empty {
-  color: var(--muted);
+  color: var(--50-terminal-file-tree-yoagent-generated-fg-25);
   font-weight: 500;
 }
 .yoagent-headline {
@@ -1217,10 +1220,13 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-line {
   padding: var(--space-2) 0;
-  color: #d6dee9;
+  color: var(--50-terminal-file-tree-yoagent-line-fg-24);
 }
 .yoagent-global .markdown-body {
   white-space: normal;
+
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-29);
 }
 .yoagent-chat {
   width: 100%;
@@ -1233,6 +1239,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   margin-top: auto;
   padding: var(--space-5) var(--space-6);
   background: var(--panel);
+
+
+  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-content-text-10);
+  --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11);
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-12);
+  border-color: var(--line);
 }
 .yoagent-chat.has-history {
   flex: 1 1 auto;
@@ -1452,11 +1464,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: grid;
   gap: var(--space-5);
   padding: var(--space-7) var(--space-8);
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel2) 88%, var(--active-control-soft-bg));
+  color: var(--50-terminal-file-tree-yoagent-chat-queue-fg-39);
+  background: var(--50-terminal-file-tree-yoagent-chat-queue-bg-40);
   border: 1px dashed var(--active-control-soft-border);
   border-radius: var(--radius-control);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-chat-queue-border-41);
 }
 .yoagent-chat-queue-index {
   display: inline-flex;
@@ -1575,6 +1590,9 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 5px;
   overflow: visible;
   overscroll-behavior: auto;
+
+
+  color: var(--50-terminal-file-tree-conversation-message-fg-19);
 }
 .conversation-message.assistant {
   align-self: flex-start;
@@ -1587,7 +1605,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-message.assistant.yoagent-agent-result {
   border-inline-start-color: var(--accent-gold);
   border-inline-start-width: 6px;
-  background: color-mix(in srgb, var(--accent-gold) 8%, var(--panel2));
+  background: var(--50-terminal-file-tree-yoagent-message-bg-18);
 }
 .yoagent-agent-result-body {
   display: grid;
@@ -1630,17 +1648,17 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  color: var(--muted);
+  color: var(--50-terminal-file-tree-conversation-message-role-fg-26);
   font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
 }
 .yoagent-message:not(.yochat-message) .conversation-message-role { text-transform: uppercase; }
 .yoagent-message-time {
-  color: var(--muted);
+  color: var(--50-terminal-file-tree-yoagent-message-time-fg-27);
   font-weight: 600;
   text-transform: none;
 }
 .yoagent-message-latency {
-  color: var(--muted);
+  color: var(--50-terminal-file-tree-yoagent-message-latency-fg-28);
   font-weight: 600;
   text-transform: none;
   white-space: nowrap;
@@ -1650,7 +1668,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   overflow-x: visible;
   overflow-y: visible;
   overscroll-behavior: auto;
-  color: var(--text);
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-20);
   font: var(--terminal-font-size)/1.35 var(--ui-font);
 }
 /* Rendered Markdown brings its own block layout — keep pre-wrap only for the plain-text fallback/user
@@ -1674,7 +1692,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   max-width: 100%;
   cursor: pointer;
   user-select: none;
-  color: var(--muted);
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-30);
 }
 .yoagent-message-details summary::-webkit-details-marker {
   display: none;
@@ -1699,7 +1717,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   min-width: 0;
   max-height: calc(2 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
   overflow: clip;
-  color: color-mix(in srgb, var(--muted) 78%, var(--text));
+  color: var(--50-terminal-file-tree-yoagent-details-preview-fg-31);
 }
 .yoagent-details-preview.yoagent-thinking-live-preview {
   max-height: calc(5 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
@@ -1713,14 +1731,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   overflow: auto;
   overscroll-behavior: auto;
   padding: var(--space-7) var(--space-8);
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel2) 72%, var(--bg));
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-32);
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-33);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-34);
 }
 .yoagent-message-details pre.yoagent-auxiliary-stream {
-  color: color-mix(in srgb, var(--muted) 72%, var(--text));
-  background: color-mix(in srgb, var(--panel2) 78%, var(--bg));
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-35);
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-36);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-37);
 }
 .yoagent-message-details[open] pre.yoagent-auxiliary-stream {
   max-height: none;
@@ -1730,26 +1754,32 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--accent-gold);
 }
 .yoagent-message-details pre.yoagent-toolcall-stream {
-  color: color-mix(in srgb, var(--accent-gold) 58%, var(--text));
-  border-color: color-mix(in srgb, var(--accent-gold) 35%, var(--line));
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-43);
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-45);
+
+
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-44);
 }
 .yoagent-tc-command {
-  color: var(--code-function);
+  color: var(--50-terminal-file-tree-yoagent-tc-command-fg-46);
   font-weight: 650;
 }
 .yoagent-details-note {
   margin-top: var(--space-5);
-  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+  color: var(--50-terminal-file-tree-yoagent-details-note-fg-38);
 }
 .yoagent-action-card {
   display: grid;
   gap: var(--space-7);
   margin-top: var(--space-7);
   padding: var(--space-8);
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel2) 70%, var(--bg));
+  color: var(--50-terminal-file-tree-yoagent-action-card-fg-47);
+  background: var(--50-terminal-file-tree-yoagent-action-card-bg-48);
   border: 1px solid rgba(112, 167, 255, 0.65);
   border-radius: var(--radius-md);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-card-border-49);
 }
 .yoagent-action-card.sent {
   border-color: var(--active-control-border);
@@ -1762,7 +1792,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   align-items: center;
   gap: var(--space-8);
   justify-content: space-between;
-  color: #dbeafe;
+  color: var(--50-terminal-file-tree-yoagent-action-head-fg-54);
   font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
 }
 .yoagent-action-send {
@@ -1794,11 +1824,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .yoagent-action-row code {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--pane-tab-text);
-  background: var(--paint-white-06);
+  color: var(--50-terminal-file-tree-yoagent-action-row-fg-55);
+  background: var(--50-terminal-file-tree-yoagent-action-row-bg-56);
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   padding: var(--space-1) var(--space-4);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-row-border-57);
 }
 .yoagent-action-text {
   min-width: 0;
@@ -1806,11 +1839,14 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   overflow: auto;
   margin: 0;
   padding: var(--space-7) var(--space-8);
-  color: #eef4ff;
-  background: var(--bg);
+  color: var(--50-terminal-file-tree-yoagent-action-text-fg-58);
+  background: var(--50-terminal-file-tree-yoagent-action-text-bg-59);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   white-space: pre-wrap;
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-text-border-60);
 }
 /* Composer (mockup 044): one rounded container with the input on top and a control row below —
    the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
@@ -1865,20 +1901,15 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   border-radius: 50%;
   background: var(--agent-inactive-marker-bg);
   border: 2px solid var(--yoagent-inactive-backend-dot-border);
-  box-shadow: 0 0 0 1px var(--paint-black-45);
+  box-shadow: var(--50-terminal-file-tree-yoagent-backend-pill-dot-shadow-2);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-backend-pill-dot-border-1);
 }
 .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
   background: var(--pr-status-passing);
-  border-color: color-mix(in srgb, var(--pr-status-passing) 30%, var(--paint-white));
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.48), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 22%, transparent);
-}
-body.theme-light .yoagent-backend-pill-dot {
-  border-color: var(--agent-inactive-marker-border);
-  box-shadow: 0 0 0 1px var(--paint-black-42), 0 0 0 2px rgb(255 255 255 / 0.45);
-}
-body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
-  border-color: color-mix(in srgb, var(--pr-status-passing) 34%, var(--paint-white));
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.38), 0 0 0 3px color-mix(in srgb, var(--pr-status-passing) 24%, transparent);
+  border-color: var(--50-terminal-file-tree-yoagent-composer-pill-backend-border-3);
+  box-shadow: var(--50-terminal-file-tree-yoagent-composer-pill-backend-shadow-4);
 }
 .yoagent-composer-pill select,
 .yoagent-backend-pill select {
@@ -1954,7 +1985,7 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
 .yoagent-global .markdown-body pre {
-  background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
+  background: var(--50-terminal-file-tree-yoagent-chat-bg-62);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   overflow-x: auto;
@@ -1962,140 +1993,10 @@ body.theme-light .yoagent-composer-pill-backend:not(:has(select:disabled)) .yoag
   overscroll-behavior: auto;
   padding: var(--space-8) var(--space-10);
 }
-body.theme-light .info-pane {
-  background: var(--paint-white);
-}
-body.theme-light .info-list {
-  background: var(--paint-white);
-}
-body.theme-light .yoagent-global {
-  color: var(--text);
-  background: var(--lt-bg);
-  border-color: var(--line);
-}
-body.theme-light .yoagent-chat,
-body.theme-light .yoagent-message {
-  --yoagent-content-text: var(--pc-control-hover-fg);
-  --yoagent-detail-text: #334155;
-  color: var(--yoagent-content-text);
-}
-body.theme-light .yoagent-message {
-  background: var(--panel);
-}
-body.theme-light .yoagent-message.assistant {
-  background: color-mix(in srgb, var(--active-control-soft-bg) 78%, var(--paint-white));
-}
-body.theme-light .yoagent-message.assistant.yoagent-agent-result {
-  background: color-mix(in srgb, var(--accent-gold) 10%, var(--paint-white));
-}
-body.theme-light .conversation-message,
-body.theme-light .conversation-message-body,
-body.theme-light .conversation-message-body.markdown-body,
-body.theme-light .conversation-message-body.markdown-body * {
-  color: var(--yoagent-content-text);
-}
-body.theme-light .yoagent-global-head,
-body.theme-light .yoagent-headline,
-body.theme-light .yoagent-line {
-  color: var(--text);
-}
-body.theme-light .yoagent-generated,
-body.theme-light .yoagent-empty,
-body.theme-light .conversation-message-role,
-body.theme-light .yoagent-message-time,
-body.theme-light .yoagent-message-latency {
-  color: var(--yoagent-detail-text);
-}
-body.theme-light .yoagent-global .markdown-body {
-  color: var(--lt-text);
-}
-body.theme-light .yoagent-message-details summary {
-  color: var(--yoagent-detail-text);
-}
-body.theme-light .yoagent-details-preview {
-  color: var(--yoagent-detail-text);
-}
-body.theme-light .yoagent-message-details pre {
-  color: var(--lt-text);
-  background: var(--lt-code-block-bg);
-  border-color: var(--lt-code-block-border);
-}
-body.theme-light .yoagent-message-details pre.yoagent-auxiliary-stream {
-  color: var(--yoagent-detail-text);
-  background: #f7f8fa;
-  border-color: var(--lt-code-block-border);
-}
-body.theme-light .yoagent-details-note {
-  color: var(--yoagent-detail-text);
-}
-body.theme-light .yoagent-chat-queue {
-  color: var(--lt-text);
-  background: color-mix(in srgb, var(--active-control-soft-bg) 72%, var(--paint-white));
-  border-color: var(--active-control-soft-border);
-}
-body.theme-light :is(.yoagent-section-title, .yoagent-compact-action) {
-  color: var(--lt-muted-strong);
-}
 body :is(.yoagent-compact-action, .yoagent-job-confirm, .yoagent-job-cancel):is(:hover, :focus-visible) {
   border-color: var(--active-control-focus-ring);
   color: var(--text);
   outline: 0;
-}
-body.theme-light .yoagent-message-details pre.yoagent-toolcall-stream {
-  color: #7a5b00;
-  background: #fff9e8;
-  border-color: #e3bf57;
-}
-body.theme-light .yoagent-tc-command {
-  color: #005fb8;
-}
-body.theme-light .yoagent-action-card {
-  color: var(--lt-text);
-  background: var(--lt-code-block-bg);
-  border-color: var(--link-soft);
-}
-body.theme-light .yoagent-chat-form {
-  background: color-mix(in srgb, var(--link-soft) 8%, var(--paint-white));
-  border-color: var(--link-soft);
-}
-body.theme-light .yoagent-chat-input {
-  color: var(--lt-text);
-}
-body.theme-light .yoagent-chat-input::placeholder {
-  color: var(--lt-muted-strong);
-}
-body.theme-light .yoagent-action-head {
-  color: var(--yoagent-action-heading-light);
-}
-body.theme-light .yoagent-action-row code {
-  color: var(--lt-text);
-  background: var(--yoagent-action-code-bg-light);
-  border-color: var(--yoagent-action-code-border-light);
-}
-body.theme-light .yoagent-action-text,
-body.theme-light .yoagent-chat .markdown-body pre,
-body.theme-light .yoagent-global .markdown-body pre {
-  color: var(--lt-code-block-text);
-  background: var(--lt-code-block-bg);
-  border-color: var(--lt-code-block-border);
-}
-body.theme-light .yoagent-chat .markdown-body strong,
-body.theme-light .yoagent-global .markdown-body strong {
-  color: var(--lt-text);
-}
-body.theme-light .yoagent-chat .markdown-body em,
-body.theme-light .yoagent-global .markdown-body em {
-  color: #374151;
-}
-body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
-body.theme-light .yoagent-global .markdown-body :not(pre) > code {
-  color: var(--yoagent-action-heading-light);
-  background: var(--yoagent-action-code-bg-light);
-  border-color: var(--yoagent-action-code-border-light);
-}
-body.theme-light .yoagent-chat .markdown-body pre code,
-body.theme-light .yoagent-global .markdown-body pre code {
-  color: var(--lt-code-block-text);
 }
 
 /* YO!chat reuses the shared conversation message/composer owners above. This block owns only its
@@ -2177,12 +2078,11 @@ body.theme-light .yoagent-global .markdown-body pre code {
   white-space: pre-wrap;
 }
 .yochat-message-metadata {
-  color: var(--text-muted-strong);
+  color: var(--50-terminal-file-tree-yochat-message-metadata-fg-78);
   font-weight: 500;
   text-transform: none;
 }
 .yochat-message-metadata .yoagent-message-time { color: inherit; }
-body.theme-light .yochat-message-metadata { color: var(--text-muted-soft); }
 .yochat-introduction {
   border: 1px solid var(--active-control-soft-border);
   background: color-mix(in srgb, var(--active-control-soft-bg) 62%, var(--panel2));
@@ -2419,25 +2319,20 @@ body.theme-light .yochat-message-metadata { color: var(--text-muted-soft); }
   --info-tree-tmux-window-color: var(--pane-tab-active-bg);
   --info-tree-tmux-window-color-hover: var(--pane-tab-active-border);
   --info-tree-ai-color: var(--icon-code);
-  --info-tree-ai-color-hover: #bae6fd;
+  --info-tree-ai-color-hover: var(--50-terminal-file-tree-info-tree-info-tree-ai-color-hover-79);
   --info-tree-path-color: var(--text);
   --info-tree-path-color-hover: var(--text);
   --info-tree-branch-color: var(--link-soft);
   --info-tree-branch-color-hover: var(--link-soft-hover);
   --info-tree-pr-color: var(--info-tree-pr-neutral);
   --info-tree-pr-color-hover: var(--info-tree-pr-neutral-hover);
-  --info-tree-linear-color: #5eead4;
-  --info-tree-linear-color-hover: #99f6e4;
+  --info-tree-linear-color: var(--50-terminal-file-tree-info-tree-info-tree-linear-color-80);
+  --info-tree-linear-color-hover: var(--50-terminal-file-tree-info-tree-info-tree-linear-color-hover-81);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   color: var(--pane-tab-text);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
-}
-body.theme-light .info-tree {
-  --info-tree-ai-color-hover: var(--link-soft);
-  --info-tree-linear-color: var(--git-untracked-badge);
-  --info-tree-linear-color-hover: #115e59;
 }
 .info-tree-group {
   --info-tree-sticky-offset: 0;
@@ -2564,9 +2459,6 @@ body.theme-light .info-tree {
   inline-size: 100%;
   max-width: 100%;
   vertical-align: middle;
-}
-body.theme-light .info-tree-tab-token:not(.active) {
-  color: var(--pc-control-fg);
 }
 button.info-tree-tab-token.active:hover,
 button.info-tree-tab-token.active:focus-visible {
@@ -2932,11 +2824,11 @@ button.info-tree-tab-token.active:focus-visible {
   width: min(56ch, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12);
-  border: 1px solid var(--accent-gold, #f0b85d);
+  border: 1px solid var(--accent-gold);
   border-radius: var(--radius-md);
-  background: #1b2230;
-  color: #e8edf4;
-  box-shadow: 0 6px 20px var(--paint-shadow-45);
+  background: var(--50-terminal-file-tree-server-update-banner-bg-86);
+  color: var(--50-terminal-file-tree-server-update-banner-fg-87);
+  box-shadow: var(--50-terminal-file-tree-server-update-banner-shadow-89);
   font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
 }
 .server-update-banner-msg {
@@ -2969,7 +2861,7 @@ button.info-tree-tab-token.active:focus-visible {
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   background: transparent;
-  color: var(--pr-status-closed);
+  color: var(--50-terminal-file-tree-server-update-banner-dismiss-fg-90);
   font: inherit;
   font-weight: 800;
   padding: var(--space-2) var(--space-8);
@@ -3007,7 +2899,7 @@ body.app-vw-lte-760 .server-update-banner-actions {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  background: #10141b;
+  background: var(--50-terminal-file-tree-modal-bg-85);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -3041,7 +2933,7 @@ body.app-vw-lte-760 .server-update-banner-actions {
 .modal.about-open .modal-dialog {
   width: min(var(--dialog-compact-inline-size), 100%);
   max-height: min(76vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
-  background: var(--panel);
+  background: var(--50-terminal-file-tree-modal-bg-85);
   box-shadow: var(--shadow-elevated);
 }
 .modal.about-open #modalBody {
@@ -3052,9 +2944,9 @@ body.app-vw-lte-760 .server-update-banner-actions {
 .modal.share-open .modal-dialog {
   width: min(var(--dialog-wide-inline-size), 100%);
   max-height: min(80vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
-  background: var(--panel);
+  background: var(--50-terminal-file-tree-modal-bg-83);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 18px 52px var(--paint-shadow-50);
+  box-shadow: var(--50-terminal-file-tree-modal-shadow-84);
 }
 .modal.share-open #modalBody {
   display: block;
@@ -3312,10 +3204,6 @@ body.app-vw-lte-760 .server-update-banner-actions {
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
-body.theme-light .modal.share-open .modal-dialog {
-  background: var(--paint-white);
-  box-shadow: 0 18px 46px rgb(var(--shadow-rgb) / 0.24);
-}
 body.app-vw-lte-760 .share-create-controls {
   grid-template-columns: 1fr;
 }
@@ -3403,9 +3291,6 @@ body.app-vw-lte-760 .share-result-meta {
   color: var(--markdown-link);
   text-decoration: underline;
 }
-body.theme-light .modal.about-open .modal-dialog {
-  background: var(--paint-white);
-}
 body.app-vw-lte-1500 .topbar {
   gap: var(--space-6);
   padding-inline: var(--space-6);
@@ -3465,7 +3350,7 @@ body.app-vw-lte-1080 .latency-meter {
   min-width: 42px;
   grid-template-columns: auto;
 }
-body.app-vw-lte-1080 .actions button {
+body.app-vw-lte-1080 .actions button:not(.topbar-activity--mobile-count-balls) {
   width: var(--compact-icon-button-size);
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
@@ -3523,7 +3408,7 @@ body.app-vw-lte-980 .tabs {
 .file-explorer-path-inline {
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  background: var(--50-terminal-file-tree-file-explorer-path-bg-95);
   direction: ltr;
   text-align: start;
   outline: 0;
@@ -3535,17 +3420,20 @@ body.app-vw-lte-980 .tabs {
   min-width: min(32ch, 100%);
   height: 22px;
   padding: var(--space-2) var(--space-6);
+
+
+  border-color: var(--50-terminal-file-tree-file-explorer-path-border-96);
 }
 .file-explorer-path:focus,
 .file-explorer-path-inline:focus {
   color: var(--text);
-  background: var(--paint-deep-ink-98);
+  background: var(--50-terminal-file-tree-file-explorer-path-bg-98);
   border-color: var(--active-control-border);
   box-shadow: var(--active-control-focus-shadow);
 }
 .file-explorer-path.invalid,
 .file-explorer-path-inline.invalid {
-  color: #ffd5d9;
+  color: var(--50-terminal-file-tree-file-explorer-path-fg-99);
   border-color: var(--bad);
   box-shadow: 0 0 0 2px rgba(255, 102, 115, 0.14);
 }
@@ -3660,31 +3548,31 @@ body.app-vw-lte-980 .tabs {
   background: var(--success-soft-bg);
 }
 .file-tree-row.new-entry:not(.selected) {
-  color: #f7ffdc;
-  background: rgba(245, 197, 66, 0.14);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-100);
+  background: var(--50-terminal-file-tree-file-tree-row-bg-101);
   box-shadow: inset 3px 0 0 var(--accent-gold);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-name {
-  color: var(--git-modified);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-102);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
   background: var(--git-modified-badge);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: var(--git-untracked-name);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-103);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
   background: var(--git-untracked-badge);
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: var(--git-deleted);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-104);
   text-decoration: line-through;
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
   background: var(--git-deleted-badge);
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: var(--git-staged);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-105);
   font-weight: 700;
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
@@ -3724,9 +3612,9 @@ body.app-vw-lte-980 .tabs {
   font-weight: 400;
 }
 .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
-  color: #ffb454;
+  color: var(--50-terminal-file-tree-file-tree-row-fg-91);
   text-decoration: underline;
-  text-decoration-color: rgba(255, 180, 84, 0.55);
+  text-decoration-color: var(--50-terminal-file-tree-file-tree-row-text-decoration-color-92);
   text-underline-offset: 2px;
 }
 .file-tree-repo-meta {
@@ -3873,7 +3761,7 @@ body.app-vw-lte-980 .tabs {
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon {
   position: relative;
-  color: var(--accent-lime);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-109);
 }
 .file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
   content: "";
@@ -3885,11 +3773,13 @@ body.app-vw-lte-980 .tabs {
   opacity: 0.9;
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: var(--accent-lime);
   font-weight: 700;
+
+
+  color: var(--50-terminal-file-tree-file-tree-row-fg-110);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
-  color: var(--file-tree-recency-fresh);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-94);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -3902,8 +3792,8 @@ body.app-vw-lte-980 .tabs {
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
   position: relative;
-  color: var(--accent-lime);
-  text-shadow: 0 0 8px rgba(196, 249, 112, 0.35);
+  color: var(--50-terminal-file-tree-file-tree-row-fg-111);
+  text-shadow: var(--50-terminal-file-tree-file-tree-row-text-shadow-112);
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
   content: "";
@@ -3914,30 +3804,7 @@ body.app-vw-lte-980 .tabs {
   height: 5px;
   border-radius: 50%;
   background: var(--accent-gold);
-  box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
-}
-/* ============================================================================
-   Light mode: the update banner is a dark navy slab, and the file-tree
-   "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
-   text that vanishes on the white tree. Darken the text; strengthen the selection
-   ring (the --file-selection-* fill/border tokens are already theme-aware).
-   ============================================================================ */
-body.theme-light .server-update-banner {
-  background: var(--paint-white);
-  color: var(--pc-control-fg);
-  border-color: #d68c1e;
-  box-shadow: 0 6px 20px var(--paint-overlay-slate-18);
-}
-body.theme-light .server-update-banner-dismiss {
-  color: var(--lt-muted);
-}
-body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
-  color: #b06a00;
-  text-decoration-color: rgba(176, 106, 0, 0.6);
-}
-body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name,
-body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
-  color: #3f6312;
+  box-shadow: var(--50-terminal-file-tree-file-tree-row-shadow-113);
 }
 .file-tree-name {
   flex: 0 1 auto;
@@ -4017,8 +3884,11 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
 }
 .file-tree-git-status.file-tree-git-status-unknown {
   border: 1px solid rgba(226, 232, 240, 0.16);
-  background: rgba(226, 232, 240, 0.10) !important;
-  color: rgba(226, 232, 240, 0.46);
+  background: var(--50-terminal-file-tree-file-tree-git-status-bg-107);
+  color: var(--50-terminal-file-tree-file-tree-git-status-fg-108);
+
+
+  border-color: var(--50-terminal-file-tree-file-tree-git-status-border-106);
 }
 .file-tree-date {
   display: inline-flex;
@@ -4072,56 +3942,9 @@ body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-
   left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
   border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
-}
-body.theme-light .file-explorer-path,
-body.theme-light .file-explorer-path-inline {
-  background: rgba(255, 255, 255, 0.58);
-  border-color: rgba(37, 99, 235, 0.18);
-}
-body.theme-light .file-explorer-path:focus,
-body.theme-light .file-explorer-path-inline:focus {
-  background: var(--paint-white);
-}
-body.theme-light .file-explorer-path.invalid,
-body.theme-light .file-explorer-path-inline.invalid {
-  color: var(--bad);
-}
-body.theme-light .file-tree-row.new-entry:not(.selected) {
-  color: #4f3600;
-  background: rgba(183, 121, 31, 0.16);
-}
-body.theme-light .file-tree-row.git-modified:not(.selected) .file-tree-name {
-  color: #8a5a00;
-}
-body.theme-light .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: var(--success-text-strong);
-}
-body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: var(--danger-strong-hover);
-}
-body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: var(--good);
-}
-body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
-  border-color: var(--paint-overlay-slate-12);
-  background: var(--paint-overlay-slate-06) !important;
-  color: rgb(var(--overlay-slate-rgb) / 0.36);
-}
-body.theme-light .file-tree-row.kind-dir.loading-children > .file-tree-icon {
-  color: var(--good);
-}
-body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: var(--good);
-}
-body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
-  color: var(--good);
-  text-shadow: none;
-}
-body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px rgba(122, 160, 0, 0.55);
-}
-body.theme-light .file-tree-children::before {
-  border-left-color: rgba(100, 116, 139, 0.28);
+
+
+  border-left-color: var(--50-terminal-file-tree-file-tree-children-border-left-114);
 }
 /* File Explorer contains a tree column (left) and an editor column that grows when a file is opened. */
 .file-explorer-tree-col {
@@ -4261,4 +4084,97 @@ body.theme-light .file-tree-children::before {
   color: var(--active-accent-text);
   font: var(--ui-font-size-sm) var(--mono-font);
   box-shadow: 0 1px 0 var(--active-accent-text);
+}
+
+/* Theme-token consumers without a pre-existing local owner. */
+.yoagent-message {
+
+  --yoagent-content-text: var(--50-terminal-file-tree-yoagent-message-yoagent-content-text-13);
+  --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-message-yoagent-detail-text-14);
+  color: var(--50-terminal-file-tree-yoagent-message-fg-15);
+  background: var(--50-terminal-file-tree-yoagent-message-bg-16);
+  border-color: var(--line);
+}
+.yoagent-message.assistant {
+
+  background: var(--50-terminal-file-tree-yoagent-message-bg-17);
+}
+.conversation-message-body.markdown-body {
+
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-21);
+}
+.conversation-message-body.markdown-body * {
+
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-22);
+}
+:is(.yoagent-section-title, .yoagent-compact-action) {
+
+  color: var(--50-terminal-file-tree-yoagent-section-title-fg-42);
+}
+.yoagent-chat-form {
+
+  background: var(--50-terminal-file-tree-yoagent-chat-form-bg-50);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-form-border-51);
+}
+.yoagent-chat-input {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-input-fg-52);
+}
+.yoagent-chat-input::placeholder {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-input-fg-53);
+}
+.yoagent-chat .markdown-body pre {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-61);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-border-63);
+}
+.yoagent-global .markdown-body pre {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-64);
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-65);
+}
+.yoagent-chat .markdown-body strong {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-66);
+}
+.yoagent-global .markdown-body strong {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-67);
+}
+.yoagent-chat .markdown-body em {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-68);
+}
+.yoagent-global .markdown-body em {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-69);
+}
+.yoagent-chat .markdown-body :not(pre) > code {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-70);
+  background: var(--50-terminal-file-tree-yoagent-chat-bg-71);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-border-72);
+}
+.yoagent-global .markdown-body :not(pre) > code {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-73);
+  background: var(--50-terminal-file-tree-yoagent-global-bg-74);
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-75);
+}
+.yoagent-chat .markdown-body pre code {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-76);
+}
+.yoagent-global .markdown-body pre code {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-77);
+}
+.info-tree-tab-token:not(.active) {
+
+  color: var(--50-terminal-file-tree-info-tree-tab-token-fg-82);
+}
+body .file-explorer-path-inline {
+
+  border-color: var(--50-terminal-file-tree-file-explorer-path-inline-border-97);
 }

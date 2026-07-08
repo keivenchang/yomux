@@ -130,45 +130,29 @@
   transform: rotate(90deg);
 }
 .js-debug-graph-view {
-  --js-debug-idle-agent-status: #3f4754;
-  --js-debug-agent-attention: var(--bad);
-  --js-debug-agent-working: var(--good);
-  --js-debug-agent-transition: var(--accent-gold);
+  --js-debug-idle-agent-status: var(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1);
+  --js-debug-agent-attention: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2);
+  --js-debug-agent-working: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3);
+  --js-debug-agent-transition: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4);
   --js-debug-agent-status-bar-opacity: 0.82;
   --js-debug-agent-idle-bar-opacity: 0.3;
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
   --js-debug-bad-connection-rgb: 220 38 38;
-  --js-debug-agent-token-cyan: #00b7ff;
-  --js-debug-agent-token-orange: #ff7a00;
-  --js-debug-agent-token-magenta: #f000d5;
-  --js-debug-agent-token-beige: #f4d08a;
-  --js-debug-agent-token-turquoise: #31dca0;
-  --js-debug-agent-token-rose: #ff4f70;
-  --js-debug-agent-token-violet: #9b6cff;
-  --js-debug-agent-token-pattern-ink: var(--paint-white);
-  --js-debug-agent-token-pattern-ink-rgb: 255 255 255;
+  --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
+  --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
+  --js-debug-agent-token-magenta: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7);
+  --js-debug-agent-token-beige: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8);
+  --js-debug-agent-token-turquoise: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9);
+  --js-debug-agent-token-rose: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10);
+  --js-debug-agent-token-violet: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11);
+  --js-debug-agent-token-pattern-ink: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12);
+  --js-debug-agent-token-pattern-ink-rgb: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13);
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: auto;
-}
-body.theme-light .js-debug-graph-view {
-  --js-debug-idle-agent-status: var(--editor-line-number);
-  /* Keep the agent-state chart distinct on white without changing its dark-theme palette. */
-  --js-debug-agent-attention: #cf1625;
-  --js-debug-agent-working: #17813a;
-  --js-debug-agent-transition: #bf6a00;
-  --js-debug-agent-token-cyan: #0074a4;
-  --js-debug-agent-token-orange: var(--icon-archive);
-  --js-debug-agent-token-magenta: #b0009f;
-  --js-debug-agent-token-beige: #805b1c;
-  --js-debug-agent-token-turquoise: #087c5b;
-  --js-debug-agent-token-rose: #c21f45;
-  --js-debug-agent-token-violet: #5b21d1;
-  --js-debug-agent-token-pattern-ink: var(--paint-black);
-  --js-debug-agent-token-pattern-ink-rgb: 0 0 0;
 }
 .js-debug-toolbar {
   justify-content: space-between;
@@ -785,7 +769,7 @@ body.theme-light .js-debug-graph-view {
 .info-refresh:hover,
 .info-refresh:focus-visible {
   border-color: var(--active-control-border);
-  color: #f2ffe8;
+  color: var(--30-preferences-changes-info-refresh-fg-17);
 }
 .info-refresh.loading {
   cursor: wait;
@@ -823,6 +807,13 @@ body.theme-light .js-debug-graph-view {
   color: var(--muted);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-sm);
+
+
+  --changes-row-hover-bg: var(--30-preferences-changes-changes-toolbar-changes-row-hover-bg-33);
+  --changes-folder-bg: var(--30-preferences-changes-changes-toolbar-changes-folder-bg-34);
+  --changes-indent-line: var(--30-preferences-changes-changes-toolbar-changes-indent-line-35);
+  --changes-path-text: var(--30-preferences-changes-changes-toolbar-changes-path-text-36);
+  --changes-icon-text: var(--30-preferences-changes-changes-toolbar-changes-icon-text-37);
 }
 .file-explorer-changes-panel:hover > .changes-toolbar,
 .file-explorer-changes-panel:focus-within > .changes-toolbar {
@@ -834,7 +825,7 @@ body.theme-light .js-debug-graph-view {
 .diff-ref-input,
 .diff-ref-control input {
   height: 24px;
-  background: var(--panel2);
+  background: var(--30-preferences-changes-changes-control-bg-15);
   font: inherit;
 }
 .diff-ref-controls {
@@ -897,6 +888,9 @@ body.theme-light .js-debug-graph-view {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-elevated);
   font-family: var(--ui-font);
+
+
+  background: var(--30-preferences-changes-diff-ref-suggestion-popover-bg-16);
 }
 .diff-ref-suggestion-popover[hidden] {
   display: none;
@@ -1029,7 +1023,7 @@ body.theme-light .js-debug-graph-view {
 .changes-warning,
 .changes-empty {
   padding: var(--space-8);
-  color: #ff8a8a;
+  color: var(--30-preferences-changes-changes-error-fg-18);
   font-size: var(--ui-font-size-sm);
 }
 .changes-empty {
@@ -1043,6 +1037,13 @@ body.theme-light .js-debug-graph-view {
   margin-bottom: var(--space-10);
   min-inline-size: 0;
   overflow: hidden;
+
+
+  --changes-row-hover-bg: var(--30-preferences-changes-changes-repo-group-changes-row-hover-bg-38);
+  --changes-folder-bg: var(--30-preferences-changes-changes-repo-group-changes-folder-bg-39);
+  --changes-indent-line: var(--30-preferences-changes-changes-repo-group-changes-indent-line-40);
+  --changes-path-text: var(--30-preferences-changes-changes-repo-group-changes-path-text-41);
+  --changes-icon-text: var(--30-preferences-changes-changes-repo-group-changes-icon-text-42);
 }
 .changes-repo-head {
   width: 100%;
@@ -1149,7 +1150,7 @@ body.theme-light .js-debug-graph-view {
   color: rgba(174, 184, 199, 0.62);
 }
 .changes-diff-add {
-  color: #78dd6f;
+  color: var(--30-preferences-changes-changes-diff-add-fg-43);
   font-weight: 800;
 }
 .changes-diff-add-neutral {
@@ -1157,7 +1158,7 @@ body.theme-light .js-debug-graph-view {
   font-weight: 800;
 }
 .changes-diff-remove {
-  color: var(--bad);
+  color: var(--30-preferences-changes-changes-diff-remove-fg-44);
   font-weight: 800;
 }
 .changes-diff-file-label {
@@ -1334,12 +1335,12 @@ body.theme-light .js-debug-graph-view {
   font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .preferences-setting-advisory {
-  --preferences-advisory-text: #f7e7b9;
-  --preferences-advisory-bg: color-mix(in srgb, var(--accent-gold) 14%, var(--panel2));
-  --preferences-advisory-border: color-mix(in srgb, var(--accent-gold) 54%, var(--line));
-  --preferences-advisory-code-text: #fff4c7;
-  --preferences-advisory-code-bg: rgb(var(--overlay-slate-rgb) / 0.38);
-  --preferences-advisory-code-border: color-mix(in srgb, var(--accent-gold) 42%, var(--line));
+  --preferences-advisory-text: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-text-19);
+  --preferences-advisory-bg: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-bg-20);
+  --preferences-advisory-border: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-border-21);
+  --preferences-advisory-code-text: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-text-22);
+  --preferences-advisory-code-bg: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-bg-23);
+  --preferences-advisory-code-border: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-border-24);
   grid-column: 1 / -1;
   padding: var(--space-6) var(--space-8);
   color: var(--preferences-advisory-text);
@@ -1412,35 +1413,38 @@ body.theme-light .js-debug-graph-view {
   gap: var(--space-12);
   margin-top: var(--space-12);
   padding: var(--space-10);
-  color: var(--danger-panel-text);
-  background: var(--danger-panel-bg);
+  color: var(--30-preferences-changes-preferences-global-reset-fg-66);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-67);
   border: 1px solid var(--danger-panel-border);
   border-radius: var(--radius-md);
+
+
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-68);
 }
 .preferences-global-reset.confirming {
-  background: var(--danger-panel-confirming-bg);
-  border-color: var(--danger-panel-confirming-border);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-69);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-70);
   box-shadow: 0 0 0 2px var(--danger-panel-confirming-ring);
 }
 .preferences-global-reset-title {
-  color: var(--danger-panel-title);
+  color: var(--30-preferences-changes-preferences-global-reset-title-fg-71);
   font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .preferences-global-reset-warning {
   margin-top: var(--space-3);
-  color: var(--danger-panel-warning);
+  color: var(--30-preferences-changes-preferences-global-reset-warning-fg-72);
   font: 600 var(--ui-font-size-xs)/1.28 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all {
   color: var(--danger-action-text);
-  background: var(--danger-action-bg);
-  border-color: var(--danger-action-border);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-73);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-74);
   font: 600 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all:hover,
 .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: var(--danger-action-hover-bg);
-  border-color: var(--danger-action-hover-border);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-75);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-76);
 }
 .preferences-reset-confirm {
   display: inline-flex;
@@ -1463,8 +1467,8 @@ body.theme-light .js-debug-graph-view {
 }
 .preferences-reset-cancel {
   color: var(--text);
-  background: var(--paint-white-06);
-  border-color: rgba(255, 255, 255, 0.22);
+  background: var(--30-preferences-changes-preferences-reset-cancel-bg-77);
+  border-color: var(--30-preferences-changes-preferences-reset-cancel-border-78);
 }
 
 .command-palette {
@@ -1481,19 +1485,21 @@ body.theme-light .js-debug-graph-view {
   max-height: min(70vh, 760px);
   overflow: hidden;
   color: var(--text);
-  background: var(--overlay-surface);
+  background: var(--30-preferences-changes-command-palette-dialog-bg-45);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: var(--radius-lg);
   box-shadow:
-    0 -4px 14px var(--paint-black-34),
-    0 24px 70px rgba(0, 0, 0, 0.62);
+    var(--30-preferences-changes-command-palette-dialog-shadow-47);
+
+
+  border-color: var(--30-preferences-changes-command-palette-dialog-border-46);
 }
 .command-palette-input {
   width: 100%;
   height: 38px;
   padding: var(--space-7) var(--space-10);
   color: var(--text);
-  background: var(--overlay-input-bg);
+  background: var(--30-preferences-changes-command-palette-input-bg-51);
   border: 0;
   border-bottom: 1px solid var(--line);
   outline: 0;
@@ -1537,7 +1543,7 @@ body.theme-light .js-debug-graph-view {
   gap: var(--space-8);
   align-items: center;
   padding: var(--space-5) var(--space-7);
-  color: var(--pane-tab-text);
+  color: var(--30-preferences-changes-command-palette-row-fg-52);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -1547,13 +1553,13 @@ body.theme-light .js-debug-graph-view {
 }
 .command-palette-row.active,
 .command-palette-row:hover {
-  color: var(--pane-tab-panel-head-text);
-  background: var(--overlay-option-hover-bg);
-  border-color: var(--accent-gold);
+  color: var(--30-preferences-changes-command-palette-row-fg-53);
+  background: var(--30-preferences-changes-command-palette-row-bg-54);
+  border-color: var(--30-preferences-changes-command-palette-row-border-55);
 }
 .command-palette-group,
 .command-palette-keybinding {
-  color: #9fb0c4;
+  color: var(--30-preferences-changes-command-palette-group-fg-56);
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .command-palette-group {
@@ -1607,7 +1613,7 @@ body.theme-light .js-debug-graph-view {
   box-decoration-break: clone;
 }
 .command-palette-detail {
-  color: var(--pr-status-closed);
+  color: var(--30-preferences-changes-command-palette-detail-fg-57);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .command-palette-keybinding {
@@ -1635,10 +1641,13 @@ body.theme-light .js-debug-graph-view {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: var(--overlay-surface);
+  background: var(--30-preferences-changes-keyboard-shortcuts-dialog-bg-48);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
   border-radius: var(--radius-lg);
-  box-shadow: 0 24px 70px var(--paint-shadow-62);
+  box-shadow: var(--30-preferences-changes-keyboard-shortcuts-dialog-shadow-50);
+
+
+  border-color: var(--30-preferences-changes-keyboard-shortcuts-dialog-border-49);
 }
 .keyboard-shortcuts-head {
   display: flex;
@@ -1665,7 +1674,7 @@ body.theme-light .js-debug-graph-view {
 .keyboard-shortcuts-close:hover,
 .keyboard-shortcuts-close:focus-visible {
   border-color: var(--accent-gold);
-  background: var(--paint-white-08);
+  background: var(--30-preferences-changes-keyboard-shortcuts-close-bg-58);
 }
 .keyboard-shortcuts-body {
   min-height: 0;
@@ -1706,18 +1715,27 @@ body.theme-light .js-debug-graph-view {
 }
 .keyboard-shortcut-row {
   grid-template-columns: minmax(0, 1fr) auto;
+
+
+  border-bottom-color: var(--30-preferences-changes-keyboard-shortcut-row-border-bottom-59);
 }
 .keyboard-shortcut-row kbd {
   padding: var(--space-1) var(--space-4);
-  color: var(--pane-tab-text);
-  background: var(--overlay-input-bg);
+  color: var(--30-preferences-changes-keyboard-shortcut-row-fg-61);
+  background: var(--30-preferences-changes-keyboard-shortcut-row-bg-62);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
+
+
+  border-color: var(--30-preferences-changes-keyboard-shortcut-row-border-63);
 }
 .keyboard-legend-row {
   grid-template-columns: minmax(34px, max-content) minmax(0, 1fr);
+
+
+  border-bottom-color: var(--30-preferences-changes-keyboard-legend-row-border-bottom-60);
 }
 .keyboard-legend-sample {
   min-width: 34px;
@@ -1776,7 +1794,10 @@ body.theme-light .js-debug-graph-view {
   display: inline-flex;
   border-radius: var(--radius-pill);
   border: 1px solid var(--paint-white-28);
-  box-shadow: 0 0 0 1px var(--paint-black-34);
+  box-shadow: var(--30-preferences-changes-keyboard-legend-swatch-shadow-65);
+
+
+  border-color: var(--30-preferences-changes-keyboard-legend-swatch-border-64);
 }
 .keyboard-legend-swatch-merged {
   background: var(--pr-status-merged);
@@ -1819,55 +1840,9 @@ body.theme-light .js-debug-graph-view {
 .preferences-setting-control textarea {
   min-width: 0;
   width: 100%;
-  background: #10151d;
+  background: var(--30-preferences-changes-preferences-setting-control-bg-14);
   font: var(--ui-font-size-sm) var(--mono-font);
   padding: var(--space-5) var(--space-6);
-}
-body.theme-light .preferences-setting-control input[type="number"],
-body.theme-light .preferences-setting-control input[type="text"],
-body.theme-light .preferences-setting-control select,
-body.theme-light .preferences-setting-control textarea,
-body.theme-light .changes-control select,
-:where(body.theme-light) .changes-refresh,
-body.theme-light .diff-ref-input,
-body.theme-light .diff-ref-control input,
-body.theme-light .diff-ref-suggestion-popover {
-  background: var(--paint-white);
-}
-body.theme-light .info-refresh:hover,
-body.theme-light .info-refresh:focus-visible {
-  color: var(--file-selection-text);
-}
-body.theme-light .changes-error {
-  color: var(--danger-strong-hover);
-}
-body.theme-light .preferences-setting-advisory {
-  --preferences-advisory-text: #372707;
-  --preferences-advisory-bg: #fff0b3;
-  --preferences-advisory-border: #c98f13;
-  --preferences-advisory-code-text: var(--lt-text);
-  --preferences-advisory-code-bg: #fffaf0;
-  --preferences-advisory-code-border: #d0a43a;
-}
-body.theme-light .preferences-setting-advisory .preferences-inline-action {
-  color: var(--good);
-  background: var(--panel);
-  border-color: color-mix(in srgb, var(--good) 46%, var(--line));
-}
-body.theme-light .file-explorer-changes-panel,
-body.theme-light .changes-toolbar,
-body.theme-light .changes-repo-group {
-  --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
-  --changes-folder-bg: var(--lt-panel);
-  --changes-indent-line: var(--tree-indent-line);
-  --changes-path-text: var(--lt-muted);
-  --changes-icon-text: var(--menu-accent);
-}
-body.theme-light .changes-diff-add {
-  color: var(--success-text-strong);
-}
-body.theme-light .changes-diff-remove {
-  color: var(--danger-strong-hover);
 }
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
@@ -2046,92 +2021,28 @@ body.theme-light .changes-diff-remove {
   display: block;
 }
 .agent-icon.codex {
-  color: var(--paint-white);
+  color: var(--30-preferences-changes-agent-icon-fg-79);
 }
 .agent-icon.codex svg {
   transform: scale(1.16);
   transform-origin: center;
 }
 .agent-icon.claude {
-  color: var(--paint-white);
+  color: var(--30-preferences-changes-agent-icon-fg-80);
 }
-/* ============================================================================
-   Light mode: dialogs and warning chrome hardcode dark fills + light
-   text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
-   → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
-   glyphs are invisible on the white Changes panel → darken.
-   ============================================================================ */
-body.theme-light .command-palette-dialog,
-body.theme-light .keyboard-shortcuts-dialog {
-  background: var(--panel);
-  border-color: var(--line);
-  box-shadow: 0 24px 70px rgb(var(--overlay-slate-rgb) / 0.22);
+
+/* Theme-token consumers without a pre-existing local owner. */
+.preferences-setting-advisory .preferences-inline-action {
+
+  color: var(--30-preferences-changes-preferences-setting-advisory-fg-25);
+  background: var(--30-preferences-changes-preferences-setting-advisory-bg-26);
+  border-color: var(--30-preferences-changes-preferences-setting-advisory-border-27);
 }
-body.theme-light .command-palette-input {
-  background: var(--panel2);
-}
-body.theme-light .command-palette-row {
-  color: var(--pc-control-fg);
-}
-body.theme-light .command-palette-row.active,
-body.theme-light .command-palette-row:hover {
-  color: var(--pc-control-fg);
-  background: var(--active-control-soft-bg);
-  border-color: var(--active-control-soft-border);
-}
-body.theme-light .command-palette-group,
-body.theme-light .command-palette-detail,
-body.theme-light .command-palette-keybinding {
-  color: var(--muted);
-}
-body.theme-light .keyboard-shortcuts-close:hover,
-body.theme-light .keyboard-shortcuts-close:focus-visible {
-  background: var(--paint-overlay-slate-06);
-}
-body.theme-light .keyboard-shortcut-row {
-  border-bottom-color: var(--paint-overlay-slate-08);
-}
-body.theme-light .keyboard-legend-row {
-  border-bottom-color: var(--paint-overlay-slate-08);
-}
-body.theme-light .keyboard-shortcut-row kbd {
-  color: var(--pc-control-fg);
-  background: var(--panel2);
-  border-color: var(--paint-overlay-slate-18);
-}
-body.theme-light .keyboard-legend-swatch {
-  border-color: rgb(var(--overlay-slate-rgb) / 0.24);
-  box-shadow: 0 0 0 1px var(--paint-overlay-slate-08);
-}
-body.theme-light .preferences-global-reset {
-  color: var(--danger-light-text);
-  background: var(--danger-panel-light-bg);
-  border-color: rgba(220, 38, 38, 0.46);
-}
-body.theme-light .preferences-global-reset.confirming {
-  background: var(--danger-panel-light-confirming-bg);
-  border-color: var(--danger-panel-light-confirming-border);
-}
-body.theme-light .preferences-global-reset-title {
-  color: var(--danger-strong-border);
-}
-body.theme-light .preferences-global-reset-warning {
-  color: var(--danger-light-text);
-}
-body.theme-light .preferences-global-reset .preferences-reset-all {
-  background: var(--danger-strong);
-  border-color: var(--danger-action-light-border);
-}
-body.theme-light .preferences-global-reset .preferences-reset-all:hover,
-body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: var(--danger-strong-hover);
-  border-color: var(--danger-strong);
-}
-body.theme-light .preferences-reset-cancel {
-  background: var(--paint-overlay-slate-05);
-  border-color: var(--paint-overlay-slate-18);
-}
-body.theme-light .agent-icon.codex,
-body.theme-light .agent-icon.claude {
-  color: var(--pc-control-fg);
+body .file-explorer-changes-panel {
+
+  --changes-row-hover-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28);
+  --changes-folder-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29);
+  --changes-indent-line: var(--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30);
+  --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
+  --changes-icon-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-icon-text-32);
 }

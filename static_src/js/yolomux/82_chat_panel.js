@@ -12,8 +12,10 @@ const chatIntroductionGreetingKeys = Object.freeze([
 const chatRecentEmojiStorageKey = 'yolomux.chat.recentEmoji';
 const chatRecentEmojiLimit = 24;
 const chatMessageMaxBytes = 8 * 1024;
-const chatTypingRefreshMs = 3000;
-const chatRelativeTimeRefreshMs = 5000;
+// Network-backed refreshes deliberately avoid round boundaries so independently opened
+// clients do not herd onto the same server tick.
+const chatTypingRefreshMs = 3001;
+const chatRelativeTimeRefreshMs = 5003;
 const chatRelativeTimeLimitSeconds = 4 * 60 * 60;
 const chatNotificationMaxAgeSeconds = 8 * 60 * 60;
 const chatTailThresholdPx = 32;

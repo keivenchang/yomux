@@ -100,11 +100,11 @@ const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
-const jsDebugStatsPollFastMs = 2000;
-const jsDebugStatsPollMs = 30000;
+const jsDebugStatsPollFastMs = 2001;
+const jsDebugStatsPollMs = 30001;
 const jsDebugStatsPollTimeoutMs = 5000;
 const jsDebugStatsHistoryFlushMs = 30000;
-const jsDebugGraphRefreshMs = 30000;
+const jsDebugGraphRefreshMs = 30001;
 // A request-driven client can be quiet between normal polls. Only mark the portion
 // after this continuous silence as missing communication, rather than treating each
 // empty raw bucket as a connection failure.

@@ -153,6 +153,9 @@ class SessionFilesService:
     """Own cache, work, and pruning records for the session-files payload pipeline."""
 
     cache_lock: threading.RLock = field(default_factory=threading.RLock)
+    compute_slot_condition: threading.Condition = field(default_factory=lambda: threading.Condition(threading.RLock()))
+    active_compute_slots: int = 0
+    peak_compute_slots: int = 0
     cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = field(default_factory=dict)
     work_records: dict[tuple[Any, ...], SessionFilesWorkRecord] = field(default_factory=dict)
     git_snapshot_records: dict[tuple[Any, ...], SessionFilesGitSnapshotRecord] = field(default_factory=dict)
@@ -170,6 +173,22 @@ class SessionFilesService:
                 record.owner_thread_id = thread_id
                 return record, True
             return record, record.owner_thread_id == thread_id
+
+    def acquire_compute_slot(self, limit: int) -> None:
+        """Queue distinct cold rebuilds without defeating per-key single-flight."""
+        maximum = max(1, int(limit))
+        with self.compute_slot_condition:
+            while self.active_compute_slots >= maximum:
+                self.compute_slot_condition.wait()
+            self.active_compute_slots += 1
+            self.peak_compute_slots = max(self.peak_compute_slots, self.active_compute_slots)
+
+    def release_compute_slot(self) -> None:
+        with self.compute_slot_condition:
+            if self.active_compute_slots <= 0:
+                raise RuntimeError("session-files compute slot released without an owner")
+            self.active_compute_slots -= 1
+            self.compute_slot_condition.notify()
 
 
 @dataclass

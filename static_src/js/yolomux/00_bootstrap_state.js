@@ -120,38 +120,70 @@ function shareBootstrapFinderSession() {
   const session = String(shareBootstrapFinderState().session || '').trim();
   return session && sessions.includes(session) ? session : '';
 }
-const shareHostDimensions = new Map();
+// One lifecycle record owns all state associated with a share sender/session.  In
+// particular, teardown removes the record rather than trying to remember every
+// independent replay map that may have acquired state for that key.
+const shareSenderRecords = new Map();
+function shareSenderRecord(key, options = {}) {
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return null;
+  let record = shareSenderRecords.get(cleanKey) || null;
+  if (!record && options.create !== false) {
+    record = {
+      connection: null,
+      dimensions: null,
+      lastFrame: null,
+      pointer: null,
+      popupSequence: 0,
+      replayScrollPublish: null,
+      scrollPublish: null,
+      scrollTarget: null,
+    };
+    shareSenderRecords.set(cleanKey, record);
+  }
+  return record;
+}
+function deleteShareSenderRecord(key) {
+  const cleanKey = String(key || '').trim();
+  const record = shareSenderRecords.get(cleanKey);
+  if (!record) return;
+  for (const state of [record.pointer, record.scrollPublish, record.replayScrollPublish]) {
+    if (state?.hideTimer) clearTimeout(state.hideTimer);
+    if (state?.timer) clearTimeout(state.timer);
+  }
+  record.pointer?.ghost?.remove?.();
+  shareSenderRecords.delete(cleanKey);
+}
+function shareSenderRecordEntries(field) {
+  return Array.from(shareSenderRecords.entries()).filter(([, record]) => record?.[field] != null);
+}
 if (shareViewMode && shareBootstrap?.session && shareBootstrap?.hostDims) {
-  shareHostDimensions.set(String(shareBootstrap.session), {
+  shareSenderRecord(shareBootstrap.session).dimensions = {
     rows: Number(shareBootstrap.hostDims.rows) || 0,
     cols: Number(shareBootstrap.hostDims.cols) || 0,
-  });
+  };
 }
 if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.hostDimsBySession === 'object') {
   for (const [session, dims] of Object.entries(shareBootstrap.hostDimsBySession)) {
-    shareHostDimensions.set(String(session), {
+    shareSenderRecord(session).dimensions = {
       rows: Number(dims?.rows) || 0,
       cols: Number(dims?.cols) || 0,
-    });
+    };
   }
 }
 let activeShare = null;
 let activeShares = [];
 let shareCreateErrorPayload = null;
-const shareHostConnectionRecords = new Map();
 let shareMirrorEpoch = 1;
 let shareMirrorSequence = 0;
 let shareReplayMirrorEpoch = 1;
 let shareReplayMirrorSequence = 0;
-const shareMirrorLastFrameBySender = new Map();
 let shareUiStatePublishTimer = null;
 let shareViewportPublishTimer = null;
 let shareAppearancePublishTimer = null;
 let sharePointerFramePending = false;
 let sharePointerLastEvent = null;
 let sharePointerLastPublishedAt = -Infinity;
-const shareScrollPublishTimers = new Map();
-const shareScrollTargetRecords = new Map();
 let shareScrollSnapshotGeneration = 0;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
@@ -163,7 +195,6 @@ let shareGeometryResyncInFlight = false;
 let shareGeometryResyncLastStartedAt = 0;
 let shareGeometryRepairInFlight = false;
 const shareAppliedTextWrapMetricsByKey = new Map();
-const sharePointerRecords = new Map();
 let applyingShareRemoteScroll = false;
 let applyingShareRemoteUiState = 0;
 let sharePopupLayerNode = null;
@@ -197,7 +228,6 @@ let shareReplayHostKeyframeSuppressedCount = 0;
 let shareReplayTopologyKeyframeTimer = null;
 let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
-const sharePopupLayerLastSeqBySender = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -541,7 +571,7 @@ const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
-const fileExplorerRefreshIdleMs = 1500;
+const fileExplorerRefreshIdleMs = 1501;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
@@ -1480,6 +1510,7 @@ const backgroundOwnerStatusState = {
   loading: false,
   error: '',
   request: null,
+  updatedAt: 0,
   guard: makeGenerationGuard(),
 };
 const yoagentStartupState = {

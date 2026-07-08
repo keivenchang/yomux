@@ -39,6 +39,23 @@ def response_headers(handler: Handler) -> dict[str, str]:
     return {name.lower(): value for name, value in handler.sent_headers}
 
 
+def test_keepalive_request_boundary_resets_response_profile_state(monkeypatch):
+    handler = object.__new__(Handler)
+    handler._http_response_compute_ms = 37.0
+    handler._http_response_performance_details = {"html_page": True}
+    observed = {}
+
+    def base_handle_one_request(self):
+        observed["compute_ms"] = self._http_response_compute_ms
+        observed["details"] = self._http_response_performance_details
+
+    monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", base_handle_one_request)
+
+    handler.handle_one_request()
+
+    assert observed == {"compute_ms": None, "details": None}
+
+
 def test_static_asset_errors_localize_without_exposing_read_failure(monkeypatch, caplog):
     monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     web.bootstrap_locale_catalogs.cache_clear()

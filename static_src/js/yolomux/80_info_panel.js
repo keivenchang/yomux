@@ -94,8 +94,8 @@ function bindInfoPanel(panel) {
     const session = button.dataset.infoOpenAiTab || '';
     const windowIndex = button.dataset.infoOpenAiWindow || '';
     if (!session) return;
-    if (windowIndex !== '' && typeof tmuxWindow === 'function') {
-      tmuxWindow(session, {windowIndex}, button.textContent || t('terminal.window.title', {name: windowIndex}));
+    if (windowIndex !== '') {
+      activateTmuxWindowFromUserAction(session, windowIndex, button.textContent || t('terminal.window.title', {name: windowIndex}));
     }
     selectSession(session, {userInitiated: true});
   });

@@ -57,6 +57,29 @@ def test_get_agent_auth_honors_force_query():
     assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
 
 
+def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monkeypatch):
+    calls = []
+    real_parse_qs = http_routes.parse_qs
+
+    def counted_parse_qs(query):
+        calls.append(query)
+        return real_parse_qs(query)
+
+    monkeypatch.setattr(http_routes, "parse_qs", counted_parse_qs)
+    request = SimpleNamespace()
+    parsed = SimpleNamespace(query="session=one&session=two")
+
+    first = http_routes.request_query(request, parsed)
+    second = http_routes.request_query(request, parsed)
+
+    assert first is second
+    assert first == {"session": ["one", "two"]}
+    assert calls == ["session=one&session=two"]
+    source = inspect.getsource(http_routes)
+    assert source.count("request_query(request, parsed)") == 36
+    assert source.count("parse_qs(parsed.query)") == 1
+
+
 def test_chat_send_route_uses_authenticated_username_and_allows_readonly():
     writes = []
     calls = []
@@ -185,6 +208,73 @@ def test_record_http_response_bytes_includes_route_compute_details():
     assert kwargs["payload_bytes"] == 17
     assert kwargs["details"]["html_page"] is True
     assert kwargs["details"]["bootstrap_bytes"] == 17
+
+
+def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
+    handler = object.__new__(Handler)
+    handler._http_response_compute_ms = 37.0
+    handler._http_response_performance_details = {"html_page": True}
+    observed = []
+
+    def fake_handle_one_request(request):
+        observed.append((request._http_response_compute_ms, request._http_response_performance_details, request._http_request_dispatch_started_at))
+
+    monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", fake_handle_one_request)
+
+    Handler.handle_one_request(handler)
+    handler._http_response_compute_ms = 12.0
+    handler._http_response_performance_details = {"stats_build_ms": 12.0}
+    Handler.handle_one_request(handler)
+
+    assert observed[0][:2] == (None, None)
+    assert observed[1][:2] == (None, None)
+    assert all(item[2] is None for item in observed)
+
+
+def test_keepalive_homepage_profile_cannot_leak_to_api_endpoints(monkeypatch):
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    paths = iter(["/", "/api/ping", "/api/share", "/api/stats-sample"])
+
+    def fake_handle_one_request(request):
+        request.path = next(paths)
+        request._http_request_dispatch_started_at = server_module.time.perf_counter()
+        if request.path == "/":
+            request._http_response_compute_ms = 37.0
+            request._http_response_performance_details = {"html_page": True}
+        Handler.record_http_response_bytes(request, HTTPStatus.OK, 17, "application/json")
+
+    monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", fake_handle_one_request)
+
+    for _ in range(4):
+        Handler.handle_one_request(handler)
+
+    assert [args[1] for args, _kwargs in records] == ["GET /", "GET /api/ping", "GET /api/share", "GET /api/stats-sample"]
+    assert records[0][1]["compute_ms"] == 37.0
+    assert all(kwargs["compute_ms"] != 37.0 for _args, kwargs in records[1:])
+    assert all("html_page" not in kwargs["details"] for _args, kwargs in records[1:])
+
+
+def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/ping"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = 100.0
+    handler._http_request_dispatch_started_at = 100.01
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: 100.035)
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "application/json")
+
+    _args, kwargs = records[0]
+    assert kwargs["compute_ms"] == pytest.approx(25.0)
+    assert kwargs["details"]["accept_to_route_ms"] == pytest.approx(10.0)
+    assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
 
 
 def test_get_stats_sample_uses_app_payload():

@@ -735,14 +735,12 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
   font-size: 0.9em;
 }
 .markdown-body pre { background: var(--markdown-code-block-bg); border: 1px solid var(--line); border-radius: var(--radius-control); padding: var(--space-4) var(--space-8); overflow: auto; margin: var(--space-4) 0; }
-/* Light mode: the near-black code block is a dark box on the light app
-   chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
-   transcript summary) — the file-editor preview's `pre` is handled separately under
-   `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
-body.theme-light .yoagent-message-body pre,
-body.theme-light .summary-preview pre {
-  color: var(--lt-code-block-text);
-  background: var(--lt-code-block-bg);
+/* Chrome markdown deliberately has a separate surface from the file editor, whose own editor
+   theme controls its code blocks. The theme-token owner supplies both palettes. */
+.yoagent-message-body pre,
+.summary-preview pre {
+  color: var(--chrome-code-block-text);
+  background: var(--chrome-code-block-bg);
 }
 .markdown-body pre code {
   color: inherit;
@@ -1127,20 +1125,14 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   min-width: 90px;
   height: 20px;
   padding: var(--space-1) var(--space-5);
-  color: var(--text);
+  color: var(--file-tree-rename-text);
   font: inherit;
   line-height: 18px;
-  background: var(--paint-deep-ink-98);
+  background: var(--file-tree-rename-bg);
   border: 1px solid var(--active-control-border);
   border-radius: var(--radius-sm);
   outline: 0;
   box-shadow: var(--active-control-focus-shadow);
-}
-/* Light mode: the rename box hardcodes a near-black fill while its text
-   uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
-body.theme-light .file-tree-rename-input {
-  color: var(--pc-control-fg);
-  background: var(--paint-white);
 }
 .file-explorer-toolbar {
   display: flex;
@@ -1287,6 +1279,7 @@ body.resizing-file-explorer-changes {
   min-height: 0;
   overflow: auto;
   padding: var(--space-4) 0;
+  background: var(--file-explorer-tree-surface);
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
    of the old special-cased hardcoded-green strip. At rest a thin yellow line (--pane-resizer-bg, the same
@@ -1336,7 +1329,7 @@ body.resizing-file-explorer-changes {
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
-  background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
+  background: var(--file-explorer-changes-surface);
   padding: 0 var(--space-5) var(--space-5);
 }
 /* Differ timestamps are supporting metadata, smaller than the changed-file names. */
@@ -1347,16 +1340,10 @@ body.resizing-file-explorer-changes {
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
-body.theme-light .file-explorer-pane,
-body.theme-light .file-explorer-tree-panel {
+.file-explorer-pane,
+.file-explorer-tree-panel,
+.file-explorer-changes-panel {
   color: var(--text);
-}
-body.theme-light .file-explorer-tree-panel {
-  background: var(--panel);
-}
-body.theme-light .file-explorer-changes-panel {
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel2) 76%, var(--panel) 24%);
 }
 .file-explorer-changes-head {
   position: sticky;
@@ -1484,13 +1471,7 @@ body.theme-light .file-explorer-changes-panel {
 .file-explorer-changes-panel .changes-refresh:focus-visible,
 .file-explorer-date-reload-cluster .changes-refresh:hover,
 .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
-  background: color-mix(in srgb, var(--panel2) 72%, transparent);
-}
-body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
-body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
-body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
-body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
-  background: var(--paint-overlay-slate-05);
+  background: var(--file-explorer-refresh-hover-surface);
 }
 body :is(
   .file-explorer-sort-select,
@@ -3187,15 +3168,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 /* Tabber (Finder pane 3rd mode) rows reuse the .file-tree-row DOM; only the level-0 session label shape,
    the window/process detail, and the active-window emphasis are tabber-specific. */
 .file-tree-row.tabber-row {
-  --tabber-level0-color: var(--markdown-heading);
-  --tabber-level1-color: var(--code-function);
   --tabber-path-color: var(--text);
   --tabber-detail-color: var(--muted);
   --tabber-agent-icon-size: calc(var(--file-explorer-font-size) + 2px);
-}
-body.theme-light .file-tree-row.tabber-row {
-  --tabber-level0-color: var(--text);
-  --tabber-level1-color: var(--text);
 }
 .file-tree-row.tabber-row[data-tabber-type="session"] > .file-tree-name {
   display: inline-flex;
