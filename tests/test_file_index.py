@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
@@ -39,6 +40,38 @@ def test_walk_root_collects_files_and_skips_skip_dirs(tmp_path, monkeypatch):
     assert "top.txt" in names
     assert "ignored.js" not in names  # node_modules (a SEARCH_SKIP_DIRS member) is pruned
     assert truncated is False
+
+
+def test_configured_excluded_subtree_is_absent_from_memory_and_sqlite(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    excluded = root / "generated-cache"
+    excluded.mkdir()
+    (excluded / "generated.py").write_text("generated\n", encoding="utf-8")
+    (root / "source.py").write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(filesystem.search, "settings_payload", lambda: {"settings": {"file_explorer": {"index_exclude_paths": [str(excluded)]}}})
+    policy = filesystem.search._search_index_policy(root)
+
+    built = file_index.build_now(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+        max_files=policy["max_files"],
+        persist_enabled=policy["persist_enabled"],
+        persist_max_files=policy["persist_max_files"],
+        persist_max_bytes=policy["persist_max_bytes"],
+    )
+
+    assert {entry[2] for entry in built.entries} == {"source.py"}
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
+
+
+def test_index_safety_refresh_uses_a_thirty_minute_interval():
+    assert file_index.INDEX_TTL_SECONDS == 30.0 * 60.0
 
 
 def test_walk_root_skips_symlinked_files_and_dirs(tmp_path, monkeypatch):
@@ -88,6 +121,85 @@ def test_build_persists_sqlite_without_large_json_payload(tmp_path, monkeypatch)
     with sqlite3.connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
     assert count >= 2
+
+
+def test_oversized_index_is_partial_in_memory_and_not_persisted_across_restart(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(file_index, "MAX_INDEX_FILES", 2)
+    for name in ("one.txt", "two.txt", "three.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    built = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+
+    assert built.ready is True
+    assert built.truncated is True
+    assert built.too_large is True
+    assert len(built.entries) == 2
+    assert built.persisted is False
+    assert not file_index._index_disk_path(tmp_path).exists()
+    _clear_registry()
+    reloaded = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
+    assert reloaded.ready is False
+
+
+def test_persistence_can_be_disabled_or_rejected_by_file_budget(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "one.txt").write_text("one", encoding="utf-8")
+    (root / "two.txt").write_text("two", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+
+    disabled = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_enabled=False)
+    assert disabled.ready is True
+    assert disabled.persisted is False
+    assert not file_index._index_disk_path(root).exists()
+
+    _clear_registry()
+    capped = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_max_files=1)
+    assert capped.ready is True
+    assert capped.persisted is False
+    assert not file_index._index_disk_path(root).exists()
+
+    _clear_registry()
+    byte_capped = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_max_bytes=1)
+    assert byte_capped.ready is True
+    assert byte_capped.persisted is False
+    assert not file_index._index_disk_path(root).exists()
+
+
+def test_incremental_refresh_replaces_only_dirty_subtree_and_debounces_persistence(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    left = root / "left"
+    right = root / "right"
+    left.mkdir(parents=True)
+    right.mkdir()
+    (left / "old.txt").write_text("old", encoding="utf-8")
+    (right / "keep.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS)
+    initial_full_builds = index.full_build_count
+    initial_writes = index.write_bytes
+
+    (left / "old.txt").unlink()
+    (left / "new.txt").write_text("new", encoding="utf-8")
+    file_index.mark_path_dirty(left)
+    file_index._run_build(index, SEARCH_SKIP_DIRS)
+
+    assert {entry[2] for entry in index.entries} == {"left/new.txt", "right/keep.txt"}
+    assert index.full_build_count == initial_full_builds
+    assert index.incremental_build_count == 1
+    assert index.persist_pending is True
+    assert index.write_bytes == initial_writes
+
+    index.last_persisted_at = time.monotonic() - file_index.PERSIST_DEBOUNCE_SECONDS - 1
+    assert file_index.schedule_refreshes() == 0
+    assert index.persist_pending is False
+    assert index.write_bytes > initial_writes
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"left/new.txt", "right/keep.txt"}
 
 
 def test_disk_index_candidate_prefilter_preserves_punctuation_free_fuzzy_filename_queries(tmp_path, monkeypatch):

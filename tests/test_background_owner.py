@@ -1146,7 +1146,12 @@ def test_directory_rename_follower_requests_owner_index_rebuild(monkeypatch, tmp
             file_index._REGISTRY.clear()
 
     assert renamed["reindex_roots"] == [str(root)]
-    assert requests == [(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(root), "path": str(old_dir), "reason": "fs-rename"})]
+    assert requests == [(BACKGROUND_ROLE_SEARCH_INDEX, {
+        "root": str(root),
+        "paths": [str(root / "home-manifest"), str(old_dir)],
+        "path": str(root / "home-manifest"),
+        "reason": "fs-rename",
+    })]
 
 
 def test_local_owner_search_index_refresh_request_starts_root_build(no_control_socket, monkeypatch, tmp_path):
@@ -1421,7 +1426,7 @@ def test_only_owner_starts_search_index_walk_for_shared_root(monkeypatch, tmp_pa
             file_index._REGISTRY.clear()
 
 
-def test_search_index_stale_ready_results_return_while_owner_rebuilds(monkeypatch, tmp_path):
+def test_search_index_stale_ready_queries_do_not_start_rebuild_until_owner_scheduler_runs(monkeypatch, tmp_path):
     target = tmp_path / "target.py"
     target.write_text("print('x')\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
@@ -1438,10 +1443,52 @@ def test_search_index_stale_ready_results_return_while_owner_rebuilds(monkeypatc
     monkeypatch.setattr(file_index, "_start_build", lambda index, *_args, **_kwargs: build_calls.append(index.root))
     try:
         payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+        repeated = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+        assert build_calls == []
+        file_index.schedule_refreshes()
     finally:
         file_index.set_background_owner_checker(None)
         with file_index._REGISTRY_LOCK:
             file_index._REGISTRY.clear()
 
     assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
+    assert [entry["relative_path"] for entry in repeated["files"]] == ["target.py"]
     assert build_calls == [tmp_path]
+
+
+def test_many_search_index_events_and_queries_schedule_one_refresh(monkeypatch, tmp_path):
+    target = tmp_path / "target.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY.clear()
+    index = file_index.build_now(
+        tmp_path,
+        filesystem.SEARCH_SKIP_DIRS,
+        exclude_path=filesystem.search.paths._path_is_secret,
+        exclude_signature=filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
+    starts = []
+
+    def record_start(root_index, *_args, **_kwargs):
+        starts.append(root_index.root)
+        with root_index.lock:
+            root_index.building = True
+
+    monkeypatch.setattr(file_index, "_start_build", record_start)
+    file_index.set_background_owner_checker(lambda _role: True)
+    try:
+        for _ in range(20):
+            file_index.mark_path_dirty(target)
+            payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+            assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
+        assert starts == []
+        for _ in range(20):
+            file_index.schedule_refreshes()
+    finally:
+        file_index.set_background_owner_checker(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert starts == [tmp_path]
+    assert len(index.dirty_paths) == 1

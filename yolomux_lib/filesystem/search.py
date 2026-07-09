@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import stat
@@ -11,6 +13,7 @@ from typing import Any
 
 from .. import file_index
 from ..common import is_generated_upload_name
+from ..settings import settings_payload
 from . import paths
 from .errors import raise_os_error
 from .git_ops import git_root_for_path
@@ -25,6 +28,72 @@ SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v1"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+
+
+def _search_index_policy(root: Path) -> dict[str, Any]:
+    settings = settings_payload().get("settings", {}).get("file_explorer", {})
+    configured_excludes: list[Path] = []
+    for raw_path in settings.get("index_exclude_paths", []):
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        candidate = Path(raw_path).expanduser().resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        configured_excludes.append(candidate)
+    configured_excludes = sorted(set(configured_excludes), key=str)
+
+    def exclude_path(path: Path) -> bool:
+        if paths._path_is_secret(path):
+            return True
+        resolved = path.expanduser().resolve(strict=False)
+        for excluded in configured_excludes:
+            try:
+                resolved.relative_to(excluded)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    max_files = int(settings.get("index_max_files", file_index.MAX_INDEX_FILES))
+    persist_max_files = int(settings.get("index_persist_max_files", file_index.MAX_PERSISTED_INDEX_FILES))
+    persist_max_bytes = int(settings.get("index_persist_max_mb", file_index.MAX_PERSISTED_INDEX_BYTES // (1024 * 1024))) * 1024 * 1024
+    refresh_seconds = float(settings.get("index_refresh_seconds", file_index.INDEX_TTL_SECONDS))
+    coverage_policy = {
+        "excludes": [str(path) for path in configured_excludes],
+        "max_files": max_files,
+    }
+    policy_signature = SEARCH_SECRET_EXCLUDE_SIGNATURE
+    if coverage_policy != {"excludes": [], "max_files": file_index.MAX_INDEX_FILES}:
+        digest = hashlib.sha256(json.dumps(coverage_policy, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        policy_signature = f"{SEARCH_SECRET_EXCLUDE_SIGNATURE}:{digest}"
+    return {
+        "exclude_path": exclude_path,
+        "exclude_signature": policy_signature,
+        "max_files": max_files,
+        "refresh_seconds": refresh_seconds,
+        "persist_enabled": bool(settings.get("index_persist", True)),
+        "persist_max_files": persist_max_files,
+        "persist_max_bytes": persist_max_bytes,
+        "excluded_paths": [str(path) for path in configured_excludes],
+    }
+
+
+def _ensure_search_index(root: Path) -> tuple[file_index.RootIndex, dict[str, Any]]:
+    policy = _search_index_policy(root)
+    index = file_index.ensure_index(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+        max_files=policy["max_files"],
+        refresh_seconds=policy["refresh_seconds"],
+        persist_enabled=policy["persist_enabled"],
+        persist_max_files=policy["persist_max_files"],
+        persist_max_bytes=policy["persist_max_bytes"],
+    )
+    return index, policy
 
 
 def _fuzzy_subsequence_match(query: str, text: str) -> bool:
@@ -221,12 +290,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
         # it in the background; until it is ready we fall back to the live walk below
         # (stale-while-revalidate), so search never blocks on indexing.
-        index = file_index.ensure_index(
-            root,
-            SEARCH_SKIP_DIRS,
-            exclude_path=paths._path_is_secret,
-            exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
-        )
+        index, index_policy = _ensure_search_index(root)
         can_build_index = file_index.background_owner_can_build()
         if tokens:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
@@ -250,7 +314,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 indexed = file_index.search_disk_index(
                     root,
                     SEARCH_SKIP_DIRS,
-                    SEARCH_SECRET_EXCLUDE_SIGNATURE,
+                    index_policy["exclude_signature"],
                     _match,
                     max_results,
                     [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
@@ -269,6 +333,8 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     "query": str(query or ""),
                     "limit": max_results,
                     "truncated": indexed_truncated,
+                    "index_state": "too_large" if index.too_large else "ready",
+                    "index_coverage": "partial" if index.too_large else "full",
                     "files": indexed_results,
                 }
                 if indexed_payload_state:
@@ -306,7 +372,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             if index.ready:
                 recent = file_index.recent_entries(index, max_results, _recent)
             elif not can_build_index and index.disk_metadata_ready:
-                recent = file_index.recent_disk_entries(root, SEARCH_SKIP_DIRS, SEARCH_SECRET_EXCLUDE_SIGNATURE, max_results, _recent)
+                recent = file_index.recent_disk_entries(root, SEARCH_SKIP_DIRS, index_policy["exclude_signature"], max_results, _recent)
                 recent_payload_state = "follower-ready"
             if recent is not None:
                 recent_results, recent_truncated = recent
@@ -393,12 +459,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
     root = paths._canonical_root(paths._validated_path(raw_root))
     if not root.is_dir():
         raise paths.FilesystemError.not_directory(root)
-    index = file_index.ensure_index(
-        root,
-        SEARCH_SKIP_DIRS,
-        exclude_path=paths._path_is_secret,
-        exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
-    )
+    index, policy = _ensure_search_index(root)
     with index.lock:
         ready = bool(index.ready)
         building = bool(index.building)
@@ -406,9 +467,20 @@ def index_status(raw_root: str) -> dict[str, Any]:
         metadata_ready = bool(index.disk_metadata_ready)
         count = len(index.entries) if ready else int(index.disk_entry_count)
         truncated = bool(index.truncated)
+        too_large = bool(index.too_large)
+        build_duration_ms = float(index.build_duration_ms)
+        cache_bytes = int(index.cache_bytes)
+        persisted = bool(index.persisted)
+        build_count = int(index.build_count)
+        full_build_count = int(index.full_build_count)
+        incremental_build_count = int(index.incremental_build_count)
+        scanned_entries = int(index.scanned_entries)
+        ignored_entries = int(index.ignored_entries)
+        write_bytes = int(index.write_bytes)
+        dirty_subtrees = len(index.dirty_paths)
     # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
     # (which made the badge flicker). `state` is the single field the UI keys on.
-    state = "ready" if ready else ("building" if building else "missing")
+    state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else "missing"))
     if not ready and not building and not file_index.background_owner_can_build():
         state = "follower"
     return {
@@ -420,6 +492,23 @@ def index_status(raw_root: str) -> dict[str, Any]:
         "built_at": built_at,
         "age": (time.time() - built_at) if built_at else None,
         "truncated": truncated,
+        "too_large": too_large,
+        "coverage": "partial" if too_large else "full",
+        "build_duration_ms": build_duration_ms,
+        "cache_bytes": cache_bytes,
+        "persisted": persisted,
+        "build_count": build_count,
+        "full_build_count": full_build_count,
+        "incremental_build_count": incremental_build_count,
+        "scanned_entries": scanned_entries,
+        "ignored_entries": ignored_entries,
+        "write_bytes": write_bytes,
+        "dirty_subtrees": dirty_subtrees,
+        "refresh_seconds": policy["refresh_seconds"],
+        "max_files": policy["max_files"],
+        "persist_max_files": policy["persist_max_files"],
+        "persist_max_bytes": policy["persist_max_bytes"],
+        "excluded_paths": policy["excluded_paths"],
         "state": state,
         "ready_elsewhere": state == "follower" and metadata_ready,
         "refreshing_elsewhere": state == "follower",
@@ -434,23 +523,30 @@ def unindex_root(raw_root: str) -> dict[str, Any]:
 
 
 def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> list[str]:
-    """Invalidate indexed ancestors and immediately hand their rebuild to the index owner."""
-    path = paths._normalized_scope_path(paths._validated_path(raw_path))
-    roots = file_index.invalidate_path(path)
-    for root in roots:
-        if not root.is_dir():
-            continue
-        if file_index.background_owner_can_build():
-            file_index.ensure_index(
-                root,
-                SEARCH_SKIP_DIRS,
-                exclude_path=paths._path_is_secret,
-                exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
-            )
-        else:
+    return reindex_roots_for_paths([raw_path], reason=reason)
+
+
+def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
+    """Coalesce changed subtrees and hand one incremental refresh to the owner."""
+    normalized_paths = [paths._normalized_scope_path(paths._validated_path(raw_path)) for raw_path in raw_paths]
+    roots_by_path: dict[Path, set[Path]] = {}
+    for path in normalized_paths:
+        for root in file_index.mark_path_dirty(path):
+            roots_by_path.setdefault(root, set()).add(path)
+    if file_index.background_owner_can_build():
+        for root, changed_paths in roots_by_path.items():
+            if not root.is_dir():
+                continue
+            _ensure_search_index(root)
+            for path in changed_paths:
+                file_index.mark_path_dirty(path)
+        file_index.schedule_refreshes()
+    else:
+        for root, changed_paths in roots_by_path.items():
             file_index.request_background_owner_refresh({
                 "root": str(root),
-                "path": str(path),
+                "paths": [str(path) for path in sorted(changed_paths, key=str)],
+                "path": str(sorted(changed_paths, key=str)[0]),
                 "reason": reason,
             })
-    return [str(root) for root in roots]
+    return [str(root) for root in sorted(roots_by_path, key=str)]

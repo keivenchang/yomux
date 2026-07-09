@@ -215,7 +215,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "image_preview_max_px": 320,
         "quick_access_paths": ["~", "/", "/tmp"],
         "indexed_dirs": [],
-        "index_refresh_seconds": 120,
+        "index_refresh_seconds": 1800,
+        "index_max_files": 100000,
+        "index_persist": True,
+        "index_persist_max_files": 100000,
+        "index_persist_max_mb": 64,
+        "index_exclude_paths": [],
         "companion_dirs": [],
         "dir_cache_ms": 5000,
         "new_entry_highlight_ms": 60000,
@@ -321,6 +326,7 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("share", "max_viewers"): 5,
     ("performance", "agent_window_cooldown_seconds"): 0,
     ("uploads", "max_bytes"): 20 * 1024 * 1024,
+    ("file_explorer", "index_refresh_seconds"): 120,
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
@@ -357,6 +363,9 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
+    ("file_explorer", "index_max_files"): (1000, 1000000),
+    ("file_explorer", "index_persist_max_files"): (1000, 1000000),
+    ("file_explorer", "index_persist_max_mb"): (1, 1024),
     ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
@@ -374,6 +383,7 @@ STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
 
 SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
     ("uploads", "image_action_order"): 9,
+    ("file_explorer", "index_exclude_paths"): 256,
 }
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
@@ -468,6 +478,11 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
+    ("file_explorer", "index_max_files"): "Files, 1000-1000000. Maximum in-memory Quick Open entries per root; larger roots report partial coverage instead of silently growing an unbounded index.",
+    ("file_explorer", "index_persist"): "true/false. Persist bounded Quick Open indexes for restart and cross-process handoff; active in-memory search remains available when false.",
+    ("file_explorer", "index_persist_max_files"): "Files, 1000-1000000. Maximum entry count eligible for recoverable Quick Open cache persistence.",
+    ("file_explorer", "index_persist_max_mb"): "MiB, 1-1024. Maximum estimated SQLite payload eligible for Quick Open cache persistence.",
+    ("file_explorer", "index_exclude_paths"): "Absolute or home-relative directory subtrees excluded from Quick Open indexing, one path per line. Each path applies only to indexed roots that contain it.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.notify_level is not none.",
@@ -685,6 +700,7 @@ SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("file_explorer", "indexed_dirs"),
     ("file_explorer", "companion_dirs"),
     ("file_explorer", "quick_access_paths"),
+    ("file_explorer", "index_exclude_paths"),
     ("uploads", "subdir"),
     ("share", "read_only"),
     ("share", "scheme"),
@@ -698,6 +714,7 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("file_explorer", "indexed_dirs"): "path-list",
     ("file_explorer", "companion_dirs"): "path-list",
     ("file_explorer", "quick_access_paths"): "path-list",
+    ("file_explorer", "index_exclude_paths"): "path-list",
     ("uploads", "subdir"): "path",
     ("github", "watched_prs"): "external-reference-list",
     ("share", "read_only"): "share-access",

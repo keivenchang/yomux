@@ -153,6 +153,12 @@ def unindex_root(raw_root: str) -> dict[str, Any]:
 
 
 @normalize_os_errors
+def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
+    _sync_package_overrides()
+    return search.reindex_roots_for_paths(raw_paths, reason=reason)
+
+
+@normalize_os_errors
 def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
     _sync_package_overrides()
     return git_ops.git_repo_info(repo, include_status=include_status)
@@ -215,7 +221,7 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.rename_path(raw_path, new_name)
     paths.invalidate_path_policy_caches()
-    payload["reindex_roots"] = search.reindex_roots_for_path(payload["old_path"], reason="fs-rename")
+    payload["reindex_roots"] = search.reindex_roots_for_paths([payload["old_path"], payload["path"]], reason="fs-rename")
     return payload
 
 
@@ -290,6 +296,7 @@ __all__ = [
     "path_info",
     "read_file",
     "read_raw",
+    "reindex_roots_for_paths",
     "rename_path",
     "search_files",
     "unindex_root",

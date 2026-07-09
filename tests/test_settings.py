@@ -694,6 +694,8 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_share = sanitize_settings({"share": {"max_viewers": 5}})
     assert stale_share["share"]["max_viewers"] == defaults["share"]["max_viewers"]
+    stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
+    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 1800
 
     custom = sanitize_settings({
         "performance": {

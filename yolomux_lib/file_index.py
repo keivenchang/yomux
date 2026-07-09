@@ -28,11 +28,27 @@ from .common import start_thread_with_rollback
 
 
 INDEX_DIR = STATE_DIR / "search_index"
-# Upper bound on indexed files per root, to bound memory on pathological trees.
-MAX_INDEX_FILES = 400_000
+
+
+def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(lower, min(upper, value))
+
+
+# Settings normally supply these values per root; environment defaults remain
+# useful for standalone module callers and recovery before settings are loaded.
+MAX_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_MAX_FILES", 100_000, 1_000, 1_000_000)
+MAX_PERSISTED_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_FILES", 100_000, 1_000, 1_000_000)
+MAX_PERSISTED_INDEX_BYTES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_MB", 64, 1, 1_024) * 1024 * 1024
+PERSIST_DEBOUNCE_SECONDS = 60.0
 # Serve from the index immediately; rebuild in the background once it is older
 # than this (stale-while-revalidate), which also prunes deleted files.
-INDEX_TTL_SECONDS = 120.0
+# A stale index remains immediately searchable while the owner refreshes it.  A
+# short TTL turns ordinary Quick Open use into a recurring whole-tree walk.
+INDEX_TTL_SECONDS = 30.0 * 60.0
 # C11: bump when the on-disk storage shape changes so old/incompatible indexes rebuild for a clear reason.
 INDEX_FORMAT_VERSION = 3
 _BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
@@ -57,9 +73,31 @@ class RootIndex:
         self.root = root
         self.entries: list[IndexEntry] = []
         self.built_at = 0.0
+        self.last_full_build_at = 0.0
         self.ready = False
         self.building = False
         self.truncated = False
+        self.too_large = False
+        self.build_duration_ms = 0.0
+        self.cache_bytes = 0
+        self.persisted = False
+        self.persist_enabled = True
+        self.persist_max_files = MAX_PERSISTED_INDEX_FILES
+        self.persist_max_bytes = MAX_PERSISTED_INDEX_BYTES
+        self.persist_pending = False
+        self.last_persisted_at = 0.0
+        self.max_files = MAX_INDEX_FILES
+        self.refresh_seconds = INDEX_TTL_SECONDS
+        self.skip_dirs: set[str] = set()
+        self.exclude_path: Callable[[Path], bool] | None = None
+        self.exclude_signature = ""
+        self.dirty_paths: set[Path] = set()
+        self.build_count = 0
+        self.full_build_count = 0
+        self.incremental_build_count = 0
+        self.scanned_entries = 0
+        self.ignored_entries = 0
+        self.write_bytes = 0
         self.disk_metadata_ready = False
         self.disk_entry_count = 0
         self.signature = ""
@@ -170,35 +208,67 @@ def walk_root(
     skip_dirs: set[str],
     stop_event: threading.Event | None = None,
     exclude_path: Callable[[Path], bool] | None = None,
+    max_files: int | None = None,
+    relative_root: Path | None = None,
 ) -> tuple[list[IndexEntry], bool]:
     """Collect every regular file under root, skipping skip_dirs. Cancellable."""
+    entries, truncated, _ignored = _walk_root_with_metrics(
+        root,
+        skip_dirs,
+        stop_event,
+        exclude_path,
+        max_files=max_files,
+        relative_root=relative_root,
+    )
+    return entries, truncated
+
+
+def _walk_root_with_metrics(
+    root: Path,
+    skip_dirs: set[str],
+    stop_event: threading.Event | None = None,
+    exclude_path: Callable[[Path], bool] | None = None,
+    *,
+    max_files: int | None = None,
+    relative_root: Path | None = None,
+) -> tuple[list[IndexEntry], bool, int]:
     entries: list[IndexEntry] = []
+    ignored = 0
+    limit = max(1, int(max_files if max_files is not None else MAX_INDEX_FILES))
+    rel_root = relative_root or root
     truncated = False
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         if stop_event is not None and stop_event.is_set():
-            return entries, True
+            return entries, True, ignored
         current_path = Path(current)
-        dirs[:] = sorted((name for name in dirs if name not in skip_dirs), key=str.lower)
+        kept_dirs = [name for name in dirs if name not in skip_dirs]
+        ignored += len(dirs) - len(kept_dirs)
+        dirs[:] = sorted(kept_dirs, key=str.lower)
         if exclude_path is not None:
-            dirs[:] = [name for name in dirs if not exclude_path(current_path / name)]
+            kept_dirs = [name for name in dirs if not exclude_path(current_path / name)]
+            ignored += len(dirs) - len(kept_dirs)
+            dirs[:] = kept_dirs
         for name in files:
-            if len(entries) >= MAX_INDEX_FILES:
-                return entries, True
+            if len(entries) >= limit:
+                return entries, True, ignored
             path = current_path / name
             if exclude_path is not None and exclude_path(path):
+                ignored += 1
                 continue
             try:
                 st = path.lstat()
             except OSError:
+                ignored += 1
                 continue
             if not stat.S_ISREG(st.st_mode):
+                ignored += 1
                 continue
             try:
-                rel = path.relative_to(root).as_posix()
+                rel = path.relative_to(rel_root).as_posix()
             except ValueError:
                 rel = name
             entries.append((str(path), name, rel, int(st.st_size), int(st.st_mtime)))
-    return entries, truncated
+    return entries, truncated, ignored
 
 
 def _entries_signature(entries: list[IndexEntry]) -> str:
@@ -217,6 +287,13 @@ def _entries_signature(entries: list[IndexEntry]) -> str:
     return digest.hexdigest()
 
 
+def _estimated_sqlite_bytes(entries: list[IndexEntry]) -> int:
+    # Include table/index overhead conservatively so the cap is checked before
+    # doing a recoverable cache write.
+    payload = sum(len(path.encode("utf-8", errors="surrogateescape")) + len(name.encode("utf-8", errors="surrogateescape")) + len(rel.encode("utf-8", errors="surrogateescape")) + 64 for path, name, rel, _size, _mtime in entries)
+    return max(4096, payload * 2)
+
+
 def _sqlite_paths(root: Path) -> list[Path]:
     path = _index_disk_path(root)
     return [path, Path(f"{path}-wal"), Path(f"{path}-shm")]
@@ -230,6 +307,16 @@ def _sqlite_storage_size(root: Path) -> int:
         except OSError:
             pass
     return total
+
+
+def _drop_persisted_index(root: Path) -> None:
+    for path in [*_sqlite_paths(root), _index_manifest_path(root)]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def _connect_sqlite_index(root: Path) -> sqlite3.Connection:
@@ -289,7 +376,26 @@ def _write_manifest(root: Path, metadata: dict[str, str]) -> None:
     manifest_tmp.replace(_index_manifest_path(root))
 
 
-def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "") -> None:
+def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *, force: bool = False) -> None:
+    estimated_bytes = _estimated_sqlite_bytes(ri.entries)
+    persistence_allowed = (
+        ri.persist_enabled
+        and not ri.too_large
+        and len(ri.entries) <= ri.persist_max_files
+        and estimated_bytes <= ri.persist_max_bytes
+    )
+    if not persistence_allowed:
+        # A partial or over-budget index stays available in bounded RAM but must
+        # not survive a restart as if it were complete.
+        _drop_persisted_index(ri.root)
+        ri.persisted = False
+        ri.persist_pending = False
+        ri.cache_bytes = 0
+        return
+    now = time.monotonic()
+    if ri.persisted and not force and now - ri.last_persisted_at < PERSIST_DEBOUNCE_SECONDS:
+        ri.persist_pending = True
+        return
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         signature = _skip_signature(skip_dirs, exclude_signature)
@@ -322,7 +428,19 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "") ->
                 _replace_sqlite_entries(conn, ri.entries)
         _write_manifest(ri.root, metadata)
         after_size = _sqlite_storage_size(ri.root)
-        record_search_index_bytes_written(max(0, after_size - before_size) if entries_unchanged else after_size)
+        bytes_written = max(0, after_size - before_size) if entries_unchanged else after_size
+        ri.write_bytes += bytes_written
+        record_search_index_bytes_written(bytes_written)
+        if after_size > ri.persist_max_bytes:
+            _drop_persisted_index(ri.root)
+            ri.persisted = False
+            ri.persist_pending = False
+            ri.cache_bytes = 0
+            return
+        ri.persisted = True
+        ri.persist_pending = False
+        ri.last_persisted_at = now
+        ri.cache_bytes = after_size
     except (OSError, sqlite3.DatabaseError):
         pass
 
@@ -477,6 +595,163 @@ def recent_disk_entries(
     return results, truncated
 
 
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _coalesced_paths(paths: set[Path]) -> list[Path]:
+    result: list[Path] = []
+    for path in sorted(paths, key=lambda item: (len(item.parts), str(item))):
+        if any(_path_is_within(path, parent) for parent in result):
+            continue
+        result.append(path)
+    return result
+
+
+def _refresh_dirty_subtrees(
+    ri: RootIndex,
+    dirty_paths: list[Path],
+    skip_dirs: set[str],
+    exclude_path: Callable[[Path], bool] | None,
+) -> tuple[list[IndexEntry], bool, int, int]:
+    with ri.lock:
+        previous = list(ri.entries)
+        previously_truncated = ri.truncated
+    retained = [
+        entry
+        for entry in previous
+        if not any(_path_is_within(Path(entry[0]), dirty) for dirty in dirty_paths)
+    ]
+    refreshed: list[IndexEntry] = []
+    ignored = 0
+    truncated = previously_truncated
+    for dirty in dirty_paths:
+        remaining = ri.max_files - len(retained) - len(refreshed)
+        if remaining <= 0:
+            truncated = True
+            break
+        if exclude_path is not None and exclude_path(dirty):
+            ignored += 1
+            continue
+        if dirty.name in skip_dirs:
+            ignored += 1
+            continue
+        if dirty.is_dir():
+            entries, subtree_truncated, subtree_ignored = _walk_root_with_metrics(
+                dirty,
+                skip_dirs,
+                ri.stop_event,
+                exclude_path,
+                max_files=remaining,
+                relative_root=ri.root,
+            )
+            refreshed.extend(entries)
+            truncated = truncated or subtree_truncated
+            ignored += subtree_ignored
+            continue
+        try:
+            st = dirty.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            refreshed.append((str(dirty), dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime)))
+        else:
+            ignored += 1
+    entries = sorted([*retained, *refreshed], key=lambda entry: entry[2].lower())
+    if len(entries) > ri.max_files:
+        entries = entries[:ri.max_files]
+        truncated = True
+    return entries, truncated, len(refreshed), ignored
+
+
+def mark_path_dirty(path: Path) -> list[Path]:
+    """Coalesce one filesystem invalidation into every containing active index."""
+    target = path.expanduser().resolve(strict=False)
+    roots = indexed_ancestor_roots(target)
+    with _REGISTRY_LOCK:
+        indexes = [_REGISTRY.get(str(root)) for root in roots]
+    for ri in indexes:
+        if ri is None:
+            continue
+        with ri.lock:
+            ri.dirty_paths.add(target)
+            ri.dirty_paths = set(_coalesced_paths(ri.dirty_paths))
+    return roots
+
+
+def schedule_refreshes(now: float | None = None) -> int:
+    """Start at most one refresh per dirty/stale root; queries never call this."""
+    if not background_owner_can_build():
+        return 0
+    wall_now = time.time() if now is None else float(now)
+    monotonic_now = time.monotonic()
+    with _REGISTRY_LOCK:
+        indexes = list(_REGISTRY.values())
+    started = 0
+    for ri in indexes:
+        with ri.lock:
+            should_flush = ri.persist_pending and monotonic_now - ri.last_persisted_at >= PERSIST_DEBOUNCE_SECONDS
+            freshness_anchor = ri.last_full_build_at or ri.built_at
+            should_refresh = bool(ri.dirty_paths) or (ri.ready and ri.refresh_seconds > 0 and wall_now - freshness_anchor >= ri.refresh_seconds)
+            building = ri.building
+            skip_dirs = set(ri.skip_dirs)
+            exclude_path = ri.exclude_path
+            exclude_signature = ri.exclude_signature
+        if should_flush and not building:
+            _persist(ri, skip_dirs, exclude_signature, force=True)
+        if should_refresh and not building:
+            _start_build(ri, skip_dirs, exclude_path=exclude_path, exclude_signature=exclude_signature)
+            started += 1
+    return started
+
+
+def runtime_diagnostics() -> dict[str, Any]:
+    with _REGISTRY_LOCK:
+        indexes = list(_REGISTRY.values())
+    roots = []
+    for ri in indexes:
+        with ri.lock:
+            roots.append({
+                "root": str(ri.root),
+                "state": "building" if ri.building else ("too_large" if ri.too_large else ("ready" if ri.ready else "missing")),
+                "entries": len(ri.entries) if ri.ready else ri.disk_entry_count,
+                "build_count": ri.build_count,
+                "full_build_count": ri.full_build_count,
+                "incremental_build_count": ri.incremental_build_count,
+                "last_duration_ms": round(ri.build_duration_ms, 3),
+                "scanned_entries": ri.scanned_entries,
+                "ignored_entries": ri.ignored_entries,
+                "truncated": ri.truncated,
+                "too_large": ri.too_large,
+                "dirty_subtrees": len(ri.dirty_paths),
+                "cache_bytes": ri.cache_bytes,
+                "write_bytes": ri.write_bytes,
+                "persisted": ri.persisted,
+                "persist_pending": ri.persist_pending,
+                "max_files": ri.max_files,
+                "refresh_seconds": ri.refresh_seconds,
+                "persist_max_files": ri.persist_max_files,
+                "persist_max_bytes": ri.persist_max_bytes,
+            })
+    roots.sort(key=lambda row: row["root"])
+    return {
+        "root_count": len(roots),
+        "build_count": sum(int(row["build_count"]) for row in roots),
+        "full_build_count": sum(int(row["full_build_count"]) for row in roots),
+        "incremental_build_count": sum(int(row["incremental_build_count"]) for row in roots),
+        "scanned_entries": sum(int(row["scanned_entries"]) for row in roots),
+        "ignored_entries": sum(int(row["ignored_entries"]) for row in roots),
+        "cache_bytes": sum(int(row["cache_bytes"]) for row in roots),
+        "write_bytes": sum(int(row["write_bytes"]) for row in roots),
+        "truncated_roots": sum(1 for row in roots if row["truncated"]),
+        "roots": roots,
+    }
+
+
 def _run_build(
     ri: RootIndex,
     skip_dirs: set[str],
@@ -487,6 +762,8 @@ def _run_build(
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
     started = time.perf_counter()
     expected_signature = _skip_signature(skip_dirs, exclude_signature)
+    with ri.lock:
+        dirty_paths = _coalesced_paths(set(ri.dirty_paths)) if ri.ready else []
     lock_fd = None
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -500,16 +777,33 @@ def _run_build(
         # Another process may have just finished while we waited for the lock — adopt a fresh disk copy
         # instead of re-walking.
         disk = _load_disk(ri.root, skip_dirs, exclude_signature)
-        if disk is not None and (time.time() - disk[1]) <= INDEX_TTL_SECONDS:
+        if not dirty_paths and not ri.ready and disk is not None:
             with ri.lock:
                 ri.entries, ri.built_at, ri.truncated = disk
+                ri.last_full_build_at = ri.built_at
+                ri.too_large = ri.truncated
+                ri.persisted = True
+                ri.last_persisted_at = time.monotonic()
+                ri.cache_bytes = _sqlite_storage_size(ri.root)
                 ri.signature = expected_signature
                 ri.disk_entry_count = len(ri.entries)
                 ri.disk_metadata_ready = True
                 ri.ready = True
                 ri.building = False
             return
-        entries, truncated = walk_root(ri.root, skip_dirs, ri.stop_event, exclude_path=exclude_path)
+        if dirty_paths:
+            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(ri, dirty_paths, skip_dirs, exclude_path)
+            build_kind = "incremental"
+        else:
+            entries, truncated, ignored_entries = _walk_root_with_metrics(
+                ri.root,
+                skip_dirs,
+                ri.stop_event,
+                exclude_path,
+                max_files=ri.max_files,
+            )
+            scanned_entries = len(entries)
+            build_kind = "full"
         if ri.stop_event.is_set():
             with ri.lock:
                 ri.building = False
@@ -517,21 +811,40 @@ def _run_build(
         with ri.lock:
             ri.entries = entries
             ri.truncated = truncated
+            ri.too_large = truncated
             ri.built_at = time.time()
+            if build_kind == "full":
+                ri.last_full_build_at = ri.built_at
+            ri.build_duration_ms = (time.perf_counter() - started) * 1000
+            ri.scanned_entries = scanned_entries
+            ri.ignored_entries = ignored_entries
+            ri.build_count += 1
+            if build_kind == "full":
+                ri.full_build_count += 1
+            else:
+                ri.incremental_build_count += 1
+            ri.dirty_paths.difference_update(dirty_paths)
             ri.signature = expected_signature
             ri.disk_entry_count = len(ri.entries)
-            ri.disk_metadata_ready = True
             ri.ready = True
-            ri.building = False
         _persist(ri, skip_dirs, exclude_signature)
+        with ri.lock:
+            ri.disk_metadata_ready = ri.persisted
+            ri.building = False
         # C11: a fresh build supersedes any prior unindex, so clear the tombstone.
         _clear_tombstone(ri.root)
         notify_background_owner_done({
             "root": str(ri.root),
             "entries": len(ri.entries),
             "truncated": ri.truncated,
+            "too_large": ri.too_large,
+            "persisted": ri.persisted,
+            "cache_bytes": ri.cache_bytes,
+            "build_kind": build_kind,
+            "scanned_entries": ri.scanned_entries,
+            "ignored_entries": ri.ignored_entries,
             "state": "ready",
-            "compute_ms": round((time.perf_counter() - started) * 1000, 3),
+            "compute_ms": round(ri.build_duration_ms, 3),
         })
     finally:
         if lock_fd is not None:
@@ -575,6 +888,12 @@ def ensure_index(
     skip_dirs: set[str],
     exclude_path: Callable[[Path], bool] | None = None,
     exclude_signature: str = "",
+    *,
+    max_files: int | None = None,
+    refresh_seconds: float = INDEX_TTL_SECONDS,
+    persist_enabled: bool = True,
+    persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
+    persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
 ) -> RootIndex:
     """Return the RootIndex for root, seeding from disk and kicking off a
     background (re)build when missing or stale. May return a not-yet-ready index."""
@@ -585,15 +904,28 @@ def ensure_index(
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
-            if background_owner_can_build():
+            ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
+            ri.refresh_seconds = max(0.0, float(refresh_seconds))
+            ri.persist_enabled = bool(persist_enabled)
+            ri.persist_max_files = max(1, int(persist_max_files))
+            ri.persist_max_bytes = max(1, int(persist_max_bytes))
+            ri.skip_dirs = set(skip_dirs)
+            ri.exclude_path = exclude_path
+            ri.exclude_signature = exclude_signature
+            if background_owner_can_build() and ri.persist_enabled:
                 disk = _load_disk(root, skip_dirs, exclude_signature)
                 if disk is not None:
                     ri.entries, ri.built_at, ri.truncated = disk
+                    ri.last_full_build_at = ri.built_at
+                    ri.too_large = ri.truncated
+                    ri.persisted = True
+                    ri.last_persisted_at = time.monotonic()
+                    ri.cache_bytes = _sqlite_storage_size(root)
                     ri.disk_entry_count = len(ri.entries)
                     ri.disk_metadata_ready = True
                     ri.signature = expected_signature
                     ri.ready = True
-            else:
+            elif not background_owner_can_build() and ri.persist_enabled:
                 metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
                 if metadata is not None:
                     try:
@@ -603,9 +935,10 @@ def ensure_index(
                         ri.built_at = 0.0
                         ri.disk_entry_count = 0
                     ri.truncated = bool(metadata.get("truncated"))
+                    ri.too_large = ri.truncated
                     ri.disk_metadata_ready = True
                     ri.signature = expected_signature
-        elif not background_owner_can_build() and not ri.ready:
+        elif not background_owner_can_build() and not ri.ready and ri.persist_enabled:
             metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
             if metadata is not None:
                 try:
@@ -615,8 +948,35 @@ def ensure_index(
                     ri.built_at = 0.0
                     ri.disk_entry_count = 0
                 ri.truncated = bool(metadata.get("truncated"))
+                ri.too_large = ri.truncated
                 ri.disk_metadata_ready = True
                 ri.signature = expected_signature
+        else:
+            with ri.lock:
+                ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
+                ri.refresh_seconds = max(0.0, float(refresh_seconds))
+                ri.persist_enabled = bool(persist_enabled)
+                ri.persist_max_files = max(1, int(persist_max_files))
+                ri.persist_max_bytes = max(1, int(persist_max_bytes))
+                ri.skip_dirs = set(skip_dirs)
+                ri.exclude_path = exclude_path
+                ri.exclude_signature = exclude_signature
+    with ri.lock:
+        ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
+        ri.refresh_seconds = max(0.0, float(refresh_seconds))
+        ri.persist_enabled = bool(persist_enabled)
+        ri.persist_max_files = max(1, int(persist_max_files))
+        ri.persist_max_bytes = max(1, int(persist_max_bytes))
+        ri.skip_dirs = set(skip_dirs)
+        ri.exclude_path = exclude_path
+        ri.exclude_signature = exclude_signature
+    if background_owner_can_build() and not ri.persist_enabled:
+        _drop_persisted_index(root)
+        with ri.lock:
+            ri.persisted = False
+            ri.persist_pending = False
+            ri.disk_metadata_ready = False
+            ri.cache_bytes = 0
     with ri.lock:
         if ri.ready and ri.signature != expected_signature:
             ri.entries = []
@@ -635,7 +995,7 @@ def ensure_index(
             ri.built_at = 0.0
             ri.disk_metadata_ready = False
             ri.disk_entry_count = 0
-    if background_owner_can_build() and (not ri.ready or (time.time() - ri.built_at) > INDEX_TTL_SECONDS):
+    if background_owner_can_build() and not ri.ready:
         _start_build(ri, skip_dirs, exclude_path=exclude_path, exclude_signature=exclude_signature)
     return ri
 
@@ -645,6 +1005,12 @@ def build_now(
     skip_dirs: set[str],
     exclude_path: Callable[[Path], bool] | None = None,
     exclude_signature: str = "",
+    *,
+    max_files: int | None = None,
+    refresh_seconds: float = INDEX_TTL_SECONDS,
+    persist_enabled: bool = True,
+    persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
+    persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
 ) -> RootIndex:
     """Synchronously build (or rebuild) the index for root. Used at warm-up and in tests."""
     key = str(root)
@@ -653,6 +1019,15 @@ def build_now(
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
+    with ri.lock:
+        ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
+        ri.refresh_seconds = max(0.0, float(refresh_seconds))
+        ri.persist_enabled = bool(persist_enabled)
+        ri.persist_max_files = max(1, int(persist_max_files))
+        ri.persist_max_bytes = max(1, int(persist_max_bytes))
+        ri.skip_dirs = set(skip_dirs)
+        ri.exclude_path = exclude_path
+        ri.exclude_signature = exclude_signature
     ri.stop_event = threading.Event()
     _run_build(ri, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
     return ri
@@ -705,19 +1080,7 @@ def unindex(root: Path) -> None:
         ri = _REGISTRY.pop(key, None)
     if ri is not None:
         ri.stop_event.set()
-    try:
-        _index_disk_path(root).unlink()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
-    for path in _sqlite_paths(root)[1:]:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+    _drop_persisted_index(root)
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         _tombstone_path(root).write_text(str(time.time()), encoding="utf-8")

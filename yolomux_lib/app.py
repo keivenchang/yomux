@@ -1386,6 +1386,30 @@ def filesystem_changed_roots(previous: tuple[Any, ...] | None, current: tuple[An
     return changed, removed
 
 
+def filesystem_changed_paths(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> list[str]:
+    """Return the smallest directly observed subtrees for index invalidation."""
+    previous_by_root = filesystem_signature_root_map(previous)
+    current_by_root = filesystem_signature_root_map(current)
+    changed_paths: set[str] = set()
+    for root in sorted(set(previous_by_root) | set(current_by_root)):
+        previous_signature = previous_by_root.get(root)
+        current_signature = current_by_root.get(root)
+        if previous_signature == current_signature:
+            continue
+        if previous_signature is None or current_signature is None:
+            changed_paths.add(root)
+            continue
+        previous_entries = filesystem_signature_entry_map(previous_signature)
+        current_entries = filesystem_signature_entry_map(current_signature)
+        names = set(previous_entries) | set(current_entries)
+        direct_changes = sorted(name for name in names if previous_entries.get(name) != current_entries.get(name))
+        if not direct_changes:
+            changed_paths.add(root)
+            continue
+        changed_paths.update(str(Path(root) / name) for name in direct_changes)
+    return sorted(changed_paths)
+
+
 def filesystem_change_summary(previous: tuple[Any, ...] | None, current: tuple[Any, ...] | None) -> dict[str, Any]:
     previous_by_root = filesystem_signature_root_map(previous)
     current_by_root = filesystem_signature_root_map(current)
@@ -4278,6 +4302,12 @@ class TmuxWebtermApp:
             root = str(request_payload.get("root") or "").strip()
             if root:
                 try:
+                    changed_paths = request_payload.get("paths")
+                    if not isinstance(changed_paths, list):
+                        changed_paths = [request_payload.get("path")] if request_payload.get("path") else []
+                    normalized_changed_paths = [str(path) for path in changed_paths if isinstance(path, str) and path]
+                    if normalized_changed_paths:
+                        filesystem.reindex_roots_for_paths(normalized_changed_paths, reason=str(request_payload.get("reason") or "owner-refresh"))
                     result["refresh"] = filesystem.index_status(root)
                 except filesystem.FilesystemError as exc:
                     result.update({"ok": False, "accepted": False, "error": str(exc)})
@@ -6710,10 +6740,15 @@ class TmuxWebtermApp:
         if filesystem_changed:
             roots = self.filesystem_roots_for_watch(sessions)
             change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
+            changed_paths = filesystem_changed_paths(previous_filesystem_signature, filesystem_signature)
+            if changed_paths:
+                filesystem.reindex_roots_for_paths(changed_paths, reason="fs-watch")
             events.extend(self.publish_filesystem_ready_event(roots, change_summary=change_summary, current_signature=filesystem_signature))
             session_file_events = self.publish_session_files_ready_events(trigger="fs_changed")
             if session_file_events:
                 events.extend(session_file_events)
+        elif self.background_can_run(BACKGROUND_ROLE_SEARCH_INDEX):
+            file_index.schedule_refreshes()
         return events
 
     def poll_client_file_events_once(self) -> list[str]:
@@ -9351,6 +9386,11 @@ class TmuxWebtermApp:
                 "activity": self.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
                 "search_index": self.runtime_cache_dir_stats(file_index.INDEX_DIR),
             },
+            "search_index": (
+                owner_control_response.get("search_index_runtime")
+                if isinstance(owner_control_response, dict) and isinstance(owner_control_response.get("search_index_runtime"), dict)
+                else file_index.runtime_diagnostics()
+            ),
             "top_endpoints": self.runtime_top_endpoints(diagnostic_status),
             "top_background_work": self.runtime_top_background_work(diagnostic_status),
             "top_event_types": self.runtime_top_event_types(),
@@ -10590,7 +10630,7 @@ class TmuxWebtermApp:
             return self.background_release_owner(requester if isinstance(requester, dict) else {})
         if action == "background_status":
             payload, _status = self.background_owner_status_payload()
-            return {"ok": True, "status": payload}
+            return {"ok": True, "status": payload, "search_index_runtime": file_index.runtime_diagnostics()}
         if action == "runtime_profile":
             return {
                 "ok": True,

@@ -1420,6 +1420,17 @@ def test_background_status_includes_performance_summary():
     }]
     assert control_response["ok"] is True
     assert "perf" not in control_response["status"]
+    assert set(control_response["search_index_runtime"]) >= {
+        "build_count",
+        "full_build_count",
+        "incremental_build_count",
+        "scanned_entries",
+        "ignored_entries",
+        "cache_bytes",
+        "write_bytes",
+        "truncated_roots",
+        "roots",
+    }
 
 
 def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
@@ -1554,6 +1565,18 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")
     monkeypatch.setattr(app_module.file_index, "INDEX_DIR", tmp_path / "search-index")
+    monkeypatch.setattr(app_module.file_index, "runtime_diagnostics", lambda: {
+        "root_count": 1,
+        "build_count": 2,
+        "full_build_count": 1,
+        "incremental_build_count": 1,
+        "scanned_entries": 7,
+        "ignored_entries": 3,
+        "cache_bytes": 5,
+        "write_bytes": 9,
+        "truncated_roots": 0,
+        "roots": [{"root": "/repo", "last_duration_ms": 4.2}],
+    })
     for dirname in ("session-files-cache", "activity-cache", "search-index"):
         (tmp_path / dirname).mkdir()
     (tmp_path / "session-files-cache" / "a.json").write_text("abc", encoding="utf-8")
@@ -1606,6 +1629,12 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert payload["caches"]["session_files"]["files"] == 1
     assert payload["caches"]["session_files"]["bytes"] == 3
     assert payload["caches"]["activity"]["bytes"] == 5
+    assert payload["search_index"]["build_count"] == 2
+    assert payload["search_index"]["incremental_build_count"] == 1
+    assert payload["search_index"]["scanned_entries"] == 7
+    assert payload["search_index"]["ignored_entries"] == 3
+    assert payload["search_index"]["cache_bytes"] == 5
+    assert payload["search_index"]["write_bytes"] == 9
     assert payload["top_endpoints"][0]["surface"] == "GET /api/session-files"
     assert payload["top_background_work"][0]["role"] == "session-files"
     assert payload["top_background_work"][0]["surface"] == "cache-entry"
@@ -7093,6 +7122,7 @@ def test_filesystem_change_summary_counts_entry_changes():
     )
 
     summary = app_module.filesystem_change_summary(previous, current)
+    changed_paths = app_module.filesystem_changed_paths(previous, current)
 
     assert summary["roots_changed"] == 2
     assert summary["roots_added"] == 1
@@ -7106,6 +7136,14 @@ def test_filesystem_change_summary_counts_entry_changes():
     assert summary["dirs_added"] == 1
     assert summary["dirs_removed"] == 1
     assert summary["dirs_modified"] == 0
+    assert changed_paths == [
+        "/new-root",
+        "/repo/mod.txt",
+        "/repo/new-dir",
+        "/repo/new.txt",
+        "/repo/old-dir",
+        "/repo/old.txt",
+    ]
 
 
 def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
@@ -7123,6 +7161,10 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
     monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: ["/repo"])
     monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: (_ for _ in ()).throw(AssertionError("diff-only fs_changed must not list directories")))
+    reindex_calls = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    schedule_calls = []
+    monkeypatch.setattr(app_module.file_index, "schedule_refreshes", lambda: schedule_calls.append(True) or 0)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
         webapp.client_watch_service.filesystem_last_full_at = time.monotonic()
@@ -7143,6 +7185,8 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert fs_payload["change_summary"]["roots_changed"] == 1
     assert fs_payload["change_summary"]["entries_added"] == 1
     assert fs_payload["change_summary"]["entries_removed"] == 1
+    assert reindex_calls == [(["/repo/new.txt", "/repo/old.txt"], "fs-watch")]
+    assert schedule_calls == [True]
     assert "listing_summary" not in fs_payload
     assert webapp.session_files_service.cache != {}
     assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload is None
