@@ -50,6 +50,27 @@ async function fetchDirectoryFileCount(path) {
   return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
 }
 
+function fileExplorerIndexContextAction(path, entry) {
+  if (!['dir', 'file'].includes(entry?.kind)) return null;
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return null;
+  if (fileExplorerDirectoryIsIndexed(normalized)) return {mode: 'unindex', labelKey: 'contextmenu.disallowIndex'};
+  const indexedRoot = fileExplorerIndexedRootForPath(normalized);
+  const exclusion = fileExplorerIndexExclusionForPath(normalized);
+  if (!indexedRoot) return entry.kind === 'dir' ? {mode: 'index', labelKey: 'contextmenu.allowIndex'} : null;
+  if (exclusion === normalized) return {mode: 'include', labelKey: 'contextmenu.allowIndex'};
+  if (exclusion) return null;
+  return {mode: 'exclude', labelKey: 'contextmenu.disallowIndex'};
+}
+
+function applyFileExplorerIndexContextAction(path, action) {
+  if (action?.mode === 'index') return setFileExplorerDirectoryIndexed(path, true);
+  if (action?.mode === 'unindex') return setFileExplorerDirectoryIndexed(path, false);
+  if (action?.mode === 'exclude') return setFileExplorerPathExcluded(path, true);
+  if (action?.mode === 'include') return setFileExplorerPathExcluded(path, false);
+  return false;
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -86,7 +107,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   if (entry?.kind === 'dir') {
     appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
   }
-  appendContextMenuButton(menu, t(fileExplorerDirectoryIsIndexed(fullPath) ? 'contextmenu.disallowIndex' : 'contextmenu.allowIndex'), () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
+  if (menuState.indexAction) {
+    appendContextMenuButton(menu, t(menuState.indexAction.labelKey), () => applyFileExplorerIndexContextAction(fullPath, menuState.indexAction), closeFileContextMenu, {disabled: menuState.indexToggleDisabled});
+  }
   appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
@@ -94,6 +117,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
 
 function fileContextMenuState(entry, selectedPaths, relativePaths) {
   const multiple = selectedPaths.length > 1;
+  const indexAction = fileExplorerIndexContextAction(selectedPaths[0], entry);
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
@@ -103,7 +127,8 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     zipDownloadDisabled: multiple || entry?.kind !== 'dir' || readOnlyMode,
-    indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
+    indexAction,
+    indexToggleDisabled: readOnlyMode || multiple || !indexAction,
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
   };

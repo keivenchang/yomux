@@ -1247,6 +1247,22 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const multiDirState = api.fileContextMenuState({kind: 'dir'}, ['/repo/app', '/repo/other'], ['', '']);
     assert.equal(multiDirState.zipDownloadDisabled, true, 'multi-select folders do not offer one ambiguous zip download');
 
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    assert.equal(api.t('contextmenu.disallowIndex'), 'Exclude from index');
+    assert.equal(api.t('contextmenu.allowIndex'), 'Include in index');
+    let indexState = api.fileContextMenuState({kind: 'dir'}, ['/repo/app'], ['app']);
+    assert.equal(indexState.indexAction.mode, 'exclude', 'a folder covered by an indexed root can be excluded directly');
+    assert.equal(indexState.indexAction.labelKey, 'contextmenu.disallowIndex');
+    api.setFileExplorerIndexExcludePathsForTest(['/repo/app']);
+    indexState = api.fileContextMenuState({kind: 'dir'}, ['/repo/app'], ['app']);
+    assert.equal(indexState.indexAction.mode, 'include', 'an explicitly excluded folder can be included again');
+    assert.equal(api.fileContextMenuState({kind: 'dir'}, ['/repo/app/nested'], ['nested']).indexAction, null, 'a child cannot override its excluded ancestor');
+    api.setFileExplorerIndexExcludePathsForTest([]);
+    assert.equal(api.fileContextMenuState({kind: 'dir'}, ['/repo'], ['']).indexAction.mode, 'unindex', 'the indexed root retains its remove-index action');
+    assert.equal(api.fileContextMenuState({kind: 'dir'}, ['/outside'], ['']).indexAction.mode, 'index', 'an unrelated folder can become an indexed root');
+    assert.equal(api.fileContextMenuState({kind: 'file'}, ['/repo/app.py'], ['app.py']).indexAction.mode, 'exclude', 'a file covered by an indexed root can be excluded directly');
+    assert.equal(api.fileContextMenuState({kind: 'file'}, ['/outside.py'], ['outside.py']).indexAction, null, 'an unrelated file cannot become an index root');
+
     const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
     // readonly is terminal-only — the server 403s every /api/fs/* read, so Download and file tab opens
@@ -1260,6 +1276,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(readonlyState.deleteDisabled, true);
     const actionSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     assert.ok(actionSource.includes("if (entry?.kind === 'dir')") && actionSource.includes("t('contextmenu.zipDownload')"), 'Zip & download is appended from the folder branch through the shared locale key');
+    assert.ok(actionSource.includes('applyFileExplorerIndexContextAction(fullPath, menuState.indexAction)'), 'Finder right-click routes index, unindex, exclude, and include through one context action');
   });
 
   test('transcript paths render through the delegated copy contract', () => {
@@ -2691,6 +2708,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('attention notifications use shared routing and policy', () => {
     loadYolomux();
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const toastCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     const start = source.indexOf('function showAttentionAlert(');
     const end = source.indexOf('function dismissAttentionAlertsForSession(', start);
     assert.ok(start > 0 && end > start, 'could not locate showAttentionAlert body');
@@ -2728,7 +2746,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const definitions = notificationApi.notificationEventDefinitionsForTest();
     const expectedNotificationPolicies = {
       sessionAttention: ['global', 'session'], agentAttention: ['global', 'session'], agentDone: ['global', 'session'], terminalConnection: ['global', 'session'],
-      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
+      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
       uploadResult: ['pane', 'session'], fileTransfer: ['pane', 'operation'], fileOpen: ['pane', 'finder'], yoloRules: ['pane', 'preferences'], previewOpen: ['pane', 'operation'],
     };
     for (const [event, [scope, target]] of Object.entries(expectedNotificationPolicies)) {
@@ -2737,6 +2755,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     assert.equal(typeof definitions.uploadResult?.deliver, 'function', 'the specialized upload renderer is dispatched through its registry row rather than a parallel producer path');
     assert.equal(Object.keys(definitions).length, Object.keys(expectedNotificationPolicies).length, 'the policy matrix has no undocumented notification event');
+    let coverageToastOptions = null;
+    notificationApi.setShowToastForTest((_title, _lines, options = {}) => {
+      coverageToastOptions = options;
+      return notificationApi.testElementForId('index-coverage-toast');
+    });
+    notificationApi.emitNotificationForTest('indexCoverage', {
+      key: '/repo',
+      title: 'Partial index',
+      lines: ['The file limit was reached.'],
+    });
+    assert.equal(coverageToastOptions?.persistent, true, 'index coverage warnings request dismiss-only persistence at the shared toast boundary');
+    assert.equal(definitions.indexCoverage?.dismissOnly, true, 'the index coverage policy requires explicit dismissal');
+    assert.ok(/if \(options\.persistent !== true\) scheduleToastRemoval/.test(source), 'persistent toasts have no removal timer');
+    assert.ok(/options\.persistent === true[\s\S]*keepButton\.hidden = true/.test(source), 'dismiss-only warnings hide Keep while retaining the shared X control');
+    assert.ok(/\.toast\[data-toast-persistent="true"\] \.toast-line::after[\s\S]*display:\s*none/.test(toastCss), 'dismiss-only warnings hide the countdown bar entirely');
+    notificationApi.clearFileIndexPartialWarningsForTest();
+    assert.equal(notificationApi.showFileIndexPartialCoverageWarningForTest('/repo', {count: 100000, max_files: 100000}), true, 'the first partial-coverage report warns');
+    assert.equal(notificationApi.showFileIndexPartialCoverageWarningForTest('/repo', {count: 100000, max_files: 100000}), false, 'repeated status polls do not recreate a dismissed warning');
     notificationApi.setDocumentVisibilityForTest('visible');
     notificationApi.setFocusedTerminal('1');
     assert.equal(notificationApi.notificationTargetIsFocusedForTest('1'), true, 'the focused session is acknowledged before a transition notification is delivered');

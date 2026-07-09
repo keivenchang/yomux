@@ -510,6 +510,14 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     assert hit["size"] == len("print('ok')\n")
 
 
+def test_search_ranking_does_not_span_absolute_root_prefix_into_filename():
+    path = Path("/tmp/target-04") / "dir" / "target-00949.py"
+
+    sort_key = filesystem._search_entry_sort_key(path, "dir/target-00949.py", ["target-04999"])
+
+    assert sort_key is None
+
+
 def test_search_files_doit_queries_require_project_doc_prefix(tmp_path):
     git(tmp_path, "init")
     (tmp_path / "DOIT.57.md").write_text("# doit\n", encoding="utf-8")
@@ -596,11 +604,13 @@ def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_pat
 
     payload = filesystem.search_files(str(root), "DIS-1850", 5, recursive=True)
 
-    assert payload["truncated"] is True
-    assert payload["files"][0]["relative_path"] == "notes/tool-calling/DIS-1850__jinja-spike/DIS-1850.md"
+    assert payload["truncated"] is False
+    assert [item["relative_path"] for item in payload["files"]] == [
+        "notes/tool-calling/DIS-1850__jinja-spike/DIS-1850.md",
+    ]
 
 
-def test_search_files_matches_absolute_path_segments(tmp_path):
+def test_search_files_does_not_match_segments_outside_the_search_root(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)
     git(project, "init")
@@ -608,7 +618,7 @@ def test_search_files_matches_absolute_path_segments(tmp_path):
 
     payload = filesystem.search_files(str(project), "hokread", 20)
 
-    assert [item["relative_path"] for item in payload["files"]] == ["README.md"]
+    assert payload["files"] == []
 
 
 def test_search_files_marks_generated_upload_names(tmp_path):

@@ -70,6 +70,22 @@ def test_configured_excluded_subtree_is_absent_from_memory_and_sqlite(tmp_path, 
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
 
 
+def test_index_storage_inside_root_is_never_indexed(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "source.py").write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", root / "runtime-index")
+
+    built = file_index.build_now(root, SEARCH_SKIP_DIRS)
+
+    assert {entry[2] for entry in built.entries} == {"source.py"}
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
+        metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+    assert metadata["skip_signature"].endswith("|internal-index-dir:runtime-index")
+
+
 def test_index_safety_refresh_uses_a_thirty_minute_interval():
     assert file_index.INDEX_TTL_SECONDS == 30.0 * 60.0
 
@@ -234,6 +250,21 @@ def test_unchanged_search_index_refresh_skips_entry_rewrite(tmp_path, monkeypatc
     file_index._persist(built, SEARCH_SKIP_DIRS)
 
     assert rewrite_calls == []
+
+
+def test_ensure_index_does_not_rebuild_before_refresh_interval(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    built = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    starts = []
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: starts.append(True))
+    monkeypatch.setattr(file_index.time, "time", lambda: built.built_at + file_index.INDEX_TTL_SECONDS - 1)
+
+    refreshed = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
+
+    assert refreshed.ready is True
+    assert starts == []
 
 
 def test_search_files_uses_index_to_find_deep_file(tmp_path, monkeypatch):

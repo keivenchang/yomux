@@ -706,8 +706,10 @@ let sessionFilesSortMode = 'newest';
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
+let fileExplorerIndexExcludePaths = new Set();
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
+const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
@@ -10762,6 +10764,7 @@ const notificationEventDefinitions = Object.freeze({
   yoagentJob: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'job', coalesce: true}),
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
   update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
+  indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
@@ -10822,6 +10825,7 @@ function emitNotification(type, payload = {}) {
       actions: payload.actions,
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
+      persistent: definition.dismissOnly === true || payload.persistent === true,
     });
     if (inApp) {
       inApp.dataset.toastEvent = type;
@@ -10989,6 +10993,10 @@ function showToast(title, lines, options = {}) {
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  if (options.persistent === true) {
+    node.dataset.toastPersistent = 'true';
+    node.classList.add('kept');
+  }
   if (targetItem) node.dataset.toastTargetItem = targetItem;
   const bodyNode = ensureToastShell(node, {
     title,
@@ -11006,8 +11014,12 @@ function showToast(title, lines, options = {}) {
   });
   const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
   renderToastLines(bodyNode, toastLines, {
-    countdownMs: options.countdownMs || toastDurationMs,
+    countdownMs: options.persistent === true ? Infinity : (options.countdownMs || toastDurationMs),
   });
+  if (options.persistent === true) {
+    const keepButton = node.querySelector('[data-toast-keep]');
+    if (keepButton) keepButton.hidden = true;
+  }
   node.addEventListener('click', event => {
     if (event.target.closest('[data-toast-close], .toast-actions')) return;
     options.onClick?.();
@@ -11020,13 +11032,13 @@ function showToast(title, lines, options = {}) {
   });
   container.appendChild(node);
   while (container.children.length > 5) {
-    const first = container.firstElementChild;
+    const first = Array.from(container.children).find(child => child.dataset.toastPersistent !== 'true');
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
   // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
-  scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
+  if (options.persistent !== true) scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
   return node;
 }
 
@@ -16236,6 +16248,7 @@ function fileTreeDirCountText(count) {
 
 function fileTreeRowDerivedState(fullPath, entry, options = {}) {
   const differMode = options.differMode === true;
+  const indexExcludedEntry = !differMode && fileExplorerPathIsExcluded(fullPath);
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
     ? (options.changedAncestorStats.get(fullPath) || null)
@@ -16244,7 +16257,9 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
     : null;
   const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
-  const gitStatus = entry.kind === 'file'
+  const gitStatus = indexExcludedEntry
+    ? t('finder.index.excluded')
+    : entry.kind === 'file'
     ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
@@ -16273,7 +16288,9 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     displayName,
     contentOptions: {
       gitStatus,
-      gitStatusTitle: entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus),
+      gitStatusTitle: indexExcludedEntry
+        ? t('finder.index.excluded')
+        : (entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus)),
       iconClass: [fileIconClassFor(entry.name, entry.kind), entry.kind === 'dir' ? 'ui-disclosure-triangle' : '', indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
       disclosureExpanded: entry.kind === 'dir' ? options.expanded === true : undefined,
       nameHtml: differMode ? null : displayName.html,
@@ -16299,13 +16316,19 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const pendingExpansion = !differMode && entry.kind === 'dir' && fileExplorerPendingExpansions.has(fullPath);
   const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
     differMode,
     autoExpand: options.autoExpand,
   });
+  const loadedChildListing = options.entriesByDir instanceof Map
+    && options.entriesByDir.has(normalizeDirectoryPath(fullPath));
+  const pendingExpansion = !differMode && entry.kind === 'dir' && (
+    fileExplorerPendingExpansions.has(fullPath)
+    || (expanded && options.hasRenderedChildren !== true && !loadedChildListing)
+  );
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
-  const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
+  const indexExcludedEntry = !differMode && fileExplorerPathIsExcluded(fullPath);
+  const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && !indexExcludedEntry && Boolean(fileExplorerIndexedAncestor(fullPath));
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
     ...options,
     expanded,
@@ -16325,6 +16348,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     expanded,
     pendingExpansion,
     indexedDirectory,
+    indexExcludedEntry,
     indexedDescendantDirectory,
     paddingLeft: fileTreeRowPadding(depth, compact),
     selected: fileExplorerSelectedPaths.has(fullPath),
@@ -16354,6 +16378,7 @@ function applyFileTreeRowDataset(row, state) {
   setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
   setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
   setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
+  setRowDataset(row, 'indexExcluded', state.indexExcludedEntry ? 'true' : 'false');
   setRowDataset(row, 'tabberType', '');
   setRowDataset(row, 'tabberSession', '');
   setRowDataset(row, 'tabberWindow', '');
@@ -16369,6 +16394,7 @@ function applyFileTreeRowDataset(row, state) {
   row.classList.toggle('loading-children', state.pendingExpansion);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('indexed-directory', state.indexedDirectory);
+  row.classList.toggle('index-excluded-entry', state.indexExcludedEntry);
   row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
   applySessionHighlightRowClass(row, state.sessionHighlightClass);
   // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
@@ -16514,7 +16540,8 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = existingRows.get(fullPath) || document.createElement('div');
-    updateFileTreeRow(row, parentPath, entry, depth, renderOptions);
+    const hasRenderedChildren = entry.kind === 'dir' && Boolean(childContainerForRow(row, fullPath));
+    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
     nextNodes.push(row);
     const isDifferDir = renderOptions.differMode === true && entry.kind === 'dir';
     // collapsedSet (the Tabber) = default-expanded, collapse to opt out; expandedSet = default-collapsed,
@@ -17102,31 +17129,86 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
-// Compact badge text for an indexed directory. When Date/Ago is visible, the directory icon is the only
-// index marker; the status column must stay empty so it cannot compete with the date column.
+function fileExplorerIndexedRootForPath(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return '';
+  return fileExplorerIndexedRootList()
+    .filter(candidate => candidate === normalized || pathIsInsideDirectory(normalized, candidate))
+    .sort((left, right) => right.length - left.length)[0] || '';
+}
+
+function fileExplorerIndexExclusionForPath(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized || !fileExplorerIndexedRootForPath(normalized)) return '';
+  return Array.from(fileExplorerIndexExcludePaths || [])
+    .filter(candidate => candidate === normalized || pathIsInsideDirectory(normalized, candidate))
+    .sort((left, right) => right.length - left.length)[0] || '';
+}
+
+function fileExplorerPathIsExcluded(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return Boolean(normalized && fileExplorerIndexExclusionForPath(normalized) === normalized);
+}
+
+// Readable index-state text for a path. Keep it visible beside Date/Ago so index coverage never relies
+// on the directory icon's small gold dot alone.
 function fileExplorerIndexBadgeText(path) {
-  if (fileExplorerTreeDateMode !== 'none') return '';
+  if (fileExplorerPathIsExcluded(path)) return t('finder.index.excluded');
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
-    return fileExplorerIndexStatus.get(normalized) === 'building' ? '…' : 'I';
+    const status = fileExplorerIndexStatus.get(normalized);
+    return status === 'building' ? '…' : (status === 'too_large' ? '!' : t('finder.index.indexed'));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
 }
 
 function fileExplorerIndexBadgeTitle(path) {
+  if (fileExplorerPathIsExcluded(path)) return t('finder.index.excluded');
   if (!fileExplorerDirectoryIsIndexed(path)) return '';
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
-  return t(fileExplorerIndexStatus.get(normalized) === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
+  const status = fileExplorerIndexStatus.get(normalized);
+  if (status === 'too_large') return t('finder.index.partial');
+  return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
 }
 
-// Warm the backend index for a root (kicks the build) and track building/ready; polls while
-// building so the badge title transitions indexing… -> indexed exactly once.
+// Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
+// user-visible terminal state instead of silently presenting a capped index as complete.
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
+  if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
+}
+
+function openFileIndexCoveragePreferences() {
+  preferencesSearchText = '';
+  collapsedPreferenceSections.delete(PREFERENCE_SECTION_IDS.fileExplorer);
+  writeStoredCollapsedPreferenceSections();
+  selectSession(prefsItemId, {userInitiated: true});
+  requestAnimationFrame(() => {
+    renderPreferencesPanels({force: true});
+    const control = document.querySelector('[data-setting-path="file_explorer.index_exclude_paths"]');
+    control?.focus?.({preventScroll: false});
+    control?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  });
+}
+
+function showFileIndexPartialCoverageWarning(root, payload = {}) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
+  fileIndexPartialWarningRoots.add(normalized);
+  const count = Math.max(0, Number(payload.count) || 0);
+  const limit = Math.max(0, Number(payload.max_files) || count);
+  emitNotification('indexCoverage', {
+    key: normalized,
+    coalesceKey: `indexCoverage:${normalized}`,
+    title: t('finder.index.partial'),
+    lines: [t('finder.index.partialBody', {path: normalized, count, limit})],
+    onClick: openFileIndexCoveragePreferences,
+  });
+  return true;
 }
 
 async function refreshFileIndexStatus(root) {
@@ -17142,6 +17224,8 @@ async function refreshFileIndexStatus(root) {
   const status = fileIndexStatusFromPayload(payload);
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
+  if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
+  else if (status === 'ready') fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
@@ -17174,7 +17258,7 @@ function syncFileIndexStatusPollInterval() {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusPollRoots.has(normalized)) return;
+  if (['ready', 'too_large'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 
@@ -17183,6 +17267,7 @@ function clearFileIndexStatus(root) {
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
   fileIndexStatusPollRoots.delete(normalized);
+  fileIndexPartialWarningRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
 }
 
@@ -17225,9 +17310,48 @@ function fileExplorerIndexedRootList() {
 function fileExplorerIndexedAncestor(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized) return '';
-  return fileExplorerIndexedRootList()
-    .filter(candidate => candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
-    .sort((left, right) => right.length - left.length)[0] || '';
+  const root = fileExplorerIndexedRootForPath(normalized);
+  return root && root !== normalized ? root : '';
+}
+
+function reconcileIndexExcludePathsFromSetting() {
+  const raw = initialSetting('file_explorer.index_exclude_paths', []);
+  const next = new Set(compactNestedPaths((Array.isArray(raw) ? raw : [])
+    .map(normalizeStoredFileExplorerIndexedDir).filter(Boolean)));
+  const previous = Array.from(fileExplorerIndexExcludePaths || []).sort();
+  const current = Array.from(next).sort();
+  fileExplorerIndexExcludePaths = next;
+  if (previous.length === current.length && previous.every((value, index) => value === current[index])) return false;
+  abortFileQuickOpenSearch();
+  updateFileExplorerIndexedDirectoryRows();
+  updateFileTreeGitStatusRows();
+  return true;
+}
+
+async function setFileExplorerPathExcluded(path, excluded) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  const indexedRoot = fileExplorerIndexedRootForPath(normalized);
+  if (!normalized || !indexedRoot || readOnlyMode) return false;
+  const raw = initialSetting('file_explorer.index_exclude_paths', []);
+  const paths = new Set((Array.isArray(raw) ? raw : [])
+    .map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  if (excluded) paths.add(normalized);
+  else paths.delete(normalized);
+  try {
+    await saveSettingsPatch({file_explorer: {index_exclude_paths: compactNestedPaths(Array.from(paths))}});
+    abortFileQuickOpenSearch();
+    markFileIndexRootsRefreshing([indexedRoot]);
+    updateFileExplorerIndexedDirectoryRows();
+    updateFileTreeGitStatusRows();
+    if (statusEl) statusEl.textContent = excluded
+      ? `${t('finder.index.excluded')}: ${compactHomePath(normalized)}`
+      : t('common.indexedPath', {path: compactHomePath(normalized)});
+    return true;
+  } catch (error) {
+    statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
+    refreshSettings({force: true});
+    return false;
+  }
 }
 
 function setFileExplorerIndexedDirs(paths) {
@@ -17309,6 +17433,7 @@ function reconcileIndexedDirsFromSetting(options = {}) {
     if (!list.length && fileExplorerIndexedDirs.size) {
       persistIndexedDirsSetting();
       storageSet(fileExplorerIndexedDirsMigratedKey, '1');
+      for (const root of fileExplorerIndexedDirs) refreshFileIndexStatus(root);
       return;
     }
     storageSet(fileExplorerIndexedDirsMigratedKey, '1');
@@ -17317,7 +17442,12 @@ function reconcileIndexedDirsFromSetting(options = {}) {
   const current = new Set(fileExplorerIndexedDirs);
   const adds = Array.from(desired).filter(dir => !current.has(dir));
   const removes = Array.from(current).filter(dir => !desired.has(dir));
-  if (!adds.length && !removes.length) return;
+  if (!adds.length && !removes.length) {
+    if (options.initial) {
+      for (const root of desired) refreshFileIndexStatus(root);
+    }
+    return;
+  }
   applyingIndexedDirsSetting = true;
   try {
     for (const dir of adds) setFileExplorerDirectoryIndexed(dir, true);
@@ -17327,6 +17457,11 @@ function reconcileIndexedDirsFromSetting(options = {}) {
     }
   } finally {
     applyingIndexedDirsSetting = false;
+  }
+  if (options.initial) {
+    for (const root of desired) {
+      if (!adds.includes(root)) refreshFileIndexStatus(root);
+    }
   }
 }
 
@@ -17340,9 +17475,12 @@ function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
-    const indexedDescendant = !indexed && Boolean(fileExplorerIndexedAncestor(path));
+    const excluded = fileExplorerPathIsExcluded(path);
+    const indexedDescendant = !indexed && !excluded && Boolean(fileExplorerIndexedAncestor(path));
     row.dataset.indexed = indexed ? 'true' : 'false';
+    row.dataset.indexExcluded = excluded ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
+    row.classList.toggle('index-excluded-entry', excluded);
     row.classList.toggle('indexed-descendant-directory', indexedDescendant);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
@@ -19668,6 +19806,27 @@ async function fetchDirectoryFileCount(path) {
   return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
 }
 
+function fileExplorerIndexContextAction(path, entry) {
+  if (!['dir', 'file'].includes(entry?.kind)) return null;
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return null;
+  if (fileExplorerDirectoryIsIndexed(normalized)) return {mode: 'unindex', labelKey: 'contextmenu.disallowIndex'};
+  const indexedRoot = fileExplorerIndexedRootForPath(normalized);
+  const exclusion = fileExplorerIndexExclusionForPath(normalized);
+  if (!indexedRoot) return entry.kind === 'dir' ? {mode: 'index', labelKey: 'contextmenu.allowIndex'} : null;
+  if (exclusion === normalized) return {mode: 'include', labelKey: 'contextmenu.allowIndex'};
+  if (exclusion) return null;
+  return {mode: 'exclude', labelKey: 'contextmenu.disallowIndex'};
+}
+
+function applyFileExplorerIndexContextAction(path, action) {
+  if (action?.mode === 'index') return setFileExplorerDirectoryIndexed(path, true);
+  if (action?.mode === 'unindex') return setFileExplorerDirectoryIndexed(path, false);
+  if (action?.mode === 'exclude') return setFileExplorerPathExcluded(path, true);
+  if (action?.mode === 'include') return setFileExplorerPathExcluded(path, false);
+  return false;
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -19704,7 +19863,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   if (entry?.kind === 'dir') {
     appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
   }
-  appendContextMenuButton(menu, t(fileExplorerDirectoryIsIndexed(fullPath) ? 'contextmenu.disallowIndex' : 'contextmenu.allowIndex'), () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
+  if (menuState.indexAction) {
+    appendContextMenuButton(menu, t(menuState.indexAction.labelKey), () => applyFileExplorerIndexContextAction(fullPath, menuState.indexAction), closeFileContextMenu, {disabled: menuState.indexToggleDisabled});
+  }
   appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
@@ -19712,6 +19873,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
 
 function fileContextMenuState(entry, selectedPaths, relativePaths) {
   const multiple = selectedPaths.length > 1;
+  const indexAction = fileExplorerIndexContextAction(selectedPaths[0], entry);
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
@@ -19721,7 +19883,8 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     zipDownloadDisabled: multiple || entry?.kind !== 'dir' || readOnlyMode,
-    indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
+    indexAction,
+    indexToggleDisabled: readOnlyMode || multiple || !indexAction,
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
   };
@@ -24793,6 +24956,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
+  reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
@@ -38624,6 +38788,8 @@ function preferenceSections() {
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.quick_access_paths', {type: 'list'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
+      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true}),
+      preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
       preferenceSettingItem('file_explorer.companion_dirs', {type: 'list'}),
       preferenceSettingItem('file_explorer.dir_cache_ms', {type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms'}),
@@ -38807,6 +38973,8 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'backup', 'quick-open']);
+  if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'frontend-crates']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
@@ -63897,6 +64065,7 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+      if (payload.root) refreshFileIndexStatus(payload.root);
       if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
         refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }

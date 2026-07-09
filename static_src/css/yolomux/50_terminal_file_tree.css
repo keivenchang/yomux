@@ -691,6 +691,10 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   animation-play-state: paused;
   transform: scaleX(1);
 }
+.toast[data-toast-persistent="true"] .toast-line::after,
+.toast[data-toast-persistent="true"] .toast-countdown::after {
+  display: none;
+}
 .toast-actions {
   display: flex;
   gap: var(--space-6);
@@ -3772,10 +3776,25 @@ body.app-vw-lte-980 .tabs {
 
   color: var(--50-terminal-file-tree-file-tree-row-fg-110);
 }
+.file-tree-row.indexed-directory > .file-tree-git-status,
+.file-tree-row.index-excluded-entry > .file-tree-git-status {
+  flex-basis: auto;
+  min-width: 0;
+  padding-inline: var(--space-4);
+}
+.file-tree-row:is(.indexed-directory, .index-excluded-entry).selected > .file-tree-git-status {
+  color: var(--file-selection-text);
+}
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
   color: var(--50-terminal-file-tree-file-tree-row-fg-94);
   letter-spacing: 0;
-  text-transform: uppercase;
+  text-transform: none;
+}
+.file-tree-row.index-excluded-entry:not(.selected) .file-tree-git-status {
+  color: var(--muted);
+  font-style: italic;
+  letter-spacing: 0;
+  text-transform: none;
 }
 /* A directory under an indexed ancestor stays visually quiet; only the indexed root carries the badge. */
 .file-tree-row.indexed-descendant-directory:not(.selected) .file-tree-git-status {

@@ -90,6 +90,7 @@ async function runShareThemeSuite() {
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug layout item resolves to the normal YO!stats tab');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'too_large', too_large: true, coverage: 'partial'}), 'too_large', 'capped file indexes remain visibly partial');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
     // YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open YO!agent.
     assert.equal(api.resolveLayoutItem('yoagent'), api.yoagentItemId, 'yoagent alias resolves to the standalone YO!agent item');
@@ -5404,20 +5405,28 @@ async function runShareThemeSuite() {
     fileRootApi.setFocusedPanelItem(fileRootApi.fileExplorerItemId);
     assert.equal(fileRootApi.fileQuickOpenTargetSlot(), null, 'Cmd-P does not target the reserved Finder pane for normal file opens');
     assert.equal(fileRootApi.slotForTabActivation(fileRootApi.prefsItemId), 'slot1', 'DOIT.56 N2: opening a virtual tab while Finder is focused falls back outside the reserved Finder pane');
-    // #31: the Finder indexed badge reflects the cached build status without writing a long label into
-    // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
+    // #31: the Finder indexed badge reflects the cached build status with a readable label that stays
+    // visible immediately before Date/Ago.
     // the right side of the row.
     api.setFileExplorerTreeDateModeForTest('none');
     api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'building');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '…', '#31: a building index renders a compact building badge');
     api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'ready');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'I', '#31: a ready index renders a compact indexed badge');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: a ready index says indexed instead of using an opaque initial');
+    api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'too_large');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '!', 'a capped index renders a persistent warning badge instead of claiming full coverage');
+    api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'ready');
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '', '#31: Date mode hides the indexed badge instead of stacking it next to the date');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: Date mode keeps the indexed label beside the date');
     api.setFileExplorerTreeDateModeForTest('relative');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '', '#31: Ago mode hides the indexed badge instead of stacking it next to the age');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: Ago mode keeps the indexed label beside the age');
     api.setFileExplorerTreeDateModeForTest('none');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
+    api.setFileExplorerIndexExcludePathsForTest(['/home/test/dynamo/backup']);
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/backup'), 'index excluded', 'an explicit exclusion says index excluded');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/backup/archive'), '', 'descendants of an excluded path stay visually quiet');
+    const indexBadgeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/\.file-tree-row\.indexed-directory > \.file-tree-git-status,[\s\S]*?\.file-tree-row\.index-excluded-entry > \.file-tree-git-status[\s\S]*?flex-basis: auto;[\s\S]*?padding-inline: var\(--space-4\)/.test(indexBadgeCss), 'readable index labels expand beyond the one-character git badge width');
     const checkboxInput = {getAttribute: name => name === 'type' ? 'checkbox' : ''};
     const textInput = {getAttribute: name => name === 'type' ? 'text' : ''};
     assert.equal(api.markdownPreviewInputAllowed(checkboxInput), true, 'GFM task-list checkbox inputs survive markdown sanitization');
@@ -5429,7 +5438,7 @@ async function runShareThemeSuite() {
     const cssSource = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(cssSource.includes('.markdown-body ul.contains-task-list'), 'markdown task lists remove the regular bullet gutter');
     assert.ok(cssSource.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'markdown task-list checkbox alignment is pinned');
-    // Descendants of an indexed root stay visually quiet; the root's compact indexed badge is the only repeated signal.
+    // Descendants of an indexed root stay visually quiet; the root's indexed badge is the only repeated signal.
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), '', 'indexed-root descendants do not show a noisy repeated badge');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');
     // #23: the topbar universal search renders a launcher button (opens the unified palette on click).

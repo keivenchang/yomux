@@ -840,6 +840,8 @@ globalThis.__layoutTestApi = {
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileIndexStatusFromPayloadForTest: fileIndexStatusFromPayload,
+  showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
+  clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
   gitStatusRowClass,
@@ -847,6 +849,9 @@ globalThis.__layoutTestApi = {
   fileStateCanRenderDiffView,
   diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
+  setFileExplorerIndexExcludePathsForTest(paths) {
+    fileExplorerIndexExcludePaths = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
   createTopbarSearch,
   createTopbarNav,
@@ -1854,6 +1859,7 @@ globalThis.__layoutTestApi = {
   setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
   infoBranchRows,
   fileContextMenuState,
+  fileExplorerIndexContextAction,
   fileEditorItemFor,
   fileEditorCopyItemFor,
   fileEditorDiffPreviewItemFor,

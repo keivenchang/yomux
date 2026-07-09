@@ -12,11 +12,12 @@ def printable_command_text(output: str) -> str:
     return output.replace("\\ ", " ")
 
 
-def test_boot_print_command_defaults_to_prod_port():
+def test_boot_print_command_uses_any_configured_primary_port():
     env = {
         **os.environ,
         "YOLOMUX_HOST": "127.0.0.1",
         "YOLOMUX_LOG_DIR": "/tmp",
+        "YOLOMUX_PORT": "48123",
     }
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command"],
@@ -30,17 +31,25 @@ def test_boot_print_command_defaults_to_prod_port():
     command = printable_command_text(result.stdout)
     assert "yolomux.py" in command
     assert "--host 127.0.0.1" in command
-    assert "--port 7770" in command
+    assert "--port 48123" in command
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
-    assert "TMUX= TMUX_PANE=" in command
+    clears_tmux_inline = "TMUX= TMUX_PANE=" in command
+    clears_tmux_in_detacher = (
+        'env.pop("TMUX", None)' in command
+        and 'env.pop("TMUX_PANE", None)' in command
+    )
+    assert clears_tmux_inline or clears_tmux_in_detacher
 
 
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
+    env = dict(os.environ)
+    env.pop("YOLOMUX_PORT", None)
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command", "8123", "8124", "8125"],
         cwd=ROOT,
+        env=env,
         check=True,
         text=True,
         capture_output=True,

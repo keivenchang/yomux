@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -25,6 +26,7 @@ import mock_agent_common  # noqa: E402
 
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
 VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
+UNIX_SOCKET_SAFE_PATH_BYTES = 100
 
 
 def load_structured_fixture(path):
@@ -91,6 +93,11 @@ def tmux_cmd(tmux_binary, socket_path, *args, timeout=8):
     return subprocess.run([tmux_binary, "-S", str(socket_path), *args], capture_output=True, text=True, timeout=timeout, check=False)
 
 
+def short_tmux_socket_path(prefix):
+    socket_base = Path(tempfile.mkdtemp(prefix=f"{prefix}-{os.getpid()}-", dir="/tmp"))
+    return socket_base / "s"
+
+
 def capture(tmux_binary, socket_path, session):
     return tmux_cmd(tmux_binary, socket_path, "capture-pane", "-p", "-t", f"{session}:").stdout or ""
 
@@ -148,9 +155,8 @@ def run_mockcase(monkeypatch, tmp_path, case):
     if not tmux_binary:
         pytest.skip("tmux is not installed")
     agent = case_agent(case)
-    sock_base = Path("/tmp") / f"yomockcase-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
+    socket_path = short_tmux_socket_path("yomockcase")
+    sock_base = socket_path.parent
     session = f"ymock-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
@@ -199,22 +205,18 @@ def cleanup_mockcase(tmp_path):
         socket_file.unlink()
 
 
-def visual_tmux_socket_path(tmp_path):
-    # A worker name is only unique inside one pytest invocation. Full gates and
-    # focused runs can overlap, so their same-named workers must not share a tmux
-    # server whose teardown can blank the other test's pane.
-    socket_base = tmp_path / "visual-tmux"
-    socket_base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return socket_base / "s"
-
-
-def test_visual_tmux_socket_path_is_scoped_to_each_test_directory(tmp_path):
-    first = visual_tmux_socket_path(tmp_path / "first")
-    second = visual_tmux_socket_path(tmp_path / "second")
-
-    assert first != second
-    assert first.parent == tmp_path / "first" / "visual-tmux"
-    assert second.parent == tmp_path / "second" / "visual-tmux"
+def test_short_tmux_socket_paths_are_unique_secure_and_bounded():
+    first = short_tmux_socket_path("yovisual")
+    second = short_tmux_socket_path("yovisual")
+    try:
+        assert first != second
+        assert first.parent.stat().st_mode & 0o777 == 0o700
+        assert second.parent.stat().st_mode & 0o777 == 0o700
+        assert len(os.fsencode(first)) < UNIX_SOCKET_SAFE_PATH_BYTES
+        assert len(os.fsencode(second)) < UNIX_SOCKET_SAFE_PATH_BYTES
+    finally:
+        shutil.rmtree(first.parent, ignore_errors=True)
+        shutil.rmtree(second.parent, ignore_errors=True)
 
 
 def cleanup_visual_test_sessions(tmux_binary, socket_path):
@@ -292,11 +294,11 @@ class VisualTmuxHarness:
 
 
 @pytest.fixture
-def visual_tmux(monkeypatch, tmp_path):
+def visual_tmux(monkeypatch):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_path = visual_tmux_socket_path(tmp_path)
+    socket_path = short_tmux_socket_path("yovisual")
     cleanup_visual_test_sessions(tmux_binary, socket_path)
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     harness = VisualTmuxHarness(tmux_binary, socket_path)

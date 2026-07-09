@@ -1554,15 +1554,20 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
     assert.ok(/function createTopbarCenterTools\(\)[\s\S]*createTopbarSearch\(\)/.test(source) && /renderSessionButtons[\s\S]*appendChild\(createTopbarCenterTools\(\)\)/.test(source), 'the topbar search is mounted in the shared menubar middle group');
     assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
-    assert.ok(source.includes("=== 'building' ? '…' : 'I'"), '#31: the indexed badge is compact when the date column is off');
-    assert.ok(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), '#31: Date/Ago rows hide the indexed status badge so it cannot overlap the date');
-    assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?t\(fileExplorerIndexStatus\.get\(normalized\) === 'building' \? 'finder\.index\.indexing' : 'finder\.index\.indexed'\)/.test(source), '#31: the indexed badge title keeps the full localized status text');
-    assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true[\s\S]*state === 'ready'/.test(source), '#31: ready/follower-owned indexes stay "indexed", not "indexing"');
+    assert.ok(source.includes("status === 'too_large' ? '!' : t('finder.index.indexed')"), 'the indexed badge uses a readable localized label while preserving partial coverage');
+    assert.equal(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), false, '#31: Date/Ago rows retain the readable index status beside the date');
+    assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?status === 'too_large'[\s\S]*?finder\.index\.partial/.test(source), 'the indexed badge title reports partial coverage');
+    assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true/.test(source), 'partial coverage wins over the generic ready state');
+    assert.ok(/function showFileIndexPartialCoverageWarning[\s\S]*emitNotification\('indexCoverage'[\s\S]*finder\.index\.partialBody/.test(source), 'capped indexes emit a persistent user-facing warning');
+    assert.ok(/payload\.role === 'search-index'[\s\S]*payload\.root[\s\S]*refreshFileIndexStatus\(payload\.root\)/.test(source), 'search-index build completion checks coverage even when Finder and Quick Open are closed');
+    assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*options\.initial[\s\S]*for \(const root of desired\)[\s\S]*refreshFileIndexStatus\(root\)/.test(source), 'initial browser startup checks every configured index for partial coverage');
     assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
     const loadAutoStatusesFn = source.slice(source.indexOf('function loadAutoStatuses'), source.indexOf('function renderAutoApproveStatusSurfaces'));
     const autoStatusRenderFn = source.slice(source.indexOf('function renderAutoApproveStatusSurfaces'), source.indexOf('function applyAutoApprovePayload'));
     assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll routes through the shared status renderer, which re-syncs the title and YO markers together so a done pane stops spinning on the same poll');
     assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
+    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_paths', \{type: 'list', wide: true\}\)/.test(source), 'Preferences exposes machine-specific Quick Open exclusions');
+    assert.ok(/preferenceSettingItem\('file_explorer\.index_max_files', \{type: 'number'/.test(source), 'Preferences exposes the Quick Open file cap');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
     assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
     // C11: the indexed-dirs setting save MERGES a single add/remove into the shared list instead of

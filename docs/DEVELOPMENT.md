@@ -210,7 +210,7 @@ Use `boot.sh` from the checkout you want to serve. It restarts only the requeste
 ./boot.sh
 ```
 
-The script starts HTTPS with `--self-signed` and `--dang`. Its default port is configurable through `YOLOMUX_PORT`; for a dev worktree, run the script from that checkout and pass the port you chose. Ports other than the script's default use `--dev` automatically:
+The script accepts any valid TCP port. It defaults to HTTPS `8880` on macOS and `7770` on Linux, with `--self-signed` and `--dang`; `YOLOMUX_PORT` selects an arbitrary primary port and keeps the normal non-dev launch behavior. The macOS dev worktrees conventionally use `8001` through `8003`; the Linux fleet conventionally uses `7771` through `7773`. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
 
 ```bash
 (cd ~/path/to/dev-checkout && ./boot.sh <dev-port>)

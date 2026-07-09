@@ -139,7 +139,6 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
     basename = _compact_search_text(path.name)
     stem = _compact_search_text(path.stem)
     rel_text = _compact_search_text(rel)
-    path_text = _compact_search_text(str(path))
     doit_needle = _doit_search_token(token)
     if doit_needle:
         basename_alnum = _alnum_search_text(path.name)
@@ -179,9 +178,6 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
     span = _fuzzy_subsequence_span(needle, rel_text)
     if span is not None:
         return 130 + rel.count("/") * 4 + span
-    span = _fuzzy_subsequence_span(needle, path_text)
-    if span is not None:
-        return 170 + rel.count("/") * 4 + span
     return None
 
 

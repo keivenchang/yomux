@@ -14478,6 +14478,14 @@ LIGHT_MODE_SURFACES = """
   <span class="file-tree-name" id="idx-name">dir</span>
   <span class="file-tree-git-status" id="idx-status">INDEXED</span>
 </div>
+<div class="file-tree-row indexed-directory selected" id="idx-selected-row">
+  <span class="file-tree-name">dir</span>
+  <span class="file-tree-git-status" id="idx-selected-status">indexed</span>
+</div>
+<div class="file-tree-row index-excluded-entry selected" id="excluded-selected-row">
+  <span class="file-tree-name">cache</span>
+  <span class="file-tree-git-status" id="excluded-selected-status">index excluded</span>
+</div>
 <input class="file-tree-rename-input" id="rename-inp" value="name">
 <div class="session-rename-dialog">
   <input class="session-rename-input" id="session-rename-inp" value="session">
@@ -14567,7 +14575,9 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "pref-adv-text": "pref-adv", "pref-adv-code": "pref-adv-code", "pref-adv-copy": "pref-adv-copy", "agent-ico": None,
         "badge-neutral": "badge-neutral", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
-        "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
+        "rnm-name": None, "idx-name": None, "idx-status": None,
+        "idx-selected-status": "idx-selected-row", "excluded-selected-status": "excluded-selected-row",
+        "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
         # the YO!info table — rows/header/current/links must read on the light pane.
         "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
         # YO!info leaf rows use a transparent fill and must stay readable on the light pane surface.
@@ -14579,6 +14589,32 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
             bg = page_white
         ratio = wcag_contrast_ratio(style[eid]["color"], bg)
         assert ratio >= 3.0, f"{eid}: text {style[eid]['color']} on {bg} contrast {ratio:.1f} < 3.0 (dark-box/invisible)"
+
+
+def test_selected_index_labels_are_readable_in_dark_theme(browser, tmp_path):
+    page = tmp_path / "dark-selected-index-labels.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-dark"),
+    )
+    metrics = browser.execute_script(
+        """
+        const read = (statusId, rowId) => {
+          const status = getComputedStyle(document.getElementById(statusId));
+          const row = getComputedStyle(document.getElementById(rowId));
+          return {color: status.color, background: row.backgroundColor};
+        };
+        return {
+          indexed: read('idx-selected-status', 'idx-selected-row'),
+          excluded: read('excluded-selected-status', 'excluded-selected-row'),
+        };
+        """
+    )
+    for label, paint in metrics.items():
+        ratio = wcag_contrast_ratio(paint["color"], paint["background"])
+        assert ratio >= 4.5, f"{label}: selected index label contrast {ratio:.1f} < 4.5: {paint}"
 
 
 def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(browser, tmp_path):

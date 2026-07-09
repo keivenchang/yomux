@@ -64,6 +64,34 @@ def _skip_signature(skip_dirs: set[str], exclude_signature: str = "") -> str:
     suffix = f"|exclude:{exclude_signature}" if exclude_signature else ""
     return ",".join(sorted(skip_dirs)) + suffix
 
+
+def _resolved_index_dir() -> Path:
+    return INDEX_DIR.expanduser().resolve(strict=False)
+
+
+def _path_is_index_storage(path: Path) -> bool:
+    candidate = path.expanduser().resolve(strict=False)
+    index_dir = _resolved_index_dir()
+    return candidate == index_dir or _path_is_within(candidate, index_dir)
+
+
+def _build_exclude_path(exclude_path: Callable[[Path], bool] | None) -> Callable[[Path], bool]:
+    def excluded(path: Path) -> bool:
+        return _path_is_index_storage(path) or bool(exclude_path is not None and exclude_path(path))
+
+    return excluded
+
+
+def _disk_skip_signature(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> str:
+    signature = _skip_signature(skip_dirs, exclude_signature)
+    resolved_root = root.expanduser().resolve(strict=False)
+    index_dir = _resolved_index_dir()
+    try:
+        relative_index_dir = index_dir.relative_to(resolved_root)
+    except ValueError:
+        return signature
+    return f"{signature}|internal-index-dir:{relative_index_dir.as_posix()}"
+
 # (path, name, relative_path, size, mtime)
 IndexEntry = tuple[str, str, str, int, int]
 
@@ -398,7 +426,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         return
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        signature = _skip_signature(skip_dirs, exclude_signature)
+        signature = _disk_skip_signature(ri.root, skip_dirs, exclude_signature)
         entries_signature = _entries_signature(ri.entries)
         metadata = {
             "version": str(INDEX_FORMAT_VERSION),
@@ -454,7 +482,7 @@ def _load_disk_metadata(root: Path, skip_dirs: set[str], exclude_signature: str 
         return None
     if not isinstance(raw, dict) or raw.get("root") != str(root):
         return None
-    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("storage") != "sqlite" or raw.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
+    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("storage") != "sqlite" or raw.get("skip_signature") != _disk_skip_signature(root, skip_dirs, exclude_signature):
         return None
     return raw
 
@@ -482,7 +510,7 @@ def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: se
         metadata.get("root") == str(root)
         and metadata.get("version") == str(INDEX_FORMAT_VERSION)
         and metadata.get("storage") == "sqlite"
-        and metadata.get("skip_signature") == _skip_signature(skip_dirs, exclude_signature)
+        and metadata.get("skip_signature") == _disk_skip_signature(root, skip_dirs, exclude_signature)
     )
 
 
@@ -762,6 +790,7 @@ def _run_build(
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
     started = time.perf_counter()
     expected_signature = _skip_signature(skip_dirs, exclude_signature)
+    effective_exclude_path = _build_exclude_path(exclude_path)
     with ri.lock:
         dirty_paths = _coalesced_paths(set(ri.dirty_paths)) if ri.ready else []
     lock_fd = None
@@ -792,14 +821,14 @@ def _run_build(
                 ri.building = False
             return
         if dirty_paths:
-            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(ri, dirty_paths, skip_dirs, exclude_path)
+            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(ri, dirty_paths, skip_dirs, effective_exclude_path)
             build_kind = "incremental"
         else:
             entries, truncated, ignored_entries = _walk_root_with_metrics(
                 ri.root,
                 skip_dirs,
                 ri.stop_event,
-                exclude_path,
+                effective_exclude_path,
                 max_files=ri.max_files,
             )
             scanned_entries = len(entries)

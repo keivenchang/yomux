@@ -5961,6 +5961,7 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+      if (payload.root) refreshFileIndexStatus(payload.root);
       if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
         refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }

@@ -4352,6 +4352,7 @@ const notificationEventDefinitions = Object.freeze({
   yoagentJob: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'job', coalesce: true}),
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
   update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
+  indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
@@ -4412,6 +4413,7 @@ function emitNotification(type, payload = {}) {
       actions: payload.actions,
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
+      persistent: definition.dismissOnly === true || payload.persistent === true,
     });
     if (inApp) {
       inApp.dataset.toastEvent = type;
@@ -4579,6 +4581,10 @@ function showToast(title, lines, options = {}) {
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  if (options.persistent === true) {
+    node.dataset.toastPersistent = 'true';
+    node.classList.add('kept');
+  }
   if (targetItem) node.dataset.toastTargetItem = targetItem;
   const bodyNode = ensureToastShell(node, {
     title,
@@ -4596,8 +4602,12 @@ function showToast(title, lines, options = {}) {
   });
   const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
   renderToastLines(bodyNode, toastLines, {
-    countdownMs: options.countdownMs || toastDurationMs,
+    countdownMs: options.persistent === true ? Infinity : (options.countdownMs || toastDurationMs),
   });
+  if (options.persistent === true) {
+    const keepButton = node.querySelector('[data-toast-keep]');
+    if (keepButton) keepButton.hidden = true;
+  }
   node.addEventListener('click', event => {
     if (event.target.closest('[data-toast-close], .toast-actions')) return;
     options.onClick?.();
@@ -4610,13 +4620,13 @@ function showToast(title, lines, options = {}) {
   });
   container.appendChild(node);
   while (container.children.length > 5) {
-    const first = container.firstElementChild;
+    const first = Array.from(container.children).find(child => child.dataset.toastPersistent !== 'true');
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
   // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
-  scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
+  if (options.persistent !== true) scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
   return node;
 }
 

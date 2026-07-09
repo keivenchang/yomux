@@ -1,7 +1,9 @@
+import errno
 import inspect
 import io
 import json
 import os
+import socket
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -1219,6 +1221,18 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
     assert "self.server.app.stop_client_event_watcher_if_idle()" in stream_body
     assert "self.app.start_client_event_watcher()" not in server_init_body
     assert "self.app.stop_client_event_watcher()" in server_close_body
+
+
+def test_server_bind_failure_preserves_original_os_error():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+
+        with pytest.raises(OSError) as info:
+            server_module.TmuxWebtermHTTPServer(("127.0.0.1", port), object())
+
+    assert info.value.errno == errno.EADDRINUSE
 
 
 def test_share_request_allowed_route_matrix(monkeypatch):

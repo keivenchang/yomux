@@ -1973,6 +1973,21 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const restoredApi = loadYolomux('', ['1']);
+      const container = new TestElement('restored-finder-tree');
+      restoredApi.setFileExplorerExpandedForTest(['/repo/dynamo']);
+      restoredApi.renderTreeChildrenForTest(container, '/repo', [{name: 'dynamo', kind: 'dir'}], 0);
+      const row = container.children.find(node => node?.dataset?.path === '/repo/dynamo');
+      assert.equal(row.getAttribute('aria-expanded'), 'true', 'a restored expanded directory points down immediately');
+      assert.equal(row.classList.contains('loading-children'), true, 'a restored expanded directory with no children rendered yet shows the moving loading indicator');
+
+      restoredApi.renderTreeChildrenForTest(container, '/repo', [{name: 'dynamo', kind: 'dir'}], 0, [
+        ['/repo/dynamo', [{name: 'child.txt', kind: 'file'}]],
+      ]);
+      assert.equal(row.classList.contains('loading-children'), false, 'the restored directory clears the loading indicator once its child listing is available');
+    }
+
+    {
       const pendingApi = loadYolomux('', ['1']);
       const container = new TestElement('finder-tree');
       const longPath = '/repo/this/is/a/very/long/path/that/takes/time';

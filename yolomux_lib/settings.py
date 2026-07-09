@@ -624,6 +624,8 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "image_preview_max_px"): "Finder",
     ("file_explorer", "quick_access_paths"): "Finder",
     ("file_explorer", "indexed_dirs"): "Finder",
+    ("file_explorer", "index_exclude_paths"): "Finder",
+    ("file_explorer", "index_max_files"): "Finder",
     ("file_explorer", "index_refresh_seconds"): "Finder",
     ("file_explorer", "companion_dirs"): "Finder",
     ("file_explorer", "dir_cache_ms"): "Finder",

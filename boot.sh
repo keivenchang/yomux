@@ -2,7 +2,13 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-default_port="${YOLOMUX_PORT:-7770}"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  platform_default_port=8880
+else
+  platform_default_port=7770
+fi
+primary_port="${YOLOMUX_PORT:-$platform_default_port}"
+default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 dev_mode="auto"
@@ -14,7 +20,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. Defaults to port 7770. Non-7770 ports use --dev by default.
+Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7770 on Linux. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh
@@ -90,7 +96,17 @@ if [[ "${#ports[@]}" -eq 0 ]]; then
   add_port "$default_port"
 fi
 
-export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PATH:-}"
+path_entries=()
+for path_entry in "${HOME}/.local/bin" "${HOME}/.local/node-v22.11.0-linux-x64/bin"; do
+  [[ -d "$path_entry" ]] && path_entries+=("$path_entry")
+done
+IFS=: read -r -a inherited_path_entries <<< "${PATH:-}"
+for path_entry in "${inherited_path_entries[@]}"; do
+  [[ -d "$path_entry" ]] && path_entries+=("$path_entry")
+done
+PATH="$(IFS=:; printf '%s' "${path_entries[*]}")"
+unset path_entries inherited_path_entries path_entry
+export PATH
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
@@ -122,7 +138,7 @@ use_dev_mode() {
   case "$dev_mode" in
     always) return 0 ;;
     never) return 1 ;;
-    auto) [[ "$port" != "7770" ]] ;;
+    auto) [[ "$port" != "$primary_port" ]] ;;
     *) die "invalid dev mode: $dev_mode" ;;
   esac
 }

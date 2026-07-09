@@ -2824,12 +2824,13 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         start_agent_auth_status_refresh(force=True)
 
     def server_close(self) -> None:
-        self.share_pointer_stop.set()
-        if hasattr(self.app, "stop_stats_history_sampler"):
+        if hasattr(self, "share_pointer_stop"):
+            self.share_pointer_stop.set()
+        if hasattr(self, "app") and hasattr(self.app, "stop_stats_history_sampler"):
             self.app.stop_stats_history_sampler()
-        if hasattr(self.app, "stop_client_event_watcher"):
+        if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
-        if hasattr(self.app, "stop_input_heartbeat_worker"):
+        if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):
             self.app.stop_input_heartbeat_worker()
         super().server_close()
 

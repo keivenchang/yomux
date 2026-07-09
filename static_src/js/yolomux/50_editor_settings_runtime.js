@@ -1092,6 +1092,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
+  reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
