@@ -2129,12 +2129,12 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   renderOpenFilePath(path);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
-    if (panel) restoreFileEditorPanelViewState(item, panel);
+    if (panel) restoreFileEditorPanelViewState(item, panel, {restoreFocused: true});
   }
   requestAnimationFrame(() => {
     for (const {item} of viewStates) {
       const panel = panelNodes.get(item);
-      if (panel) restoreFileEditorPanelViewState(item, panel);
+      if (panel) restoreFileEditorPanelViewState(item, panel, {restoreFocused: true});
     }
   });
   if (loaded.state?.kind && typeof updateFilePreviewPopout === 'function' && editorPreviewModeAvailable(path, loaded.state)) {

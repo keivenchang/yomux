@@ -3470,11 +3470,20 @@ function captureFileEditorPanelViewStateForItem(item) {
   return true;
 }
 
-function restoreFileEditorPanelViewState(item, panel) {
+function restoreFileEditorPanelViewState(item, panel, options = {}) {
   const state = fileEditorViewState.get(item);
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!state || !view || !scrollDOM) return;
+  // An ordinary rerender (autosave chrome, watch/SSE refresh, session metadata) can finish after
+  // CodeMirror has already advanced a Shift+Arrow selection and scrolled to follow it. The focused
+  // live view is newer than the cached tab-switch snapshot, so refresh that shared snapshot instead
+  // of replaying stale cursor/scroll state into the editor. Explicit disk replacement captures a
+  // pre-reload snapshot and opts back into restoration with restoreFocused.
+  if (options.restoreFocused !== true && view.hasFocus && panel?.isConnected) {
+    captureFileEditorPanelViewState(item, panel);
+    return;
+  }
   const docLength = view.state?.doc?.length || 0;
   const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
   const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));

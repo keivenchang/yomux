@@ -3948,3 +3948,97 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
     assert metrics["savedTop"] > metrics["clientHeight"], metrics
     assert metrics["restored"] is True, metrics
     assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
+
+
+def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": dict(app_english_strings())},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "focused-editor-background-rerender.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__focusedRerenderReady = (async () => {{
+              const path = '/home/test/repo/interview.md';
+              const content = Array.from({{length: 500}}, (_value, index) => `line ${{index + 1}} with enough text to keep CodeMirror scrolling normally`).join('\\n');
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{kind: 'text', content, original: content, dirty: false, language: 'markdown'}});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
+              const ready = await waitFor(() => panel._cmView?.scrollDOM?.scrollHeight > panel._cmView?.scrollDOM?.clientHeight * 3);
+              if (!ready) return {{error: 'CodeMirror editor did not become scrollable'}};
+              const view = panel._cmView;
+              const scroller = view.scrollDOM;
+              view.focus();
+              view.dispatch({{selection: {{anchor: 12, head: 48}}}});
+              scroller.scrollTop = Math.min(1600, scroller.scrollHeight - scroller.clientHeight - 10);
+              await frame();
+              captureFileEditorPanelViewState(item, panel);
+              const stale = fileEditorViewState.get(item);
+              view.dispatch({{selection: {{anchor: 180, head: 420}}}});
+              scroller.scrollTop = Math.min(5200, scroller.scrollHeight - scroller.clientHeight - 10);
+              await frame();
+              const before = {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}};
+              fileEditorViewState.set(item, stale);
+              renderFileEditorPanel(panel, item, {{updateActiveFile: false, captureViewState: false}});
+              await frame();
+              await frame();
+              await frame();
+              return {{
+                focused: panel._cmView.hasFocus,
+                sameView: panel._cmView === view,
+                before,
+                after: {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}},
+                stale: {{anchor: stale.anchor, head: stale.head, top: stale.scrollTop}},
+              }};
+            }})();
+          </script>
+        </body></html>""",
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__focusedRerenderReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["focused"] is True, metrics
+    assert metrics["sameView"] is True, metrics
+    assert metrics["before"]["anchor"] != metrics["stale"]["anchor"], metrics
+    assert metrics["before"]["head"] != metrics["stale"]["head"], metrics
+    assert metrics["before"]["top"] > metrics["stale"]["top"], metrics
+    assert metrics["after"]["anchor"] == metrics["before"]["anchor"], metrics
+    assert metrics["after"]["head"] == metrics["before"]["head"], metrics
+    assert abs(metrics["after"]["top"] - metrics["before"]["top"]) < 32, metrics
