@@ -16,7 +16,7 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
     names = {item["name"] for item in payload["skills"]}
     by_name = {item["name"]: item for item in payload["skills"]}
     assert payload["ok"] is True
-    assert {"work-next", "notify-when-idle", "wait-then-run", "wait-roster-then-send", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
+    assert {"work-next", "notify-when-idle", "wait-then-run", "wait-roster-then-send", "loop-send", "research-to-session", "review-to-session", "verify-to-session", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
     assert payload["user_dirs"]["skills"] == str(tmp_path / "skills.d")
     assert payload["user_dirs"]["context"] == str(tmp_path / "context.d")
     assert any("YO!agent skill `work-next`" in line for line in payload["context_lines"])

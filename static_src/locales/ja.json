@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "監視中",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} {session}用",
-  "yolo.titleReadonly": "YOLO {state} {session} 用。読み取り専用アクセス"
+  "yolo.titleReadonly": "YOLO {state} {session} 用。読み取り専用アクセス",
+  "yoagent.job.answer.loopSend": "確認後、tmux セッション `{session}` に {interval}秒ごと、最大 {runs} 回送信する YO!agent ジョブ `{id}` を作成しました。\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "{seconds}秒ごと · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "検証済み送信を繰り返す"
 }

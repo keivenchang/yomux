@@ -2490,5 +2490,8 @@
   "yolo.status.watching": "obserwowanie",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} dla {session}",
-  "yolo.titleReadonly": "YOLO {state} za {session}; Dostęp tylko do odczytu"
+  "yolo.titleReadonly": "YOLO {state} za {session}; Dostęp tylko do odczytu",
+  "yoagent.job.answer.loopSend": "Utworzono zadanie YO!agent `{id}`, które po potwierdzeniu wyśle do sesji tmux `{session}` co {interval}s, maksymalnie {runs} razy:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "co {seconds}s · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "powtarzaj zweryfikowane wysłanie"
 }

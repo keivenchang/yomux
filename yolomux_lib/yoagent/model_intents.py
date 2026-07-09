@@ -16,6 +16,29 @@ from typing import Any
 
 
 MODEL_INTENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+MODEL_INTENT_SCHEMA_TEMPLATES: dict[str, dict[str, Any]] = {
+    "delegated-prompt": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["session", "prompt", "return_result"],
+        "properties": {
+            "session": {"type": "string", "format": "known-session"},
+            "prompt": {"type": "string", "maxLength": 4000},
+            "return_result": {"type": "boolean"},
+        },
+    },
+    "loop-send": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["session", "prompt", "interval_seconds", "max_runs"],
+        "properties": {
+            "session": {"type": "string", "format": "known-session"},
+            "prompt": {"type": "string", "maxLength": 4000},
+            "interval_seconds": {"type": "number", "minimum": 5, "maximum": 3600},
+            "max_runs": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -28,6 +51,8 @@ class ModelIntentDefinition:
     candidate_require_any: tuple[str, ...]
     candidate_collective_terms: tuple[str, ...]
     min_known_sessions: int
+    session_scope: str
+    priority: int
     confirmation_required: bool
     defaults: dict[str, Any]
 
@@ -51,22 +76,24 @@ def model_intent_definition_from_payload(skill: dict[str, Any]) -> ModelIntentDe
     candidate = raw.get("candidate")
     output = raw.get("output")
     defaults = raw.get("defaults")
-    if not MODEL_INTENT_NAME_RE.fullmatch(name) or not MODEL_INTENT_NAME_RE.fullmatch(handler) or confirmation != "required":
+    if not MODEL_INTENT_NAME_RE.fullmatch(name) or not MODEL_INTENT_NAME_RE.fullmatch(handler) or confirmation not in {"required", "none"}:
         return None
     if not isinstance(candidate, dict) or not isinstance(output, dict) or not isinstance(defaults, dict):
         return None
     any_of = _string_list(candidate.get("any_of"))
-    require_any = _string_list(candidate.get("require_any"))
-    collective_terms = _string_list(candidate.get("collective_terms"))
-    minimum = candidate.get("min_known_sessions")
+    require_any = _string_list(candidate.get("require_any", []))
+    collective_terms = _string_list(candidate.get("collective_terms", []))
+    minimum = candidate.get("min_known_sessions", 0)
+    priority = candidate.get("priority", 0)
+    session_scope = str(candidate.get("session_scope") or "condition").strip()
     tag = str(output.get("tag") or "").strip()
-    schema = output.get("schema")
-    if not any_of or not require_any or not collective_terms or isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+    raw_schema = output.get("schema")
+    schema = MODEL_INTENT_SCHEMA_TEMPLATES.get(raw_schema) if isinstance(raw_schema, str) else raw_schema
+    if not any_of or require_any is None or collective_terms is None or isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0 or isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100 or session_scope not in {"condition", "request"}:
         return None
     if not MODEL_INTENT_NAME_RE.fullmatch(tag) or not isinstance(schema, dict):
         return None
-    quiet_seconds = defaults.get("quiet_seconds")
-    if isinstance(quiet_seconds, bool) or not isinstance(quiet_seconds, (int, float)) or not 1 <= quiet_seconds <= 300:
+    if any(isinstance(value, (dict, list)) or value is None for value in defaults.values()):
         return None
     return ModelIntentDefinition(
         name=name,
@@ -77,8 +104,10 @@ def model_intent_definition_from_payload(skill: dict[str, Any]) -> ModelIntentDe
         candidate_require_any=require_any,
         candidate_collective_terms=collective_terms,
         min_known_sessions=minimum,
-        confirmation_required=True,
-        defaults={"quiet_seconds": float(quiet_seconds)},
+        session_scope=session_scope,
+        priority=priority,
+        confirmation_required=confirmation == "required",
+        defaults=dict(defaults),
     )
 
 
@@ -94,12 +123,17 @@ def known_session_mentions(question: str, known_sessions: list[str] | tuple[str,
 
 def model_intent_matches(definition: ModelIntentDefinition, question: str, known_sessions: list[str] | tuple[str, ...]) -> bool:
     text = str(question or "").lower()
-    if not any(term in text for term in definition.candidate_any_of) or not any(term in text for term in definition.candidate_require_any):
+    if not any(term in text for term in definition.candidate_any_of):
         return False
-    command_start = min(position for term in definition.candidate_require_any if (position := text.find(term)) >= 0)
+    if definition.candidate_require_any and not any(term in text for term in definition.candidate_require_any):
+        return False
+    command_start = min((position for term in definition.candidate_require_any if (position := text.find(term)) >= 0), default=len(text))
     condition_text = str(question or "")[:command_start]
-    mentions = known_session_mentions(condition_text, known_sessions)
-    return len(mentions) >= definition.min_known_sessions or any(term in condition_text.lower() for term in definition.candidate_collective_terms)
+    session_text = str(question or "") if definition.session_scope == "request" else condition_text
+    mentions = known_session_mentions(session_text, known_sessions)
+    if definition.candidate_collective_terms:
+        return len(mentions) >= definition.min_known_sessions or any(term in condition_text.lower() for term in definition.candidate_collective_terms)
+    return len(mentions) >= definition.min_known_sessions
 
 
 def select_model_intent(skills_payload: dict[str, Any], question: str, known_sessions: list[str] | tuple[str, ...]) -> ModelIntentDefinition | None:
@@ -107,7 +141,11 @@ def select_model_intent(skills_payload: dict[str, Any], question: str, known_ses
     if not isinstance(skills, list):
         return None
     matches = [definition for skill in skills if isinstance(skill, dict) for definition in [model_intent_definition_from_payload(skill)] if definition and model_intent_matches(definition, question, known_sessions)]
-    return matches[0] if len(matches) == 1 else None
+    if not matches:
+        return None
+    highest = max(definition.priority for definition in matches)
+    selected = [definition for definition in matches if definition.priority == highest]
+    return selected[0] if len(selected) == 1 else None
 
 
 def model_intent_provider_schema(definition: ModelIntentDefinition, known_sessions: list[str] | tuple[str, ...]) -> dict[str, Any]:
@@ -183,6 +221,12 @@ def _validate_schema(value: Any, schema: dict[str, Any], known_sessions: set[str
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         return (not isinstance(minimum, (int, float)) or value >= minimum) and (not isinstance(maximum, (int, float)) or value <= maximum)
+    if value_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        return (not isinstance(minimum, int) or value >= minimum) and (not isinstance(maximum, int) or value <= maximum)
     if value_type == "boolean":
         return isinstance(value, bool)
     return False
@@ -218,8 +262,45 @@ def _wait_roster_then_send_job_payload(definition: ModelIntentDefinition, plan: 
     }
 
 
+def _wait_then_send_job_payload(definition: ModelIntentDefinition, plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "wait_then_send",
+        "session": str(plan["session"]).strip(),
+        "quiet_seconds": float(definition.defaults.get("quiet_seconds", 3)),
+        "return_result": bool(plan.get("return_result", True)),
+        "requires_confirmation": definition.confirmation_required,
+        "action": {
+            "session": str(plan["session"]).strip(),
+            "text": str(plan["prompt"]).strip(),
+            "submit": True,
+            "return_result": bool(plan.get("return_result", True)),
+            "requires_confirmation": definition.confirmation_required,
+        },
+    }
+
+
+def _loop_send_job_payload(definition: ModelIntentDefinition, plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "loop_send",
+        "session": str(plan["session"]).strip(),
+        "interval_seconds": float(plan.get("interval_seconds") or definition.defaults.get("interval_seconds", 30)),
+        "max_runs": int(plan.get("max_runs") or definition.defaults.get("max_runs", 10)),
+        "return_result": False,
+        "requires_confirmation": definition.confirmation_required,
+        "action": {
+            "session": str(plan["session"]).strip(),
+            "text": str(plan["prompt"]).strip(),
+            "submit": True,
+            "return_result": False,
+            "requires_confirmation": definition.confirmation_required,
+        },
+    }
+
+
 MODEL_INTENT_JOB_HANDLERS = {
     "wait-roster-then-send": _wait_roster_then_send_job_payload,
+    "wait-then-send": _wait_then_send_job_payload,
+    "loop-send": _loop_send_job_payload,
 }
 
 

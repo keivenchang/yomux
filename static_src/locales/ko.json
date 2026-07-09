@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "감시 중",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} 에 대한 {session}",
-  "yolo.titleReadonly": "{session}에 대해 YOLO {state}; 읽기 전용 액세스"
+  "yolo.titleReadonly": "{session}에 대해 YOLO {state}; 읽기 전용 액세스",
+  "yoagent.job.answer.loopSend": "확인 후 tmux 세션 `{session}`에 {interval}초마다 최대 {runs}회 전송하는 YO!agent 작업 `{id}`을 만들었습니다:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "{seconds}초마다 · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "검증된 전송 반복"
 }

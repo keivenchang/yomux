@@ -2490,5 +2490,8 @@
   "yolo.status.watching": "наблюдение",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} для {session}",
-  "yolo.titleReadonly": "YOLO {state} для {session}; доступ только для чтения"
+  "yolo.titleReadonly": "YOLO {state} для {session}; доступ только для чтения",
+  "yoagent.job.answer.loopSend": "Создано задание YO!agent `{id}`: после подтверждения отправлять в сеанс tmux `{session}` каждые {interval}с, не более {runs} раз:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "каждые {seconds}с · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "повторять проверенную отправку"
 }

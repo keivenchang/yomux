@@ -99,6 +99,7 @@ YOAGENT_JOB_TYPE_MESSAGE_KEYS = {
     "notify_session_idle": "yoagent.jobs.type.notifySessionIdle",
     "notify_session_needs_input": "yoagent.jobs.type.notifySessionNeedsInput",
     "result_watch": "yoagent.jobs.type.resultWatch",
+    "loop_send": "yoagent.jobs.type.loopSend",
     "wait_roster_then_send": "yoagent.jobs.type.waitRosterThenSend",
     "wait_then_send": "yoagent.jobs.type.waitThenSend",
 }
@@ -507,7 +508,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             "idempotency_key": str(value.get("idempotency_key") or ""),
             "audit_event_ids": [str(item) for item in value.get("audit_event_ids", []) if item],
         }
-        for key in ("firing_at", "fired_at", "cancelled_at", "failed_at", "timed_out_at", "result", "error"):
+        for key in ("firing_at", "fired_at", "cancelled_at", "failed_at", "timed_out_at", "result", "error", "run_count", "max_runs", "next_run_ts", "last_run_at"):
             if key in value:
                 job[key] = value[key]
         if interrupted_firing:
@@ -706,6 +707,30 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             predicate = {"type": "session_idle", "quiet_seconds": self.float_value(payload.get("quiet_seconds"), YOAGENT_JOB_IDLE_QUIET_SECONDS)}
             return_result = action_payload["return_result"] if "return_result" in action_payload else payload.get("return_result", True)
             action = {"type": "send_prompt", "session": session, "text": text, "submit": action_payload.get("submit") is not False, "return_result": bool(return_result)}
+        elif job_type in {"loop_send", "repeat_send"}:
+            job_type = "loop_send"
+            if not session:
+                diagnostic = "missing target session"
+                return user_message_payload("yoagent.error.targetSessionRequired", diagnostic), HTTPStatus.BAD_REQUEST
+            unknown = self.require_known_session(session)
+            if unknown:
+                unknown_payload, unknown_status = unknown
+                diagnostic = str(unknown_payload.get("error") or f"unknown session: {session}")
+                return {**unknown_payload, **user_message_payload("yoagent.error.unknownSession", diagnostic, session=session)}, unknown_status
+            text = truncate_text(str(payload.get("text") or action_payload.get("text") or "").strip(), YOAGENT_ACTION_TEXT_LIMIT)
+            if not text:
+                diagnostic = "missing prompt text"
+                return {"session": session, **user_message_payload("yoagent.error.promptTextRequired", diagnostic)}, HTTPStatus.BAD_REQUEST
+            interval_seconds = self.float_value(payload.get("interval_seconds"), 30.0)
+            max_runs_value = payload.get("max_runs", 10)
+            max_runs = int(max_runs_value) if isinstance(max_runs_value, int) and not isinstance(max_runs_value, bool) else 0
+            if not 5.0 <= interval_seconds <= 3600.0 or not 1 <= max_runs <= 100:
+                diagnostic = "loop interval must be 5-3600 seconds and max runs must be 1-100"
+                return user_message_payload("yoagent.error.unsupportedJobType", diagnostic, type=job_type), HTTPStatus.BAD_REQUEST
+            target = {"session": session}
+            predicate = {"type": "interval", "interval_seconds": interval_seconds, "quiet_seconds": 0.0}
+            action = {"type": "send_prompt", "session": session, "text": text, "submit": action_payload.get("submit") is not False, "return_result": False}
+            return {"type": job_type, "target": target, "predicate": predicate, "action": action, "locale": locale, "max_runs": max_runs}, HTTPStatus.OK
         else:
             diagnostic = f"unsupported YO!agent job type: {job_type}"
             return user_message_payload("yoagent.error.unsupportedJobType", diagnostic, type=job_type), HTTPStatus.BAD_REQUEST
@@ -763,6 +788,10 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 "idempotency_key": idempotency_key,
                 "audit_event_ids": [],
             }
+            if job_type == "loop_send":
+                job["run_count"] = 0
+                job["max_runs"] = int(spec.get("max_runs") or 10)
+                job["next_run_ts"] = now_ts
             self.yoagent_jobs[job["id"]] = job
             self.persist_yoagent_jobs_locked()
         event = self.log_event(
@@ -856,7 +885,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         now_iso = datetime.now(timezone.utc).isoformat()
         with self.yoagent_job_lock:
             for job in self.yoagent_jobs.values():
-                if job.get("status") not in {"queued", "pending_confirmation"}:
+                cancellable = job.get("status") in {"queued", "pending_confirmation"} or (job.get("status") == "firing" and job.get("type") == "loop_send")
+                if not cancellable:
                     continue
                 target = job.get("target") if isinstance(job.get("target"), dict) else {}
                 action = job.get("action") if isinstance(job.get("action"), dict) else {}
@@ -955,7 +985,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         elif predicate_type == "session_done_after_working":
             ready = accepting
         else:
-            ready = accepting if predicate_type in {"session_idle", "session_done"} else False
+            ready = accepting if predicate_type in {"session_idle", "session_done", "interval"} else False
         return {
             "ready": ready,
             "state": state_key,
@@ -999,7 +1029,8 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             state_data[YOAGENT_JOBS_STATE_KEY] = jobs
             predicate_type = str(predicate.get("type") or "")
             ready_after_working = predicate_type != "session_done_after_working" or seen_working
-            return copy.deepcopy(job), ready and ready_after_working and now - since >= quiet_seconds
+            loop_due = predicate_type != "interval" or now >= self.float_value(job.get("next_run_ts"), now)
+            return copy.deepcopy(job), ready and ready_after_working and loop_due and now - since >= quiet_seconds
 
         current, should_fire = self.deps.mutate_yolomux_state(update)
         if current:
@@ -1083,6 +1114,33 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             return copy.deepcopy(job)
 
 
+    def complete_or_reschedule_yoagent_loop_send(self, job_id: str, result: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """Finish a bounded loop or atomically schedule its next verified send."""
+        with self.yoagent_job_lock:
+            job = self.yoagent_jobs.get(job_id)
+            if not job or job.get("status") != "firing":
+                return None, False
+            run_count = int(job.get("run_count") or 0) + 1
+            max_runs = max(1, int(job.get("max_runs") or 1))
+            job["run_count"] = run_count
+            job["last_run_at"] = datetime.now(timezone.utc).isoformat()
+            job["result"] = result
+            if run_count >= max_runs:
+                job["status"] = "fired"
+                job["fired_at"] = job["last_run_at"]
+                if not job.get("started_at"):
+                    job["started_at"] = job["last_run_at"]
+                done = True
+            else:
+                interval = max(5.0, min(3600.0, self.float_value((job.get("predicate") or {}).get("interval_seconds"), 30.0)))
+                job["status"] = "queued"
+                job["next_run_ts"] = time.time() + interval
+                job.pop("firing_at", None)
+                done = False
+            self.persist_yoagent_jobs_locked()
+            return copy.deepcopy(job), done
+
+
     def fire_yoagent_job(self, job: dict[str, Any], observed: dict[str, Any]) -> bool:
         job_id = str(job.get("id") or "")
         action = job.get("action") if isinstance(job.get("action"), dict) else {}
@@ -1133,7 +1191,13 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             preview, preview_status = self.create_yoagent_action_preview(intent)
             if preview_status == HTTPStatus.OK and preview.get("status") == "ready":
                 result, result_status = self.execute_yoagent_send_action({"preview_id": preview.get("id")}, persist_result=True, start_result_watch=bool(intent.get("return_result")))
-                completed = self.complete_yoagent_job(job_id, "fired" if result_status == HTTPStatus.OK else "failed", {"action": preview, "send": result, "status": int(result_status)})
+                job_type = str(job.get("type") or "")
+                payload = {"action": preview, "send": result, "status": int(result_status)}
+                if job_type == "loop_send" and result_status == HTTPStatus.OK:
+                    completed, loop_complete = self.complete_or_reschedule_yoagent_loop_send(job_id, payload)
+                else:
+                    completed = self.complete_yoagent_job(job_id, "fired" if result_status == HTTPStatus.OK else "failed", payload)
+                    loop_complete = True
                 if completed:
                     self.log_event(
                         str(intent.get("session") or ""),
@@ -1143,7 +1207,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                         message_key="events.message.yoagent.jobPromptSent",
                         message_params={"session": str(intent.get("session") or "")},
                     )
-                    self.publish_yoagent_jobs_changed("yoagent_job_fired", completed)
+                    self.publish_yoagent_jobs_changed("yoagent_job_fired" if loop_complete else "yoagent_job_looped", completed)
                     return result_status == HTTPStatus.OK
                 return False
             diagnostic = str(preview.get("error") or preview.get("acceptance_text") or "target is not ready")
@@ -1816,6 +1880,16 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 id=job.get("id"),
                 roster=roster,
                 session=action.get("session") or "",
+                text=action.get("text") or "",
+            )
+        if job_type == "loop_send":
+            return yoagent_text(
+                locale,
+                "yoagent.job.answer.loopSend",
+                id=job.get("id"),
+                session=target.get("session"),
+                interval=int(self.float_value((job.get("predicate") or {}).get("interval_seconds"), 30.0)),
+                runs=int(job.get("max_runs") or 1),
                 text=action.get("text") or "",
             )
         return yoagent_text(locale, "yoagent.job.answer.idle", id=job.get("id"), session=target.get("session"))

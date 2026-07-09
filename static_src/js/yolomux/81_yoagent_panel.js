@@ -585,6 +585,12 @@ function yoagentJobDestinationText(job) {
 
 function yoagentJobQuietText(job) {
   const predicate = job?.predicate && typeof job.predicate === 'object' ? job.predicate : {};
+  const interval = Number(predicate.interval_seconds);
+  if (String(predicate.type || '') === 'interval' && Number.isFinite(interval) && interval > 0) {
+    const runs = Number(job?.max_runs);
+    const count = Number(job?.run_count);
+    return t('yoagent.jobs.every', {seconds: Math.round(interval), runs: Number.isFinite(runs) ? Math.round(runs) : '?', count: Number.isFinite(count) ? Math.round(count) : 0});
+  }
   const seconds = Number(predicate.quiet_seconds);
   return Number.isFinite(seconds) && seconds > 0 ? t('yoagent.jobs.calmFor', {seconds: Math.round(seconds)}) : '';
 }
@@ -607,6 +613,7 @@ const YOAGENT_JOB_CLASSIFICATION_KEYS = Object.freeze({
     notify_all_idle: 'yoagent.jobs.type.notifyAllIdle',
     wait_then_send: 'yoagent.jobs.type.waitThenSend',
     wait_roster_then_send: 'yoagent.jobs.type.waitRosterThenSend',
+    loop_send: 'yoagent.jobs.type.loopSend',
     result_watch: 'yoagent.jobs.type.resultWatch',
   }),
 });
@@ -629,7 +636,7 @@ function yoagentJobRowsHtml() {
     const destination = yoagentJobDestinationText(job);
     const actionText = yoagentJobActionText(job);
     const canConfirm = status === 'pending_confirmation' && id && !readOnlyMode;
-    const canCancel = ['queued', 'pending_confirmation'].includes(status) && id && !readOnlyMode;
+    const canCancel = (['queued', 'pending_confirmation'].includes(status) || (status === 'firing' && type === 'loop_send')) && id && !readOnlyMode;
     const blocker = job?.last_observed_state?.blockers && Array.isArray(job.last_observed_state.blockers)
       ? job.last_observed_state.blockers.join(', ')
       : '';

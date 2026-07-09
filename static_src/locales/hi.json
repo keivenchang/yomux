@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "निगरानी जारी है",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} के लिए {session}",
-  "yolo.titleReadonly": "YOLO {state} के लिए {session}; केवल पढ़ने योग्य पहुंच"
+  "yolo.titleReadonly": "YOLO {state} के लिए {session}; केवल पढ़ने योग्य पहुंच",
+  "yoagent.job.answer.loopSend": "पुष्टि के बाद मैंने YO!agent कार्य `{id}` बनाया है जो tmux सत्र `{session}` को हर {interval}s पर अधिकतम {runs} बार भेजेगा:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "हर {seconds}s · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "सत्यापित भेजना दोहराएं"
 }

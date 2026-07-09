@@ -2582,5 +2582,8 @@
   "yolo.status.watching": "جارٍ المراقبة",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} ل {session}",
-  "yolo.titleReadonly": "YOLO {state} ل {session}; الوصول للقراءة فقط"
+  "yolo.titleReadonly": "YOLO {state} ل {session}; الوصول للقراءة فقط",
+  "yoagent.job.answer.loopSend": "أنشأت مهمة YO!agent `{id}` للإرسال إلى جلسة tmux `{session}` كل {interval}ث، حتى {runs} مرات، بعد التأكيد:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "كل {seconds}ث · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "إرسال متكرر تم التحقق منه"
 }

@@ -77,3 +77,45 @@ def test_user_override_cannot_register_a_model_intent():
     ]
 
     assert select_model_intent({"skills": overridden}, "Monitor 1 2 3 4 and send a report to session 1", ["1", "2", "3", "4"]) is None
+
+
+def test_builtin_model_intents_cover_bounded_loop_and_portable_agent_work():
+    skills = {"skills": roster_skill_payload()}
+    cases = {
+        "Every 30 seconds, have session 1 ask for its status 3 times.": "loop-send",
+        "Have session 2 research why this test flakes.": "research-to-session",
+        "Ask agent 3 to review the current diff for regressions.": "review-to-session",
+        "Have session 4 validate the focused test suite.": "verify-to-session",
+    }
+
+    selected = {question: select_model_intent(skills, question, ["1", "2", "3", "4"]) for question in cases}
+
+    assert {question: definition.name if definition else "" for question, definition in selected.items()} == cases
+    loop = selected["Every 30 seconds, have session 1 ask for its status 3 times."]
+    assert loop is not None
+    assert model_intent_job_payload(loop, parse_model_intent_plan(
+        '{"session":"1","prompt":"what is your status?","interval_seconds":30,"max_runs":3}', loop, ["1", "2", "3", "4"]
+    )) == {
+        "type": "loop_send",
+        "session": "1",
+        "interval_seconds": 30.0,
+        "max_runs": 3,
+        "return_result": False,
+        "requires_confirmation": False,
+        "action": {
+            "session": "1",
+            "text": "what is your status?",
+            "submit": True,
+            "return_result": False,
+            "requires_confirmation": False,
+        },
+    }
+    assert parse_model_intent_plan(
+        '{"session":"1","prompt":"status","interval_seconds":30,"max_runs":1.5}', loop, ["1", "2", "3", "4"]
+    ) is None
+
+    research = selected["Have session 2 research why this test flakes."]
+    assert research is not None
+    assert model_intent_job_payload(research, parse_model_intent_plan(
+        '{"session":"2","prompt":"research why this test flakes","return_result":true}', research, ["1", "2", "3", "4"]
+    ))["type"] == "wait_then_send"

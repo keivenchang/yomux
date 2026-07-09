@@ -208,6 +208,110 @@ def test_yoagent_chat_accepts_validated_model_roster_plan_as_confirmation_only_j
     assert model_calls[0][0][2]["type"] == "object"
 
 
+def test_yoagent_model_loop_starts_without_confirmation_and_reschedules_verified_sends(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    send_calls = []
+    install_chat_defaults(monkeypatch, webapp)
+    monkeypatch.setattr(webapp.yoagent_controller.deps, "resolve_yoagent_backend", lambda _backend: "codex")
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (idle_target(session), HTTPStatus.OK))
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "run_yoagent_model_intent_backend",
+        lambda *_args, **_kwargs: ('{"session":"1","prompt":"what is your status?","interval_seconds":5,"max_runs":2}', "", {"backend": "codex"}),
+    )
+    monkeypatch.setattr(
+        transport_module,
+        "send_prompt",
+        lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
+    )
+
+    try:
+        payload, status = webapp.yoagent_controller.yoagent_chat({"message": "Every 5 seconds have session 1 ask for its status twice."})
+        jobs, _jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+        job_id = jobs["jobs"][0]["id"]
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        with webapp.yoagent_job_lock:
+            webapp.yoagent_jobs[job_id]["next_run_ts"] = 0
+        second = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        completed, _completed_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["cli"]["structured_job"] is True
+    assert jobs["jobs"][0]["status"] == "queued"
+    assert first == [job_id]
+    assert second == [job_id]
+    assert [call[1] for call in send_calls] == ["what is your status?", "what is your status?"]
+    assert completed["jobs"][0]["status"] == "fired"
+    assert completed["jobs"][0]["run_count"] == 2
+
+
+def test_yoagent_loop_cancellation_prevents_the_next_verified_send(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    send_calls = []
+    install_chat_defaults(monkeypatch, webapp)
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda session: (idle_target(session), HTTPStatus.OK))
+    monkeypatch.setattr(
+        transport_module,
+        "send_prompt",
+        lambda send_target, text, **kwargs: send_calls.append((send_target, text, kwargs)) or fake_agent_tui_send_result(),
+    )
+
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "loop_send",
+            "session": "1",
+            "text": "what is your status?",
+            "interval_seconds": 5,
+            "max_runs": 3,
+        })
+        job_id = created["job"]["id"]
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        cancelled, cancelled_status = webapp.yoagent_controller.cancel_yoagent_job(job_id)
+        with webapp.yoagent_job_lock:
+            webapp.yoagent_jobs[job_id]["next_run_ts"] = 0
+        after_cancel = webapp.yoagent_controller.poll_yoagent_jobs_once()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert created["job"]["status"] == "queued"
+    assert first == [job_id]
+    assert cancelled_status == HTTPStatus.OK
+    assert cancelled["job"]["status"] == "cancelled"
+    assert after_cancel == []
+    assert [call[1] for call in send_calls] == ["what is your status?"]
+
+
+def test_yoagent_cancel_session_jobs_cancels_a_firing_loop(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    install_chat_defaults(monkeypatch, webapp)
+
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "loop_send",
+            "session": "1",
+            "text": "what is your status?",
+            "interval_seconds": 5,
+            "max_runs": 3,
+        })
+        job_id = created["job"]["id"]
+        claimed = webapp.yoagent_controller.claim_yoagent_job_fire(job_id)
+        cancelled, cancelled_status = webapp.yoagent_controller.cancel_yoagent_jobs_for_session("1")
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert claimed and claimed["status"] == "firing"
+    assert cancelled_status == HTTPStatus.OK
+    assert cancelled["count"] == 1
+    assert cancelled["jobs"][0]["status"] == "cancelled"
+
+
 def test_yoagent_model_intent_requires_enabled_builtin_skill(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     monkeypatch.setattr(

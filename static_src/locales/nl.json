@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "bewaken",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} voor {session}",
-  "yolo.titleReadonly": "YOLO {state} voor {session}; Alleen-lezen toegang"
+  "yolo.titleReadonly": "YOLO {state} voor {session}; Alleen-lezen toegang",
+  "yoagent.job.answer.loopSend": "YO!agent-taak `{id}` gemaakt om na bevestiging maximaal {runs} keer elke {interval}s naar tmux-sessie `{session}` te sturen:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "elke {seconds}s · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "geverifieerde verzending herhalen"
 }

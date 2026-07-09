@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "กำลังเฝ้าดู",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} สําหรับ {session}",
-  "yolo.titleReadonly": "YOLO {state} สําหรับ {session}; การเข้าถึงแบบอ่านอย่างเดียว"
+  "yolo.titleReadonly": "YOLO {state} สําหรับ {session}; การเข้าถึงแบบอ่านอย่างเดียว",
+  "yoagent.job.answer.loopSend": "สร้างงาน YO!agent `{id}` เพื่อส่งไปยังเซสชัน tmux `{session}` ทุก {interval} วินาที สูงสุด {runs} ครั้ง หลังยืนยัน:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "ทุก {seconds} วินาที · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "ส่งที่ตรวจสอบแล้วซ้ำ"
 }

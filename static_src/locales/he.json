@@ -2444,5 +2444,8 @@
   "yolo.status.watching": "עוקב",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} עבור {session}",
-  "yolo.titleReadonly": "YOLO {state} עבור {session}; גישה לקריאה בלבד"
+  "yolo.titleReadonly": "YOLO {state} עבור {session}; גישה לקריאה בלבד",
+  "yoagent.job.answer.loopSend": "נוצרה משימת YO!agent `{id}` לשליחה להפעלת tmux `{session}` כל {interval}ש׳, עד {runs} פעמים, לאחר אישור:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "כל {seconds}ש׳ · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "חזור על שליחה מאומתת"
 }

@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "đang theo dõi",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} cho {session}",
-  "yolo.titleReadonly": "YOLO {state} cho {session}; Truy cập chỉ đọc"
+  "yolo.titleReadonly": "YOLO {state} cho {session}; Truy cập chỉ đọc",
+  "yoagent.job.answer.loopSend": "Đã tạo công việc YO!agent `{id}` để gửi tới phiên tmux `{session}` mỗi {interval}s, tối đa {runs} lần, sau khi xác nhận:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "mỗi {seconds}s · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "lặp lại lần gửi đã xác minh"
 }

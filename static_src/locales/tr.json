@@ -2398,5 +2398,8 @@
   "yolo.status.watching": "izleniyor",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} {session} için",
-  "yolo.titleReadonly": "YOLO {state} yerine {session}; okunabilir erişim"
+  "yolo.titleReadonly": "YOLO {state} yerine {session}; okunabilir erişim",
+  "yoagent.job.answer.loopSend": "Onaydan sonra tmux oturumu `{session}` içine her {interval}s'de bir, en fazla {runs} kez göndermek için YO!agent işi `{id}` oluşturuldu:\n\n```text\n{text}\n```",
+  "yoagent.jobs.every": "her {seconds}s · {count}/{runs}",
+  "yoagent.jobs.type.loopSend": "doğrulanmış göndermeyi tekrarla"
 }
