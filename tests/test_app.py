@@ -4450,7 +4450,7 @@ def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
     assert rows[0]["window_active"] is True
 
 
-def test_agent_window_working_completion_gets_a_fresh_pause_timestamp(monkeypatch, tmp_path):
+def test_agent_window_working_completion_gets_a_fresh_pause_timestamp_after_idle_confirmation(monkeypatch, tmp_path):
     pane = PaneInfo(
         session="2",
         window="0",
@@ -4473,19 +4473,26 @@ def test_agent_window_working_completion_gets_a_fresh_pause_timestamp(monkeypatc
         selected_pane=pane,
         agents=[AgentInfo("2", "codex", 20, "%20", "codex", "/repo/working", "idle", "codex-id", str(tmp_path / "codex.jsonl"), None)],
     )
-    states = iter(({"key": "working", "text": "working"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}))
+    states = iter(({"key": "working", "text": "working"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}))
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, **_kwargs: "fixture")
     monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: next(states))
     webapp = app_module.TmuxWebtermApp(["2"])
     try:
+        now = [100.0]
+        monkeypatch.setattr(app_module.time, "time", lambda: now[0])
         working = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
+        now[0] = 200.0
+        pending = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
+        now[0] = 205.0
         completed = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
         still_completed = webapp.agent_window_status_payloads("2", info=info, discovered_sessions={"2": info})[0]
     finally:
         webapp.control_server.stop()
     assert working["state"] == "working"
+    assert pending["state"] == "idle"
+    assert pending["working_stopped_ts"] is None
     assert completed["state"] == "idle"
-    assert completed["working_stopped_ts"] >= working["observed_ts"]
+    assert completed["working_stopped_ts"] == 200.0
     assert still_completed["working_stopped_ts"] == completed["working_stopped_ts"]
 
 

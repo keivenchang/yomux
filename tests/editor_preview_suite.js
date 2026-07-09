@@ -1657,31 +1657,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(settledGreenToAsk.pulseActive, false, 'red ASK becomes steady when its configured pulse period ends');
     const acknowledgedGreenToAsk = api.agentWindowActivityIconForTest('codex', 'approval', 0, {transitionKey: greenToAskKey, attention_key: 'green-to-ask-attention', attention_acknowledged: true, nowSeconds: 2066, scheduleRefresh: false});
     assert.equal(acknowledgedGreenToAsk.acknowledged, true, 'explicit acknowledgement removes the red ASK marker after its acknowledgement delay');
-    const freshStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false});
-    assert.equal(freshStopped.state, 'cooldown', 'a window that just stopped working shows yellow');
+    const unconfirmedStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1005, scheduleRefresh: false});
+    assert.equal(unconfirmedStopped, null, 'an idle sample without the server-confirmed stop timestamp remains quiet');
+    const freshStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, working_stopped_ts: 1005, nowSeconds: 1005, scheduleRefresh: false});
+    assert.equal(freshStopped.state, 'cooldown', 'a server-confirmed stopped window shows yellow');
     assert.equal(freshStopped.pulseActive, true, 'a fresh stopped marker glows during the configured glow window');
     assert.equal(freshStopped.transitionPulseActive, true, 'a green-to-yellow transition pulses during the workflow transition glow duration');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 20, {transitionKey, nowSeconds: 1020, scheduleRefresh: false}).state, 'cooldown', 'the stopped marker stays yellow during the dedicated cooldown instead of using file-recency timing');
-    const staleStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, nowSeconds: 1065, scheduleRefresh: false});
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 20, {transitionKey, working_stopped_ts: 1005, nowSeconds: 1020, scheduleRefresh: false}).state, 'cooldown', 'the stopped marker stays yellow during the dedicated cooldown instead of using file-recency timing');
+    const staleStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey, working_stopped_ts: 1005, nowSeconds: 1065, scheduleRefresh: false});
     assert.equal(staleStopped.state, 'cooldown', 'after the glow duration the stopped marker stays yellow until acknowledgement');
     assert.equal(staleStopped.pulseActive, false, 'after the glow duration the stopped marker becomes static');
     assert.equal(staleStopped.transitionPulseActive, false, 'after the workflow transition glow duration the yellow transition pulse stops');
     api.setWorkflowTransitionGlowSecondsForTest(0);
     const stickyTransitionKey = '1:4::codex';
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: stickyTransitionKey, nowSeconds: 3000, scheduleRefresh: false}).state, 'working', 'working clears an earlier yellow acknowledgement');
-    const noGlowStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 3005, scheduleRefresh: false});
+    const noGlowStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, working_stopped_ts: 3005, nowSeconds: 3005, scheduleRefresh: false});
     assert.equal(noGlowStopped.state, 'cooldown', '0-second glow duration keeps the stopped marker visible instead of disabling it');
     assert.equal(noGlowStopped.pulseActive, false, '0-second glow duration renders the stopped marker static from the start');
     assert.equal(noGlowStopped.transitionPulseActive, false, '0-second workflow transition glow duration keeps the yellow marker static from the start');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 9999, scheduleRefresh: false}).state, 'cooldown', '0-second glow duration stays visible forever until acknowledgement');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, working_stopped_ts: 3005, nowSeconds: 9999, scheduleRefresh: false}).state, 'cooldown', '0-second glow duration stays visible forever until acknowledgement');
     assert.equal(api.acknowledgeAgentWindowStoppedTransitionForTest(stickyTransitionKey, null, {refresh: false}), true, 'acknowledging the matching stopped window clears the sticky yellow notification');
-    const acknowledgedStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10000, scheduleRefresh: false});
+    const acknowledgedStopped = api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, working_stopped_ts: 3005, nowSeconds: 10000, scheduleRefresh: false});
     assert.equal(acknowledgedStopped.state, 'cooldown', 'acknowledgement retains the transition state only to suppress it until re-armed');
     assert.equal(acknowledgedStopped.acknowledged, true, 'acknowledged sticky yellow markers retain acknowledgement state for lifecycle re-arming');
     assert.equal(acknowledgedStopped.pulseActive, false, 'acknowledged sticky yellow markers do not keep glowing');
     assert.equal(acknowledgedStopped.transitionPulseActive, false, 'acknowledged sticky yellow markers do not keep transition-pulsing');
     assert.equal(api.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10010, scheduleRefresh: false}).state, 'working', 'a later working run re-arms the sticky yellow notification');
-    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, nowSeconds: 10012, scheduleRefresh: false}).state, 'cooldown', 'a later stopped run shows yellow again after the earlier acknowledgement');
+    assert.equal(api.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: stickyTransitionKey, working_stopped_ts: 10012, nowSeconds: 10012, scheduleRefresh: false}).state, 'cooldown', 'a later server-confirmed stopped run shows yellow again after the earlier acknowledgement');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'codex', state: 'idle', window_index: 7, window_label: '7:codex', working_stopped_ts: 4000},
     ]});
@@ -1741,7 +1743,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const timerNowSeconds = Date.now() / 1000;
     timerApi.agentWindowActivityIconForTest('codex', 'working', 0, {transitionKey: timerTransitionKey, nowSeconds: timerNowSeconds});
     const firstTransitionTimer = scheduledActivityTimers.at(-1).timer;
-    timerApi.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: timerTransitionKey, nowSeconds: timerNowSeconds + 1});
+    timerApi.agentWindowActivityIconForTest('codex', 'idle', 0, {transitionKey: timerTransitionKey, working_stopped_ts: timerNowSeconds + 1, nowSeconds: timerNowSeconds + 1});
     const scheduledRecord = canonical(timerApi.agentWindowActivityRecordForTest(timerTransitionKey));
     assert.equal(scheduledRecord.activity.visualTone, 'cooldown', 'the shared record advances the activity generation from working to cooldown');
     assert.ok(scheduledRecord.stoppedRefreshUntilMs > Date.now() && scheduledRecord.transitionPulseRefreshUntilMs > Date.now(), 'both refresh schedules live on the same transition record');
@@ -3232,11 +3234,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.agentWindowActivityIconForTest('claude', 'working', 0, {transitionKey: '4:2::claude', nowSeconds: 5000, scheduleRefresh: false});
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'working', window_index: 0, window_label: '0:claude'},
-      {kind: 'claude', state: 'idle', window_index: 2, window_label: '2:claude'},
+      {kind: 'claude', state: 'idle', window_index: 2, window_label: '2:claude', working_stopped_ts: 5001},
     ]});
     const transitionYellowTabHtml = api.tmuxPaneTabHtml('4', {panes: []}, null, true);
-    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--working)/.test(transitionYellowTabHtml), 'the active working child remains the session state when another child is in a frontend yellow transition');
-    assert.ok(transitionYellowTabHtml.includes('agent-window-status-dot--cooldown-working'), 'a frontend yellow transition plus another working child uses the same dual yellow/green parent ball');
+    assert.ok(/session-agent-activity-marker[\s\S]*agent-window-status-dot(?=[^"]*status-indicator--working)/.test(transitionYellowTabHtml), 'the active working child remains the session state when another child has a server-confirmed yellow transition');
+    assert.ok(transitionYellowTabHtml.includes('agent-window-status-dot--cooldown-working'), 'a server-confirmed yellow transition plus another working child uses the same dual yellow/green parent ball');
     api.setAutoApproveStateForTest('4', {enabled: true, agent_windows: [
       {kind: 'claude', state: 'needs-input', window_index: 0, window_label: '0:claude'},
       {kind: 'codex', state: 'idle', window_index: 1, window_label: '1:codex', working_stopped_ts: Math.floor(Date.now() / 1000) - 5},

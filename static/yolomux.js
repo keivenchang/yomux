@@ -19784,8 +19784,6 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
   const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
-  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
   const cooldownTransitionStartedAt = agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
   if (transitionKey) record.activity = {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt};
   if (seenWorking && stoppedAt > 0) {

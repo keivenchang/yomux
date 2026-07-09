@@ -229,7 +229,8 @@ def test_cooldown_ack_uses_one_shared_transition_identity_across_servers(monkeyp
 
     first.agent_window_working_stopped_ts(*scope, "working", 100.0)
     second.agent_window_working_stopped_ts(*scope, "working", 110.0)
-    first_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    assert first.agent_window_working_stopped_ts(*scope, "idle", 200.0) == 0.0
+    first_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 205.0)
     first_key = first.agent_window_attention_key(
         *scope, "cooldown", first.agent_window_attention_signature("cooldown", {}, first_stopped)
     )
@@ -248,7 +249,8 @@ def test_cooldown_ack_uses_one_shared_transition_identity_across_servers(monkeyp
     assert second.attention_acknowledged(second_key) is True
 
     first.agent_window_working_stopped_ts(*scope, "working", 300.0)
-    next_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 400.0)
+    assert first.agent_window_working_stopped_ts(*scope, "idle", 400.0) == 0.0
+    next_stopped = first.agent_window_working_stopped_ts(*scope, "idle", 405.0)
     next_key = first.agent_window_attention_key(
         *scope, "cooldown", first.agent_window_attention_signature("cooldown", {}, next_stopped)
     )
@@ -265,10 +267,24 @@ def test_fresh_server_hydrates_shared_cooldown_transition(monkeypatch, tmp_path,
     scope = ("7773", "1", "%27", "claude")
 
     owner.agent_window_working_stopped_ts(*scope, "working", 100.0)
-    owner_stopped = owner.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    assert owner.agent_window_working_stopped_ts(*scope, "idle", 200.0) == 0.0
+    owner_stopped = owner.agent_window_working_stopped_ts(*scope, "idle", 205.0)
     follower_stopped = follower.agent_window_working_stopped_ts(*scope, "idle", 220.0)
 
     assert owner_stopped == follower_stopped == 200.0
+
+
+def test_working_idle_candidate_requires_five_continuous_seconds(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    scope = ("7772", "1", "%27", "codex")
+
+    assert app.agent_window_working_stopped_ts(*scope, "working", 100.0) == 0.0
+    assert app.agent_window_working_stopped_ts(*scope, "idle", 200.0, return_pending=True) == (0.0, True)
+    assert app.agent_window_working_stopped_ts(*scope, "working", 203.0, return_pending=True) == (0.0, False)
+    assert app.agent_window_working_stopped_ts(*scope, "idle", 204.0, return_pending=True) == (0.0, True)
+    assert app.agent_window_working_stopped_ts(*scope, "idle", 208.9, return_pending=True) == (0.0, True)
+    assert app.agent_window_working_stopped_ts(*scope, "idle", 209.0, return_pending=True) == (204.0, False)
 
 
 def test_fresh_follower_status_payload_preserves_shared_cooldown_ack(monkeypatch, tmp_path, make_app):
@@ -277,7 +293,8 @@ def test_fresh_follower_status_payload_preserves_shared_cooldown_ack(monkeypatch
     follower = make_app()
     scope = ("1", "0", "%27", "claude")
     owner.agent_window_working_stopped_ts(*scope, "working", 100.0)
-    stopped_at = owner.agent_window_working_stopped_ts(*scope, "idle", 200.0)
+    assert owner.agent_window_working_stopped_ts(*scope, "idle", 200.0) == 0.0
+    stopped_at = owner.agent_window_working_stopped_ts(*scope, "idle", 205.0)
     key = owner.agent_window_attention_key(
         *scope, "cooldown", owner.agent_window_attention_signature("cooldown", {}, stopped_at)
     )

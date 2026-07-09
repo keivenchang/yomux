@@ -296,6 +296,7 @@ class AutoApproveCacheRecord:
 class AgentWindowAttentionInstance:
     cooldown_generation: int = 0
     cooldown_stopped_at: float = 0.0
+    cooldown_idle_since: float = 0.0
     cooldown_cancelled_generation: int = 0
     cooldown_working: bool = False
     attention_generation: int = 0
@@ -313,6 +314,10 @@ class AgentWindowAttentionInstance:
         except (TypeError, ValueError):
             cooldown_stopped_at = 0.0
         try:
+            cooldown_idle_since = max(0.0, float(payload.get("cooldown_idle_since", 0.0)))
+        except (TypeError, ValueError):
+            cooldown_idle_since = 0.0
+        try:
             cooldown_cancelled_generation = max(0, int(payload.get("cooldown_cancelled_generation", 0)))
         except (TypeError, ValueError):
             cooldown_cancelled_generation = 0
@@ -323,6 +328,7 @@ class AgentWindowAttentionInstance:
         return cls(
             cooldown_generation=cooldown_generation,
             cooldown_stopped_at=cooldown_stopped_at,
+            cooldown_idle_since=cooldown_idle_since,
             cooldown_cancelled_generation=cooldown_cancelled_generation,
             cooldown_working=payload.get("cooldown_working") is True,
             attention_generation=attention_generation,
@@ -487,6 +493,9 @@ STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input",
 STATS_AGENT_RUN_STATES = frozenset({"working"})
 STATS_AGENT_TRANSITION_STATES = frozenset({"cooldown", "transition"})
 STATS_AGENT_ACTIVE_STATES = STATS_AGENT_ASK_STATES | STATS_AGENT_RUN_STATES | STATS_AGENT_TRANSITION_STATES
+# A terminal can briefly render an idle prompt while an agent is still producing its next update.
+# Do not make that flicker a completed/yellow transition or a notification.
+AGENT_WORKING_IDLE_CONFIRM_SECONDS = 5.0
 
 
 def current_process_rss_bytes() -> int | None:
@@ -12253,7 +12262,8 @@ class TmuxWebtermApp:
         state: str,
         observed_ts: float,
         shared_instances: dict[str, AgentWindowAttentionInstance] | None = None,
-    ) -> float:
+        return_pending: bool = False,
+    ) -> float | tuple[float, bool]:
         key = "\x1f".join((session, window, pane_target, kind))
         with self.agent_window_transition_lock:
             previous = self.agent_window_transition_state.get(key, {})
@@ -12267,7 +12277,7 @@ class TmuxWebtermApp:
             # working->idle transition. Hydrate that durable identity before using the
             # local shadow state, otherwise this follower renders ordinary idle while
             # the owner correctly renders the shared yellow completion.
-            shared_generation, shared_stopped_ts = self.shared_agent_window_cooldown_state(
+            shared_generation, shared_stopped_ts, shared_idle_since = self.shared_agent_window_cooldown_state(
                 session,
                 window,
                 pane_target,
@@ -12277,45 +12287,56 @@ class TmuxWebtermApp:
             if shared_generation >= previous_generation:
                 previous_generation = shared_generation
                 previous_stopped_ts = shared_stopped_ts
+            pending_idle_since = shared_idle_since if shared_generation >= previous_generation else 0.0
             generation = previous_generation
             if state == "working":
                 stopped_ts = 0.0
-                if previous_state != "working":
-                    generation, _ = self.shared_agent_window_cooldown_transition(
+                generation, _stopped_ts, pending_idle_since = self.shared_agent_window_cooldown_transition(
+                    session,
+                    window,
+                    pane_target,
+                    kind,
+                    "working",
+                    previous_generation,
+                    observed_ts,
+                )
+                if generation > 0:
+                    self.update_shared_agent_window_instance_snapshot(
+                        shared_instances,
                         session,
                         window,
                         pane_target,
                         kind,
-                        "working",
-                        0,
-                        observed_ts,
+                        cooldown_generation=generation,
+                        cooldown_stopped_at=0.0,
+                        cooldown_idle_since=pending_idle_since,
+                        cooldown_working=True,
                     )
-                    if generation > 0:
-                        self.update_shared_agent_window_instance_snapshot(
-                            shared_instances,
-                            session,
-                            window,
-                            pane_target,
-                            kind,
-                            cooldown_generation=generation,
-                            cooldown_stopped_at=0.0,
-                            cooldown_working=True,
-                        )
             elif state == "idle":
                 # A completion belongs only to a working->idle transition observed by this
                 # tracker. Activity recency is historical metadata: treating it as a stop
                 # fabricates a yellow completion when a renamed or newly discovered session is
                 # first seen idle.
-                if previous_state == "working":
-                    generation, stopped_ts = self.shared_agent_window_cooldown_transition(
+                if previous_generation > 0:
+                    generation, stopped_ts, pending_idle_since = self.shared_agent_window_cooldown_transition(
                         session,
                         window,
                         pane_target,
                         kind,
-                        "idle",
+                        "idle-pending",
                         previous_generation,
                         observed_ts,
                     )
+                    if generation > 0 and pending_idle_since > 0 and observed_ts - pending_idle_since >= AGENT_WORKING_IDLE_CONFIRM_SECONDS:
+                        generation, stopped_ts, pending_idle_since = self.shared_agent_window_cooldown_transition(
+                            session,
+                            window,
+                            pane_target,
+                            kind,
+                            "idle",
+                            generation,
+                            observed_ts,
+                        )
                     if generation > 0:
                         self.update_shared_agent_window_instance_snapshot(
                             shared_instances,
@@ -12325,13 +12346,16 @@ class TmuxWebtermApp:
                             kind,
                             cooldown_generation=generation,
                             cooldown_stopped_at=stopped_ts,
-                            cooldown_working=False,
+                            cooldown_idle_since=pending_idle_since,
+                            cooldown_working=stopped_ts <= 0,
                         )
                 else:
                     stopped_ts = previous_stopped_ts
+                    pending_idle_since = 0.0
             else:
                 stopped_ts = 0.0
-                if previous_state == "working":
+                pending_idle_since = 0.0
+                if previous_generation > 0:
                     self.shared_agent_window_cooldown_transition(
                         session,
                         window,
@@ -12345,9 +12369,9 @@ class TmuxWebtermApp:
             # Keep the prompt-transition fields alongside the working transition. A later
             # approval uses them to distinguish A -> B -> A from one still-visible A prompt.
             next_state = dict(previous)
-            next_state.update({"state": state, "working_stopped_ts": stopped_ts, "cooldown_generation": generation})
+            next_state.update({"state": state, "working_stopped_ts": stopped_ts, "cooldown_generation": generation, "cooldown_idle_since": pending_idle_since})
             self.agent_window_transition_state[key] = next_state
-        return stopped_ts
+        return (stopped_ts, pending_idle_since > 0 and stopped_ts <= 0) if return_pending else stopped_ts
 
     @staticmethod
     def attention_ack_key(*parts: Any) -> str:
@@ -12456,6 +12480,7 @@ class TmuxWebtermApp:
         shared_instances[key] = AgentWindowAttentionInstance(
             cooldown_generation=int(changes.get("cooldown_generation", current.cooldown_generation)),
             cooldown_stopped_at=float(changes.get("cooldown_stopped_at", current.cooldown_stopped_at)),
+            cooldown_idle_since=float(changes.get("cooldown_idle_since", current.cooldown_idle_since)),
             cooldown_cancelled_generation=int(changes.get("cooldown_cancelled_generation", current.cooldown_cancelled_generation)),
             cooldown_working=bool(changes.get("cooldown_working", current.cooldown_working)),
             attention_generation=int(changes.get("attention_generation", current.attention_generation)),
@@ -12469,15 +12494,19 @@ class TmuxWebtermApp:
         pane_target: str,
         kind: str,
         shared_instances: dict[str, AgentWindowAttentionInstance] | None = None,
-    ) -> tuple[int, float]:
+    ) -> tuple[int, float, float]:
         """Read the durable completion identity used by every server process."""
 
         key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
         if shared_instances is not None:
-            return shared_instances.get(key, AgentWindowAttentionInstance()).cooldown_state()
+            instance = shared_instances.get(key, AgentWindowAttentionInstance())
+            generation, stopped_at = instance.cooldown_state()
+            return generation, stopped_at, instance.cooldown_idle_since if stopped_at <= 0 else 0.0
 
-        def read(record: dict[str, Any], _now: float) -> tuple[tuple[int, float], bool]:
-            return AgentWindowAttentionInstance.from_record(record).cooldown_state(), False
+        def read(record: dict[str, Any], _now: float) -> tuple[tuple[int, float, float], bool]:
+            instance = AgentWindowAttentionInstance.from_record(record)
+            generation, stopped_at = instance.cooldown_state()
+            return (generation, stopped_at, instance.cooldown_idle_since if stopped_at <= 0 else 0.0), False
 
         return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, read)
 
@@ -12490,37 +12519,52 @@ class TmuxWebtermApp:
         transition: str,
         local_generation: int,
         observed_ts: float,
-    ) -> tuple[int, float]:
-        def update(record: dict[str, Any], now: float) -> tuple[tuple[int, float], bool]:
+    ) -> tuple[int, float, float]:
+        def update(record: dict[str, Any], now: float) -> tuple[tuple[int, float, float], bool]:
             instance = AgentWindowAttentionInstance.from_record(record)
             generation = instance.cooldown_generation
             stopped_ts = instance.cooldown_stopped_at
+            idle_since = instance.cooldown_idle_since
             cancelled_generation = instance.cooldown_cancelled_generation
             working = instance.cooldown_working
             if transition == "working":
                 if not working:
                     generation += 1
-                    record.update({"cooldown_generation": generation, "cooldown_working": True, "cooldown_stopped_at": 0.0})
-                    return (generation, 0.0), True
-                return (generation, 0.0), False
+                    record.update({"cooldown_generation": generation, "cooldown_working": True, "cooldown_stopped_at": 0.0, "cooldown_idle_since": 0.0})
+                    return (generation, 0.0, 0.0), True
+                if idle_since > 0:
+                    record["cooldown_idle_since"] = 0.0
+                    return (generation, 0.0, 0.0), True
+                return (generation, 0.0, 0.0), False
             if local_generation <= 0 or local_generation != generation:
-                return (0, 0.0), False
+                return (0, 0.0, 0.0), False
+            if transition == "idle-pending":
+                if cancelled_generation >= generation or stopped_ts > 0:
+                    return (generation, stopped_ts, 0.0), False
+                if idle_since <= 0:
+                    idle_since = observed_ts if observed_ts > 0 else now
+                    record["cooldown_idle_since"] = idle_since
+                    return (generation, 0.0, idle_since), True
+                return (generation, 0.0, idle_since), False
             if transition == "idle":
                 if cancelled_generation >= generation:
-                    return (0, 0.0), False
+                    return (0, 0.0, 0.0), False
+                if idle_since <= 0 or (observed_ts if observed_ts > 0 else now) - idle_since < AGENT_WORKING_IDLE_CONFIRM_SECONDS:
+                    return (generation, 0.0, idle_since), False
                 changed = False
                 if stopped_ts <= 0:
-                    stopped_ts = observed_ts if observed_ts > 0 else now
+                    stopped_ts = idle_since
                     record["cooldown_stopped_at"] = stopped_ts
+                    record["cooldown_idle_since"] = 0.0
                     changed = True
                 if working:
                     record["cooldown_working"] = False
                     changed = True
-                return (generation, stopped_ts), changed
+                return (generation, stopped_ts, 0.0), changed
             if transition == "cancel" and stopped_ts <= 0 and (working or cancelled_generation < generation):
-                record.update({"cooldown_working": False, "cooldown_cancelled_generation": generation})
-                return (generation, 0.0), True
-            return (generation, 0.0), False
+                record.update({"cooldown_working": False, "cooldown_idle_since": 0.0, "cooldown_cancelled_generation": generation})
+                return (generation, 0.0, 0.0), True
+            return (generation, 0.0, idle_since if stopped_ts <= 0 else 0.0), False
 
         return self.update_shared_agent_window_attention_instance(session, window, pane_target, kind, update)
 
