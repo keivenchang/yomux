@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "क्विक-ओपन इंडेक्स को पृष्ठभूमि में कितनी बार ताज़ा किया जाता है (सेकंड)। जब आप खोजते हैं तो केवल पुनर्निर्माण के लिए 0 पर सेट करें।",
   "pref.file_explorer.index_refresh_seconds.label": "इंडेक्स ऑटो-रिफ्रेश अंतराल",
   "pref.file_explorer.indexed_dirs.help": "Pre-built quick-open index वाली डायरेक्टरी, प्रति पंक्ति एक path। index करने के लिए path जोड़ें (Finder right-click जैसा); un-index करने के लिए लाइन हटाएं।",
+  "pref.file_explorer.index_exclude_paths.help": "क्विक ओपन बहिष्करण, हर पंक्ति में एक नियम। सामान्य पूर्ण या होम-रिलेटिव पथ उस उपवृक्ष को केवल तब बाहर करता है जब कोई इंडेक्स किया हुआ रूट उसे रखता हो। `glob:<root-relative glob>` हर इंडेक्स किए रूट के नीचे के पथों से मेल खाता है, जैसे `glob:**/.uploads/**`। `regex:<regular expression>` हर रूट-सापेक्ष POSIX पथ से मेल खाता है, जैसे `regex:(^|/)target(?:/|$)`। अमान्य regex नियम अनदेखे किए जाते हैं।",
+  "pref.file_explorer.index_exclude_paths.label": "क्विक ओपन बहिष्करण",
   "pref.file_explorer.indexed_dirs.label": "Indexed डायरेक्टरी",
   "pref.file_explorer.new_entry_highlight_ms.help": "नई पहचानी गई फ़ाइलें या डायरेक्टरी Finder/File Explorer में कितनी देर रंगीन रहती हैं।",
   "pref.file_explorer.new_entry_highlight_ms.label": "नई फ़ाइल highlight अवधि",

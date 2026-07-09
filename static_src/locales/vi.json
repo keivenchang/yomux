@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "Tần suất chỉ mục mở nhanh được làm mới trong nền (giây). Đặt thành 0 để chỉ xây dựng lại khi bạn tìm kiếm.",
   "pref.file_explorer.index_refresh_seconds.label": "Khoảng thời gian tự động làm mới chỉ mục",
   "pref.file_explorer.indexed_dirs.help": "Thư mục có chỉ mục mở nhanh được tạo sẵn, một đường dẫn cho mỗi dòng. Thêm một đường dẫn để lập chỉ mục nó (giống như nhấp chuột phải vào Finder); Xóa một dòng để bỏ lập chỉ mục.",
+  "pref.file_explorer.index_exclude_paths.help": "Loại trừ Mở nhanh, một quy tắc mỗi dòng. Đường dẫn thường tuyệt đối hoặc tương đối với thư mục chính chỉ loại trừ cây con đó khi một gốc đã lập chỉ mục chứa nó. `glob:<root-relative glob>` khớp các đường dẫn dưới mọi gốc đã lập chỉ mục, ví dụ `glob:**/.uploads/**`. `regex:<regular expression>` khớp từng đường dẫn POSIX tương đối với gốc, ví dụ `regex:(^|/)target(?:/|$)`. Các quy tắc regex không hợp lệ bị bỏ qua.",
+  "pref.file_explorer.index_exclude_paths.label": "Loại trừ Mở nhanh",
   "pref.file_explorer.indexed_dirs.label": "Thư mục được lập chỉ mục",
   "pref.file_explorer.new_entry_highlight_ms.help": "Thời gian các tệp hoặc thư mục mới được phát hiện vẫn có màu trong Finder/File Explorer.",
   "pref.file_explorer.new_entry_highlight_ms.label": "Thời lượng đánh dấu tệp mới",

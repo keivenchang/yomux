@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "クイックオープンインデックスがバックグラウンドで更新される頻度 (秒)。検索時にのみ再構築するには、0 に設定します。",
   "pref.file_explorer.index_refresh_seconds.label": "インデックスの自動更新間隔",
   "pref.file_explorer.indexed_dirs.help": "クイックオープン用のインデックスを事前作成したディレクトリ。1 行に 1 つのパス。パスを追加するとインデックス化します（Finder の右クリックと同じ）。行を削除するとインデックスを解除します。",
+  "pref.file_explorer.index_exclude_paths.help": "クイックオープンの除外です。1 行に 1 ルールを指定します。通常の絶対パスまたはホーム相対パスは、インデックス化されたルートに含まれる場合だけそのサブツリーを除外します。`glob:<root-relative glob>` は各インデックス化ルート配下のパスに一致します。例: `glob:**/.uploads/**`。`regex:<regular expression>` はルート相対 POSIX パスに一致します。例: `regex:(^|/)target(?:/|$)`。無効な regex ルールは無視されます。",
+  "pref.file_explorer.index_exclude_paths.label": "クイックオープンの除外",
   "pref.file_explorer.indexed_dirs.label": "インデックス済みディレクトリ",
   "pref.file_explorer.new_entry_highlight_ms.help": "新しく検出されたファイルやディレクトリが Finder / ファイルエクスプローラーで色付けされたまま残る時間。",
   "pref.file_explorer.new_entry_highlight_ms.label": "新規ファイルの強調時間",

@@ -9478,6 +9478,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(sectionHtml('performance').includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
     assert.equal(sectionHtml('performance').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
     assert.equal(sectionHtml('yoagent').includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
+    const fileExplorerHtml = sectionHtml('file_explorer');
+    assert.ok(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_paths"'), 'Finder Preferences exposes explicit Quick Open exclusions');
+    assert.ok(/data-setting-path="file_explorer\.index_exclude_paths"[^>]*data-setting-type="list"/.test(fileExplorerHtml), 'Quick Open exclusions use the shared multiline list control');
+    assert.ok(fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents glob and regex rule syntax');
+    const excludeItem = {path: 'file_explorer.index_exclude_paths', label: 'Quick Open exclusions', help: 'Exclude generated files with glob or regex patterns.'};
+    assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
     const appearanceHtml = sectionHtml('appearance');
     assert.ok(appearanceHtml.includes('Global appearance'), 'Appearance shows the renamed Global appearance field');
     assert.ok(appearanceHtml.includes('Theme color'), 'Appearance shows the renamed Theme color field');

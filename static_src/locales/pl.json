@@ -1081,6 +1081,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "Jak często indeks szybkiego otwierania jest odświeżany w tle (sekundy). Ustaw na 0, żeby odbudowywać tylko podczas wyszukiwania.",
   "pref.file_explorer.index_refresh_seconds.label": "Interwał automatycznego odświeżania indeksu",
   "pref.file_explorer.indexed_dirs.help": "Katalogi z gotowym indeksem szybkiego otwierania, jedna ścieżka na linię. Dodaj ścieżkę do indeksowania (tak samo jak przy prawym kliknięciu w Finderze); usuń linię, aby odindeksować ją.",
+  "pref.file_explorer.index_exclude_paths.help": "Wykluczenia szybkiego otwierania, jedna reguła w wierszu. Zwykła ścieżka bezwzględna lub względem katalogu domowego wyklucza to poddrzewo tylko wtedy, gdy zawiera je indeksowany korzeń. `glob:<root-relative glob>` dopasowuje ścieżki pod każdym indeksowanym korzeniem, na przykład `glob:**/.uploads/**`. `regex:<regular expression>` dopasowuje każdą ścieżkę POSIX względem korzenia, na przykład `regex:(^|/)target(?:/|$)`. Nieprawidłowe reguły regex są ignorowane.",
+  "pref.file_explorer.index_exclude_paths.label": "Wykluczenia szybkiego otwierania",
   "pref.file_explorer.indexed_dirs.label": "Katalogi indeksowane",
   "pref.file_explorer.new_entry_highlight_ms.help": "Jak długo nowo wykryte pliki lub katalogi pozostają kolorowane w Finderze/Eksploratorze plików.",
   "pref.file_explorer.new_entry_highlight_ms.label": "Czas trwania nowego podświetlenia pliku",

@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "Hızlı açılma indeksi arka planda ne sıklıkla yenileniyor (saniyeler). Sadece aradığınızda yeniden inşa etmek için 0'a ayarlayın.",
   "pref.file_explorer.index_refresh_seconds.label": "Index otomatik yenileme aralığı",
   "pref.file_explorer.indexed_dirs.help": "Dizinler, her satır için bir yol olan önceden hazırlanmış hızlı açılma indeksi. Indekslemek için bir yol ekleyin (Finder'ın sağ tıklamasıyla aynı); Bir satırı kaldırıp indeksten çıkar.",
+  "pref.file_explorer.index_exclude_paths.help": "Hızlı Açma dışlamaları, satır başına bir kural. Düz bir mutlak veya ev göreli yol, yalnızca dizinlenmiş bir kök onu içerdiğinde bu alt ağacı dışlar. `glob:<root-relative glob>` her dizinlenmiş kökün altındaki yollarla eşleşir; örneğin `glob:**/.uploads/**`. `regex:<regular expression>` her köke göre POSIX yoluyla eşleşir; örneğin `regex:(^|/)target(?:/|$)`. Geçersiz regex kuralları yoksayılır.",
+  "pref.file_explorer.index_exclude_paths.label": "Hızlı Açma dışlamaları",
   "pref.file_explorer.indexed_dirs.label": "Indeksli dizinler",
   "pref.file_explorer.new_entry_highlight_ms.help": "Yeni tespit edilen dosyalar veya dizinler Finder/Dosya Gezdirici'de ne kadar süre renkli kalacak.",
   "pref.file_explorer.new_entry_highlight_ms.label": "Yeni dosya vurgulama süresi",

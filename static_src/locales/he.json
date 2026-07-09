@@ -1057,6 +1057,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "באיזו תדירות אינדקס הפתיחה המהירה מתרענן ברקע (שניות). הגדר ל-0 כדי לבנות מחדש רק בעת חיפוש.",
   "pref.file_explorer.index_refresh_seconds.label": "מרווח רענון אוטומטי של אינדקס",
   "pref.file_explorer.indexed_dirs.help": "ספריות עם אינדקס פתיחה מהירה שנבנה מראש, נתיב אחד בכל שורה. הוסף נתיב כדי לאנדקס אותו (בדומה ללחיצה ימנית ב-Finder); הסר שורה כדי לבטל את האינדקס.",
+  "pref.file_explorer.index_exclude_paths.help": "החרגות פתיחה מהירה, כלל אחד בכל שורה. נתיב רגיל מוחלט או יחסי לתיקיית הבית מחריג את עץ המשנה רק כאשר שורש מאונדקס מכיל אותו. `glob:<root-relative glob>` מתאימה לנתיבים תחת כל שורש מאונדקס, למשל `glob:**/.uploads/**`. `regex:<regular expression>` מתאים לכל נתיב POSIX יחסי לשורש, למשל `regex:(^|/)target(?:/|$)`. כללי regex לא תקינים מתעלמים.",
+  "pref.file_explorer.index_exclude_paths.label": "החרגות פתיחה מהירה",
   "pref.file_explorer.indexed_dirs.label": "ספריות מאונדקסות",
   "pref.file_explorer.new_entry_highlight_ms.help": "כמה זמן קבצים או ספריות שזוהו לאחרונה נשארים צבועים ב-Finder/סייר הקבצים.",
   "pref.file_explorer.new_entry_highlight_ms.label": "משך הדגשת קובץ חדש",

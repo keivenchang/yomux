@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "ความถี่ในการรีเฟรชดัชนีเปิดด่วนในเบื้องหลัง (วินาที) ตั้งค่าเป็น 0 เพื่อสร้างใหม่เมื่อคุณค้นหาเท่านั้น",
   "pref.file_explorer.index_refresh_seconds.label": "ช่วงเวลาการรีเฟรชอัตโนมัติของดัชนี",
   "pref.file_explorer.indexed_dirs.help": "ไดเรกทอรีที่มีดัชนีเปิดด่วนที่สร้างไว้ล่วงหน้า หนึ่งเส้นทางต่อบรรทัด เพิ่มเส้นทางเพื่อจัดทําดัชนี (เหมือนกับการคลิกขวาของ Finder) ลบบรรทัดเพื่อยกเลิกการจัดทําดัชนี",
+  "pref.file_explorer.index_exclude_paths.help": "ข้อยกเว้นการเปิดด่วน หนึ่งกฎต่อบรรทัด พาธปกติแบบสัมบูรณ์หรือสัมพันธ์กับโฮมจะยกเว้นแผนผังย่อยนั้นเฉพาะเมื่อรากที่ทำดัชนีมีพาธนั้นอยู่ `glob:<root-relative glob>` จับคู่พาธใต้รากที่ทำดัชนีแต่ละรายการ เช่น `glob:**/.uploads/**` `regex:<regular expression>` จับคู่พาธ POSIX ที่สัมพันธ์กับราก เช่น `regex:(^|/)target(?:/|$)` กฎ regex ที่ไม่ถูกต้องจะถูกละเว้น",
+  "pref.file_explorer.index_exclude_paths.label": "ข้อยกเว้นการเปิดด่วน",
   "pref.file_explorer.indexed_dirs.label": "ไดเรกทอรีที่จัดทําดัชนี",
   "pref.file_explorer.new_entry_highlight_ms.help": "ระยะเวลาที่ไฟล์หรือไดเร็กทอรีที่ตรวจพบใหม่ยังคงมีสีใน Finder/File Explorer",
   "pref.file_explorer.new_entry_highlight_ms.label": "ระยะเวลาไฮไลต์ไฟล์ใหม่",

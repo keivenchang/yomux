@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from fnmatch import fnmatchcase
 import stat
 import time
 from pathlib import Path
@@ -24,44 +25,77 @@ SEARCH_SKIP_DIRS = {
     ".ruff_cache", ".tox", ".venv", "venv", "node_modules", "__pycache__",
     "dist", "build", "target",
 }
-SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v1"
+SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v2"
+INDEX_EXCLUDE_GLOB_PREFIX = "glob:"
+INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
 
 
+def _index_exclude_rule(raw_rule: str, root: Path) -> tuple[str, str, Path | re.Pattern[str]] | None:
+    value = str(raw_rule or "").strip()
+    if not value:
+        return None
+    if value.startswith(INDEX_EXCLUDE_GLOB_PREFIX):
+        pattern = value.removeprefix(INDEX_EXCLUDE_GLOB_PREFIX).strip().replace("\\", "/").lstrip("/")
+        return ("glob", pattern, Path(".")) if pattern else None
+    if value.startswith(INDEX_EXCLUDE_REGEX_PREFIX):
+        pattern = value.removeprefix(INDEX_EXCLUDE_REGEX_PREFIX).strip()
+        if not pattern:
+            return None
+        try:
+            return "regex", pattern, re.compile(pattern)
+        except re.error:
+            return None
+    candidate = Path(value).expanduser().resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return "path", str(candidate), candidate
+
+
+def _index_exclude_rule_matches(rule: tuple[str, str, Path | re.Pattern[str]], path: Path, root: Path) -> bool:
+    kind, _value, matcher = rule
+    try:
+        relative_path = path.expanduser().resolve(strict=False).relative_to(root).as_posix()
+    except ValueError:
+        return False
+    if kind == "path":
+        assert isinstance(matcher, Path)
+        try:
+            path.expanduser().resolve(strict=False).relative_to(matcher)
+            return True
+        except ValueError:
+            return False
+    if kind == "glob":
+        pattern = _value
+        # Try the directory form too: a familiar rule such as `glob:**/.uploads/**`
+        # must prune `.uploads` itself, not merely reject files after walking it.
+        candidates = (relative_path, f"_/{relative_path}", f"{relative_path}/", f"_/{relative_path}/")
+        return any(fnmatchcase(candidate, pattern) for candidate in candidates)
+    assert isinstance(matcher, re.Pattern)
+    return matcher.search(relative_path) is not None
+
+
 def _search_index_policy(root: Path) -> dict[str, Any]:
     settings = settings_payload().get("settings", {}).get("file_explorer", {})
-    configured_excludes: list[Path] = []
-    for raw_path in settings.get("index_exclude_paths", []):
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        candidate = Path(raw_path).expanduser().resolve(strict=False)
-        try:
-            candidate.relative_to(root)
-        except ValueError:
-            continue
-        configured_excludes.append(candidate)
-    configured_excludes = sorted(set(configured_excludes), key=str)
+    configured_rules = [rule for raw_path in settings.get("index_exclude_paths", []) if isinstance(raw_path, str) if (rule := _index_exclude_rule(raw_path, root)) is not None]
+    configured_rules.sort(key=lambda rule: (rule[0], rule[1]))
 
     def exclude_path(path: Path) -> bool:
         if paths._path_is_secret(path):
             return True
-        resolved = path.expanduser().resolve(strict=False)
-        for excluded in configured_excludes:
-            try:
-                resolved.relative_to(excluded)
-                return True
-            except ValueError:
-                continue
-        return False
+        return any(_index_exclude_rule_matches(rule, path, root) for rule in configured_rules)
 
     max_files = int(settings.get("index_max_files", file_index.MAX_INDEX_FILES))
     persist_max_files = int(settings.get("index_persist_max_files", file_index.MAX_PERSISTED_INDEX_FILES))
     persist_max_bytes = int(settings.get("index_persist_max_mb", file_index.MAX_PERSISTED_INDEX_BYTES // (1024 * 1024))) * 1024 * 1024
     refresh_seconds = float(settings.get("index_refresh_seconds", file_index.INDEX_TTL_SECONDS))
+    rule_values = [f"{kind}:{value}" for kind, value, _matcher in configured_rules]
     coverage_policy = {
-        "excludes": [str(path) for path in configured_excludes],
+        "excludes": rule_values,
         "max_files": max_files,
     }
     policy_signature = SEARCH_SECRET_EXCLUDE_SIGNATURE
@@ -76,7 +110,7 @@ def _search_index_policy(root: Path) -> dict[str, Any]:
         "persist_enabled": bool(settings.get("index_persist", True)),
         "persist_max_files": persist_max_files,
         "persist_max_bytes": persist_max_bytes,
-        "excluded_paths": [str(path) for path in configured_excludes],
+        "excluded_paths": rule_values,
     }
 
 

@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "Hoe vaak de quick-open-index op de achtergrond wordt ververst (seconden). Zet het op 0 om alleen opnieuw op te bouwen als je zoekt.",
   "pref.file_explorer.index_refresh_seconds.label": "Interval voor automatisch vernieuwen van index",
   "pref.file_explorer.indexed_dirs.help": "mappen met een vooraf gebouwde quick-open index, één pad per regel. Voeg een pad toe om het te indexeren (hetzelfde als de rechtermuisklik in Finder); Verwijder een regel om deze te de-indexeren.",
+  "pref.file_explorer.index_exclude_paths.help": "Quick Open-uitsluitingen, één regel per regel. Een gewoon absoluut of home-relatief pad sluit die subboom alleen uit wanneer een geïndexeerde hoofdmap deze bevat. `glob:<root-relative glob>` vergelijkt paden onder elke geïndexeerde hoofdmap, bijvoorbeeld `glob:**/.uploads/**`. `regex:<regular expression>` vergelijkt elk root-relatief POSIX-pad, bijvoorbeeld `regex:(^|/)target(?:/|$)`. Ongeldige regex-regels worden genegeerd.",
+  "pref.file_explorer.index_exclude_paths.label": "Quick Open-uitsluitingen",
   "pref.file_explorer.indexed_dirs.label": "Geïndexeerde directories",
   "pref.file_explorer.new_entry_highlight_ms.help": "Hoe lang nieuw gedetecteerde bestanden of mappen gekleurd blijven in Finder/Verkenner.",
   "pref.file_explorer.new_entry_highlight_ms.label": "Duur van nieuwe bestandmarkeringen",

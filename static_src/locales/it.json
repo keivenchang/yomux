@@ -1057,6 +1057,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "Quanto spesso l'indice ad apertura rapida viene aggiornato in background (secondi). Imposta a 0 per ricostruire solo quando cerchi.",
   "pref.file_explorer.index_refresh_seconds.label": "Intervallo di aggiornamento automatico dell'indice",
   "pref.file_explorer.indexed_dirs.help": "Directory con un indice pre-costruito ad apertura rapida, un percorso per riga. Aggiungi un percorso per indicizzarlo (come nel Finder con il tasto destro); Rimuovi una riga per disindicizzarla.",
+  "pref.file_explorer.index_exclude_paths.help": "Esclusioni Apertura rapida, una regola per riga. Un percorso semplice assoluto o relativo alla home esclude quella sotto-struttura solo quando una radice indicizzata la contiene. `glob:<root-relative glob>` corrisponde ai percorsi sotto ogni radice indicizzata, ad esempio `glob:**/.uploads/**`. `regex:<regular expression>` corrisponde a ogni percorso POSIX relativo alla radice, ad esempio `regex:(^|/)target(?:/|$)`. Le regole regex non valide vengono ignorate.",
+  "pref.file_explorer.index_exclude_paths.label": "Esclusioni Apertura rapida",
   "pref.file_explorer.indexed_dirs.label": "Directory indicizzati",
   "pref.file_explorer.new_entry_highlight_ms.help": "Quanto tempo i file o directory appena rilevati rimangono colorati in Finder/File Explorer.",
   "pref.file_explorer.new_entry_highlight_ms.label": "Durata degli evidenziati nuovi file",

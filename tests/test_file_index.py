@@ -86,6 +86,38 @@ def test_index_storage_inside_root_is_never_indexed(tmp_path, monkeypatch):
     assert metadata["skip_signature"].endswith("|internal-index-dir:runtime-index")
 
 
+def test_configured_glob_and_regex_exclusions_match_root_relative_paths(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    uploads = root / "project" / ".uploads"
+    target = root / "project" / "target"
+    uploads.mkdir(parents=True)
+    target.mkdir()
+    (uploads / "capture.png").write_text("image\n", encoding="utf-8")
+    (target / "generated.rs").write_text("generated\n", encoding="utf-8")
+    (root / "project" / "source.rs").write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(filesystem.search, "settings_payload", lambda: {"settings": {"file_explorer": {
+        "index_exclude_paths": ["glob:**/.uploads/**", r"regex:(^|/)target(?:/|$)", "regex:("],
+    }}})
+    policy = filesystem.search._search_index_policy(root)
+
+    assert policy["exclude_path"](uploads) is True
+    assert policy["exclude_path"](target) is True
+    assert policy["exclude_path"](root / "project" / "source.rs") is False
+
+    built = file_index.build_now(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+    )
+
+    assert {entry[2] for entry in built.entries} == {"project/source.rs"}
+    assert policy["excluded_paths"] == ["glob:**/.uploads/**", "regex:(^|/)target(?:/|$)"]
+    assert policy["exclude_signature"].startswith("fs-secret-v2:")
+
+
 def test_index_safety_refresh_uses_a_thirty_minute_interval():
     assert file_index.INDEX_TTL_SECONDS == 30.0 * 60.0
 

@@ -1033,6 +1033,8 @@
   "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "Directories with a pre-built quick-open index, one path per line. Add a path to index it (same as the Finder right-click); remove a line to un-index it.",
+  "pref.file_explorer.index_exclude_paths.help": "Quick Open exclusions, one rule per line. A plain absolute or home-relative path excludes that subtree only when an indexed root contains it. `glob:<root-relative glob>` matches paths below every indexed root, for example `glob:**/.uploads/**`. `regex:<regular expression>` matches each root-relative POSIX path, for example `regex:(^|/)target(?:/|$)`. Invalid regex rules are ignored.",
+  "pref.file_explorer.index_exclude_paths.label": "Quick Open exclusions",
   "pref.file_explorer.indexed_dirs.label": "Indexed directories",
   "pref.file_explorer.new_entry_highlight_ms.help": "How long newly detected files or directories stay colored in Finder/File Explorer.",
   "pref.file_explorer.new_entry_highlight_ms.label": "New file highlight duration",
