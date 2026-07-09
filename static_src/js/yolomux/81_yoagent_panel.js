@@ -578,9 +578,21 @@ function yoagentJobActionText(job) {
   return String(job?.public_text || job?.prompt_preview || action.text_preview || action.text || action.message || '').trim();
 }
 
+function yoagentJobDestinationText(job) {
+  const action = job?.action && typeof job.action === 'object' ? job.action : {};
+  return String(action.session || '').trim();
+}
+
+function yoagentJobQuietText(job) {
+  const predicate = job?.predicate && typeof job.predicate === 'object' ? job.predicate : {};
+  const seconds = Number(predicate.quiet_seconds);
+  return Number.isFinite(seconds) && seconds > 0 ? t('yoagent.jobs.calmFor', {seconds: Math.round(seconds)}) : '';
+}
+
 const YOAGENT_JOB_CLASSIFICATION_KEYS = Object.freeze({
   status: Object.freeze({
     queued: 'yoagent.jobs.status.queued',
+    firing: 'yoagent.action.state.sending',
     pending_confirmation: 'yoagent.jobs.status.pendingConfirmation',
     fired: 'yoagent.jobs.status.fired',
     failed: 'yoagent.jobs.status.failed',
@@ -594,6 +606,7 @@ const YOAGENT_JOB_CLASSIFICATION_KEYS = Object.freeze({
     notify_session_done_after_working: 'yoagent.jobs.type.notifySessionDoneAfterWorking',
     notify_all_idle: 'yoagent.jobs.type.notifyAllIdle',
     wait_then_send: 'yoagent.jobs.type.waitThenSend',
+    wait_roster_then_send: 'yoagent.jobs.type.waitRosterThenSend',
     result_watch: 'yoagent.jobs.type.resultWatch',
   }),
 });
@@ -613,6 +626,7 @@ function yoagentJobRowsHtml() {
     const status = String(job?.status || '');
     const type = String(job?.type || '');
     const target = yoagentJobTargetText(job);
+    const destination = yoagentJobDestinationText(job);
     const actionText = yoagentJobActionText(job);
     const canConfirm = status === 'pending_confirmation' && id && !readOnlyMode;
     const canCancel = ['queued', 'pending_confirmation'].includes(status) && id && !readOnlyMode;
@@ -620,9 +634,12 @@ function yoagentJobRowsHtml() {
       ? job.last_observed_state.blockers.join(', ')
       : '';
     const error = userMessageText(job?.result?.send || job?.result || job, '');
+    const route = target && destination ? t('yoagent.jobs.route', {roster: target, session: destination}) : '';
+    const quiet = yoagentJobQuietText(job);
     const meta = [
       type ? yoagentJobClassificationText('type', type) : '',
-      target ? t('yoagent.jobs.target', {target}) : '',
+      route || (target ? t('yoagent.jobs.target', {target}) : ''),
+      quiet,
       blocker ? t('yoagent.jobs.blockedBy', {blocker}) : '',
       error,
     ].filter(Boolean).join(' · ');

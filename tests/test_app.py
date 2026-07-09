@@ -10077,9 +10077,16 @@ def test_yoagent_chat_does_not_send_when_target_agent_is_working(monkeypatch):
 
 def install_fake_yolomux_state(monkeypatch):
     state = {}
+    lock = threading.Lock()
     monkeypatch.setattr(app_module, "read_yolomux_state", lambda: dict(state))
     monkeypatch.setattr(app_module, "update_yolomux_state", lambda updates: state.update(updates))
+    monkeypatch.setattr(app_module, "mutate_yolomux_state", lambda mutator: lock_and_mutate(lock, state, mutator))
     return state
+
+
+def lock_and_mutate(lock, state, mutator):
+    with lock:
+        return mutator(state)
 
 
 def test_notify_status_defaults_browser_notifications_off(monkeypatch):
@@ -10177,6 +10184,390 @@ def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
     assert jobs["jobs"][0]["result_marker"] == {"transcript": "/tmp/codex-session-6.jsonl", "size": 10}
     assert jobs["jobs"][0]["result"]["send"]["ok"] is True
     assert any(item[0] == "yoagent_jobs_changed" and item[1].get("reason") == "yoagent_job_fired" for item in events)
+
+
+def test_yoagent_wait_roster_then_send_job_validates_dedupes_and_redacts(monkeypatch):
+    state = install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
+    wakes = []
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(webapp.yoagent_controller, "wake_client_event_watcher", lambda: wakes.append(True))
+    payload = {
+        "type": "wait_roster_then_send",
+        "roster": ["1", "2", "3", "4", "2"],
+        "action": {"session": "1", "text": "api_key=super-secret-value", "submit": True, "return_result": False},
+    }
+
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job(payload)
+        duplicate, duplicate_status = webapp.yoagent_controller.create_yoagent_job(payload)
+        unknown, unknown_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "9"],
+            "action": {"session": "1", "text": "date"},
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert duplicate_status == HTTPStatus.CONFLICT
+    assert duplicate["duplicate"] is True
+    job = created["job"]
+    assert job["target"] == {"roster": ["1", "2", "3", "4"]}
+    assert job["predicate"] == {"type": "all_calm", "quiet_seconds": 10.0}
+    assert job["action"]["session"] == "1"
+    assert job["action"]["return_result"] is False
+    assert job["status"] == "pending_confirmation"
+    assert job["action"]["risk_labels"] == ["secret-like-text"]
+    assert job["action"]["text"] == "api_key=<redacted>"
+    assert job["prompt"] == "api_key=<redacted>"
+    assert "super-secret-value" not in json.dumps(state)
+    assert wakes == [True]
+    assert unknown_status == HTTPStatus.NOT_FOUND
+    assert unknown["sessions"] == ["9"]
+
+
+def test_yoagent_all_calm_requires_idle_or_done_without_draft_or_attention(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    states = {"1": "idle", "2": "done"}
+
+    def target(session):
+        state = states[session]
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "claude",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": state, "text": state},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+    try:
+        ready = webapp.yoagent_controller.yoagent_roster_observed_state(["1", "2"], "all_calm")
+        blocking_states = {}
+        for state in ["working", "needs-input", "approval", "error", "disconnected", "input-draft"]:
+            states["2"] = state
+            blocking_states[state] = webapp.yoagent_controller.yoagent_roster_observed_state(["1", "2"], "all_calm")
+        states["2"] = "input-draft"
+        legacy_idle = webapp.yoagent_controller.yoagent_roster_observed_state(["1", "2"], "all_idle")
+    finally:
+        webapp.control_server.stop()
+
+    assert ready == {"ready": True, "state": "all_calm", "states": {"1": "idle", "2": "done"}, "blockers": []}
+    for state, observed in blocking_states.items():
+        assert observed["ready"] is False
+        assert observed["state"] == "waiting"
+        assert observed["states"]["2"] == state
+        assert observed["blockers"] == ["2"]
+    assert legacy_idle["ready"] is True
+
+
+def test_yoagent_roster_calm_quiet_window_resets_after_activity(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    state = {"2": "idle"}
+    sent = []
+
+    def target(session):
+        screen = state.get(session, "idle")
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": screen, "text": screen},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "execute_yoagent_send_action",
+        lambda payload, **_kwargs: sent.append(payload) or ({"ok": True, "sent": True}, HTTPStatus.OK),
+    )
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+        })
+        base = created["job"]["created_ts"]
+        clock = {"value": base}
+        monkeypatch.setattr(controller_module.time, "time", lambda: clock["value"])
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        clock["value"] = base + 9.0
+        before_quiet = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        state["2"] = "working"
+        clock["value"] = base + 9.5
+        activity = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        state["2"] = "idle"
+        clock["value"] = base + 10.0
+        reset = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        clock["value"] = base + 19.9
+        still_quiet = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        clock["value"] = base + 20.1
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert first == before_quiet == activity == reset == still_quiet == []
+    assert fired == [created["job"]["id"]]
+    assert len(sent) == 1
+
+
+def test_yoagent_roster_job_revalidates_destination_and_resets_wait_without_sending(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    phase = {"value": "becomes_busy"}
+    calls = []
+    sends = []
+
+    def target(session):
+        calls.append(session)
+        state = "idle"
+        if phase["value"] == "becomes_busy" and len(calls) == 3 and session == "1":
+            state = "working"
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": state, "text": state},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "execute_yoagent_send_action",
+        lambda payload, **_kwargs: sends.append(payload) or ({"ok": True, "sent": True}, HTTPStatus.OK),
+    )
+
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+            "quiet_seconds": 0,
+        })
+        first = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        waiting, _waiting_status = webapp.yoagent_controller.yoagent_jobs_payload()
+        sends_before_idle = list(sends)
+        phase["value"] = "idle"
+        second = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        fired, _fired_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert first == []
+    assert sends_before_idle == []
+    assert waiting["jobs"][0]["status"] == "queued"
+    assert waiting["jobs"][0]["last_observed_state"]["ready"] is False
+    assert second == [created["job"]["id"]]
+    assert fired["jobs"][0]["status"] == "fired"
+    assert len(sends) == 1
+
+
+def test_yoagent_roster_job_claim_allows_only_one_overlapping_send(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    send_started = threading.Event()
+    allow_send_finish = threading.Event()
+    sends = []
+
+    def target(session):
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": "idle", "text": "idle"},
+        }, HTTPStatus.OK
+
+    def send(payload, **_kwargs):
+        sends.append(payload)
+        send_started.set()
+        assert allow_send_finish.wait(2.0)
+        return {"ok": True, "sent": True}, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp.yoagent_controller, "execute_yoagent_send_action", send)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+            "quiet_seconds": 0,
+        })
+        first = threading.Thread(target=webapp.yoagent_controller.poll_yoagent_jobs_once)
+        first.start()
+        assert send_started.wait(2.0)
+        second = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        allow_send_finish.set()
+        first.join(timeout=2.0)
+        jobs, jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert first.is_alive() is False
+    assert second == []
+    assert jobs_status == HTTPStatus.OK
+    assert jobs["jobs"][0]["status"] == "fired"
+    assert len(sends) == 1
+
+
+def test_yoagent_roster_job_shared_state_claim_allows_only_one_server_send(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    first_app = app_module.TmuxWebtermApp(["1", "2"])
+    second_app = None
+    send_started = threading.Event()
+    allow_send_finish = threading.Event()
+    sends = []
+
+    def target(session):
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": "idle", "text": "idle"},
+        }, HTTPStatus.OK
+
+    def first_send(payload, **_kwargs):
+        sends.append(("first", payload))
+        send_started.set()
+        assert allow_send_finish.wait(2.0)
+        return {"ok": True, "sent": True}, HTTPStatus.OK
+
+    def second_send(payload, **_kwargs):
+        sends.append(("second", payload))
+        return {"ok": True, "sent": True}, HTTPStatus.OK
+
+    try:
+        monkeypatch.setattr(first_app, "log_event", lambda *args, **kwargs: {"time": "event"})
+        monkeypatch.setattr(first_app, "publish_client_event", lambda *args, **kwargs: {})
+        created, created_status = first_app.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+            "quiet_seconds": 0,
+        })
+        second_app = app_module.TmuxWebtermApp(["1", "2"])
+        for webapp, sender in [(first_app, first_send), (second_app, second_send)]:
+            monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+            monkeypatch.setattr(webapp.yoagent_controller, "execute_yoagent_send_action", sender)
+            monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+            monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+        first_results = []
+        thread = threading.Thread(target=lambda: first_results.append(first_app.yoagent_controller.poll_yoagent_jobs_once()))
+        thread.start()
+        assert send_started.wait(2.0)
+        second_results = second_app.yoagent_controller.poll_yoagent_jobs_once()
+        allow_send_finish.set()
+        thread.join(timeout=2.0)
+        jobs, jobs_status = first_app.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        first_app.control_server.stop()
+        if second_app is not None:
+            second_app.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert first_results == [[created["job"]["id"]]]
+    assert second_results == []
+    assert jobs_status == HTTPStatus.OK
+    assert jobs["jobs"][0]["status"] == "fired"
+    assert [source for source, _payload in sends] == ["first"]
+
+
+def test_yoagent_roster_job_fails_for_missing_watched_session_and_cancels_by_roster_member(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    events = []
+
+    def target(session):
+        if session == "2":
+            return {"error": "tmux session 2 disappeared"}, HTTPStatus.NOT_FOUND
+        return {
+            "session": session,
+            "pane_target": f"%{session}",
+            "agent_kind": "codex",
+            "transport": "pane-paste",
+            "prompt": {},
+            "screen": {"key": "idle", "text": "idle"},
+        }, HTTPStatus.OK
+
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", target)
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})) or {})
+    try:
+        failed_job, failed_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+            "quiet_seconds": 0,
+        })
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        failed_jobs, _failed_jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+        queued_job, queued_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report queued EOD"},
+        })
+        cancelled, cancel_status = webapp.yoagent_controller.cancel_yoagent_jobs_for_session("2")
+    finally:
+        webapp.control_server.stop()
+
+    assert failed_status == HTTPStatus.OK
+    assert fired == []
+    assert failed_jobs["jobs"][0]["id"] == failed_job["job"]["id"]
+    assert failed_jobs["jobs"][0]["status"] == "failed"
+    assert "target session is missing: 2" in failed_jobs["jobs"][0]["result"]["error"]
+    assert queued_status == HTTPStatus.OK
+    assert cancel_status == HTTPStatus.OK
+    assert cancelled["count"] == 1
+    assert cancelled["jobs"][0]["id"] == queued_job["job"]["id"]
+    assert any(event[0] == "yoagent_jobs_changed" and event[1].get("reason") == "yoagent_job_failed" for event in events)
+
+
+def test_yoagent_roster_job_times_out_without_sending(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    sends = []
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(webapp.yoagent_controller, "yoagent_action_target", lambda _session: (_ for _ in ()).throw(AssertionError("expired job must not inspect or send")))
+    monkeypatch.setattr(webapp.yoagent_controller, "execute_yoagent_send_action", lambda payload, **_kwargs: sends.append(payload) or ({"ok": True}, HTTPStatus.OK))
+    try:
+        created, created_status = webapp.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+        })
+        with webapp.yoagent_job_lock:
+            webapp.yoagent_jobs[created["job"]["id"]]["timeout_ts"] = time.time() - 1
+        fired = webapp.yoagent_controller.poll_yoagent_jobs_once()
+        jobs, jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert fired == []
+    assert jobs_status == HTTPStatus.OK
+    assert jobs["jobs"][0]["status"] == "timed_out"
+    assert sends == []
 
 
 def fake_agent_tui_send_result():
@@ -10624,6 +11015,42 @@ def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
     assert jobs_status == HTTPStatus.OK
     assert jobs["jobs"][0]["id"] == payload["job"]["id"]
     assert jobs["jobs"][0]["status"] == "queued"
+
+
+def test_yoagent_roster_job_recovers_queued_and_suppresses_interrupted_firing_retry(monkeypatch):
+    state = install_fake_yolomux_state(monkeypatch)
+    first_app = app_module.TmuxWebtermApp(["1", "2"])
+    second_app = None
+    third_app = None
+    monkeypatch.setattr(first_app, "log_event", lambda *args, **kwargs: {"time": "event"})
+    monkeypatch.setattr(first_app, "publish_client_event", lambda *args, **kwargs: {})
+    try:
+        created, created_status = first_app.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": ["1", "2"],
+            "action": {"session": "1", "text": "/dyn-tps-report 1 2 EOD"},
+        })
+        second_app = app_module.TmuxWebtermApp(["1", "2"])
+        queued, queued_status = second_app.yoagent_controller.yoagent_jobs_payload()
+        state[app_module.YOAGENT_JOBS_STATE_KEY][created["job"]["id"]]["status"] = "firing"
+        third_app = app_module.TmuxWebtermApp(["1", "2"])
+        recovered, recovered_status = third_app.yoagent_controller.yoagent_jobs_payload()
+        fired = third_app.yoagent_controller.poll_yoagent_jobs_once()
+    finally:
+        first_app.control_server.stop()
+        if second_app is not None:
+            second_app.control_server.stop()
+        if third_app is not None:
+            third_app.control_server.stop()
+
+    assert created_status == HTTPStatus.OK
+    assert queued_status == HTTPStatus.OK
+    assert queued["jobs"][0]["status"] == "queued"
+    assert recovered_status == HTTPStatus.OK
+    assert recovered["jobs"][0]["status"] == "failed"
+    assert "automatic retry is suppressed" in recovered["jobs"][0]["error"]
+    assert state[app_module.YOAGENT_JOBS_STATE_KEY][created["job"]["id"]]["status"] == "failed"
+    assert fired == []
 
 
 def test_yoagent_job_fails_and_notifies_when_target_disappears(monkeypatch):

@@ -64,6 +64,24 @@ def test_parse_notify_job_intents():
     assert parse_yoagent_job_intent("notify me when agent 9 is idling", ["1"]) is None
 
 
+def test_parse_roster_calm_then_send_preserves_exact_slash_command():
+    intent = parse_yoagent_job_intent(
+        "periodically monitor 1 2 3 4 and if they are all done, then send a /dyn-tps-report 1 2 3 4 EOD to session 1.",
+        ["1", "2", "3", "4"],
+    )
+
+    assert intent == {
+        "type": "wait_roster_then_send",
+        "roster": ["1", "2", "3", "4"],
+        "action": {
+            "session": "1",
+            "text": "/dyn-tps-report 1 2 3 4 EOD",
+            "submit": True,
+            "return_result": False,
+        },
+    }
+
+
 def test_parse_direct_tell_bare_session_name():
     intent = parse_yoagent_action_intent(
         "tell 8002 and ask what it has done today, and tell me what it says.",

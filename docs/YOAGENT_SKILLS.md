@@ -34,6 +34,12 @@ Required fields are `name` and a useful `description`. `name` must match `[a-z][
 
 ## Examples
 
+Create a roster wait-and-send job through YO!agent:
+
+- `periodically monitor 1 2 3 4 and if they are all done, then send a /dyn-tps-report 1 2 3 4 EOD to session 1`
+
+YO!agent parses this deterministic workflow before invoking a model. For flexible equivalent wording that does not match the local parser, its shared model-intent registry invokes the one matching built-in skill as an isolated no-tools planner with that skill's JSON Schema and the known session names. The server accepts only a schema-valid plan using known sessions, routes it through the normal job validation, fixes the ten-second quiet default, and always leaves the resulting model-derived job pending your confirmation. It persists the watch roster separately from the destination, waits until each listed Claude/Codex pane is idle or done with an empty composer for the stable quiet window, revalidates immediately before the one verified send, and fires once. It waits through work, questions, approvals, errors, disconnects, non-agent panes, and drafts; a removed tmux session fails the job visibly. The command is not rewritten, and YO!agent captures a target result only if you explicitly request it.
+
 Create a local status skill:
 
 ```yaml

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -358,6 +359,46 @@ class YoagentBackendsMixin:
         return answer, yoagent_cli_fallback_reason(backend, error, locale), status
 
 
+    def run_yoagent_model_intent_backend(self, backend: str, prompt: str, schema: dict[str, Any], settings: dict[str, Any] | None = None, locale: str = "en") -> tuple[str, str, dict[str, Any]]:
+        """Run one isolated, read-only/no-tools planner request with no resumable chat state."""
+        if backend not in {"codex", "claude"}:
+            error = f"unknown backend: {backend}"
+            return "", yoagent_cli_fallback_reason(backend, error, locale), {"backend": backend, "error": error}
+        started = time.monotonic()
+        current_settings = settings or self.yoagent_settings()
+        if backend == "codex":
+            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=current_settings, output_schema=schema)
+            transport = "codex-exec"
+        else:
+            claude_model = str(current_settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
+            claude_effort = str(current_settings.get("claude_effort") or "").strip()
+            answer, error = self.run_yoagent_claude_cli(
+                prompt,
+                session_id="",
+                resume=False,
+                model=claude_model,
+                effort=claude_effort,
+                tools="",
+                permission_mode=None,
+                json_schema=schema,
+            )
+            transport = "claude-stream-json"
+        status = {
+            "backend": backend,
+            "transport": transport,
+            "model_intent": True,
+            "native_structured_output": True,
+            "persistent": False,
+            "external_tools_enabled": False,
+            "prompt_chars": len(prompt),
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+        }
+        if error:
+            status["error"] = error
+            status["fallback_reason_message"] = yoagent_cli_fallback_descriptor(backend, error)
+        return answer, yoagent_cli_fallback_reason(backend, error, locale), status
+
+
     def run_yoagent_cli_backend(
         self,
         backend: str,
@@ -489,7 +530,7 @@ class YoagentBackendsMixin:
         return answer, fallback_reason, status
 
 
-    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None, enable_search: bool = False) -> tuple[str, str, str]:
+    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False, settings: dict[str, Any] | None = None, enable_search: bool = False, output_schema: dict[str, Any] | None = None) -> tuple[str, str, str]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", ""
         current_settings = settings or self.yoagent_settings()
@@ -501,7 +542,13 @@ class YoagentBackendsMixin:
             search=enable_search and not (resume and session_id),
         )
         try:
-                completed = subprocess.run(
+            schema_dir = tempfile.TemporaryDirectory(prefix="yolomux-codex-schema-") if output_schema is not None else None
+            if schema_dir is not None:
+                schema_path = os.path.join(schema_dir.name, "output-schema.json")
+                with open(schema_path, "w", encoding="utf-8") as handle:
+                    json.dump(output_schema, handle, ensure_ascii=False, separators=(",", ":"))
+                args = [*args[:-1], "--output-schema", schema_path, args[-1]]
+            completed = subprocess.run(
                     args,
                     input=prompt,
                     cwd=str(PROJECT_ROOT),
@@ -513,7 +560,11 @@ class YoagentBackendsMixin:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return "", str(exc), ""
+        finally:
+            if 'schema_dir' in locals() and schema_dir is not None:
+                schema_dir.cleanup()
         text_parts = []
+        error_parts = []
         captured_session_id = ""
         for line in completed.stdout.splitlines():
             try:
@@ -524,9 +575,15 @@ class YoagentBackendsMixin:
             text = codex_event_text(event)
             if text:
                 text_parts.append(text)
+            if str(event.get("type") or "") in {"error", "turn.failed"}:
+                detail = event.get("error") or event.get("message") or event.get("reason")
+                if isinstance(detail, dict):
+                    detail = detail.get("message") or detail.get("detail") or json.dumps(detail, ensure_ascii=False)
+                if str(detail or "").strip():
+                    error_parts.append(str(detail).strip())
         if text_parts:
             return "\n".join(text_parts).strip(), "", captured_session_id
-        error = completed.stderr.strip() or f"codex exited {completed.returncode}"
+        error = completed.stderr.strip() or "\n".join(error_parts) or f"codex exited {completed.returncode}"
         return "", error, captured_session_id
 
 
@@ -540,8 +597,9 @@ class YoagentBackendsMixin:
         stream_callback: Any | None = None,
         request_id: str = "",
         cancel_event: threading.Event | None = None,
-        tools: str = CLAUDE_STREAM_JSON_DEFAULT_TOOLS,
-        permission_mode: str = CLAUDE_STREAM_JSON_PERMISSION_MODE,
+        tools: str | None = CLAUDE_STREAM_JSON_DEFAULT_TOOLS,
+        permission_mode: str | None = CLAUDE_STREAM_JSON_PERMISSION_MODE,
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
@@ -558,10 +616,12 @@ class YoagentBackendsMixin:
             target["agent_model"] = model
         if effort:
             target["agent_effort"] = effort
-        if tools:
+        if tools is not None:
             target["tools"] = tools
-        if permission_mode:
+        if permission_mode is not None:
             target["permission_mode"] = permission_mode
+        if json_schema is not None:
+            target["json_schema"] = json_schema
         result = ClaudeStreamJsonTransport().send(
             target,
             prompt,

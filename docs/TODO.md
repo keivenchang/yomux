@@ -33,7 +33,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## YO!agent
 
-- [ ] [M] Add remaining watch predicates on top of persisted YO!agent jobs: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches. Needs-input watches, blocked-session watches, done-after-working watches, and cancel pending jobs by session are shipped in DONE 2026-06-20.
+- [ ] [M] Add remaining watch predicates on top of persisted YO!agent jobs: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches. Needs-input watches, blocked-session watches, done-after-working watches, cancel pending jobs by session, and deterministic roster-calm-then-send jobs are shipped.
 - [ ] [M] Add artifact-handoff helpers: choose a safe project-local path, ask a target to write there, validate existence/size/type, and pass the path or bounded content to the next target.
 - [ ] [L] Add golden-frame fixtures for remaining scrape-and-type paths. Record real Claude/Codex `capture-pane` frames per agent version and pin spinner/footer/approval/ready detection so upstream TUI changes fail tests instead of silently changing behavior.
 - [ ] [L] Expose YOLOmux as a local MCP/ACP-style control plane so agents can query session/activity state and request server-verified sends through structured APIs instead of requiring YO!agent to paste into panes.

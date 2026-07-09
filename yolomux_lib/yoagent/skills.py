@@ -19,6 +19,7 @@ from ..common import CONFIG_DIR
 from ..common import truncate_text
 from ..locales import message_fields
 from ..locales import user_message_payload
+from .model_intents import model_intent_definition_from_payload
 
 
 YOAGENT_PACKAGE = "yolomux_lib.yoagent"
@@ -84,6 +85,7 @@ class YoagentSkill:
     source: str
     confirmation: str
     default_timeout_minutes: int | None
+    model_intent: dict[str, Any] | None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -99,6 +101,8 @@ class YoagentSkill:
         }
         if self.default_timeout_minutes is not None:
             payload["default_timeout_minutes"] = self.default_timeout_minutes
+        if self.model_intent is not None:
+            payload["model_intent"] = dict(self.model_intent)
         return payload
 
     def context_line(self) -> str:
@@ -299,6 +303,23 @@ def clean_timeout_minutes(value: Any, errors: list[dict[str, Any]], source: str)
     return minutes
 
 
+def clean_model_intent(value: Any, *, name: str, enabled: bool, builtin: bool, errors: list[dict[str, Any]], source: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        errors.append(skill_error(source, "yoagent.skill.error.modelIntentMapping", "model_intent must be a mapping."))
+        return None
+    if not builtin:
+        errors.append(skill_error(source, "yoagent.skill.error.modelIntentBuiltinOnly", "model_intent is allowed only in built-in skills."))
+        return None
+    clean = dict(value)
+    definition = model_intent_definition_from_payload({"name": name, "enabled": enabled, "builtin": builtin, "model_intent": clean})
+    if definition is None:
+        errors.append(skill_error(source, "yoagent.skill.error.modelIntentInvalid", "model_intent must declare a valid handler, candidate, output tag, and schema."))
+        return None
+    return clean
+
+
 def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str) -> tuple[YoagentSkill | None, list[dict[str, Any]]]:
     if not isinstance(raw, dict):
         return None, [skill_error(source, "yoagent.skill.error.mappingRequired", "The skill file must contain a YAML mapping.")]
@@ -328,6 +349,7 @@ def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str
     if confirmation not in {"none", "required", "template"}:
         errors.append(skill_error(source, "yoagent.skill.error.confirmation", "confirmation must be one of: none, required, template."))
     timeout = clean_timeout_minutes(raw.get("default_timeout_minutes"), errors, source)
+    model_intent = clean_model_intent(raw.get("model_intent"), name=name, enabled=enabled, builtin=builtin, errors=errors, source=source)
     if errors:
         return None, errors
     return YoagentSkill(
@@ -341,6 +363,7 @@ def parse_skill_mapping(raw: Any, source: str, builtin: bool, fallback_name: str
         source=source,
         confirmation=confirmation,
         default_timeout_minutes=timeout,
+        model_intent=model_intent,
     ), []
 
 

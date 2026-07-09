@@ -11,6 +11,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
+from typing import TypeVar
 
 from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
@@ -23,6 +25,9 @@ from .locales import message_descriptor
 from .locales import message_fields
 from .types import RunHistoryEntry
 from .types import SearchResult
+
+
+T = TypeVar("T")
 
 
 @contextmanager
@@ -59,6 +64,15 @@ def update_yolomux_state(updates: dict[str, Any]) -> None:
         state = _read_yolomux_state_unlocked()
         state.update(updates)
         _write_yolomux_state_unlocked(state)
+
+
+def mutate_yolomux_state(mutator: Callable[[dict[str, Any]], T]) -> T:
+    """Apply a state transition while holding the shared cross-server state lock."""
+    with locked_yolomux_state_file():
+        state = _read_yolomux_state_unlocked()
+        result = mutator(state)
+        _write_yolomux_state_unlocked(state)
+        return result
 
 
 def utc_event_time() -> str:

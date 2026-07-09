@@ -6887,6 +6887,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         {id: 'job-confirm', type: 'wait_then_send', status: 'pending_confirmation', target: {session: '6'}, public_text: 'send date', last_observed_state: {blockers: ['target is busy']}},
         {id: 'job-queued', type: 'result_watch', status: 'queued', target: {roster: ['6', '7']}, action: {text_preview: 'wait for replies'}},
         {id: 'job-fired', type: 'wait_then_send', status: 'fired', session: '8', action: {text: 'echo done'}},
+        {id: 'job-roster', type: 'wait_roster_then_send', status: 'firing', target: {roster: ['1', '2', '3', '4']}, predicate: {quiet_seconds: 10}, action: {session: '1', text: '/dyn-tps-report 1 2 3 4 EOD'}, last_observed_state: {blockers: ['3']}},
         {id: 'job-failed', type: 'wait_then_send', status: 'failed', target: {session: '9'}, error: 'timed out waiting'},
         {id: 'job-cancelled', type: 'wait_then_send', status: 'cancelled', target: {session: '10'}},
       ],
@@ -6894,20 +6895,28 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const jobsHtml = api.yoagentChatHtml();
     assert.ok(jobsHtml.includes('yoagent-jobs-list'), 'YO!agent jobs render as a visible queue in the chat history');
     assert.ok(jobsHtml.includes('class="yoagent-jobs-title yoagent-section-title"'), 'YO!agent jobs use the shared section title');
-    assert.equal((jobsHtml.match(/class="yoagent-job-item/g) || []).length, 5, 'queued, pending, fired, failed, and cancelled jobs render as separate rows');
-    for (const status of ['pending confirmation', 'queued', 'fired', 'failed', 'cancelled']) {
+    assert.equal((jobsHtml.match(/class="yoagent-job-item/g) || []).length, 6, 'queued, pending, firing, fired, failed, and cancelled jobs render as separate rows');
+    for (const status of ['pending confirmation', 'queued', 'sending', 'fired', 'failed', 'cancelled']) {
       assert.ok(jobsHtml.includes(`class="yoagent-job-status">${status}</span>`), `YO!agent localizes the ${status} job status`);
     }
-    assert.ok(jobsHtml.includes('wait, then send') && jobsHtml.includes('watch for result'), 'YO!agent localizes job types through the shared classifier');
+    assert.ok(jobsHtml.includes('wait, then send') && jobsHtml.includes('wait for roster, then send') && jobsHtml.includes('watch for result'), 'YO!agent localizes job types through the shared classifier');
     assert.equal(jobsHtml.includes('wait_then_send'), false, 'YO!agent does not expose raw job type protocol values');
     assert.equal(jobsHtml.includes('result_watch'), false, 'YO!agent does not expose raw result-watch protocol values');
+    assert.equal(jobsHtml.includes('wait_roster_then_send'), false, 'YO!agent does not expose raw roster-job protocol values');
     assert.ok(jobsHtml.includes('data-yoagent-job-confirm="job-confirm"'), 'pending-confirmation jobs expose a confirm control');
     assert.ok(jobsHtml.includes('data-yoagent-job-cancel="job-confirm"'), 'pending-confirmation jobs expose a cancel control');
     assert.ok(jobsHtml.includes('data-yoagent-job-cancel="job-queued"'), 'queued jobs expose a cancel control');
     assert.equal(jobsHtml.includes('data-yoagent-job-confirm="job-fired"'), false, 'fired jobs do not expose stale confirm controls');
     assert.ok(jobsHtml.includes('target 6') && jobsHtml.includes('blocked by target is busy'), 'job rows show target sessions and blockers');
+    assert.ok(jobsHtml.includes('watch 1, 2, 3, 4 → send to 1') && jobsHtml.includes('calm for 10s') && jobsHtml.includes('blocked by 3'), 'roster jobs show their watch set, destination, quiet requirement, and current blocker');
     assert.ok(jobsHtml.includes('send date') && jobsHtml.includes('wait for replies'), 'job rows show prompt/action previews');
     assert.ok(/data-yoagent-chat-input[^>]*placeholder="Ask anything…"(?![^>]* disabled)/.test(jobsHtml), 'visible jobs do not disable the YO!agent composer input');
+    api.applyYoagentJobsPayloadForTest({
+      jobs: [{id: 'job-roster', type: 'wait_roster_then_send', status: 'fired', target: {roster: ['1', '2', '3', '4']}, predicate: {quiet_seconds: 10}, action: {session: '1', text: '/dyn-tps-report 1 2 3 4 EOD'}}],
+    }, {source: 'sse'});
+    const firedRosterHtml = api.yoagentChatHtml();
+    assert.ok(firedRosterHtml.includes('class="yoagent-job-status">fired</span>'), 'SSE job payload replaces the pending roster row with its terminal state');
+    assert.equal(firedRosterHtml.includes('data-yoagent-job-cancel="job-roster"'), false, 'terminal roster jobs no longer expose a stale cancel control after SSE refresh');
     api.setYoagentMessagesForTest([
       {role: 'user', content: 'wait for session 6, then ask for date', createdAt: '2026-06-13T17:40:00Z'},
       {

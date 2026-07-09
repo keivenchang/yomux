@@ -14,8 +14,9 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
     )
 
     names = {item["name"] for item in payload["skills"]}
+    by_name = {item["name"]: item for item in payload["skills"]}
     assert payload["ok"] is True
-    assert {"work-next", "notify-when-idle", "wait-then-run", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
+    assert {"work-next", "notify-when-idle", "wait-then-run", "wait-roster-then-send", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
     assert payload["user_dirs"]["skills"] == str(tmp_path / "skills.d")
     assert payload["user_dirs"]["context"] == str(tmp_path / "context.d")
     assert any("YO!agent skill `work-next`" in line for line in payload["context_lines"])
@@ -40,6 +41,12 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
         for line in payload["context_lines"]
     )
     assert any(
+        "YO!agent skill `wait-roster-then-send`" in line
+        and "stably calm" in line
+        and "Do not capture a result unless" in line
+        for line in payload["context_lines"]
+    )
+    assert any(
         "YO!agent skill `sequential-dependent-asks`" in line
         and "even when every step targets the same tmux session" in line
         and "never paste free text into a menu" in line
@@ -47,6 +54,8 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
     )
     assert any("YO!agent skill `manage-skills`" in line and "~/.config/yolomux/skills.d/" in line for line in payload["context_lines"])
     assert any("YO!agent context `recommendation-rubric`" in line for line in payload["context_lines"])
+    assert by_name["wait-roster-then-send"]["model_intent"]["handler"] == "wait-roster-then-send"
+    assert by_name["wait-roster-then-send"]["model_intent"]["output"]["tag"] == "yoagent-job-plan"
 
 
 def test_user_skills_override_disable_and_extend_builtins(tmp_path):

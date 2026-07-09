@@ -109,6 +109,7 @@ from .control import send_yolomux_control_request
 from .drop_actions import run_drop_action
 from .events import EventLog
 from .events import RunHistoryStore
+from .events import mutate_yolomux_state
 from .events import search_snippet
 from .events import read_yolomux_state
 from .events import update_yolomux_state
@@ -1601,7 +1602,7 @@ class YoagentAppDeps:
     yoagent_session_summary_lock yoagent_settings yoagent_skill_file_answer yoagent_skills_payload yoagent_stream_auxiliary_message_fields
     yoagent_stream_callback yoagent_summary_worker_lock yoagent_summary_worker_record yoagent_transports""".split()
     global_callables = """agent_screen_state codex_event_session_id discover_sessions hybrid_approval_prompt_state normalized_prompt_state
-    read_yolomux_state resolve_yoagent_backend tmux_capture_pane tmux_capture_pane_styled tmux_clear_input tmux_paste_text
+    mutate_yolomux_state read_yolomux_state resolve_yoagent_backend tmux_capture_pane tmux_capture_pane_styled tmux_clear_input tmux_paste_text
     transcript_activity_is_recent update_yolomux_state yoagent_activity_payload_signature yoagent_cli_auth_failure
     strip_yoagent_hidden_thinking strip_yoagent_stream_hidden_thinking yoagent_cli_fallback_reason yoagent_language_directive""".split()
 

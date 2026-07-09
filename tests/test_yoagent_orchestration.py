@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 from http import HTTPStatus
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -16,9 +17,16 @@ pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conv
 
 def install_fake_yolomux_state(monkeypatch):
     state = {}
+    lock = threading.Lock()
     monkeypatch.setattr(app_module, "read_yolomux_state", lambda: dict(state))
     monkeypatch.setattr(app_module, "update_yolomux_state", lambda updates: state.update(updates))
+    monkeypatch.setattr(app_module, "mutate_yolomux_state", lambda mutator: _lock_and_mutate(lock, state, mutator))
     return state
+
+
+def _lock_and_mutate(lock, state, mutator):
+    with lock:
+        return mutator(state)
 
 
 def fake_agent_tui_send_result():
@@ -126,6 +134,119 @@ def test_yoagent_chat_wait_then_send_queues_while_busy_then_fires_when_idle(monk
     assert len(send_calls) == 1
     assert send_calls[0][1] == "date"
     assert send_calls[0][2]["verify_submit"] is True
+
+
+def test_yoagent_chat_roster_calm_then_send_queues_without_model_backend(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
+    install_chat_defaults(monkeypatch, webapp)
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "yoagent_chat_cli_or_fallback_response",
+        lambda _ctx: (_ for _ in ()).throw(AssertionError("recognized roster job must not invoke a model backend")),
+    )
+
+    try:
+        payload, status = webapp.yoagent_controller.yoagent_chat({
+            "message": "periodically monitor 1 2 3 4 and if they are all done, then send a /dyn-tps-report 1 2 3 4 EOD to session 1.",
+        })
+        jobs, jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert jobs_status == HTTPStatus.OK
+    assert payload["backend_used"] == "yolomux"
+    assert len(jobs["jobs"]) == 1
+    job = jobs["jobs"][0]
+    assert job["type"] == "wait_roster_then_send"
+    assert job["target"] == {"roster": ["1", "2", "3", "4"]}
+    assert job["predicate"] == {"type": "all_calm", "quiet_seconds": 10.0}
+    assert job["action"]["session"] == "1"
+    assert job["action"]["text"] == "/dyn-tps-report 1 2 3 4 EOD"
+    assert job["action"]["return_result"] is False
+
+
+def test_yoagent_chat_accepts_validated_model_roster_plan_as_confirmation_only_job(monkeypatch):
+    install_fake_yolomux_state(monkeypatch)
+    webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
+    install_chat_defaults(monkeypatch, webapp)
+    model_calls = []
+    monkeypatch.setattr(webapp.yoagent_controller.deps, "resolve_yoagent_backend", lambda _backend: "codex")
+
+    def model_plan(*args, **kwargs):
+        model_calls.append((args, kwargs))
+        return (
+            '{"type":"wait_roster_then_send","roster":["1","2","3","4"],"destination":"1","command":"/dyn-tps-report 1 2 3 4 EOD","return_result":false}',
+            "",
+            {"backend": "codex"},
+        )
+
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "run_yoagent_model_intent_backend",
+        model_plan,
+    )
+
+    try:
+        payload, status = webapp.yoagent_controller.yoagent_chat({
+            "message": "Could you keep an eye on 1, 2, 3 and 4, and after they all settle have session 1 run /dyn-tps-report 1 2 3 4 EOD?",
+        })
+        jobs, jobs_status = webapp.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert jobs_status == HTTPStatus.OK
+    assert payload["backend_used"] == "codex"
+    assert payload["cli"]["structured_job"] is True
+    assert len(jobs["jobs"]) == 1
+    assert jobs["jobs"][0]["status"] == "pending_confirmation"
+    assert jobs["jobs"][0]["action"]["text"] == "/dyn-tps-report 1 2 3 4 EOD"
+    assert "Invoke preset `wait-roster-then-send`" in model_calls[0][0][1]
+    assert "Do not use tools" in model_calls[0][0][1]
+    assert model_calls[0][0][2]["type"] == "object"
+
+
+def test_yoagent_model_intent_requires_enabled_builtin_skill(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "yoagent_skills_payload",
+        lambda: {"skills": [{"name": "wait-roster-then-send", "enabled": True, "builtin": False, "model_intent": {}}]},
+    )
+    try:
+        assert webapp.yoagent_controller.yoagent_model_intent("Monitor 1 and 2 then send a report to session 1") is None
+    finally:
+        webapp.control_server.stop()
+
+
+def test_yoagent_model_intent_backend_isolated_and_disables_claude_tools(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    claude_calls = []
+    codex_calls = []
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_claude_cli", lambda *args, **kwargs: claude_calls.append((args, kwargs)) or ("<no-plan/>", ""))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_codex_cli", lambda *args, **kwargs: codex_calls.append((args, kwargs)) or ("<no-plan/>", "", ""))
+
+    try:
+        schema = {"type": "object", "properties": {}, "required": []}
+        claude_answer, claude_reason, claude_status = webapp.yoagent_controller.run_yoagent_model_intent_backend("claude", "plan", schema, {"claude_model": "test"})
+        codex_answer, codex_reason, codex_status = webapp.yoagent_controller.run_yoagent_model_intent_backend("codex", "plan", schema, {"codex_model": "test"})
+    finally:
+        webapp.control_server.stop()
+
+    assert (claude_answer, claude_reason) == ("<no-plan/>", "")
+    assert claude_calls[0][1]["session_id"] == ""
+    assert claude_calls[0][1]["resume"] is False
+    assert claude_calls[0][1]["tools"] == ""
+    assert claude_calls[0][1]["permission_mode"] is None
+    assert claude_calls[0][1]["json_schema"] == schema
+    assert claude_status["external_tools_enabled"] is False
+    assert (codex_answer, codex_reason) == ("<no-plan/>", "")
+    assert codex_calls[0][1]["session_id"] == ""
+    assert codex_calls[0][1]["resume"] is False
+    assert codex_calls[0][1]["output_schema"] == schema
+    assert codex_status["external_tools_enabled"] is False
 
 
 def test_yoagent_sequential_dependent_ask_waits_then_sends_computed_followup(monkeypatch):
