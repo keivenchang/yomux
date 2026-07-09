@@ -354,7 +354,7 @@ function splitVirtualItemToRightPane(item, sourceSlot = null) {
   if (!root) {
     const targetSlot = sourceSlot || slotForNewSession();
     next[layoutTreeKey] = leafNode(targetSlot);
-    next[targetSlot] = paneStateWithTabs([item], item);
+    next[targetSlot] = paneStateWithTabsForSlot(targetSlot, [item], item, next);
     applyLayoutSlots(next, {focusSession: item, prune: false});
     return;
   }

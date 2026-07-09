@@ -1,7 +1,11 @@
 
 function paneFrameControlsHtml(session, options = {}) {
-  const disabled = options.disabled === true;
-  const unavailableLabel = options.unavailableLabel || itemLabel(session);
+  const role = paneRoleForSlot(options.slot || slotForItem(session));
+  const controlOptions = role.controls === 'minimize-only'
+    ? {...options, actions: false, details: false, popout: false, expand: false, close: false, minimize: true}
+    : options;
+  const disabled = controlOptions.disabled === true;
+  const unavailableLabel = controlOptions.unavailableLabel || itemLabel(session);
   const unavailableTitle = t('tab.unavailableFor', {name: unavailableLabel});
   const controls = [];
   const add = spec => controls.push(toolbarButtonHtml({
@@ -14,11 +18,11 @@ function paneFrameControlsHtml(session, options = {}) {
     pressed: spec.pressed,
     html: spec.html,
   }));
-  const includeActions = options.actions ?? isTmuxSession(session);
-  const includeDetails = options.details === true;
-  const includeMinimize = options.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
-  const includeExpand = options.expand !== false;
-  const includePopout = options.popout === true;
+  const includeActions = controlOptions.actions ?? isTmuxSession(session);
+  const includeDetails = controlOptions.details === true;
+  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeExpand = controlOptions.expand !== false;
+  const includePopout = controlOptions.popout === true;
   if (includeActions) {
     add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
   }
@@ -35,10 +39,10 @@ function paneFrameControlsHtml(session, options = {}) {
   if (includeMinimize) {
     add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
   }
-  if (options.close) {
-    const closeLabel = options.closeLabel || t('pane.closeTab');
-    const closeTitle = options.closeTitle || closeLabel;
-    add({className: ['pane-close', options.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
+  if (controlOptions.close) {
+    const closeLabel = controlOptions.closeLabel || t('pane.closeTab');
+    const closeTitle = controlOptions.closeTitle || closeLabel;
+    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
   }
   return controls.join('');
 }
@@ -3951,7 +3955,7 @@ function hideUploadResult(session) {
 function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
-  panel.classList.toggle('file-surface-home-pane', slotIsFileSurfaceHome(slot));
+  syncPaneRoleDom(panel, slot);
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
   if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
@@ -3966,6 +3970,10 @@ function updatePaneExpandButton(panel, session) {
 
 function syncPanelVisibility(previousActive = []) {
   const visible = new Set(activeSessions);
+  const previouslyVisible = new Set(previousActive);
+  for (const item of activeSessions) {
+    if (isFileExplorerItem(item) && !previouslyVisible.has(item)) activateFileExplorerSurface(item);
+  }
   for (const session of sessions) {
     if (!visible.has(session)) {
       stopTranscriptStream(session);

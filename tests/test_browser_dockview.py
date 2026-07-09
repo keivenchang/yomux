@@ -5983,6 +5983,106 @@ def test_dockview_real_triplet_drop_into_home_header_moves_and_clears_drag_ui(br
     assert_dockview_drag_cleanup(result)
 
 
+def test_dockview_real_yo_tab_drag_crosses_generic_and_vertical_side_roles(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(side,main)&tabs=side:@side-left,finder;main:1,info,debug,yoagent,chat",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=6)
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__info__"]')
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__finder__"]')
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__info__"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__finder__"]', 0.7, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return paneRoleForSlot(slotForItem(infoItemId)).kind === paneRoleSide;"
+        )
+    )
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__info__"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.7, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return paneRoleForSlot(slotForItem(infoItemId)).kind === paneRoleGeneric;"
+        )
+    )
+    result = browser.execute_script(
+        """
+        return {
+          infoSlot: slotForItem(infoItemId),
+          infoRole: paneRoleForSlot(slotForItem(infoItemId)).kind,
+          finderRole: paneRoleForSlot(slotForItem(finderItemId)).kind,
+          policies: [infoItemId, debugPaneItemId, yoagentItemId, chatItemId]
+            .map(item => panePlacementForItem(item)),
+          errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+        };
+        """
+    )
+    assert result["errors"] == [], result
+    assert result["infoRole"] == "generic" and result["finderRole"] == "side", result
+    assert result["policies"] == ["side-allowed"] * 4, result
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_moving_finder_resumes_newly_visible_differ(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(side,main)&tabs=side:@side-left,finder,differ;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const originalApiFetchJson = apiFetchJson;
+        const requests = [];
+        apiFetchJson = async url => {
+          if (!String(url).startsWith('/api/session-files?')) return originalApiFetchJson(url);
+          requests.push(String(url));
+          return {session: '1', loaded: true, files: [], repos: [], refs_by_repo: {}, errors: [], warnings: []};
+        };
+        setSessionFilesPayloadForDestination('finder', emptySessionFilesPayload('1', false));
+        setSessionFilesLoadingForDestination('finder', false);
+        renderFileExplorerChangesPanel(panelNodes.get(differItemId), {force: true});
+        splitSessionAtLayoutBoundary(finderItemId, 'right', slotForItem(finderItemId)).then(moved => {
+          const deadline = performance.now() + 4000;
+          const poll = () => {
+            const panel = panelNodes.get(differItemId);
+            const loaded = sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, '1');
+            if ((loaded && requests.length) || performance.now() >= deadline) {
+              apiFetchJson = originalApiFetchJson;
+              done({
+                moved,
+                requests,
+                loaded,
+                differSlot: slotForItem(differItemId),
+                differActive: activeItemForSide(slotForItem(differItemId)),
+                text: panel?.innerText || panel?.textContent || '',
+                connected: panel?.isConnected === true,
+                errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+              });
+              return;
+            }
+            requestAnimationFrame(poll);
+          };
+          requestAnimationFrame(poll);
+        }).catch(error => {
+          apiFetchJson = originalApiFetchJson;
+          done({error: String(error?.stack || error)});
+        });
+        """
+    )
+    assert result.get("error") is None and result["errors"] == [], result
+    assert result["moved"] is True and result["connected"] is True, result
+    assert result["differActive"] == "__differ__", result
+    assert result["loaded"] is True and len(result["requests"]) >= 1, result
+    assert "not loaded" not in result["text"].lower(), result
+
+
 def test_dockview_real_triplet_release_over_finder_row_clears_drag_ui(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -5997,6 +6097,7 @@ def test_dockview_real_triplet_release_over_finder_row_clears_drag_ui(browser, t
         const tree = document.querySelector('.file-explorer-finder .file-explorer-tree-panel');
         const row = document.createElement('div');
         row.className = 'file-tree-row';
+        row.style.marginTop = '260px';
         tree.replaceChildren(row);
         updateFileTreeRow(row, '/tmp', {name: 'drop-target.txt', kind: 'file', size: 1, mtime: 1}, 0);
         """
@@ -6237,6 +6338,941 @@ def test_dockview_minimizing_finder_tab_preserves_triplet_home_width(browser, tm
     assert abs(after["pct"] - before["pct"]) <= 0.1, {"before": before, "after": after}
     assert abs(after["ratio"] - before["ratio"]) <= 0.02, {"before": before, "after": after}
     assert after["errors"] == [], after
+
+
+def test_dockview_empty_generic_panes_close_independently_and_preserve_side_width(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,right)&tabs=left:@side-left,finder;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    browser.execute_script(
+        """
+        const sideRole = paneRoleDefinition(paneRoleSide, paneSideLeft);
+        applyLayoutSlots({
+          [layoutTreeKey]: splitNode(
+            'row',
+            leafNode('side'),
+            splitNode('column', leafNode('upper'), leafNode('lower'), 50),
+            22,
+          ),
+          side: paneStateWithTabs([finderItemId], finderItemId, sideRole),
+          upper: emptyPlaceholderPaneState(),
+          lower: emptyPlaceholderPaneState(),
+        }, {preservePlaceholderSlots: true});
+        """
+    )
+
+    def empty_metrics(driver):
+        return driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const sideSlot = sidePaneSlot(paneSideLeft);
+            const sideItem = activeItemForSide(sideSlot);
+            const side = document.querySelector(`.dockview-pane-tab[data-pane-tab="${sideItem}"]`)
+              ?.closest('.dv-groupview')?.getBoundingClientRect();
+            const empties = Array.from(document.querySelectorAll('.empty-pane-panel')).map(panel => ({
+              slot: panel.dataset.slot,
+              closable: Boolean(panel.querySelector('[data-pane-close]')),
+            }));
+            if (!host?.width || !side?.width) return null;
+            return {
+              empties,
+              sideRatio: side.width / host.width,
+              pct: Number(layoutSlots?.[layoutTreeKey]?.pct || 0),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    def two_empty_panes(driver):
+        value = empty_metrics(driver)
+        return value if value and len(value["empties"]) == 2 else None
+
+    before = WebDriverWait(browser, 5).until(two_empty_panes)
+    assert all(empty["closable"] for empty in before["empties"]), before
+    browser.execute_script(
+        "document.querySelector('.empty-pane-panel[data-slot=\"upper\"] [data-pane-close]')?.click();"
+    )
+
+    def one_empty_pane(driver):
+        value = empty_metrics(driver)
+        return value if value and len(value["empties"]) == 1 else None
+
+    after = WebDriverWait(browser, 5).until(one_empty_pane)
+    assert after["empties"] == [{"slot": "lower", "closable": False}], after
+    assert abs(after["pct"] - before["pct"]) <= 0.1, {"before": before, "after": after}
+    assert abs(after["sideRatio"] - before["sideRatio"]) <= 0.02, {"before": before, "after": after}
+    assert after["errors"] == [], after
+
+
+def test_dockview_closing_empty_generic_pane_keeps_right_side_pane_at_host_edge(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@78(main,side)&tabs=main:1;side:@side-right,finder",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    browser.execute_script(
+        """
+        const sideRole = paneRoleDefinition(paneRoleSide, paneSideRight);
+        applyLayoutSlots({
+          [layoutTreeKey]: splitNode(
+            'row',
+            splitNode('column', leafNode('main'), leafNode('empty'), 50),
+            leafNode('side'),
+            78,
+          ),
+          main: paneStateWithTabs(['1'], '1'),
+          empty: emptyPlaceholderPaneState(),
+          side: paneStateWithTabs([finderItemId], finderItemId, sideRole),
+        }, {preservePlaceholderSlots: true});
+        """
+    )
+
+    def right_edge_metrics(driver):
+        return driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
+              ?.getBoundingClientRect();
+            const empty = document.querySelector('.empty-pane-panel');
+            if (!host?.width || !side?.width) return null;
+            return {
+              hostRight: host.right,
+              sideLeft: side.left,
+              sideRight: side.right,
+              sideWidth: side.width,
+              emptySlot: empty?.dataset.slot || '',
+              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              rightSideSlot: sidePaneSlot(paneSideRight),
+              rightSidePct: sidePaneWidthPercent(paneSideRight),
+              leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    before = WebDriverWait(browser, 5).until(
+        lambda driver: (value if (value := right_edge_metrics(driver)) and value["emptySlot"] else None)
+    )
+    assert before["emptyClosable"] is True, before
+    assert abs(before["hostRight"] - before["sideRight"]) <= 3, before
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+
+    after = WebDriverWait(browser, 5).until(
+        lambda driver: (value if (value := right_edge_metrics(driver)) and not value["emptySlot"] else None)
+    )
+    assert after["leaves"][-1] == after["rightSideSlot"], after
+    assert abs(after["hostRight"] - after["sideRight"]) <= 3, {"before": before, "after": after}
+    assert abs(after["sideWidth"] - before["sideWidth"]) <= 4, {"before": before, "after": after}
+    assert abs(after["rightSidePct"] - before["rightSidePct"]) <= 0.2, {"before": before, "after": after}
+    assert after["errors"] == [], after
+
+
+def test_dockview_closing_empty_between_two_side_panes_keeps_both_at_host_edges(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,row@72(main,right))&tabs=left:@side-left,differ;main:1;right:@side-right,finder",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    browser.execute_script(
+        """
+        const leftRole = paneRoleDefinition(paneRoleSide, paneSideLeft);
+        const rightRole = paneRoleDefinition(paneRoleSide, paneSideRight);
+        applyLayoutSlots({
+          [layoutTreeKey]: splitNode(
+            'row',
+            leafNode('leftSide'),
+            splitNode(
+              'row',
+              splitNode('column', leafNode('main'), leafNode('empty'), 50),
+              leafNode('rightSide'),
+              72,
+            ),
+            22,
+          ),
+          leftSide: paneStateWithTabs([differItemId], differItemId, leftRole),
+          main: paneStateWithTabs(['1'], '1'),
+          empty: emptyPlaceholderPaneState(),
+          rightSide: paneStateWithTabs([finderItemId], finderItemId, rightRole),
+        }, {preservePlaceholderSlots: true});
+        """
+    )
+
+    def edge_metrics(driver):
+        return driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const left = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="left"]')
+              ?.getBoundingClientRect();
+            const right = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
+              ?.getBoundingClientRect();
+            const empty = document.querySelector('.empty-pane-panel');
+            if (!host?.width || !left?.width || !right?.width) return null;
+            return {
+              hostLeft: host.left,
+              hostRight: host.right,
+              leftLeft: left.left,
+              leftWidth: left.width,
+              rightRight: right.right,
+              rightWidth: right.width,
+              emptySlot: empty?.dataset.slot || '',
+              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              leftSlot: sidePaneSlot(paneSideLeft),
+              rightSlot: sidePaneSlot(paneSideRight),
+              leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    def with_empty(driver):
+        value = edge_metrics(driver)
+        return value if value and value["emptySlot"] else None
+
+    before = WebDriverWait(browser, 5).until(with_empty)
+    assert before["emptyClosable"] is True, before
+    assert abs(before["hostLeft"] - before["leftLeft"]) <= 3, before
+    assert abs(before["hostRight"] - before["rightRight"]) <= 3, before
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+
+    def without_empty(driver):
+        value = edge_metrics(driver)
+        return value if value and not value["emptySlot"] else None
+
+    after = WebDriverWait(browser, 5).until(without_empty)
+    assert after["leaves"][0] == after["leftSlot"], after
+    assert after["leaves"][-1] == after["rightSlot"], after
+    assert abs(after["hostLeft"] - after["leftLeft"]) <= 3, {"before": before, "after": after}
+    assert abs(after["hostRight"] - after["rightRight"]) <= 3, {"before": before, "after": after}
+    assert abs(after["leftWidth"] - before["leftWidth"]) <= 4, {"before": before, "after": after}
+    assert abs(after["rightWidth"] - before["rightWidth"]) <= 4, {"before": before, "after": after}
+    assert after["errors"] == [], after
+
+
+def test_dockview_closing_horizontal_empty_beside_right_side_preserves_right_width(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,row@55(row@60(main,empty),right))&tabs=left:@side-left,differ;main:1;empty:;right:@side-right,finder",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    browser.execute_script(
+        """
+        const leftRole = paneRoleDefinition(paneRoleSide, paneSideLeft);
+        const rightRole = paneRoleDefinition(paneRoleSide, paneSideRight);
+        applyLayoutSlots({
+          [layoutTreeKey]: splitNode(
+            'row',
+            leafNode('leftSide'),
+            splitNode(
+              'row',
+              splitNode('row', leafNode('main'), leafNode('empty'), 60),
+              leafNode('rightSide'),
+              55,
+            ),
+            22,
+          ),
+          leftSide: paneStateWithTabs([differItemId], differItemId, leftRole),
+          main: paneStateWithTabs(['1'], '1'),
+          empty: emptyPlaceholderPaneState(),
+          rightSide: paneStateWithTabs([finderItemId], finderItemId, rightRole),
+        }, {preservePlaceholderSlots: true});
+        """
+    )
+
+    def metrics(driver):
+        return driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const right = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
+              ?.getBoundingClientRect();
+            const empty = document.querySelector('.empty-pane-panel');
+            if (!host?.width || !right?.width) return null;
+            return {
+              hostRight: host.right,
+              hostWidth: host.width,
+              rightRight: right.right,
+              rightWidth: right.width,
+              rightPct: sidePaneWidthPercent(paneSideRight),
+              emptySlot: empty?.dataset.slot || '',
+              emptyClosable: Boolean(empty?.querySelector('[data-pane-close]')),
+              leaves: layoutLeafSlots(layoutSlots?.[layoutTreeKey]),
+              rightSlot: sidePaneSlot(paneSideRight),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    def with_empty(driver):
+        value = metrics(driver)
+        return value if value and value["emptySlot"] else None
+
+    before = WebDriverWait(browser, 5).until(with_empty)
+    assert before["emptyClosable"] is True, before
+    browser.execute_script("document.querySelector('.empty-pane-panel [data-pane-close]')?.click();")
+
+    def without_empty(driver):
+        value = metrics(driver)
+        return value if value and not value["emptySlot"] else None
+
+    after = WebDriverWait(browser, 5).until(without_empty)
+    assert after["leaves"][-1] == after["rightSlot"], after
+    assert abs(after["hostRight"] - after["rightRight"]) <= 3, {"before": before, "after": after}
+    assert abs(after["rightWidth"] - before["rightWidth"]) <= 4, {"before": before, "after": after}
+    assert abs(after["rightPct"] - before["rightPct"]) <= 0.2, {"before": before, "after": after}
+    assert after["rightWidth"] <= after["hostWidth"] / 3 + 4, after
+    assert after["errors"] == [], after
+
+
+def test_dockview_side_pane_responsive_role_geometry_matrix(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,right)&tabs=left:@side-left,finder,differ,tabber,info*;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=5)
+
+    def metrics(driver):
+        return driver.execute_script(
+            """
+            const groups = Array.from(document.querySelectorAll('.dv-groupview')).map(group => {
+              const rect = group.getBoundingClientRect();
+              return {
+                role: group.dataset.paneRole || '',
+                side: group.dataset.paneSide || null,
+                tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+                left: rect.left,
+                right: rect.right,
+                width: rect.width,
+              };
+            });
+            const sideSlotsNow = sidePaneSlots();
+            const sideItems = sideSlotsNow.flatMap(slot => paneTabs(slot));
+            const genericSlots = layoutSlotKeys().filter(slot => !slotIsSidePane(slot));
+            const genericItems = genericSlots.flatMap(slot => paneTabs(slot));
+            return {
+              viewport: {width: innerWidth, height: innerHeight},
+              sideSlots: sideSlotsNow,
+              sideItems,
+              genericSlots,
+              genericItems,
+              groups,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    cases = [
+        (899, 720, False, False, "constrained desktop"),
+        (900, 720, False, True, "minimum wide desktop"),
+        (430, 800, True, False, "phone"),
+        (834, 1112, True, False, "portrait tablet"),
+        (1180, 820, True, True, "wide tablet"),
+        (1366, 820, False, True, "desktop"),
+    ]
+    try:
+        for width, height, touch, expected_side, label in cases:
+            browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": touch})
+            browser.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
+            )
+            browser.execute_script("dispatchEvent(new Event('resize'))")
+
+            def settled(driver):
+                state = metrics(driver)
+                has_side = len(state["sideSlots"]) == 1 and sum(group["role"] == "side" for group in state["groups"]) == 1
+                no_side = len(state["sideSlots"]) == 0 and all(group["role"] != "side" for group in state["groups"])
+                return state if state["viewport"]["width"] == width and (has_side if expected_side else no_side) else False
+
+            try:
+                state = WebDriverWait(browser, 8).until(settled)
+            except TimeoutException as exc:
+                raise AssertionError(f"Side Pane viewport case did not settle: {label}: {metrics(browser)}") from exc
+            assert state["errors"] == [], (label, state)
+            if expected_side:
+                assert set(state["sideItems"]) == {"__finder__", "__differ__", "__tabber__"}, (label, state)
+                assert "__info__" in state["genericItems"], (label, state)
+                side_group = next(group for group in state["groups"] if group["role"] == "side")
+                assert side_group["side"] == "left", (label, state)
+                assert side_group["left"] <= min(group["left"] for group in state["groups"]) + 1, (label, state)
+                assert side_group["width"] <= width / 3 + 3, (label, state)
+            else:
+                assert len(state["genericSlots"]) == 1 and len(state["groups"]) == 1, (label, state)
+                assert len({"__finder__", "__differ__", "__tabber__"}.intersection(state["genericItems"])) == 1, (label, state)
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+
+
+def test_dockview_dual_role_moves_keep_right_edge_generic_distinct_from_right_side(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,finder,info;main:1,debug",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const leftSide = sidePaneSlot(paneSideLeft);
+          const main = slotForItem('1');
+          const infoCrossRole = await moveSessionToSlot(infoItemId, main, leftSide);
+          const statsCrossRole = await moveSessionToSlot(debugPaneItemId, leftSide, main);
+          const genericRight = await splitSessionAtLayoutBoundary('1', 'right', main);
+          const terminalSlot = slotForItem('1');
+          const sideRight = await splitSessionAtLayoutBoundary(debugPaneItemId, 'right', leftSide);
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const orderedGroups = Array.from(document.querySelectorAll('.dv-groupview'))
+              .map(group => {
+                const rect = group.getBoundingClientRect();
+                return {
+                  left: rect.left,
+                  role: group.dataset.paneRole || '',
+                  side: group.dataset.paneSide || null,
+                  tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+                };
+              })
+              .sort((left, right) => left.left - right.left);
+            done({
+              infoCrossRole,
+              statsCrossRole,
+              genericRight,
+              sideRight,
+              terminalRole: paneRoleForSlot(terminalSlot).kind,
+              terminalSide: paneRoleForSlot(terminalSlot).side,
+              infoRole: paneRoleForSlot(slotForItem(infoItemId)).kind,
+              infoSide: paneRoleForSlot(slotForItem(infoItemId)).side,
+              statsRole: paneRoleForSlot(slotForItem(debugPaneItemId)).kind,
+              statsSide: paneRoleForSlot(slotForItem(debugPaneItemId)).side,
+              finderRole: paneRoleForSlot(slotForItem(finderItemId)).kind,
+              orderedGroups,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            });
+          }));
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert result.get("error") is None and result["errors"] == [], result
+    assert result["infoCrossRole"] is True and result["statsCrossRole"] is True, result
+    assert result["genericRight"] is True and result["sideRight"] is True, result
+    assert result["terminalRole"] == "generic" and result["terminalSide"] is None, result
+    assert result["infoRole"] == "generic" and result["infoSide"] is None, result
+    assert result["statsRole"] == "side" and result["statsSide"] == "right", result
+    assert result["finderRole"] == "side", result
+    assert result["orderedGroups"][0]["role"] == "side" and result["orderedGroups"][0]["side"] == "left", result
+    assert result["orderedGroups"][-1]["role"] == "side" and result["orderedGroups"][-1]["side"] == "right", result
+    assert any(group["role"] == "generic" and "1" in group["tabs"] for group in result["orderedGroups"]), result
+
+
+def test_dockview_side_pane_chrome_intrinsic_tabs_cap_and_width_preservation(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:@side-left,finder,differ,tabber;slot1:1;slot2:2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=5)
+    WebDriverWait(browser, 5).until(lambda driver: len(dockview_layout_metrics(driver)["groups"]) == 3)
+    browser.execute_script(
+        "document.documentElement.style.setProperty('--pane-tab-width', '200px');"
+        "dockviewSyncHeaderActionReservations();"
+    )
+
+    def side_metrics(driver):
+        return driver.execute_script(
+            """
+            const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="left"]');
+            const generic = Array.from(document.querySelectorAll('.dv-groupview[data-pane-role="generic"]'))
+              .find(group => group.querySelector('.dockview-pane-tab[data-pane-tab="1"]'));
+            const host = document.querySelector('.yolomux-dockview');
+            const sideRect = side?.getBoundingClientRect();
+            const hostRect = host?.getBoundingClientRect();
+            const sideTabs = Array.from(side?.querySelectorAll('.dv-tab') || []);
+            const genericTab = generic?.querySelector('.dv-tab');
+            const actions = side?.querySelector('.dockview-pane-header-actions');
+            return {
+              sideRole: side?.dataset.paneRole || '',
+              sideEdge: side?.dataset.paneSide || '',
+              sideWidth: sideRect?.width || 0,
+              hostWidth: hostRect?.width || 0,
+              viewportWidth: innerWidth,
+              layoutPct: sidePaneWidthPercent(paneSideLeft),
+              actionButtons: Array.from(actions?.querySelectorAll('button') || []).map(button => ({
+                minimize: button.dataset.paneMinimize || '',
+                className: button.className,
+              })),
+              paneDragHandles: side?.querySelectorAll('[data-pane-drag]').length || 0,
+              sideTabWidths: sideTabs.map(tab => tab.getBoundingClientRect().width),
+              sideTabTops: sideTabs.map(tab => Math.round(tab.getBoundingClientRect().top)),
+              genericTabWidth: genericTab?.getBoundingClientRect().width || 0,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    before = side_metrics(browser)
+    assert before["errors"] == [], before
+    assert before["sideRole"] == "side" and before["sideEdge"] == "left", before
+    assert len(before["actionButtons"]) == 1 and before["actionButtons"][0]["minimize"] == "__finder__", before
+    assert "pane-minimize" in before["actionButtons"][0]["className"], before
+    assert before["paneDragHandles"] == 0, before
+    assert len(set(before["sideTabTops"])) == 1, before
+    assert max(before["sideTabWidths"]) < 180, before
+    assert abs(before["genericTabWidth"] - 200) <= 3, before
+    assert before["sideWidth"] <= before["viewportWidth"] / 3 + 3, before
+
+    browser.execute_script("removePaneFromLayout('2')")
+    compacted = WebDriverWait(browser, 8).until(
+        lambda driver: (state if (state := side_metrics(driver))["sideWidth"] > 0 and not driver.execute_script("return itemInLayout('2')") else False)
+    )
+    assert abs(compacted["sideWidth"] - before["sideWidth"]) <= 4, {"before": before, "compacted": compacted}
+    assert abs(compacted["layoutPct"] - before["layoutPct"]) <= 0.2, {"before": before, "compacted": compacted}
+
+
+def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_chrome(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@24(side,main)&tabs=side:@side-left,__info__;main:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+
+    def metrics(driver):
+        return driver.execute_script(
+            """
+            dockviewSyncHeaderActionReservations();
+            const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="left"]');
+            const tab = side?.querySelector('.dv-tab');
+            const tabContent = tab?.querySelector('.dockview-pane-tab');
+            const label = tabContent?.querySelector('.session-button-dir');
+            const tabMinimize = tabContent?.querySelector('.pane-tab-close');
+            const actions = side?.querySelector('.dockview-pane-header-actions');
+            const tabRect = tab?.getBoundingClientRect();
+            const contentRect = tabContent?.getBoundingClientRect();
+            const labelRect = label?.getBoundingClientRect();
+            const tabMinimizeRect = tabMinimize?.getBoundingClientRect();
+            return {
+              item: tabContent?.dataset.paneTab || '',
+              tabWidth: tabRect?.width || 0,
+              contentWidth: contentRect?.width || 0,
+              labelRight: labelRect?.right || 0,
+              tabMinimizeLeft: tabMinimizeRect?.left || 0,
+              customTabWidth: getComputedStyle(side?.querySelector('.dv-tabs-and-actions-container'))
+                .getPropertyValue('--dockview-tab-inline-size').trim(),
+              actionButtons: Array.from(actions?.querySelectorAll('button') || []).map(button => ({
+                minimize: button.dataset.paneMinimize || '',
+                className: button.className,
+              })),
+              paneDragHandles: side?.querySelectorAll('[data-pane-drag]').length || 0,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    result = WebDriverWait(browser, 5).until(
+        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and state["tabWidth"] > 0 else False)
+    )
+    assert result["errors"] == [], result
+    assert result["customTabWidth"] == "", result
+    assert result["tabWidth"] < 160 and abs(result["contentWidth"] - result["tabWidth"]) <= 2, result
+    assert 0 <= result["tabMinimizeLeft"] - result["labelRight"] <= 20, result
+    assert len(result["actionButtons"]) == 1 and result["actionButtons"][0]["minimize"] == "__info__", result
+    assert "pane-minimize" in result["actionButtons"][0]["className"], result
+    assert result["paneDragHandles"] == 0, result
+
+
+def test_dockview_right_side_pane_sash_cannot_expand_past_one_third(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,row@72(main,right))&tabs=left:@side-left,differ;main:1;right:@side-right,finder",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+
+    def metrics(driver):
+        return driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
+              ?.getBoundingClientRect();
+            if (!host?.width || !side?.width) return null;
+            return {
+              hostLeft: host.left,
+              hostRight: host.right,
+              hostWidth: host.width,
+              sideLeft: side.left,
+              sideRight: side.right,
+              sideWidth: side.width,
+              pct: sidePaneWidthPercent(paneSideRight),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+
+    before = WebDriverWait(browser, 5).until(metrics)
+    start = browser.execute_script(
+        """
+        const sideLeft = arguments[0];
+        const sashes = Array.from(document.querySelectorAll('.dv-sash'))
+          .map(sash => sash.getBoundingClientRect())
+          .filter(rect => rect.width > 0 && rect.height > rect.width);
+        const sash = sashes.reduce((best, rect) => (
+          !best || Math.abs((rect.left + rect.width / 2) - sideLeft) < Math.abs((best.left + best.width / 2) - sideLeft)
+            ? rect
+            : best
+        ), null);
+        return sash ? {x: Math.round(sash.left + sash.width / 2), y: Math.round(sash.top + sash.height / 2)} : null;
+        """,
+        before["sideLeft"],
+    )
+    assert start is not None, before
+    cdp_drag(browser, start, {"x": round(before["hostLeft"] + before["hostWidth"] * 0.35), "y": start["y"]}, steps=36)
+    after = WebDriverWait(browser, 8).until(metrics)
+    assert abs(after["hostRight"] - after["sideRight"]) <= 3, {"before": before, "after": after}
+    assert after["sideWidth"] <= after["hostWidth"] / 3 + 4, {"before": before, "after": after}
+    assert after["pct"] <= 100 / 3 + 0.2, {"before": before, "after": after}
+    assert after["errors"] == [], after
+
+
+def test_dockview_creating_opposite_right_side_pane_uses_capped_edge_width(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,finder,differ,tabber;main:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    moved = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const source = slotForItem(finderItemId);
+          const result = await splitSessionAtLayoutBoundary(finderItemId, 'right', source);
+          requestAnimationFrame(() => requestAnimationFrame(() => done(result)));
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert moved is True, moved
+    metrics = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
+              ?.getBoundingClientRect();
+            if (!host?.width || !side?.width) return null;
+            return {
+              hostRight: host.right,
+              hostWidth: host.width,
+              sideRight: side.right,
+              sideWidth: side.width,
+              pct: sidePaneWidthPercent(paneSideRight),
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+    )
+    assert abs(metrics["hostRight"] - metrics["sideRight"]) <= 3, metrics
+    assert metrics["sideWidth"] <= metrics["hostWidth"] / 3 + 4, metrics
+    assert metrics["pct"] <= 100 / 3 + 0.2, metrics
+    assert metrics["errors"] == [], metrics
+
+
+def test_dockview_side_tab_context_actions_move_and_swap_only_up_down(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,finder,differ,tabber;main:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const source = slotForItem(finderItemId);
+          const sourceRect = document.querySelector('.dv-groupview[data-pane-role="side"]')?.getBoundingClientRect();
+          const before = tabDirectionalActionCapabilities(finderItemId, source);
+          const moved = await moveLayoutItemDirectional(finderItemId, source, 'bottom');
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const sideSlots = sidePaneSlotsForSide(paneSideLeft);
+            const movedSlot = slotForItem(finderItemId);
+            const caps = tabDirectionalActionCapabilities(finderItemId, movedSlot);
+            const sourceTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${finderItemId}"]`);
+            sourceTab?.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 40, clientY: 40}));
+            const buttons = Array.from(document.querySelectorAll('.session-context-menu .tab-split-action')).map(button => ({
+              direction: button.dataset.direction,
+              disabled: button.disabled,
+              group: button.closest('.tab-directional-action-groups > section')?.dataset?.tabActionKind || '',
+            }));
+            const edgeMove = document.querySelector('.session-context-menu .tab-move-action[data-direction="right"]');
+            done({
+              moved,
+              before: {move: before.move, swap: before.swap},
+              after: {move: caps.move, swap: caps.swap, targets: caps.targets},
+              sideSlots,
+              movedSlot,
+              sideWidth: sourceRect?.width || 0,
+              buttons,
+              descriptionCount: document.querySelectorAll('.session-context-menu .tab-action-description').length,
+              edgeMove: {
+                label: edgeMove?.getAttribute('aria-label') || '',
+                text: edgeMove?.textContent?.trim() || '',
+                rightIcon: Boolean(edgeMove?.querySelector('.tab-directional-action-icon--right')),
+              },
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            });
+          }));
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert result.get("error") is None and result["errors"] == [], result
+    assert result["moved"] is True, result
+    assert result["before"] == {
+        "move": {"left": False, "right": True, "top": True, "bottom": True},
+        "swap": {"left": False, "right": False, "top": False, "bottom": False},
+    }, result
+    assert len(result["sideSlots"]) == 2 and result["movedSlot"] == result["sideSlots"][-1], result
+    assert result["after"]["move"] == {"left": False, "right": True, "top": True, "bottom": False}, result
+    assert result["after"]["swap"] == {"left": False, "right": False, "top": True, "bottom": False}, result
+    enabled = {(button["group"], button["direction"]) for button in result["buttons"] if not button["disabled"]}
+    assert enabled == {("move", "right"), ("move", "top"), ("swap", "top")}, result
+    assert result["descriptionCount"] == 0, result
+    assert result["edgeMove"] == {"label": "Move right", "text": "Move right", "rightIcon": True}, result
+
+
+def test_dockview_vertical_side_pane_edge_icon_moves_to_opposite_edge(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,finder,differ,tabber;main:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${finderItemId}"]`);
+        const rect = tab.getBoundingClientRect();
+        tab.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.bottom,
+        }));
+        const sourceGroup = tab.closest('.dv-groupview');
+        const sourceWidth = sourceGroup.getBoundingClientRect().width;
+        const action = document.querySelector('.session-context-menu .tab-move-action[data-direction="right"]');
+        const initial = {
+          descriptionCount: document.querySelectorAll('.session-context-menu .tab-action-description').length,
+          label: action?.getAttribute('aria-label') || '',
+          rightIcon: Boolean(action?.querySelector('.tab-directional-action-icon--right')),
+        };
+        action?.click();
+        const wait = () => {
+          const slot = slotForItem(finderItemId);
+          if (!slot || paneRoleForSlot(slot).side !== paneSideRight) return requestAnimationFrame(wait);
+          const movedTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${finderItemId}"]`);
+          const movedRect = movedTab.getBoundingClientRect();
+          movedTab.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            clientX: movedRect.left + movedRect.width / 2,
+            clientY: movedRect.bottom,
+          }));
+          const targetGroup = movedTab.closest('.dv-groupview');
+          const reverse = document.querySelector('.session-context-menu .tab-move-action[data-direction="left"]');
+          done({
+            initial,
+            side: paneRoleForSlot(slot).side,
+            sourceWidth,
+            targetWidth: targetGroup.getBoundingClientRect().width,
+            reverseLabel: reverse?.getAttribute('aria-label') || '',
+            leftIcon: Boolean(reverse?.querySelector('.tab-directional-action-icon--left')),
+            errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+          });
+        };
+        wait();
+        """
+    )
+    assert result["errors"] == [], result
+    assert result["initial"] == {"descriptionCount": 0, "label": "Move right", "rightIcon": True}, result
+    assert result["side"] == "right", result
+    assert abs(result["sourceWidth"] - result["targetWidth"]) <= 4, result
+    assert result["reverseLabel"] == "Move left" and result["leftIcon"] is True, result
+
+
+def test_file_menu_keeps_existing_triplet_tabs_in_their_vertical_side_panes(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,row@72(main,right))&tabs=left:@side-left,differ;main:1;right:@side-right,finder",
+        sessions=["1"],
+        grid_width=1400,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const before = {
+          finderSlot: slotForItem(finderItemId),
+          differSlot: slotForItem(differItemId),
+          finderSide: paneRoleForSlot(slotForItem(finderItemId)).side,
+          differSide: paneRoleForSlot(slotForItem(differItemId)).side,
+        };
+        openFileSurfaceFromMenu(finderItemId).then(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => done({
+            before,
+            finderSlot: slotForItem(finderItemId),
+            differSlot: slotForItem(differItemId),
+            tabberSlot: slotForItem(tabberItemId),
+            finderSide: paneRoleForSlot(slotForItem(finderItemId)).side,
+            differSide: paneRoleForSlot(slotForItem(differItemId)).side,
+            tabberSide: paneRoleForSlot(slotForItem(tabberItemId)).side,
+            active: activeItemForSide(slotForItem(finderItemId)),
+            errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+          })));
+        }).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert result.get("error") is None and result["errors"] == [], result
+    assert result["finderSlot"] == result["before"]["finderSlot"] and result["finderSide"] == "right", result
+    assert result["differSlot"] == result["before"]["differSlot"] and result["differSide"] == "left", result
+    assert result["tabberSide"] == "left", result
+    assert result["active"] == "__finder__", result
+
+
+@pytest.mark.parametrize(
+    ("zone", "item"),
+    (("top", "__finder__"), ("bottom", "__differ__")),
+)
+def test_dockview_side_tab_drag_creates_real_vertical_side_leaves(browser, tmp_path, zone, item):
+    companion = "__differ__" if item == "__finder__" else "__finder__"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,{companion},{item};main:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{item}"]')
+    before = dockview_layout_metrics(browser)
+    side_before = next(group for group in before["groups"] if item in group["tabs"])
+    start = dockview_point(browser, f'.dockview-pane-tab[data-pane-tab="{item}"]', 0.5, 0.5)
+    end = {
+        "x": round(side_before["rect"]["left"] + side_before["rect"]["width"] / 2),
+        "y": round(side_before["rect"]["top"] + min(100, side_before["rect"]["height"] * 0.18) if zone == "top" else side_before["rect"]["bottom"] - min(100, side_before["rect"]["height"] * 0.18)),
+    }
+    cdp_drag(browser, start, end, steps=28)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return sidePaneSlotsForSide(paneSideLeft).length") == 2
+    )
+    result = browser.execute_script(
+            """
+            const item = arguments[0];
+            const sideSlots = sidePaneSlotsForSide(paneSideLeft);
+            const groups = Array.from(document.querySelectorAll('.dv-groupview[data-pane-role="side"]')).map(group => {
+              const rect = group.getBoundingClientRect();
+              return {
+                tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+                rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height},
+              };
+            }).sort((left, right) => left.rect.top - right.rect.top);
+            return {
+              sideSlots,
+              itemSlot: slotForItem(item),
+              tree: layoutSlots[layoutTreeKey],
+              groups,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """,
+        item,
+    )
+    assert result["errors"] == [], result
+    expected_slot = result["sideSlots"][0 if zone == "top" else -1]
+    assert result["itemSlot"] == expected_slot, {"zone": zone, **result}
+    assert result["tree"]["split"] == "row" and result["tree"]["children"][0]["split"] == "column", result
+    assert len(result["groups"]) == 2, result
+    top_group, bottom_group = result["groups"]
+    assert top_group["rect"]["bottom"] <= bottom_group["rect"]["top"] + 3, {"zone": zone, **result}
+    assert top_group["rect"]["height"] < side_before["rect"]["height"] * 0.75, {"zone": zone, **result}
+    assert bottom_group["rect"]["height"] < side_before["rect"]["height"] * 0.75, {"zone": zone, **result}
+    assert abs(top_group["rect"]["width"] - side_before["rect"]["width"]) <= 4, result
+    assert abs(bottom_group["rect"]["width"] - side_before["rect"]["width"]) <= 4, result
+    assert all(abs(group["rect"]["left"] - side_before["rect"]["left"]) <= 3 for group in result["groups"]), result
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+@pytest.mark.parametrize(
+    ("zone", "item"),
+    (("top", "__info__"), ("bottom", "__debug__"), ("top", "__yoagent__"), ("bottom", "__chat__")),
+)
+def test_dockview_yo_tabs_create_vertical_side_leaves(browser, tmp_path, zone, item):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout=row@22(side,main)&tabs=side:@side-left,finder,{item};main:1",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    before = dockview_layout_metrics(browser)
+    side_before = next(group for group in before["groups"] if item in group["tabs"])
+    result = browser.execute_async_script(
+        """
+        const [item, zone, done] = arguments;
+        const sourceSlot = slotForItem(item);
+        splitSessionAtSlot(item, sourceSlot, zone, sourceSlot).then(moved => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const groups = Array.from(document.querySelectorAll('.dv-groupview[data-pane-role="side"]')).map(group => {
+              const rect = group.getBoundingClientRect();
+              return {
+                tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+                rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height},
+              };
+            }).sort((left, right) => left.rect.top - right.rect.top);
+            done({moved, itemSlot: slotForItem(item), sideSlots: sidePaneSlotsForSide(paneSideLeft), groups,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])]});
+          }));
+        }).catch(error => done({error: String(error?.stack || error)}));
+        """,
+        item,
+        zone,
+    )
+    assert result.get("error") is None and result["errors"] == [] and result["moved"] is True, result
+    assert len(result["sideSlots"]) == 2 and len(result["groups"]) == 2, result
+    expected_slot = result["sideSlots"][0 if zone == "top" else -1]
+    assert result["itemSlot"] == expected_slot, result
+    top_group, bottom_group = result["groups"]
+    assert top_group["rect"]["bottom"] <= bottom_group["rect"]["top"] + 3, result
+    assert all(abs(group["rect"]["width"] - side_before["rect"]["width"]) <= 4 for group in result["groups"]), result
 
 
 def test_dockview_docked_finder_sash_resize_updates_root_pct(browser, tmp_path):
@@ -6565,3 +7601,88 @@ def test_dockview_directory_drag_over_finder_is_reserved_but_terminal_path_targe
     assert result["sharedFileGateFinder"] is False, result
     assert result["sharedPathGateFinderMiddle"] is False, result
     assert result["sharedPathGateTerminalEdge"] is True, result
+
+
+def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=tabber,1,2&layout=row@22(side,main)&tabs=side:@side-left,tabber;main:1,2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          window.__bootFetches.length = 0;
+          const now = Date.now() / 1000;
+          applyTabberActivityPayload({
+            activity: {
+              '1': {active_recency_ts: now - 60},
+              '2': {active_recency_ts: now - 7200},
+              '1:0': {active_recency_ts: now - 60},
+              '2:0': {active_recency_ts: now - 7200},
+            },
+            agents: [],
+            agent_windows: {},
+          });
+          transcriptMetadataState.payload = {
+            sessions: {
+              '1': {panes: [{index: 0, index_text: '0', name: 'bash', active: true, window_active: true}], project: {git: {root: '/repo/one', branch: 'main'}}},
+              '2': {panes: [{index: 0, index_text: '0', name: 'bash', active: true, window_active: true}], project: {git: {root: '/repo/two', branch: 'main'}}},
+            },
+          };
+          transcriptMetadataState.loaded = true;
+          refreshTabberPanels();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const panel = panelNodes.get(tabberItemId);
+          const rowSessions = () => Array.from(panel.querySelectorAll('.file-tree-row[data-tabber-type="session"]')).map(row => row.dataset.tabberSession);
+          const sessionRows = () => Array.from(panel.querySelectorAll('.file-tree-row[data-tabber-type="session"]'));
+          const initial = rowSessions();
+
+          const sort = panel.querySelector('[data-file-explorer-tree-sort]');
+          sort.value = 'za';
+          sort.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          const sorted = rowSessions();
+
+          const date = panel.querySelector('[data-file-explorer-tree-dates]');
+          const dateBefore = date.dataset.dateMode;
+          date.click();
+          const dateAfter = panel.querySelector('[data-file-explorer-tree-dates]').dataset.dateMode;
+
+          panel.querySelector('[data-file-tree-expand-collapse-all="collapse"]').click();
+          const collapsed = sessionRows().every(row => row.getAttribute('aria-expanded') === 'false');
+          panel.querySelector('[data-file-tree-expand-collapse-all="expand"]').click();
+          const expanded = sessionRows().every(row => row.getAttribute('aria-expanded') === 'true');
+
+          const lookback = panel.querySelector('[data-tabber-lookback]');
+          lookback.value = '48';
+          lookback.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          await Promise.resolve(tabberActivityState.request);
+          const activityFetch = window.__bootFetches.find(entry => entry.path === '/api/activity' && new URLSearchParams(entry.search).get('hours') === '48');
+          done({
+            initial,
+            sorted,
+            sortValue: panel.querySelector('[data-file-explorer-tree-sort]').value,
+            dateBefore,
+            dateAfter,
+            collapsed,
+            expanded,
+            lookbackValue: panel.querySelector('[data-tabber-lookback]').value,
+            lookbackHours: tabberSessionFileLookbackHours,
+            activityFetch: activityFetch || null,
+            bound: panel.dataset.fileExplorerHeaderActionsBound,
+            errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result and result["errors"] == [], result
+    assert result["bound"] == "true", result
+    assert result["initial"] == ["1", "2"] and result["sorted"] == ["2", "1"], result
+    assert result["sortValue"] == "za", result
+    assert result["dateBefore"] != result["dateAfter"], result
+    assert result["collapsed"] is True and result["expanded"] is True, result
+    assert result["lookbackValue"] == "48" and result["lookbackHours"] == 48, result
+    assert result["activityFetch"] is not None, result

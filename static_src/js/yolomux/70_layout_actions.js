@@ -13,8 +13,8 @@ function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
     const active = activeItemForSide(side, slots);
     const tabs = paneTabs(side, slots).filter(value => value !== item);
     next[side] = !tabs.length && (side === preserveEmptySlot || (preserveRemovedSlot && hadItem))
-      ? emptyPlaceholderPaneState()
-      : paneStateWithTabs(tabs, active === item ? null : active);
+      ? emptyPlaceholderPaneState(paneRoleForSlot(side, slots))
+      : paneStateWithTabs(tabs, active === item ? null : active, paneRoleForSlot(side, slots));
   }
   return next;
 }
@@ -59,20 +59,35 @@ function removePaneFromLayout(item) {
 // Placeholders are deliberate drop targets after a split/move, but they are still disposable UI.
 // Keep their dismissal on the same layout transaction path as pane-frame close so Dockview, the
 // DOM renderer, URL state, and shared layout snapshots cannot disagree about which leaf vanished.
-function emptyPaneCanClose(slot, slots = layoutSlots) {
-  return paneIsPlaceholder(slot, slots) && layoutSlotKeys(slots).some(otherSlot => otherSlot !== slot);
+function canCloseEmptyPane(slot, slots = layoutSlots) {
+  if (!slot || !paneIsPlaceholder(slot, slots) || slotIsSidePane(slot, slots)) return false;
+  return layoutSlotKeys(slots).some(candidate => (
+    candidate !== slot
+    && !slotIsSidePane(candidate, slots)
+    && paneHasLayoutContent(candidate, slots)
+  ));
 }
 
 function closeEmptyPaneFromLayout(slot) {
-  if (!emptyPaneCanClose(slot)) return false;
+  if (!canCloseEmptyPane(slot)) return false;
   applyLayoutSlots(layoutWithoutSlot(slot), {
+    preserveMissingSidePane: sidePaneSlots().length > 0,
     preservePlaceholderSlots: true,
     prune: false,
   });
   return true;
 }
 
+function emptyPaneCanClose(slot, slots = layoutSlots) {
+  return canCloseEmptyPane(slot, slots);
+}
+
 function closePaneFrameItem(item) {
+  const emptySlot = typeof dockviewEmptyPaneSlot === 'function' ? dockviewEmptyPaneSlot(item) : null;
+  if (emptySlot) {
+    closeEmptyPaneFromLayout(emptySlot);
+    return;
+  }
   const resolved = resolveLayoutItem(item);
   if (isFileExplorerItem(resolved)) {
     removeSessionFromLayout(resolved);
@@ -145,19 +160,15 @@ function tabsToEvictForCap(tabs, keepItem) {
   return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
 }
 
-function paneTabsWithoutFinder(slot, slots = layoutSlots) {
-  // Only the dedicated left home column is special. A Finder, Differ, or Tabber moved elsewhere
-  // is a normal pane tab and must participate in minimize/expand like every other item.
-  return slotIsFileSurfaceHome(slot, slots)
-    ? paneTabs(slot, slots).filter(item => !isFileExplorerItem(item))
-    : paneTabs(slot, slots);
+function paneTabsForGenericActions(slot, slots = layoutSlots) {
+  return slotIsSidePane(slot, slots) ? [] : paneTabs(slot, slots);
 }
 
 // A narrow touch layout has one shared tab strip, not independent panes. Its frame controls must
 // therefore operate on the selected tab; removing the only pane would make the control appear to
 // do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
 function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
-  if (!narrowSingleColumnMode()) return false;
+  if (!sidePaneConstrainedMode()) return false;
   const slot = slotForItem(item, slots);
   return Boolean(slot && paneTabs(slot, slots).length > 1);
 }
@@ -171,12 +182,12 @@ function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
 
 function canPaneExpand(item, slots = layoutSlots) {
   const targetSlot = slotForItem(item, slots);
-  if (!targetSlot || slotIsFileSurfaceHome(targetSlot, slots)) return false;
+  if (!targetSlot || slotIsSidePane(targetSlot, slots)) return false;
   if (!activeItemForSide(targetSlot, slots)) return false;
   return layoutSlotKeys(slots).some(slot => (
     slot !== targetSlot
-    && !slotIsFileSurfaceHome(slot, slots)
-    && paneTabsWithoutFinder(slot, slots).length > 0
+    && !slotIsSidePane(slot, slots)
+    && paneTabsForGenericActions(slot, slots).length > 0
   ));
 }
 
@@ -187,12 +198,12 @@ function minimizePaneFromLayout(item) {
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (narrowSingleColumnMode()) return;
-  if (slotIsFileSurfaceHome(sourceSlot)) {
+  if (sidePaneConstrainedMode()) return;
+  if (slotIsSidePane(sourceSlot)) {
     removePaneFromLayout(item);
     return;
   }
-  const minimizedTabs = paneTabsWithoutFinder(sourceSlot);
+  const minimizedTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
   if (!targetSlot || !minimizedTabs.length) {
     removePaneFromLayout(item);
@@ -200,8 +211,8 @@ function minimizePaneFromLayout(item) {
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const targetTabs = appendUniqueItems(paneTabsWithoutFinder(targetSlot, next), minimizedTabs);
-  next[targetSlot] = paneStateWithTabs(targetTabs, targetActive);
+  const targetTabs = appendUniqueItems(paneTabsForGenericActions(targetSlot, next), minimizedTabs);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, targetTabs, targetActive, next);
   applyLayoutSlots(next, {
     focusSession: targetActive || targetTabs[0],
     prune: false,
@@ -209,39 +220,20 @@ function minimizePaneFromLayout(item) {
   });
 }
 
-function finderLeadsExpandedPane(finderSlot, targetSlot) {
-  const finderRect = layoutColumnNode(finderSlot)?.getBoundingClientRect();
-  const targetRect = layoutColumnNode(targetSlot)?.getBoundingClientRect();
-  if (finderRect && targetRect && Math.abs(finderRect.left - targetRect.left) > 1) return finderRect.left < targetRect.left;
-  const leaves = layoutLeafSlots(layoutSlots[layoutTreeKey]);
-  const finderIndex = leaves.indexOf(finderSlot);
-  const targetIndex = leaves.indexOf(targetSlot);
-  if (finderIndex !== -1 && targetIndex !== -1) return finderIndex < targetIndex;
-  return true;
-}
-
 function expandPaneFromLayout(item) {
   const targetSlot = slotForSession(item);
   if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
-  const finderSlot = layoutFileSurfaceHomeSlot();
-  const targetTabs = appendUniqueItems([], paneTabsWithoutFinder(targetSlot));
+  const targetTabs = appendUniqueItems([], paneTabsForGenericActions(targetSlot));
   for (const slot of layoutSlotKeys()) {
     if (slot === targetSlot) continue;
-    appendUniqueItems(targetTabs, paneTabsWithoutFinder(slot));
+    appendUniqueItems(targetTabs, paneTabsForGenericActions(slot));
   }
-  const next = emptyLayoutSlots();
-  next[targetSlot] = paneStateWithTabs(targetTabs, active);
-  if (finderSlot && finderSlot !== targetSlot) {
-    next[finderSlot] = paneStateWithTabs(paneTabs(finderSlot), activeItemForSide(finderSlot));
-    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
-    next[layoutTreeKey] = finderFirst
-      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
-      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = leafNode(targetSlot);
-  }
+  const content = emptyLayoutSlots();
+  content[targetSlot] = paneStateWithTabs(targetTabs, active, paneRoleDefinition(paneRoleGeneric));
+  content[layoutTreeKey] = leafNode(targetSlot);
+  const next = layoutWithPreservedSidePanes(content);
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
@@ -251,16 +243,16 @@ function expandPaneFromLayout(item) {
 
 function visibleNonFinderPaneItems(slots = layoutSlots) {
   const result = [];
-  for (const slot of layoutSlotKeys(slots)) appendUniqueItems(result, paneTabsWithoutFinder(slot, slots));
+  for (const slot of layoutSlotKeys(slots)) appendUniqueItems(result, paneTabsForGenericActions(slot, slots));
   return result;
 }
 
 function firstNonFinderPaneSlot(slots = layoutSlots) {
-  return layoutSlotKeys(slots).find(slot => !isFileExplorerItem(activeItemForSide(slot, slots)) && paneTabsWithoutFinder(slot, slots).length > 0) || null;
+  return layoutSlotKeys(slots).find(slot => !slotIsSidePane(slot, slots) && paneTabsForGenericActions(slot, slots).length > 0) || null;
 }
 
 function preferredNonFinderLayoutSlots(finderSlot = null) {
-  return layoutSlotKeys().filter(slot => slot !== finderSlot && paneTabsWithoutFinder(slot).length > 0);
+  return layoutSlotKeys().filter(slot => slot !== finderSlot && paneTabsForGenericActions(slot).length > 0);
 }
 
 function layoutModeStatusMessage(mode) {
@@ -273,27 +265,18 @@ function applyNonFinderLayoutMode(mode) {
   if (!items.length) return;
   const normalized = normalizeLayoutMode(mode);
   const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const finderSlot = slotForSession(fileExplorerItemId);
   const preserveSlots = normalized === 'single' || normalized === 'split';
-  const next = layoutSlotsForItems(items, normalized, {
+  const content = layoutSlotsForItems(items, normalized, {
     active,
-    finderSlot,
-    preferredSlots: preserveSlots ? preferredNonFinderLayoutSlots(finderSlot) : [],
+    preferredSlots: preserveSlots ? preferredNonFinderLayoutSlots() : [],
+    reservedSlots: sidePaneSlots(),
   });
-  if (finderSlot) {
-    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const targetSlot = layoutLeafSlots(next[layoutTreeKey]).find(slot => slot !== finderSlot) || firstNonFinderPaneSlot() || 'right';
-    const nonFinderTree = next[layoutTreeKey];
-    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
-    next[layoutTreeKey] = finderFirst
-      ? splitNode('row', leafNode(finderSlot), nonFinderTree, fileExplorerSplitPercent)
-      : splitNode('row', nonFinderTree, leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  }
+  const next = layoutWithPreservedSidePanes(content);
   applyLayoutSlots(next, {focusSession: active, prune: false, message: layoutModeStatusMessage(normalized)});
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(sidePaneConstrainedMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -313,32 +296,20 @@ function setLayoutToWallPanes() {
 }
 
 function layoutWithFileExplorerDockedLeft(slots = layoutSlots, options = {}) {
-  const rightRaw = layoutWithoutItemFromSlots(fileExplorerItemId, slots, {
-    preservePlaceholders: options.preservePlaceholders !== false,
+  // Compatibility callers still use the old Finder-specific name. Rebuild through the shared
+  // Side Pane transaction so this path cannot drop Differ/Tabber or silently create a generic pane.
+  const withoutFileSurfaces = layoutWithoutFileSurfaces(slots);
+  return layoutWithSidePaneItems(withoutFileSurfaces, layoutFileSurfaceItems(), {
+    side: paneSideLeft,
+    forceCreate: true,
+    active: options.active || fileExplorerItemId,
   });
-  const right = options.preservePlaceholders === false && !paneItems(rightRaw).length
-    ? rightRaw
-    : compactLayoutSlots(rightRaw);
-  const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
-  const next = emptyLayoutSlots();
-  for (const slot of rightSlots) next[slot] = paneStateForLayoutSlot(slot, right);
-  const used = new Set(rightSlots);
-  const currentSlot = slotForItem(fileExplorerItemId, slots);
-  const preferredSlot = options.preferredSlot && !used.has(options.preferredSlot) ? options.preferredSlot : null;
-  let finderSlot = currentSlot && !used.has(currentSlot) ? currentSlot : null;
-  if (!finderSlot) finderSlot = preferredSlot;
-  if (!finderSlot) finderSlot = !used.has('left') ? 'left' : nextLayoutSlot(next);
-  next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-  next[layoutTreeKey] = rightSlots.length
-    ? splitNode('row', leafNode(finderSlot), right[layoutTreeKey], fileExplorerSplitPercent)
-    : leafNode(finderSlot);
-  return layoutWithFileExplorerPeerPane(compactLayoutSlots(next));
 }
 
 function dockFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
   if (fileExplorerUsesNormalTabMovement()) {
-    void moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null, paneTabs(slotForNewSession()).length);
+    void openFileSurfacePane(fileExplorerItemId);
     return;
   }
   applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
@@ -348,7 +319,7 @@ function dockFileExplorerPane() {
 }
 
 function firstEmptyPane(slots = layoutSlots) {
-  const placeholderSlot = layoutSlotKeys(slots).find(slot => paneIsPlaceholder(slot, slots));
+  const placeholderSlot = layoutSlotKeys(slots).find(slot => !slotIsSidePane(slot, slots) && paneIsPlaceholder(slot, slots));
   if (placeholderSlot) return placeholderSlot;
   return layoutSlotKeys(slots).length ? null : 'left';
 }
@@ -357,8 +328,8 @@ function slotForNewSession() {
   const empty = firstEmptyPane();
   if (empty) return empty;
   const focusedSlot = focusedPanelItem ? slotForSession(focusedPanelItem) : null;
-  if (focusedSlot) return focusedSlot;
-  return 'left';
+  if (focusedSlot && !slotIsSidePane(focusedSlot)) return focusedSlot;
+  return layoutSlotKeys().find(slot => !slotIsSidePane(slot)) || 'left';
 }
 
 function focusedActivationSlot() {
@@ -428,7 +399,7 @@ async function placeTmuxSession(session) {
     return;
   }
   if (isFileExplorerItem(activeItemForSide(targetSlot))) {
-    await splitSessionAtSlot(session, targetSlot, 'right', null, fileExplorerSplitPercent);
+    await splitSessionAtSlot(session, targetSlot, 'right', null, sidePaneDefaultWidthPercent);
     return;
   }
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
@@ -447,34 +418,7 @@ function toggleFinderPane() {
 
 async function openFileExplorerPane() {
   rememberFileExplorerOpenIntent(true);
-  if (fileExplorerUsesNormalTabMovement()) {
-    await moveSessionToSlot(fileExplorerItemId, firstNonFinderPaneSlot() || slotForNewSession(), null, paneTabs(firstNonFinderPaneSlot() || slotForNewSession()).length);
-    return;
-  }
-  const currentSlot = slotForSession(fileExplorerItemId);
-  if (currentSlot) {
-    if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
-      activatePaneTab(currentSlot, fileExplorerItemId);
-      return;
-    }
-    dockFileExplorerPane();
-    return;
-  }
-  const empty = firstEmptyPane();
-  if (empty) {
-    if (layoutSlotKeys().includes(empty) && paneIsPlaceholder(empty)) {
-      await splitSessionBesidePlaceholder(fileExplorerItemId, empty, 'left', fileExplorerSplitPercent);
-    } else {
-      await moveSessionToSlot(fileExplorerItemId, empty, null);
-    }
-    return;
-  }
-  const targetSlot = largestPaneSlot();
-  if (targetSlot && paneTabs(targetSlot).length) {
-    dockFileExplorerPane();
-    return;
-  }
-  await moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null);
+  return openFileSurfacePane(fileExplorerItemId);
 }
 
 // The menu and shortcuts call this shared placement transaction for Finder, Differ, and Tabber.
@@ -487,14 +431,14 @@ async function openFileSurfacePane(item) {
     activatePaneTab(currentSlot, resolved, {userInitiated: true});
     return true;
   }
-  if (narrowSingleColumnMode()) {
+  if (sidePaneConstrainedMode()) {
     const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
     const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
-    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingFileExplorer: true});
+    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
     return true;
   }
-  const next = layoutWithFileSurfaceHome(layoutSlots, [resolved]);
-  const homeSlot = layoutFileSurfaceHomeSlot(next);
+  const next = layoutWithSidePaneItems(layoutSlots, [resolved], {side: paneSideLeft});
+  const homeSlot = sidePaneSlot(paneSideLeft, next);
   applyLayoutSlots(next, {focusSession: resolved, prune: false});
   if (homeSlot) activatePaneTab(homeSlot, resolved, {userInitiated: true});
   return true;
@@ -513,8 +457,17 @@ async function openFileSurface(item) {
 async function openFileSurfaceFromMenu(item) {
   const resolved = resolveLayoutItem(item);
   if (!layoutIsFileSurfaceItem(resolved)) return false;
-  if (narrowSingleColumnMode()) return openFileSurfacePane(resolved);
-  const next = layoutWithFileSurfaceHome(layoutSlots, fileSurfaceItems, {forceCreate: true, active: resolved});
+  if (sidePaneConstrainedMode()) return openFileSurfacePane(resolved);
+  // Pass only absent items to the left-edge creator. Existing triplet tabs are already placed by the
+  // user, possibly in the right Vertical Side Pane or another vertical leaf, and must not be re-homed.
+  const missing = fileSurfaceItems.filter(candidate => !itemInLayout(candidate));
+  const next = missing.length
+    ? layoutWithSidePaneItems(layoutSlots, missing, {
+      side: paneSideLeft,
+      forceCreate: true,
+      active: missing.includes(resolved) ? resolved : missing[0],
+    })
+    : layoutSlots;
   const targetSlot = slotForItem(resolved, next);
   applyLayoutSlots(next, {focusSession: resolved, prune: false});
   if (targetSlot) activatePaneTab(targetSlot, resolved, {userInitiated: true});
@@ -525,7 +478,13 @@ function layoutWithoutFileSurfaces(slots = layoutSlots) {
   const next = cloneLayoutSlots(slots);
   for (const slot of layoutSlotKeys(next)) {
     const tabs = paneTabs(slot, next).filter(item => !layoutIsFileSurfaceItem(item));
-    next[slot] = tabs.length ? paneStateWithTabs(tabs, activeItemForSide(slot, next)) : emptyPlaceholderPaneState();
+    if (tabs.length) {
+      next[slot] = paneStateWithTabsForSlot(slot, tabs, activeItemForSide(slot, next), next);
+    } else if (slotIsSidePane(slot, next)) {
+      delete next[slot];
+    } else {
+      next[slot] = emptyPlaceholderPaneState();
+    }
   }
   return compactLayoutSlots(next, {preservePlaceholderSlots: false});
 }
@@ -536,13 +495,13 @@ function layoutWithoutFileSurfaces(slots = layoutSlots) {
 async function toggleAllFileSurfaces() {
   if (layoutFileSurfaceItems().some(item => itemInLayout(item))) {
     applyLayoutSlots(layoutWithoutFileSurfaces(), {
-      preserveMissingFileExplorer: true,
+      preserveMissingSidePane: true,
       message: fileExplorerHiddenStatusMessage(),
     });
     return false;
   }
-  const next = layoutWithDefaultFileSurfaceHome(layoutSlots);
-  const homeSlot = layoutFileSurfaceHomeSlot(next);
+  const next = layoutWithDefaultLeftSidePane(layoutSlots);
+  const homeSlot = sidePaneSlot(paneSideLeft, next);
   applyLayoutSlots(next, {focusSession: finderItemId, prune: false});
   if (homeSlot) activatePaneTab(homeSlot, finderItemId, {userInitiated: true});
   return true;
@@ -582,7 +541,11 @@ function sessionTerminalIsLive(session) {
 }
 
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
-  if (!isLayoutItem(session) || !targetSlot) return;
+  if (!isLayoutItem(session) || !targetSlot) return false;
+  const actualSourceSlot = sourceSlot || slotForItem(session);
+  if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, targetSlot, layoutSlots, {
+    allowRequiredInGeneric: sidePaneConstrainedMode(),
+  })) return false;
   // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
   // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
   // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
@@ -605,30 +568,28 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   // used tabs (keeping the new active tab, the Finder, and any dirty editors).
   const evicted = tabsToEvictForCap(tabs, session);
   const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
-  next[targetSlot] = paneStateWithTabs(keptTabs, session);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, keptTabs, session, next);
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
     preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
     message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
   });
+  return true;
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
-  if (!dropIntentAllowsSession(session, intent)) return;
+  if (!dropIntentAllowsSession(session, intent, {sourceSlot})) return false;
   if (intent?.boundary === 'gutter') {
-    await splitSessionAtGutter(session, intent.splitPath, intent.zone, sourceSlot);
-    return;
+    return splitSessionAtGutter(session, intent.splitPath, intent.zone, sourceSlot);
   }
   if (intent?.boundary === 'root') {
-    await splitSessionAtLayoutBoundary(session, intent.zone, sourceSlot);
-    return;
+    return splitSessionAtLayoutBoundary(session, intent.zone, sourceSlot);
   }
   if (!intent?.targetSlot || intent.zone === 'middle') {
-    await moveSessionToSlot(session, intent?.targetSlot || slotForNewSession(), sourceSlot);
-    return;
+    return moveSessionToSlot(session, intent?.targetSlot || slotForNewSession(), sourceSlot);
   }
-  await splitSessionAtSlot(session, intent.targetSlot, intent.zone, sourceSlot);
+  return splitSessionAtSlot(session, intent.targetSlot, intent.zone, sourceSlot);
 }
 
 function splitPercentForNewItem(session, zone, pct = null) {
@@ -647,29 +608,34 @@ function rootBoundarySplitPercent(existingNode, zone, pct = null, slots = layout
 }
 
 function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
-  return Boolean(sourceSlot && sourceSlot !== targetSlot && slotIsFileSurfaceHome(targetSlot));
+  return Boolean(sourceSlot && sourceSlot !== targetSlot && slotIsSidePane(targetSlot));
 }
 
-function dockedFileExplorerRootSplit(node, slots = layoutSlots) {
+function layoutSidePaneRootSplit(node, slots = layoutSlots, requestedSide = null) {
   if (!node || node.split !== 'row' || !Array.isArray(node.children) || node.children.length !== 2) return null;
-  const homeLeaves = new Set(layoutFileSurfaceHomeLeaves(slots));
-  const finderIndex = node.children.findIndex(child => {
+  const sideIndex = node.children.findIndex(child => {
     const leaves = layoutLeafSlots(child);
-    const populated = leaves.filter(slot => paneTabs(slot, slots).length > 0);
-    return populated.length > 0
-      && populated.every(slot => homeLeaves.has(slot))
-      && leaves.every(slot => homeLeaves.has(slot) || !paneHasLayoutContent(slot, slots));
+    const populated = leaves.filter(slot => paneHasLayoutContent(slot, slots));
+    if (!populated.length || populated.length !== leaves.length || populated.some(slot => !slotIsSidePane(slot, slots))) return false;
+    const sides = new Set(populated.map(slot => paneRoleForSlot(slot, slots).side));
+    if (sides.size !== 1) return false;
+    return !requestedSide || sides.has(requestedSide);
   });
-  if (finderIndex < 0) return null;
+  if (sideIndex < 0) return null;
+  const sideSlots = layoutLeafSlots(node.children[sideIndex]).filter(slot => slotIsSidePane(slot, slots));
+  const sideSlot = sideSlots[0];
   return {
-    finderIndex,
-    contentIndex: finderIndex === 0 ? 1 : 0,
-    pct: Number.isFinite(Number(node.pct)) ? Number(node.pct) : fileExplorerSplitPercent,
+    sideIndex,
+    sideSlot,
+    sideSlots,
+    side: paneRoleForSlot(sideSlot, slots).side,
+    contentIndex: sideIndex === 0 ? 1 : 0,
+    pct: Number.isFinite(Number(node.pct)) ? Number(node.pct) : sidePaneDefaultWidthPercent,
   };
 }
 
-function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct = null, slots = layoutSlots) {
-  const docked = dockedFileExplorerRootSplit(root, slots);
+function splitRootPreservingSidePane(root, newNode, session, zone, pct = null, slots = layoutSlots) {
+  const docked = layoutSidePaneRootSplit(root, slots);
   if (!docked) return null;
   const children = [...(root.children || [])];
   const contentNode = children[docked.contentIndex];
@@ -684,6 +650,10 @@ function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct
 
 async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, pct = null, options = {}) {
   if (!isLayoutItem(item) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return false;
+  const actualSourceSlot = sourceSlot || slotForItem(item);
+  const targetRole = paneRoleForSlot(targetSlot);
+  if ((targetRole.kind === paneRoleSide && !['top', 'bottom'].includes(zone))
+    || !paneRoleAllowsItemTransfer(item, actualSourceSlot, targetSlot, layoutSlots)) return false;
   // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
   // empty source while it is pending; the directional action still owes the user the explicit peer
   // they chose when the gesture began.
@@ -694,36 +664,41 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
     const ensured = await ensureSession(item);
     if (!ensured) return;
   }
+  // ensureSession() may let Dockview adopt the same visible group under a new slot id while the
+  // readiness request is in flight. Keep a self-split attached to that live source leaf instead of
+  // replacing the stale pre-await slot name (which leaves the new pane outside the layout tree).
+  const liveSourceSlot = slotForItem(item) || actualSourceSlot;
+  const liveTargetSlot = targetSlot === actualSourceSlot ? liveSourceSlot : targetSlot;
   // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
   // operates on what the user can see, so that old group cannot become a hidden third pane.
   const sourceSlots = options.forceSplitEmpty === true
     ? layoutSlotsWithoutUnrenderedPlaceholders()
     : layoutSlots;
-  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot)
-    ? sourceSlot
+  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(liveSourceSlot, liveTargetSlot)
+    ? liveSourceSlot
     : null;
   const next = layoutWithoutItemFromSlots(item, sourceSlots, {
     preserveEmptySlot,
     preserveRemovedSlot,
   });
-  const targetTabs = paneTabs(targetSlot, next);
+  const targetTabs = paneTabs(liveTargetSlot, next);
   if (!targetTabs.length && options.forceSplitEmpty !== true) {
-    await moveSessionToSlot(item, targetSlot, sourceSlot);
+    await moveSessionToSlot(item, liveTargetSlot, liveSourceSlot);
     return true;
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([item], item);
+  next[newSlot] = paneStateWithTabs([item], item, targetRole);
   const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
-  const existingNode = leafNode(targetSlot);
+  const existingNode = leafNode(liveTargetSlot);
   const newNode = leafNode(newSlot);
   const splitPct = splitPercentForNewItem(item, zone, pct);
   const replacement = zone === 'right' || zone === 'bottom'
     ? splitNode(direction, existingNode, newNode, splitPct)
     : splitNode(direction, newNode, existingNode, splitPct);
-  next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
+  next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], liveTargetSlot, replacement);
   applyLayoutSlots(next, {
     focusSession: item,
-    preservePlaceholderSlots: preserveRemovedSlot,
+    preservePlaceholderSlots: preserveRemovedSlot || targetRole.kind === paneRoleSide,
     prune: false,
   });
   return true;
@@ -827,12 +802,12 @@ function directionalLocalSplitAvailable(sourceSlot, zone, sourceRect, slots, tar
 function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), slots = layoutSlots) {
   const visibleSlots = layoutSlotsWithoutUnrenderedPlaceholders(slots);
   const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const sourceRole = sourceSlot ? paneRoleForSlot(sourceSlot, slots) : paneRoleDefinition(paneRoleGeneric);
   const allowed = Boolean(
     isLayoutItem(item)
       && sourceSlot
-      && !narrowSingleColumnMode()
+      && !sidePaneConstrainedMode()
       && !tabIsPinned(item)
-      && !slotIsFileSurfaceHome(sourceSlot, slots)
       && sourceRect,
   );
   const result = {move: {}, swap: {}, targets: {}};
@@ -843,10 +818,21 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
       result.targets[zone] = null;
       continue;
     }
+    if (sourceRole.kind === paneRoleSide && (zone === 'left' || zone === 'right')) {
+      const targetSide = zone;
+      const oppositeEdge = sourceRole.side !== targetSide;
+      result.move[zone] = oppositeEdge;
+      result.swap[zone] = false;
+      result.targets[zone] = oppositeEdge ? sidePaneSlot(targetSide, slots) : null;
+      continue;
+    }
     const targets = layoutSlotsTouchingDirection(sourceSlot, zone, visibleSlots);
     if (targets.length === 1) {
       const targetSlot = targets[0];
-      const targetIsUsable = !slotIsFileSurfaceHome(targetSlot, visibleSlots);
+      const targetRole = paneRoleForSlot(targetSlot, visibleSlots);
+      const targetIsUsable = sourceRole.kind === paneRoleSide
+        ? targetRole.kind === paneRoleSide && targetRole.side === sourceRole.side
+        : targetRole.kind === paneRoleGeneric;
       const targetItem = activeItemForSide(targetSlot, visibleSlots);
       const targetHasTab = Boolean(targetItem);
       if (!targetIsUsable) {
@@ -881,6 +867,7 @@ function tabCanFillWorkspace(item, slots = layoutSlots) {
   return Boolean(
     isLayoutItem(item)
       && sourceSlot
+      && !slotIsSidePane(sourceSlot, slots)
       && layoutLeafSlots(slots[layoutTreeKey]).length > 1
       && !paneIsPlaceholder(sourceSlot, slots),
   );
@@ -906,9 +893,10 @@ function toggleTabWorkspaceFill(item) {
   }
   if (!tabCanFillWorkspace(item)) return false;
   const sourceSlot = slotForItem(item);
-  const next = emptyLayoutSlots();
-  next[sourceSlot] = paneStateForLayoutSlot(sourceSlot);
-  next[layoutTreeKey] = leafNode(sourceSlot);
+  const content = emptyLayoutSlots();
+  content[sourceSlot] = paneStateForLayoutSlot(sourceSlot);
+  content[layoutTreeKey] = leafNode(sourceSlot);
+  const next = layoutWithPreservedSidePanes(content);
   filledWorkspaceLayout = {item, slots: cloneLayoutSlots(layoutSlots)};
   applyLayoutSlots(next, {
     focusSession: item,
@@ -923,6 +911,10 @@ function toggleTabWorkspaceFill(item) {
 async function moveLayoutItemDirectional(item, sourceSlot = slotForItem(item), zone) {
   const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
   if (capabilities.move[zone] !== true) return false;
+  const sourceRole = paneRoleForSlot(sourceSlot);
+  if (sourceRole.kind === paneRoleSide && (zone === 'left' || zone === 'right')) {
+    return splitSessionAtLayoutBoundary(item, zone, sourceSlot);
+  }
   const targetSlot = capabilities.targets[zone];
   if (targetSlot) {
     await moveSessionToSlot(item, targetSlot, sourceSlot, 0, {preserveSourcePlaceholder: true});
@@ -943,8 +935,8 @@ async function swapLayoutItemDirectional(item, sourceSlot = slotForItem(item), z
   const next = cloneLayoutSlots(layoutSlots);
   const sourceTabs = paneTabs(sourceSlot, next).map(tab => tab === item ? targetItem : tab);
   const targetTabs = paneTabs(targetSlot, next).map(tab => tab === targetItem ? item : tab);
-  next[sourceSlot] = paneStateWithTabs(sourceTabs, targetItem);
-  next[targetSlot] = paneStateWithTabs(targetTabs, item);
+  next[sourceSlot] = paneStateWithTabsForSlot(sourceSlot, sourceTabs, targetItem, next);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, targetTabs, item, next);
   applyLayoutSlots(next, {focusSession: item, prune: false});
   return true;
 }
@@ -955,47 +947,66 @@ async function splitLayoutItemDirectional(item, sourceSlot = slotForItem(item), 
 }
 
 async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pct = null) {
-  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return;
+  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return false;
+  const actualSourceSlot = sourceSlot || slotForItem(session);
+  const sourceRole = actualSourceSlot ? paneRoleForSlot(actualSourceSlot) : paneRoleDefinition(paneRoleGeneric);
+  let targetRole = paneRoleDefinition(paneRoleGeneric);
+  if (sourceRole.kind === paneRoleSide) {
+    if (!['left', 'right'].includes(zone) || sourceRole.side === zone) return false;
+    const existingTarget = sidePaneSlot(zone);
+    if (existingTarget) return moveSessionToSlot(session, existingTarget, actualSourceSlot, paneTabs(existingTarget).length);
+    targetRole = paneRoleDefinition(paneRoleSide, zone);
+    if (pct === null || pct === undefined || pct === '') {
+      const sourceWidth = sidePaneWidthPercent(sourceRole.side, layoutSlots);
+      pct = zone === paneSideRight ? 100 - sourceWidth : sourceWidth;
+    }
+  }
+  if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {targetRole})) return false;
   if (isTmuxSession(session)) {
     const ensured = await ensureSession(session);
-    if (!ensured) return;
+    if (!ensured) return false;
   }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   if (!root) {
-    await moveSessionToSlot(session, sourceSlot || slotForNewSession(), sourceSlot);
-    return;
+    return moveSessionToSlot(session, actualSourceSlot || slotForNewSession(), actualSourceSlot);
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([session], session);
+  next[newSlot] = paneStateWithTabs([session], session, targetRole);
   const newNode = leafNode(newSlot);
   const direction = layoutSplitDirectionForZone(zone);
   const splitPct = rootBoundarySplitPercent(root, zone, pct, next);
-  next[layoutTreeKey] = splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct, next)
+  next[layoutTreeKey] = splitRootPreservingSidePane(root, newNode, session, zone, pct, next)
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
     : splitNode(direction, newNode, root, splitPct));
   applyLayoutSlots(next, {focusSession: session, prune: false});
+  return true;
 }
 
 async function splitSessionAtGutter(session, splitPath, zone, sourceSlot = null, pct = null) {
-  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return;
+  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return false;
+  const actualSourceSlot = sourceSlot || slotForItem(session);
+  if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {
+    targetRole: paneRoleDefinition(paneRoleGeneric),
+  })) return false;
   if (isTmuxSession(session)) {
     const ensured = await ensureSession(session);
-    if (!ensured) return;
+    if (!ensured) return false;
   }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   const target = layoutNodeAtPath(splitPath, root);
+  if (layoutNodeContainsSidePane(target, next)) return false;
   if (!root || !target?.children?.length) {
-    await splitSessionAtLayoutBoundary(session, zone, sourceSlot, pct);
-    return;
+    return splitSessionAtLayoutBoundary(session, zone, actualSourceSlot, pct);
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = paneStateWithTabs([session], session);
+  next[newSlot] = paneStateWithTabs([session], session, paneRoleDefinition(paneRoleGeneric));
   const replacement = splitLayoutNodeAtGutter(target, leafNode(newSlot), session, zone, pct);
   next[layoutTreeKey] = replaceLayoutNodeAtPath(root, splitPath, replacement);
   applyLayoutSlots(next, {focusSession: session, prune: false});
+  return true;
 }
 
 function layoutSplitZone(zone) {
@@ -3277,7 +3288,7 @@ function rootBoundaryDropZoneForEvent(event, rect, preferredZone = null) {
 function rootBoundaryLayoutTarget(slots = layoutSlots) {
   const root = slots?.[layoutTreeKey];
   if (!root) return null;
-  const docked = dockedFileExplorerRootSplit(root, slots);
+  const docked = layoutSidePaneRootSplit(root, slots);
   const targetNode = docked ? root.children?.[docked.contentIndex] : root;
   if (!targetNode) return null;
   return {
@@ -3323,7 +3334,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (narrowSingleColumnMode()) {
+  if (sidePaneConstrainedMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -3345,11 +3356,7 @@ function dropIntentForEvent(event, options = {}) {
 }
 
 function slotIsFileExplorerPane(slot) {
-  return slotIsFileSurfaceHome(slot);
-}
-
-function slotIsFileSurfaceHome(slot, slots = layoutSlots) {
-  return layoutFileSurfaceHomeLeaves(slots).includes(slot);
+  return slotIsSidePane(slot);
 }
 
 function dropIntentTargetRect(intent) {
@@ -3393,7 +3400,7 @@ function paneSwapAllowed(sourceSlot, targetSlot, slots = layoutSlots) {
   const keys = layoutSlotKeys(slots);
   if (!keys.includes(sourceSlot) || !keys.includes(targetSlot)) return false;
   if (paneIsPlaceholder(sourceSlot, slots) || paneIsPlaceholder(targetSlot, slots)) return false;
-  if (slotIsFileSurfaceHome(sourceSlot, slots) || slotIsFileSurfaceHome(targetSlot, slots)) return false;
+  if (slotIsSidePane(sourceSlot, slots) || slotIsSidePane(targetSlot, slots)) return false;
   const sourceTabs = paneTabs(sourceSlot, slots);
   const targetTabs = paneTabs(targetSlot, slots);
   if (!sourceTabs.length || !targetTabs.length) return false;
@@ -3477,15 +3484,44 @@ function itemCanSplitSinglePurposePane(item, intent) {
 
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
-  if (narrowSingleColumnMode()) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
-  if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
+  const sourceSlot = options.sourceSlot || slotForItem(session);
+  if (sidePaneConstrainedMode()) {
+    return Boolean(intent?.targetSlot)
+      && intent.zone === 'middle'
+      && paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
+        allowRequiredInGeneric: true,
+        allowCandidate: options.allowCandidate === true,
+      });
+  }
+  if (intent?.boundary === 'root' && layoutSplitZone(intent.zone)) {
+    const sourceRole = sourceSlot ? paneRoleForSlot(sourceSlot) : paneRoleDefinition(paneRoleGeneric);
+    if (sourceRole.kind === paneRoleSide) {
+      if (!['left', 'right'].includes(intent.zone) || sourceRole.side === intent.zone) return false;
+      return paneRoleAllowsItemTransfer(session, sourceSlot, null, layoutSlots, {
+        targetRole: paneRoleDefinition(paneRoleSide, intent.zone),
+        allowCandidate: options.allowCandidate === true,
+      });
+    }
+    return paneRoleAllowsItemTransfer(session, sourceSlot, null, layoutSlots, {
+      targetRole: paneRoleDefinition(paneRoleGeneric),
+      allowCandidate: options.allowCandidate === true,
+    });
+  }
+  if (intent?.boundary === 'gutter' && layoutSplitZone(intent.zone)) {
+    const targetNode = layoutNodeAtPath(intent.splitPath || '', layoutSlots[layoutTreeKey]);
+    return !layoutNodeContainsSidePane(targetNode)
+      && paneRoleAllowsItemTransfer(session, sourceSlot, null, layoutSlots, {
+        targetRole: paneRoleDefinition(paneRoleGeneric),
+        allowCandidate: options.allowCandidate === true,
+      });
+  }
   if (!intent?.targetSlot) return false;
-  if (slotIsFileSurfaceHome(intent.targetSlot)) {
-    // The 22% root column is intentionally a tiny file-surface workspace. It may stack or split
-    // vertically, but a horizontal split would widen/fragment the column and a terminal drop
-    // would turn it into an accidental general-purpose pane.
-    if (!layoutIsFileSurfaceItem(session)) return false;
-    return intent.zone === 'middle' || itemCanSplitSinglePurposePane(session, intent);
+  if (!paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
+    allowCandidate: options.allowCandidate === true,
+  })) return false;
+  if (slotIsSidePane(intent.targetSlot)) {
+    return intent.zone === 'middle'
+      || (['top', 'bottom'].includes(intent.zone) && dropIntentHasRoomForItem(session, intent));
   }
   return dropIntentHasRoomForItem(session, intent);
 }

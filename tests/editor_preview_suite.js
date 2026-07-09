@@ -231,7 +231,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(tablet.narrowSingleColumnModeForTest(), false, 'a wide landscape iPad retains its multi-pane layout');
     assert.deepEqual(
       canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(tablet.finderItemId))),
-      {active: tablet.finderItemId, tabs: [tablet.finderItemId, tablet.differItemId, tablet.tabberItemId]},
+      {active: tablet.finderItemId, tabs: [tablet.finderItemId, tablet.differItemId, tablet.tabberItemId], paneRole: tablet.paneRoleSide, side: tablet.paneSideLeft},
       'the wide landscape iPad gives the independent file-surface triplet a dedicated pane instead of mixing it into terminal tabs',
     );
     assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
@@ -299,7 +299,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(rotationApi.compactCurrentLayoutSlotsForTest(), true, 'rotating to wide landscape restores a dedicated Finder pane from compact portrait tabs');
     assert.deepEqual(
       canonical(Object.values(rotationApi.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(rotationApi.finderItemId))),
-      {active: rotationApi.finderItemId, tabs: [rotationApi.finderItemId, rotationApi.differItemId, rotationApi.tabberItemId]},
+      {active: rotationApi.finderItemId, tabs: [rotationApi.finderItemId, rotationApi.differItemId, rotationApi.tabberItemId], paneRole: rotationApi.paneRoleSide, side: rotationApi.paneSideLeft},
       'a page first loaded in portrait creates the dedicated triplet home column when rotated to landscape',
     );
     assert.equal(phone.topbarMenuTreeForTest().length, 5, 'the initial phone tree stays full until measured overflow requires Menus');
@@ -326,7 +326,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function createAppMenu\(menu\)[\s\S]*wrapper\.classList\.contains\('app-menu--nested-root'\)[\s\S]*closeAppMenus\(\)/.test(source), 'the compact phone Menus root is an immediate open/close disclosure, not a delayed reopen');
     */
     assert.ok(source.includes("'hide-owner',\n  'compact-search'") && source.includes("'hide-nav',\n  'icon-search',\n  'compact-menu'"), 'topbar packing preserves the requested priority order before compacting menus');
-    assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = topbarPackingStepOrder\.filter\(topbarPackingHasStep\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*while \(applied\.length\)[\s\S]*candidate = applied\.slice\(0, -1\)/.test(source), 'topbar packing measures each compact representation and restores only a contiguous reverse prefix');
+    assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = \[\];[\s\S]*applyTopbarPackingSteps\(applied\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*applied\.push\(topbarPackingStepOrder\[applied\.length\]\)/.test(source), 'topbar packing starts from the full representation on every pass, then reduces in one contiguous priority prefix');
     assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
     assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /function fileSurfaceMenuItems\(\)[\s\S]*menuCommand\(itemLabel\(item\), \(\) => openFileSurfaceFromMenu\(item\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
     assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
@@ -9088,7 +9088,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const schedulerBody = layoutSrc.slice(layoutSrc.indexOf('function performLayoutRender'), layoutSrc.indexOf('function updateActiveSessionParam'));
     assert.ok(/requestLayoutRender\(\{[\s\S]*?prevShape[\s\S]*?nextShape: layoutShapeSignature\(layoutSlots\)/.test(applyBody), '#applyLayoutSlots sends prev/next shape to the shared layout scheduler');
     assert.ok(/function requestLayoutRender[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/.test(schedulerBody), '#scheduler stores structured deferred render state during drag');
-    assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(schedulerBody), '#same-shape changes take the in-place branch');
+    assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(previousActive\)/.test(schedulerBody), '#same-shape changes take the in-place branch and carries its prior visibility set');
     assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(schedulerBody), '#shape changes still fall through to the full rebuild');
     assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#the in-place panel swap exists');
     // fix 6: the markdown preview render is guarded by a path+content signature.

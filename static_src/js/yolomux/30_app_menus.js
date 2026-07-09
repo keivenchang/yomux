@@ -886,7 +886,8 @@ let topbarPackingStepsApplied = [];
 let topbarPackingIsApplying = false;
 
 // The sequence is user-facing priority, not a viewport policy. Start complete, reduce only on
-// actual overflow, then try every removed control again so spare width is never left unused.
+// actual overflow. Every pass restarts from this full representation so resize direction and prior
+// compact state cannot change which controls fit.
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
@@ -1025,25 +1026,14 @@ function syncTopbarPacking() {
   if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
   topbarPackingIsApplying = true;
   try {
-    // Begin with the currently rendered presentation. Resetting to full before every measurement
-    // would briefly replace Menus with five roots, then repeat that replacement on every frame.
-    const applied = topbarPackingStepOrder.filter(topbarPackingHasStep);
+    // Every measurement starts from the same full presentation. Restoring one compact tier at a
+    // time made the result depend on the previous viewport: a menu subtree rebuilt while expanding
+    // could be measured before its next layout pass and leave most narrow-width steps stuck on.
+    const applied = [];
     applyTopbarPackingSteps(applied);
     while (topbarPackingOverflows() && applied.length < topbarPackingStepOrder.length) {
       applied.push(topbarPackingStepOrder[applied.length]);
       applyTopbarPackingSteps(applied);
-    }
-    // Restore only the most recently removed item, then continue toward the full presentation.
-    // Restoring a middle item while a later one stays removed reverses user-facing priority (for
-    // example, showing an optional icon while keeping the full menu collapsed).
-    while (applied.length) {
-      const candidate = applied.slice(0, -1);
-      applyTopbarPackingSteps(candidate);
-      if (topbarPackingOverflows()) {
-        applyTopbarPackingSteps(applied);
-        break;
-      }
-      applied.pop();
     }
     topbarPackingStepsApplied = applied.slice();
     return applied;

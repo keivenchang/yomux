@@ -61,10 +61,12 @@ async function runTabberSuite() {
     const panelSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
     assert.ok(/const finderItemId = '__finder__';[\s\S]*const differItemId = '__differ__';[\s\S]*const tabberItemId = '__tabber__';[\s\S]*const fileExplorerItemIds = Object\.freeze\(\[finderItemId, differItemId, tabberItemId\]\)/.test(bootstrapSource), 'the triplet has three stable layout identities in one registry');
     assert.ok(/function fileExplorerViewForItem\(item\)[\s\S]*function isFileExplorerItem\(item\)/.test(bootstrapSource), 'identity-to-view and shared triplet predicate have one bootstrap owner');
-    assert.ok(/function layoutFileSurfaceHomeLeaves[\s\S]*function layoutWithFileSurfaceHome[\s\S]*function layoutWithDefaultFileSurfaceHome/.test(layoutSource), 'home-column detection, insertion, and default seeding share the layout owner');
-    assert.ok(/async function openFileSurfacePane\(item\)[\s\S]*currentSlot[\s\S]*activatePaneTab[\s\S]*layoutWithFileSurfaceHome/.test(actionsSource), 'an existing triplet item activates in place while only a missing item uses home insertion');
+    assert.ok(/function sidePaneSlots[\s\S]*function layoutWithSidePaneItems[\s\S]*function layoutWithDefaultLeftSidePane/.test(layoutSource), 'Side Pane detection, insertion, and default seeding share the layout owner');
+    assert.ok(/async function openFileSurfacePane\(item\)[\s\S]*currentSlot[\s\S]*activatePaneTab[\s\S]*layoutWithSidePaneItems/.test(actionsSource), 'an existing triplet item activates in place while only a missing item uses Side Pane insertion');
     assert.ok(/function fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'File uses one desktop triplet command and separate narrow-screen commands through the shared placement entry point');
     assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerViewForItem\(item\)[\s\S]*panelDomId\(item\)/.test(panelSource), 'one parameterized panel builder gives every triplet item a fixed view and unique panel DOM id');
+    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function syncPanelVisibility\(previousActive = \[\]\)[\s\S]*const previouslyVisible = new Set\(previousActive\);[\s\S]*activeSessions[\s\S]*isFileExplorerItem\(item\) && !previouslyVisible\.has\(item\)[\s\S]*activateFileExplorerSurface\(item\)/.test(terminalBootSource), 'one shared active-panel transition resumes whichever Finder/Differ/Tabber surface becomes newly visible');
     assert.ok(/function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(panelSource), 'the retired in-panel mode switcher is a compatibility no-op');
   });
 
@@ -705,7 +707,7 @@ async function runTabberSuite() {
   });
 
   test('file drags show pane split previews', () => {
-    const api = loadYolomux();
+    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -725,7 +727,7 @@ async function runTabberSuite() {
   });
 
   test('terminal file drags bubble to pane split previews', () => {
-    const api = loadYolomux();
+    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -750,7 +752,7 @@ async function runTabberSuite() {
   });
 
   test('terminal directory drags retain path insertion affordance', () => {
-    const api = loadYolomux();
+    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -771,7 +773,7 @@ async function runTabberSuite() {
   });
 
   test('file tree drags retain copy payload through protected mode', () => {
-    const api = loadYolomux();
+    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
     const row = new TestElement('pic-row');
     row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
     const event = fileDragEvent(row, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 30, 28);

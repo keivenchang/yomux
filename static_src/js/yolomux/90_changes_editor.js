@@ -2681,9 +2681,9 @@ function createFileExplorerPanel(item = finderItemId) {
     event.stopPropagation();
     copyCurrentFileExplorerPath();
   });
+  bindFileExplorerHeaderActions(panel);
   if (view === 'finder') {
     bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
-    bindFileExplorerHeaderActions(panel);
   }
   if (view !== 'finder') bindFileExplorerChangesResizer(panel);
   applyFileExplorerPanelView(panel, item);

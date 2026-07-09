@@ -771,6 +771,12 @@ body.layout-resizing {
 
   border-color: var(--40-layout-panes-tabs-panel-border-20);
 }
+.empty-pane-controls {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: var(--z-pane-tab-strip);
+}
 .split-column > .layout-column:has(+ .layout-resizer) > .panel {
   border-bottom-width: 0;
   border-bottom-right-radius: 0;
@@ -1321,21 +1327,32 @@ body.layout-resizing {
   cursor: pointer;
   user-select: none;
 }
-.layout-column.file-explorer-home-column .pane-tab {
+.layout-column[data-pane-role="side"],
+.yolomux-dockview .dv-groupview[data-pane-role="side"] {
+  max-inline-size: calc(100vw * var(--side-pane-max-viewport-fraction));
+}
+.layout-column[data-pane-role="side"] .pane-tab {
   width: auto;
   max-width: 100%;
 }
-.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tab {
-  flex: 0 1 auto;
-  width: fit-content;
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .dv-tab {
+  flex: 0 1 max-content;
+  width: max-content;
+  max-width: calc(100% - var(--space-1));
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .dv-tab > .dockview-pane-tab {
+  width: auto;
   max-width: 100%;
 }
-.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-and-actions-container {
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .dockview-pane-tab > .pane-tab-core {
+  flex: 0 1 auto;
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .dv-tabs-and-actions-container {
   height: var(--pane-tab-height);
   min-height: var(--pane-tab-height);
   overflow: hidden;
 }
-.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-container {
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .dv-tabs-container {
   box-sizing: border-box;
   flex-wrap: nowrap;
   align-content: stretch;

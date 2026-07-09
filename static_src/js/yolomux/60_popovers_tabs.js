@@ -395,7 +395,7 @@ function tabInteractionControllerForApp() {
   const showActions = (descriptor, event = null, options = {}) => {
     descriptor = currentDescriptor(descriptor);
     const item = String(descriptor?.item || '').trim();
-    if (!item || (!isPinnableTab(item) && !isTmuxSession(item))) return false;
+    if (!item || !isLayoutItem(item)) return false;
     const eventPoint = event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
       ? {x: event.clientX, y: event.clientY}
       : pointForAnchor(descriptor.anchor);

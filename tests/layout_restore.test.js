@@ -312,7 +312,7 @@ async function runLayoutRestoreSuite() {
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
     assert.equal(params.get('sessions'), 'finder,1,3');
     assert.equal(params.get('layout'), 'row@22(slot1,row@50(left,right))');
-    assert.equal(params.get('tabs'), 'slot1:finder,differ,tabber;left:1,2;right:3');
+    assert.equal(params.get('tabs'), 'slot1:@side-left,finder,differ,tabber;left:1,2;right:3');
   });
 
   test('empty default layout retains a Finder and placeholder pane', () => {
@@ -328,7 +328,7 @@ async function runLayoutRestoreSuite() {
     const url = api.syncInitialLayoutUrlForTest();
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
     assert.equal(params.get('layout'), 'row@22(slot1,left)');
-    assert.equal(params.get('tabs'), 'slot1:finder,differ,tabber;left:__empty_pane__');
+    assert.equal(params.get('tabs'), 'slot1:@side-left,finder,differ,tabber;left:__empty_pane__');
   });
 
   test('session URL order restores the active pane layout', () => {
@@ -390,7 +390,7 @@ async function runLayoutRestoreSuite() {
         __differ__: 'finder,differ*,tabber',
         __tabber__: 'finder,differ,tabber*',
       }[active];
-      assert.ok(params.get('tabs').includes(`slot1:${tabs}`), `${mode} remains the active independent tab after serialization`);
+      assert.ok(params.get('tabs').includes(`slot1:@side-left,${tabs}`), `${mode} remains the active independent tab after serialization`);
     }
 
     const noFinder = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
@@ -561,25 +561,24 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(fourPane)), {
       tree: {
         split: 'row',
-        pct: 50,
+        pct: 22,
         children: [
+          {slot: 'left'},
           {
-            split: 'column',
+            split: 'row',
             pct: 50,
-            children: [{slot: 'leftTop'}, {slot: 'leftBottom'}],
-          },
-          {
-            split: 'column',
-            pct: 50,
-            children: [{slot: 'rightTop'}, {slot: 'rightBottom'}],
+            children: [
+              {split: 'column', pct: 50, children: [{slot: 'leftTop'}, {slot: 'leftBottom'}]},
+              {slot: 'rightBottom'},
+            ],
           },
         ],
       },
       panes: {
+        left: {tabs: ['__differ__'], active: '__differ__'},
         leftBottom: {tabs: ['1'], active: '1'},
         leftTop: {tabs: ['4'], active: '4'},
         rightBottom: {tabs: ['2', '3'], active: '3'},
-        rightTop: {tabs: ['__differ__'], active: '__differ__'},
       },
     });
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes inside an old four-pane URL still selects Finder diff mode');
@@ -640,9 +639,10 @@ async function runLayoutRestoreSuite() {
   for (const legacyChangesToken of ['changes', '__changes__']) {
     const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {slot: 'left'},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'main'}]},
       panes: {
         left: {tabs: ['__differ__', '__finder__', '__tabber__'], active: '__differ__'},
+        main: {tabs: [], active: null, placeholder: true},
       },
     });
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes-only URLs restore Finder diff mode');
@@ -672,7 +672,7 @@ async function runLayoutRestoreSuite() {
     const url = api.syncInitialLayoutUrlForTest();
     const params = parseUrl(url);
     assert.equal(params.get('layout'), 'row@20.7(slot2,row@42(slot3,slot1))');
-    assert.equal(params.get('tabs'), 'slot2:finder,differ,tabber;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
+    assert.equal(params.get('tabs'), 'slot2:@side-left,finder,differ,tabber;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
   });
 
   test('mixed virtual and file tabs restore from URL state', () => {
@@ -718,7 +718,7 @@ async function runLayoutRestoreSuite() {
     });
     const activeParams = parseUrl(api.syncInitialLayoutUrlForTest());
     assert.equal(activeParams.get('sessions'), 'finder,file:/home/keivenc/AGENTS.md');
-    assert.equal(activeParams.get('tabs').includes('slot2:finder,differ,tabber;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
+    assert.equal(activeParams.get('tabs').includes('slot2:@side-left,finder,differ,tabber;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
 
     const terminalToolbarBeforeFinderFocus = api.panelControlsHtml('6');
     api.setFocusedPanelItem('__finder__');
@@ -1489,7 +1489,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/key:\s*'yoagent'[\s\S]*?renderAttached:\s*\(\) => \{[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\);[\s\S]*?prewarmYoagent\(\);[\s\S]*?\}/.test(source), 'YO!agent registry hook renders and prewarms its own panel');
     assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?tabTypeForItem\(item\)\?\.renderAttached[\s\S]*?renderAttached\(item\)/.test(source), 'pooled panel attach dispatches through TAB_TYPES');
     assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), 'initial drop-slot attach renders virtual panels before metadata polling');
-    assert.ok(/function syncActivePanelsInPlace\(\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), 'in-place panel swaps also render attached virtual panels');
+    assert.ok(/function syncActivePanelsInPlace\(previousActive = \[\]\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), 'in-place panel swaps also render attached virtual panels');
     assert.ok(source.includes('function createYoagentPanel('), 'standalone YO!agent panel builder exists');
     assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('async function openInfoSubTab('), 'legacy sub-tab compatibility helpers remain');
     assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoPanelSubTab === 'yoagent' \? yoagentItemId : infoItemId\)/.test(source), 'legacy YO!agent opener activates the standalone YO!agent tab');
@@ -2901,7 +2901,7 @@ async function runLayoutRestoreSuite() {
     const itemSlot = api.layoutSlotKeys(moved).find(slot => api.paneTabs(slot, moved).includes('__info__'));
     assert.ok(itemSlot && itemSlot !== 'content');
     assert.deepStrictEqual(canonical(moved[api.layoutTreeKey]), {
-      split: 'row', pct: 50, children: [
+      split: 'row', pct: api.clampSidePaneWidthPercent(50), children: [
         {slot: 'finder'},
         {split: 'row', pct: 50, children: [{slot: itemSlot}, {slot: 'content'}]},
       ],

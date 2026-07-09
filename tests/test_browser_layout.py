@@ -8216,6 +8216,56 @@ def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tm
     assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
 
 
+def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrapping(browser, tmp_path):
+    page = tmp_path / "yoinfo-vertical-side-responsive-record.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="yolomux-dockview" style="width: 360px">
+              <div class="dv-groupview" data-pane-role="side" data-pane-side="left">
+                <div class="info-tree">
+                  <div class="info-tree-group-children"><div class="info-tree-group-children"><div class="info-tree-group-children">
+                    <div class="info-tree-record"><div class="info-tree-record-main">
+                      <div id="branch-field" class="info-tree-field info-tree-field-branch">
+                        <span id="branch-label" class="info-tree-field-label">Git branch:</span>
+                        <span id="branch-value" class="info-tree-field-value"><span id="branch-text" class="info-tree-value-text">backup/yolomux.dev8001-pre-root-rewrite-20260619-202420</span><span class="info-tree-meta-updated">Git commit 3 weeks ago</span></span>
+                      </div>
+                    </div></div>
+                  </div></div></div>
+                </div>
+              </div>
+            </div>
+            """,
+            extra_css="body { margin: 0; background: var(--bg); }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
+        const textStyle = getComputedStyle(document.getElementById('branch-text'));
+        return {
+          columns: fieldStyle.gridTemplateColumns,
+          labelBottom: rect('branch-label').bottom,
+          valueTop: rect('branch-value').top,
+          valueWidth: rect('branch-value').width,
+          textWidth: rect('branch-text').width,
+          textHeight: rect('branch-text').height,
+          lineHeight: parseFloat(textStyle.lineHeight),
+        };
+        """
+    )
+    assert " " not in metrics["columns"].strip(), metrics
+    assert metrics["valueTop"] >= metrics["labelBottom"], metrics
+    assert metrics["valueWidth"] >= 220, metrics
+    assert metrics["textWidth"] >= 180, metrics
+    assert metrics["textHeight"] <= metrics["lineHeight"] * 4.5, metrics
+
+
 def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):
     page = tmp_path / "yoinfo-path-trailing-metadata.html"
     load_static_html_fixture(

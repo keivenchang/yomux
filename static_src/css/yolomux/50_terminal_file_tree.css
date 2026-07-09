@@ -2755,6 +2755,31 @@ button.info-tree-tab-token.active:focus-visible {
   margin-inline-start: auto;
   text-align: end;
 }
+/* A Vertical Side Pane deliberately trades width for a persistent edge view. Keep the same
+   information hierarchy, but stack field labels above values and tighten each tree level so deep
+   branch/path records retain a readable value column instead of wrapping one character per line. */
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-group-children {
+  margin-inline-start: var(--space-8);
+  padding-inline-start: var(--space-8);
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-record-main {
+  padding-inline-start: var(--space-4);
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: var(--space-1);
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-label {
+  white-space: normal;
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-value {
+  width: 100%;
+}
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-branch .info-tree-meta-updated,
+.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-ai .info-tree-trailing-meta {
+  margin-inline-start: 0;
+  text-align: start;
+}
 .info-tree-trailing-meta {
   color: var(--subwindow-recency-color);
   font: var(--ui-font-size-2xs)/1 var(--mono-font);

@@ -717,10 +717,7 @@ let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} 
 // Legacy URL/share compatibility value while old clients are still in circulation. Live panels are
 // identified by one of the fixed triplet item IDs below; do not use this to render a panel.
 let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
-// Rotation only changes presentation. Keep the transient wide layout outside the layout partial
-// so startup URL application cannot read it while that partial is still being evaluated.
-let fileSurfaceWideLayoutSnapshot = null;
-let fileSurfaceLayoutWasNarrow = false;
+let sidePaneLayoutWasConstrained = false;
 const commandPaletteState = {
   node: null,
   query: '',
@@ -868,7 +865,8 @@ const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
 
 const defaultSplitPercent = 50;
-const fileExplorerSplitPercent = 22;
+const sidePaneDefaultWidthPercent = 22;
+const sidePaneMaxWidthPercent = 100 / 3;
 const minNonFileExplorerSplitPercent = 30;
 // Phone layout is deliberately a touch-device policy: a resized desktop must preserve its layout.
 // 760px covers portrait phones and narrow iPad split view; 960x520 catches phone landscape without
@@ -890,6 +888,8 @@ const layoutBoundaryDropMaxPx = 64;
 // Dockview keeps a small gutter between neighboring leaf groups. Directional tab actions compare
 // their rendered edges with this shared allowance instead of assuming touching DOM rectangles.
 const directionalPaneAdjacencyTolerancePx = 8;
+const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 300;
+const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -908,6 +908,39 @@ const differItemId = '__differ__';
 const tabberItemId = '__tabber__';
 const fileExplorerItemIds = Object.freeze([finderItemId, differItemId, tabberItemId]);
 const fileSurfaceItems = fileExplorerItemIds;
+const paneRoleGeneric = 'generic';
+const paneRoleSide = 'side';
+const paneSideLeft = 'left';
+const paneSideRight = 'right';
+const paneSideValues = Object.freeze([paneSideLeft, paneSideRight]);
+const panePlacementGenericOnly = 'generic-only';
+const panePlacementSideAllowed = 'side-allowed';
+const panePlacementSideRequired = 'side-required';
+const paneRoleParamPrefix = '@side-';
+const genericPaneRoleDefinition = Object.freeze({
+  kind: paneRoleGeneric,
+  side: null,
+  controls: 'standard',
+  tabSizing: 'preference',
+  preserveWidth: false,
+  maxViewportFraction: 1,
+  outermost: false,
+});
+// A Side Pane is deliberately a specialization of the generic pane definition. Keep every shared
+// behavior inherited here; consumers ask for a role definition instead of restating side cases.
+const sidePaneRoleDefinition = Object.freeze({
+  ...genericPaneRoleDefinition,
+  kind: paneRoleSide,
+  controls: 'minimize-only',
+  tabSizing: 'intrinsic',
+  preserveWidth: true,
+  maxViewportFraction: 1 / 3,
+  outermost: true,
+});
+const paneRoleDefinitions = Object.freeze({
+  [paneRoleGeneric]: genericPaneRoleDefinition,
+  [paneRoleSide]: sidePaneRoleDefinition,
+});
 const legacyFileExplorerItemId = '__files__';
 // Compatibility for older helpers while their callers migrate. This is a live Finder identity,
 // never the legacy __files__ layout item.
@@ -1017,9 +1050,7 @@ function tabletUsesDesktopLayout(viewport = nativeViewport()) {
 }
 
 function fileExplorerUsesNormalTabMovement() {
-  // A wide landscape tablet has desktop-scale horizontal room, so it uses the same reserved
-  // Finder pane as a laptop. Phone and portrait/narrow-tablet layouts keep Finder movable as a tab.
-  return browserUsesCoarsePointer() && !tabletUsesDesktopLayout();
+  return !sidePanesAvailable();
 }
 
 function phoneLikeMobileViewport(viewport = nativeViewport()) {
@@ -1236,6 +1267,7 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-info-search]', {panelSelector: '.info-tree-panel', select: true}),
     className: () => 'info',
     icon: 'branch-info',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1260,6 +1292,7 @@ const TAB_TYPES = [
     },
     className: () => 'yoagent',
     icon: 'yoagent',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1276,6 +1309,7 @@ const TAB_TYPES = [
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
     icon: 'chat',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1304,6 +1338,7 @@ const TAB_TYPES = [
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer file-explorer-finder',
     icon: 'finder',
+    panePlacement: panePlacementSideRequired,
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1317,6 +1352,7 @@ const TAB_TYPES = [
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer file-explorer-differ',
     icon: 'changes',
+    panePlacement: panePlacementSideRequired,
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1330,6 +1366,7 @@ const TAB_TYPES = [
     relocalize: () => relocalizeFileExplorerPanels(),
     className: () => 'file-explorer file-explorer-tabber',
     icon: 'tab-meta',
+    panePlacement: panePlacementSideRequired,
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1388,6 +1425,7 @@ const TAB_TYPES = [
     },
     className: () => 'debug-item',
     icon: 'tab-meta',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   filePanelTabType({
@@ -1410,6 +1448,22 @@ const TAB_TYPES = [
   }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
+function paneRoleDefinition(kind = paneRoleGeneric, side = null) {
+  const normalizedKind = kind === paneRoleSide && paneSideValues.includes(side) ? paneRoleSide : paneRoleGeneric;
+  const definition = paneRoleDefinitions[normalizedKind] || genericPaneRoleDefinition;
+  return normalizedKind === paneRoleSide ? Object.freeze({...definition, side}) : definition;
+}
+function panePlacementForItem(item) {
+  return tabTypeForItem(item)?.panePlacement || panePlacementGenericOnly;
+}
+function paneRoleAllowsItem(role, item, options = {}) {
+  if (!isLayoutItem(item) && !(options.allowCandidate === true && tabTypeForItem(item))) return false;
+  const definition = paneRoleDefinition(role?.kind || role?.paneRole, role?.side);
+  const placement = panePlacementForItem(item);
+  if (definition.kind === paneRoleSide) return placement !== panePlacementGenericOnly;
+  if (placement !== panePlacementSideRequired) return true;
+  return options.allowRequiredInGeneric === true;
+}
 function tabTypeForParam(value) {
   const text = String(value || '');
   return TAB_TYPES.find(type => {

@@ -3490,9 +3490,6 @@ function rootCssLengthPx(name) {
   return Math.max(0, width);
 }
 
-const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 300;
-const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
-
 function minSplitPaneWidthPx() {
   return rootCssLengthPx('--min-split-pane-width') || MIN_SPLIT_PANE_WIDTH_FALLBACK_PX;
 }
@@ -4225,7 +4222,7 @@ function openTabDescriptionPopover(item, anchor) {
 }
 
 function showTabContextMenu(item, x, y, options = {}) {
-  if (!isPinnableTab(item) && !isTmuxSession(item)) return;
+  if (!isLayoutItem(item)) return;
   closeAppMenus();
   closeTerminalContextMenu();
   closeFileContextMenu();
@@ -4257,8 +4254,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   };
   const renderActions = () => {
     menu.replaceChildren();
-    appendDescription();
-    appendFileSurfaceMoveLeftCommand(menu, item);
+    const sourceSlot = options.sourceSlot || slotForItem(item);
+    if (!slotIsSidePane(sourceSlot)) appendDescription();
     appendTabSplitCommands(menu, item, options);
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
@@ -4276,23 +4273,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   sessionContextMenu.open(menu, x, y);
 }
 
-function leftmostLayoutSlot(slots = layoutSlots) {
-  const leaves = layoutLeafSlots(slots?.[layoutTreeKey]);
-  if (!leaves.length) return '';
-  return leaves
-    .map((slot, index) => ({slot, index, left: Number(layoutSlotScreenRect(slot)?.left)}))
-    .sort((left, right) => (Number.isFinite(left.left) ? left.left : left.index) - (Number.isFinite(right.left) ? right.left : right.index) || left.index - right.index)[0]?.slot || '';
-}
-
-function appendFileSurfaceMoveLeftCommand(menu, item) {
-  if (!layoutIsFileSurfaceItem(item)) return;
-  const sourceSlot = slotForItem(item);
-  const targetSlot = leftmostLayoutSlot();
-  const disabled = !sourceSlot || !targetSlot || sourceSlot === targetSlot;
-  const label = `${t('tab.actions.move')} ${t('layout.zone.left')}`;
-  appendContextMenuButton(menu, label, () => {
-    if (!disabled) void moveSessionToSlot(item, targetSlot, sourceSlot, paneTabs(targetSlot).length);
-  }, closeSessionContextMenu, {disabled, className: 'file-surface-move-left', ariaLabel: label, title: label});
+function tabDirectionalActionIconHtml(zone) {
+  return `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
 }
 
 function appendTabSplitCommands(menu, item, options = {}) {
@@ -4304,10 +4286,9 @@ function appendTabSplitCommands(menu, item, options = {}) {
     sourceSlot
       && sourceRect
       && !narrowSingleColumnMode()
-      && !isFileExplorerItem(activeItemForSide(sourceSlot)),
+      && (!isFileExplorerItem(activeItemForSide(sourceSlot)) || slotIsSidePane(sourceSlot)),
   );
   if (!canPresent) return;
-  const directionalIconHtml = zone => `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
   const actionGroups = document.createElement('div');
   actionGroups.className = 'tab-directional-action-groups';
   const appendDirectionalActions = (kind, label, action) => {
@@ -4328,7 +4309,7 @@ function appendTabSplitCommands(menu, item, options = {}) {
         {
           disabled: capabilities[kind][zone] !== true,
           className: `tab-split-action tab-${kind}-action`,
-          iconHtml: directionalIconHtml(zone),
+          iconHtml: tabDirectionalActionIconHtml(zone),
           ariaLabel: directionLabel,
           title: directionLabel,
         },

@@ -2411,8 +2411,8 @@ async function applyShareUiState(payload = {}) {
     applyShareAppearanceState(payload.appearance || {});
     applyShareTerminalDimensionsState(payload.terminalDims || []);
     if (payload.layout || payload.tabs) {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
-      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingSidePane: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingSidePane: true});
     }
     applyShareChromeState(payload.chrome || {});
     applyShareAutoApproveState(payload.autoApprove || {});
@@ -3050,6 +3050,8 @@ function shareSlotDigestSnapshot() {
     slots: layoutSlotKeys().map(slot => ({
       slot,
       placeholder: paneIsPlaceholder(slot),
+      paneRole: paneRoleForSlot(slot).kind,
+      side: paneRoleForSlot(slot).side,
     })),
   };
 }
@@ -3762,8 +3764,8 @@ function applyShareUiMessage(message) {
   const finishRemoteApply = beginShareRemoteUiApply();
   try {
     if (message.type === 'layout') {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
-      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingSidePane: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingSidePane: true});
       return;
     }
     if (message.type === 'active-tab') {

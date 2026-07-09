@@ -2518,7 +2518,7 @@ async function openFileEditorPane(path, options = {}) {
   const fallbackSlot = layoutSlotKeys().find(slot => slot !== filesSlot) || filesSlot;
   if (fallbackSlot) {
     const zone = fallbackSlot === filesSlot ? 'right' : 'left';
-    const pct = fallbackSlot === filesSlot ? fileExplorerSplitPercent : defaultSplitPercent;
+    const pct = fallbackSlot === filesSlot ? sidePaneDefaultWidthPercent : defaultSplitPercent;
     await splitSessionAtSlot(item, fallbackSlot, zone, null, pct);
     return;
   }
@@ -3516,7 +3516,7 @@ function layoutWithReplacedItems(replacements) {
     const tabs = paneTabs(side).map(item => replacements.get(item) || item);
     const activeItem = activeItemForSide(side);
     const active = replacements.get(activeItem) || activeItem;
-    next[side] = paneStateWithTabs(tabs, active);
+    next[side] = paneStateWithTabsForSlot(side, tabs, active, next);
   }
   return compactLayoutSlots(next);
 }

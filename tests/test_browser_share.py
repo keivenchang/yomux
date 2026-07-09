@@ -2122,7 +2122,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 };
                 const detail = extra => ({
                   ...extra,
-                  finderOpen: itemInLayout(fileExplorerItemId),
+                      finderOpen: itemInLayout(fileExplorerItemId),
+                      finderSlot: slotForItem(fileExplorerItemId) || '',
+                      finderPaneRole: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).kind : '',
+                      finderPaneSide: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).side : null,
                   finderMode: normalizeFileExplorerMode(fileExplorerMode),
                   rootMode: fileExplorerRootModeValue(),
                   treeSortMode: fileExplorerTreeSortMode,
@@ -2540,7 +2543,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             for visible, mode in [(False, "files"), (True, "files"), (False, "diff"), (True, "diff")]:
                 host = host_phase("visible", visible, mode)
                 metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
-                assert host["finderOpen"] is visible, host
+                assert host["finderOpen"] is visible, json.dumps(host, sort_keys=True)
                 assert metrics["detail"]["finderOpen"] is visible, metrics
                 assert metrics["detail"]["finderPanelCount"] <= 3, metrics
 
@@ -5036,7 +5039,7 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
             gitHistory: [{ref: 'HEAD', short: 'HEAD'}],
           });
           const initial = layoutFromParam(arguments[0], `left:__files__;slot1:1,${item}`);
-          applyLayoutSlots(initial, {prune: false, preserveMissingFileExplorer: true});
+          applyLayoutSlots(initial, {prune: false, preserveMissingSidePane: true});
           await waitFor(() => slotForItem(item) === 'slot1' && itemInLayout(fileExplorerItemId));
           await applyShareUiState({
             layout: 'left',

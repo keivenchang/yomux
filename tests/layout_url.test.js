@@ -10,6 +10,7 @@ const suiteFiles = [
   'tests/layout_restore.test.js',
   'tests/drop_action_result.test.js',
   'tests/file_surface_menu.test.js',
+  'tests/side_panes.test.js',
   'tests/share_theme.test.js',
   'tests/share_file_surface_replay.test.js',
   'tests/editor_preview_core.test.js',

@@ -28,7 +28,7 @@ test('File submenu restores the desktop triplet through the layout owner', () =>
   assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
   assert.match(menus, /if \(narrowSingleColumnMode\(\)\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*else \{[\s\S]*menuCommand\(t\('yoagent\.capability\.finderDifferTabber\.name'\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/);
   assert.match(menus, /checked: fileSurfaceItems\.every\(item => itemInLayout\(item\)\),[\s\S]*partial: fileSurfaceItems\.some\(item => itemInLayout\(item\)\) && !fileSurfaceItems\.every\(item => itemInLayout\(item\)\)/);
-  assert.match(actions, /async function openFileSurfaceFromMenu\(item\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*openFileSurfacePane\(resolved\)[\s\S]*layoutWithFileSurfaceHome\(layoutSlots, fileSurfaceItems, \{forceCreate: true, active: resolved\}\)[\s\S]*activatePaneTab/);
+  assert.match(actions, /async function openFileSurfaceFromMenu\(item\)[\s\S]*sidePaneConstrainedMode\(\)[\s\S]*openFileSurfacePane\(resolved\)[\s\S]*fileSurfaceItems\.filter\(candidate => !itemInLayout\(candidate\)\)[\s\S]*layoutWithSidePaneItems\(layoutSlots, missing, \{[\s\S]*side: paneSideLeft[\s\S]*forceCreate: true[\s\S]*activatePaneTab/);
   assert.doesNotMatch(menus.slice(menus.indexOf('function fileSurfaceMenuItems()'), menus.indexOf('function appMenuTree()')), /toggleFinderPane\(|selectSession\(fileExplorerItemId\)/);
 });
 
@@ -58,11 +58,11 @@ test('file-surface pane headers use shared minimize and expand controls, not a l
   assert.doesNotMatch(filePanelCss, /\.panel\.file-explorer-panel \.virtual-panel-controls/);
 });
 
-test('independent triplets retain their pane tab strip and moved panels are not treated as home columns', () => {
+test('independent triplets retain their pane tab strip and generic actions exclude Side Panes', () => {
   const strip = shell.slice(shell.indexOf('function updatePaneTabStrip('), shell.indexOf('function reconcilePaneTabChildren('));
   assert.doesNotMatch(strip, /isFileExplorerItem\(activeItemForSide\(side\)\)[\s\S]*strip\.hidden = true/);
-  assert.match(actions, /function paneTabsWithoutFinder\([\s\S]*slotIsFileSurfaceHome\(slot, slots\)[\s\S]*: paneTabs\(slot, slots\)/);
-  assert.match(actions, /function canPaneExpand[\s\S]*slotIsFileSurfaceHome\(targetSlot, slots\)/);
+  assert.match(actions, /function paneTabsForGenericActions\([\s\S]*slotIsSidePane\(slot, slots\) \? \[\] : paneTabs\(slot, slots\)/);
+  assert.match(actions, /function canPaneExpand[\s\S]*slotIsSidePane\(targetSlot, slots\)/);
 });
 
 test('Dockview keeps the group tab strip for singleton file surfaces', () => {
@@ -73,13 +73,14 @@ test('Dockview keeps the group tab strip for singleton file surfaces', () => {
 
 test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
   assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewPaneContentDropAllowed\(paneInfo\)[\s\S]*moveSessionToSlot\(paneInfo\.item, paneInfo\.intent\.targetSlot/);
-  assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsFileSurfaceHome\(tabInsertion\.targetSlot\)[\s\S]*layoutIsFileSurfaceItem\(tabInsertion\.item\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
+  assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
   assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewGroupForPoint[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
 });
 
-test('triplet tab context menus expose only Move left and disable it in the leftmost pane', () => {
-  assert.match(coreUtils, /function appendFileSurfaceMoveLeftCommand\(menu, item\)[\s\S]*layoutIsFileSurfaceItem\(item\)[\s\S]*leftmostLayoutSlot\(\)[\s\S]*sourceSlot === targetSlot[\s\S]*moveSessionToSlot\(item, targetSlot, sourceSlot/);
-  assert.match(coreUtils, /showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*appendFileSurfaceMoveLeftCommand\(menu, item\)[\s\S]*appendTabSplitCommands/);
+test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
+  assert.match(coreUtils, /if \(!slotIsSidePane\(sourceSlot\)\) appendDescription\(\)/);
+  assert.match(coreUtils, /showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*appendTabSplitCommands\(menu, item, options\)/);
+  assert.doesNotMatch(coreUtils, /vertical-side-pane-edge-move|appendVerticalSidePaneEdgeMoveCommand/);
 });
 
 test('Finder and Differ render the same shared session selector', () => {
@@ -89,7 +90,7 @@ test('Finder and Differ render the same shared session selector', () => {
 
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
   assert.match(terminalBoot, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
-  assert.match(dockview, /function dockviewHeaderActionsHtml\(item\)[\s\S]*if \(!isLayoutItem\(item\)\) return ''[\s\S]*if \(isVirtualItem\(item\)\) return `\$\{paneHandle\}\$\{virtualPanelControlsHtml\(item/);
+  assert.match(dockview, /function dockviewHeaderActionsHtml\(item, slot = slotForItem\(item\)\)[\s\S]*if \(!isLayoutItem\(item\)\) return ''[\s\S]*if \(slotIsSidePane\(slot\)\)[\s\S]*if \(isVirtualItem\(item\)\) return `\$\{paneHandle\}\$\{virtualPanelControlsHtml\(item/);
   assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
   assert.match(shell, /function paneTabInnerHtml\(item, rowOptions = \{\}\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(!isLegacyFiles\)/);
 });

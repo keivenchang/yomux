@@ -82,9 +82,9 @@ function poolDisplacedPanel(node) {
 // for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
-function syncActivePanelsInPlace() {
+function syncActivePanelsInPlace(previousActive = []) {
   if (dockviewLayoutActive()) {
-    syncActivePanelsDockview();
+    syncActivePanelsDockview(previousActive);
     return;
   }
   for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
@@ -275,7 +275,15 @@ function minWidthForLayoutItem(item) {
   return minSplitPaneWidthPx();
 }
 
+function minWidthForSidePaneItem(item) {
+  return Math.min(
+    minWidthForLayoutItem(item),
+    rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  );
+}
+
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
+  if (slotIsSidePane(slot, slots)) return minWidthForSidePaneItem(activeItemForSide(slot, slots));
   return minWidthForLayoutItem(activeItemForSide(slot, slots));
 }
 
@@ -335,12 +343,27 @@ function smallLayoutSlotCandidate() {
   return candidate;
 }
 
+function syncPaneRoleDom(node, slot, slots = layoutSlots) {
+  if (!node) return null;
+  const role = paneRoleForSlot(slot, slots);
+  node.dataset.paneRole = role.kind;
+  if (role.kind === paneRoleSide) {
+    node.dataset.paneSide = role.side;
+    node.style?.setProperty('--side-pane-max-viewport-fraction', String(role.maxViewportFraction));
+  } else {
+    delete node.dataset.paneSide;
+    node.style?.removeProperty('--side-pane-max-viewport-fraction');
+  }
+  node.classList.toggle('side-pane-role', role.kind === paneRoleSide);
+  return role;
+}
+
 function renderLayoutColumn(side) {
   const column = document.createElement('section');
   const session = activeItemForSide(side);
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
-  if (slotIsFileSurfaceHome(side)) column.classList.add('file-explorer-home-column');
+  syncPaneRoleDom(column, side);
   if (isPreferencesItem(session)) column.classList.add('preferences-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
@@ -355,6 +378,7 @@ function renderDropSlot(slot, session) {
   node.className = 'drop-slot';
   node.dataset.slot = slot;
   node.dataset.side = slotSide(slot);
+  syncPaneRoleDom(node, slot);
   if (!session) {
     node.appendChild(renderEmptyPane(slot));
     return node;
@@ -372,6 +396,24 @@ function renderEmptyPane(slot) {
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
   panel.setAttribute('aria-label', t('pane.empty'));
+  const emptyItem = dockviewEmptyPaneItem(slot);
+  if (canCloseEmptyPane(slot)) {
+    const controls = document.createElement('div');
+    controls.className = 'empty-pane-controls';
+    controls.innerHTML = paneFrameControlsGroupHtml(emptyItem, {
+      slot,
+      actions: false,
+      details: false,
+      popout: false,
+      expand: false,
+      minimize: false,
+      close: true,
+      closeTitle: t('editor.closePane'),
+      closeLabel: t('editor.closePane'),
+    });
+    panel.appendChild(controls);
+    bindPaneFrameControls(panel, emptyItem);
+  }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
   const closeLabel = t('editor.closePane');

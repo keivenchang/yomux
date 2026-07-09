@@ -1698,8 +1698,8 @@ async function runShareThemeSuite() {
     assert.ok(macPaneControls.indexOf('pane-expand') < macPaneControls.indexOf('pane-minimize'), 'Mac frame controls use the shared + then _ order');
     assert.ok(/data-pane-expand="1"[^>]* hidden/.test(macPaneControls));
     const macFinderControls = macApi.panelControlsHtml(macApi.finderItemId);
-    assert.ok(macFinderControls.includes(`data-pane-close="${macApi.finderItemId}"`));
-    assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
+    assert.ok(macFinderControls.includes(`data-pane-minimize="${macApi.finderItemId}"`));
+    assert.equal(macFinderControls.includes('data-pane-close'), false);
     assert.equal(macFinderControls.includes('data-pane-expand'), false);
     const macFinderFields = macApi.tabSearchFields(macApi.fileExplorerItemId);
     assert.ok(macFinderFields.includes('Finder'), 'Finder tab indexes its visible macOS name');
@@ -1782,13 +1782,13 @@ async function runShareThemeSuite() {
       fileExplorerClosedOptions(),
     );
     assert.deepStrictEqual(canonical(staleFinderWidthUrlApi.serialize(staleFinderWidthUrlApi.currentSlots())), {
-      tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    }, 'stale Finder-width URLs do not restore a non-Finder terminal pane at 22%');
-    assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@50(left,slot1)');
+    }, 'explicit generic pane roles preserve their serialized 22% split');
+    assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@22(left,slot1)');
 
     const finderBesideSinglePaneUrlApi = loadYolomux(
       '?sessions=files,3&layout=row@22(slot1,left)&tabs=slot1:files;left:1,6,5,2,ant,4,3*',
@@ -3081,7 +3081,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareCreatePayloadFromForm[\s\S]*debug_profile:\s*form\?\.elements\?\.debug_profile\?\.checked === true/.test(shareSource), 'YO!share create payload includes only explicit debug/profiling upload opt-in');
       assert.ok(/function shareDebugProfileUploadPayload[\s\S]*shareRedactDiagnosticValue[\s\S]*async function shareUploadDebugProfile[\s\S]*shareDebugProfileUploadEnabled\(\)[\s\S]*apiFetchJson\('\/api\/share\/debug-profile'/.test(shareSource), 'YO!share debug/profiling uploads are opt-in, sent to the share debug endpoint, and client-redacted');
       assert.ok(/async function boot\(\)[\s\S]*shareBootstrap\?\.uiState[\s\S]*await applyShareUiState/.test(shareSource), 'share-view boot applies the server UI-state bootstrap after the initial panes render');
-      assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingFileExplorer: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Finder');
+      assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingSidePane: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Side Pane');
       assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*setTranscriptMetadataPayload\(\{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a guarded stub only until scoped metadata loads');
       assert.ok(/function updateActiveSessionParam\(\)[\s\S]*if \(shareViewMode\) return/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot does not rewrite the share URL from local layout state');
       assert.ok(/function syncShareProtocolControls[\s\S]*!readOnly\.checked[\s\S]*https\.checked = true[\s\S]*http\.disabled = true/.test(shareSource), 'YO!share modal locks write mode to https');
@@ -6116,9 +6116,10 @@ async function runShareThemeSuite() {
     slots.slot2 = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     const next = api.layoutWithItems(slots, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(next).panes), {
-      slot2: {tabs: [api.finderItemId, '1'], active: api.finderItemId},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
+      main: {tabs: ['1'], active: '1'},
     });
-    assert.equal(next[api.layoutTreeKey].slot, 'slot2', 'a moved standalone Finder is an ordinary pane tab, not a reserved home column');
+    assert.equal(next[api.layoutTreeKey].children[0].slot, 'left', 'a legacy standalone Finder is repaired into an outer left Side Pane');
 
     const placeholderSlots = api.emptyLayoutSlots();
     placeholderSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
@@ -6135,7 +6136,7 @@ async function runShareThemeSuite() {
     const placeholderUrl = api.setLayoutSlotsForTest(placeholderSlots);
     const placeholderParams = parseUrl(placeholderUrl);
     assert.equal(placeholderParams.get('layout'), 'row@22(left,slot1)');
-    assert.equal(placeholderParams.get('tabs'), 'left:finder;slot1:__empty_pane__');
+    assert.equal(placeholderParams.get('tabs'), 'left:@side-left,finder;slot1:__empty_pane__');
     const reloadedPlaceholder = loadYolomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
     assert.deepStrictEqual(canonical(reloadedPlaceholder.serialize(reloadedPlaceholder.currentSlots())), canonical(api.serialize(placeholderSlots)));
 
@@ -6172,6 +6173,7 @@ async function runShareThemeSuite() {
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
       left: {tabs: [api.finderItemId], active: api.finderItemId},
+      slot1: {tabs: [], active: null, placeholder: true},
     });
 
     const tmuxAboveFinder = api.emptyLayoutSlots();
@@ -6181,9 +6183,10 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(tmuxAboveFinder);
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {slot: 'left'},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
         left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
@@ -6194,9 +6197,10 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(finderAboveTmux);
     api.removePaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {slot: 'left'},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
         left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
@@ -6227,10 +6231,10 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(dockedFinder)), {
       tree: {
         split: 'row',
-        pct: 35,
+        pct: 22,
         children: [
-          {slot: 'left'},
-          {split: 'row', pct: 37, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
+          {slot: 'slot2'},
+          {split: 'row', pct: 35, children: [{slot: 'left'}, {slot: 'slot1'}]},
         ],
       },
       panes: {
@@ -6238,7 +6242,7 @@ async function runShareThemeSuite() {
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    }, 'normalization preserves a file surface exactly where the user moved it');
+    }, 'normalization repairs a legacy generic Finder into the outer left Side Pane');
     api.setLayoutSlotsForTest(dockedFinder);
 
     const verticalFinderBranch = api.emptyLayoutSlots();
@@ -6252,14 +6256,28 @@ async function runShareThemeSuite() {
     verticalFinderBranch.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     verticalFinderBranch.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(verticalFinderBranch);
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), canonical(api.serialize(verticalFinderBranch)), 'normalization preserves a vertically nested moved Finder');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 34, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
+        ],
+      },
+      panes: {
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot2: {tabs: ['__info__'], active: '__info__'},
+        slot1: {tabs: ['1'], active: '1'},
+      },
+    }, 'normalization repairs a vertically nested legacy Finder into the outer left Side Pane');
 
     const noFinderSplit = api.emptyLayoutSlots();
     noFinderSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     noFinderSplit.left = api.paneStateWithTabs(['1'], '1');
     noFinderSplit.slot1 = api.paneStateWithTabs(['2'], '2');
     assert.equal(api.itemInLayout(api.finderItemId, api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization never invents a missing file surface');
-    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithDefaultFileSurfaceHome(noFinderSplit))), {
+    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithDefaultLeftSidePane(noFinderSplit))), {
       tree: {
         split: 'row',
         pct: 22,
@@ -6505,12 +6523,13 @@ async function runShareThemeSuite() {
     finderDropHome.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderOnly);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {slot: 'left'},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'main'}]},
       panes: {
         left: {tabs: [api.finderItemId], active: api.finderItemId},
+        main: {tabs: [], active: null, placeholder: true},
       },
     });
-    assert.equal(api.slotForNewTmuxSession('2'), 'left', 'a lone moved Finder behaves as an ordinary pane tab');
+    assert.equal(api.slotForNewTmuxSession('2'), 'main', 'a lone Side Pane retains a generic filler for new terminals');
 
     const dragSlots = api.emptyLayoutSlots();
     dragSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
@@ -6527,15 +6546,17 @@ async function runShareThemeSuite() {
     const moved = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__'));
     assert.deepStrictEqual(canonical(api.serialize(moved).panes), {
       left: {tabs: [api.finderItemId], active: api.finderItemId},
+      main: {tabs: [], active: null, placeholder: true},
     });
     api.splitSessionAtSlot('__info__', 'left', 'top', 'slot1');
     const split = api.serialize(api.currentSlots());
     assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
-    assert.equal(split.panes.slot1, undefined);
+    assert.deepStrictEqual(canonical(split.panes.slot1), {tabs: [], active: null, placeholder: true}, 'the explicit Generic source remains as the requested placeholder');
     assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__info__'))), [{tabs: ['__info__'], active: '__info__'}]);
     const infoSlot = Object.entries(split.panes).find(([, pane]) => pane.tabs.includes('__info__'))[0];
-    assert.notEqual(infoSlot, 'slot1');
-    assert.equal(api.shouldPreserveSourceSlotForSplit(infoSlot, 'slot1'), false);
+    assert.notEqual(infoSlot, 'slot1', 'YO!info moves into a top Vertical Side Pane leaf');
+    assert.equal(api.paneRoleForSlot(infoSlot).kind, api.paneRoleSide, 'YO!info destination retains the Vertical Side Pane role');
+    assert.equal(api.paneRoleForSlot(infoSlot).side, api.paneSideLeft, 'YO!info destination retains the left edge');
 
     const finderCloseSlots = api.emptyLayoutSlots();
     finderCloseSlots[api.layoutTreeKey] = api.splitNode(
@@ -6571,8 +6592,9 @@ async function runShareThemeSuite() {
     autoPruneSlots.slot2 = api.paneStateWithTabs([api.finderItemId, '1'], '1');
     api.setLayoutSlotsForTest(autoPruneSlots);
     api.setGridPreviewNodesForTest([topColumn, finderColumn]);
-    assert.equal(api.slotCanAutoPrune('slot2'), false, 'legacy auto-prune protects a slot when Finder is a background tab');
-    assert.equal(api.smallLayoutSlotCandidate(), null, 'legacy auto-prune does not remove a small slot containing a background Finder tab');
+    assert.deepStrictEqual(canonical(api.paneTabs(api.sidePaneSlot(api.paneSideLeft))), [api.finderItemId], 'normalization rehomes a background Finder into the Side Pane');
+    assert.deepStrictEqual(canonical(api.paneTabs('slot2')), ['1'], 'the generic pane retains only its ordinary tab');
+    assert.equal(api.smallLayoutSlotCandidate().slot, 'slot2', 'ordinary-pane pruning no longer depends on inferred Finder contents');
 
     autoPruneSlots.slot2 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(autoPruneSlots);
@@ -6617,9 +6639,17 @@ async function runShareThemeSuite() {
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedNestedFinderNormalized)), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 58, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+        ],
+      },
       panes: {
         left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
         slot2: {tabs: ['2'], active: '2'},
       },
     });
@@ -6638,9 +6668,17 @@ async function runShareThemeSuite() {
     killedApi.setLayoutSlotsForTest(staleFileOpenSlots);
     killedApi.openFileEditorPane(staleFileOpenPath);
     assert.deepStrictEqual(canonical(killedApi.serialize(killedApi.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 58, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+        ],
+      },
       panes: {
         left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
         slot2: {tabs: [staleFileOpenItem], active: staleFileOpenItem},
       },
     });
@@ -6654,9 +6692,10 @@ async function runShareThemeSuite() {
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedVerticalNormalized)), {
-      tree: {slot: 'left'},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
         left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
@@ -6687,7 +6726,7 @@ async function runShareThemeSuite() {
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false, 'the triplet home rejects Preferences below Finder');
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'left'}), true, 'Finder can leave the home column through the normal pane split path');
+    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'left'}), false, 'Finder cannot cross from a Side Pane into a generic pane');
     assert.equal(api.dropIntentAllowsSession('__changes__', {targetSlot: 'slot1', zone: 'left'}), false, 'retired standalone Differ is not draggable as a layout item');
     assert.equal(api.dropIntentAllowsSession(api.finderItemId, {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), true, 'Finder can leave the home column through a root split');
     assert.equal(api.dropIntentAllowsSession('__changes__', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1'}), false, 'retired standalone Differ cannot be dropped at a gutter');
@@ -6716,33 +6755,33 @@ async function runShareThemeSuite() {
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle', targetRect: matrixFinderRect})},
       {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
-      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
+      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: api.fileDropIntentAllowsPayload(filePayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: api.fileDropIntentAllowsPayload(multiFilePayload, {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: api.pathDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.fileDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: api.dropIntentAllowsSession('2', {boundary: 'root', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
-      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: api.dropIntentAllowsSession('2', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
+      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
     ];
     assert.deepStrictEqual(canonical(matrixCases), [
       {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: true},
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
-      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
+      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: true},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: true},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: true},
       {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: true},
-      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: true},
+      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
     ], 'drag/drop matrix covers source x target x zone through the shared validators');
     api.setLayoutSlotsForTest(finderOnly);
     api.splitSessionAtSlot(editorItem, 'left', 'bottom');
     const editorSplit = api.serialize(api.currentSlots());
     assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
-    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [{tabs: [editorItem], active: editorItem}]);
-    assert.ok(JSON.stringify(editorSplit.tree).includes('"split":"column"'));
+    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [], 'a generic editor cannot subdivide a Side Pane');
+    assert.equal(editorSplit.tree.split, 'row');
 
     const fullSpanA = api.registerFileEditorLayoutItem('/home/test/full-span-a.md');
     const fullSpanB = api.registerFileEditorLayoutItem('/home/test/full-span-b.md');
@@ -6914,8 +6953,8 @@ async function runShareThemeSuite() {
     api.handleDropDragOver(finderPaneDrag);
     assert.ok(finderPaneDrag.defaultPrevented, 'Finder pane dragover is handled so the browser does not show its own drop UI');
     assert.ok(finderPaneDrag.propagationStopped, 'Finder pane dragover is owned by the pane drag handler');
-    assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'move');
-    assert.equal(noPreviewSlot.classList.contains('drop-preview'), true, 'Finder uses the normal dotted pane preview after leaving its home column');
+    assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'none');
+    assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'a Side Pane Finder cannot preview a cross-role drop into a generic pane');
     api.setLayoutSlotsForTest(finderOnly);
     const finderStrip = tabStrip([tabElement(api.finderItemId, 100, 120)]);
     api.bindPaneTabStrip(finderStrip, 'left');
@@ -6923,8 +6962,8 @@ async function runShareThemeSuite() {
     finderStrip.ondragover(event);
     assert.equal(event.defaultPrevented, true);
     assert.equal(event.propagationStopped, true);
-    assert.equal(event.dataTransfer.dropEffect, 'move');
-    assert.equal(finderStrip.classList.contains('tab-drop-preview'), true, 'a moved standalone Finder accepts ordinary tab stacking');
+    assert.equal(event.dataTransfer.dropEffect, 'none');
+    assert.equal(finderStrip.classList.contains('tab-drop-preview'), false, 'a Side Pane strip rejects ordinary generic tabs');
   });
 }
 
