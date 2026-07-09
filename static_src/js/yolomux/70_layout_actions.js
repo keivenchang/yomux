@@ -56,6 +56,22 @@ function removePaneFromLayout(item) {
   });
 }
 
+// Placeholders are deliberate drop targets after a split/move, but they are still disposable UI.
+// Keep their dismissal on the same layout transaction path as pane-frame close so Dockview, the
+// DOM renderer, URL state, and shared layout snapshots cannot disagree about which leaf vanished.
+function emptyPaneCanClose(slot, slots = layoutSlots) {
+  return paneIsPlaceholder(slot, slots) && layoutSlotKeys(slots).some(otherSlot => otherSlot !== slot);
+}
+
+function closeEmptyPaneFromLayout(slot) {
+  if (!emptyPaneCanClose(slot)) return false;
+  applyLayoutSlots(layoutWithoutSlot(slot), {
+    preservePlaceholderSlots: true,
+    prune: false,
+  });
+  return true;
+}
+
 function closePaneFrameItem(item) {
   const resolved = resolveLayoutItem(item);
   if (isFileExplorerItem(resolved)) {

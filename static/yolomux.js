@@ -20441,13 +20441,20 @@ async function collapseAllFileExplorerDirectories() {
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
-async function setAllFileTreeDirectoriesExpanded(source, expand) {
-  if (fileExplorerMode === 'tabber') {
+function fileExplorerToolbarView(container = null) {
+  return fileExplorerViewForItem(container?.closest?.('.file-explorer-panel')?.dataset?.panelItem)
+    || fileExplorerViewForItem(container?.dataset?.panelItem)
+    || normalizeFileExplorerMode(fileExplorerMode);
+}
+
+async function setAllFileTreeDirectoriesExpanded(source, expand, options = {}) {
+  const view = options.view || fileExplorerToolbarView(source);
+  if (view === 'tabber') {
     setAllTabberCollapsed(!expand);
     scheduleShareUiStatePublish();
     return;
   }
-  if (source?.closest?.('.file-explorer-changes-panel')) {
+  if (view === 'differ' || source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
     scheduleShareUiStatePublish();
     return;
@@ -20457,10 +20464,39 @@ async function setAllFileTreeDirectoriesExpanded(source, expand) {
   scheduleShareUiStatePublish();
 }
 
+function handleFileExplorerTreeToolbarAction(container, event) {
+  const action = event.target.closest('[data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
+  if (!action || !container?.contains(action)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const view = fileExplorerToolbarView(container);
+  if (action.matches('[data-file-tree-expand-collapse-all]')) {
+    setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand', {view})
+      .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
+  } else {
+    cycleFileExplorerTreeDateMode();
+  }
+  return true;
+}
+
+function handleFileExplorerTreeToolbarChange(container, event) {
+  const select = event.target.closest('[data-file-explorer-tree-sort]');
+  if (!select || !container?.contains(select)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
+  writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
+  if (fileExplorerToolbarView(container) === 'tabber') refreshTabberPanels();
+  else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  scheduleShareUiStatePublish();
+  return true;
+}
+
 function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
+    if (handleFileExplorerTreeToolbarAction(container, event)) return;
     const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
@@ -20479,24 +20515,10 @@ function bindFileExplorerHeaderActions(container = document) {
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
-    } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
-      setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
-        .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
-    } else if (action.matches('[data-file-explorer-tree-dates]')) {
-      cycleFileExplorerTreeDateMode();
-      if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   });
   container.addEventListener('change', event => {
-    const select = event.target.closest('[data-file-explorer-tree-sort]');
-    if (!select || !container.contains(select)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
-    writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-    if (fileExplorerMode === 'tabber') refreshTabberPanels();
-    else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    scheduleShareUiStatePublish();
+    handleFileExplorerTreeToolbarChange(container, event);
   });
 }
 
@@ -27296,6 +27318,22 @@ function removePaneFromLayout(item) {
   });
 }
 
+// Placeholders are deliberate drop targets after a split/move, but they are still disposable UI.
+// Keep their dismissal on the same layout transaction path as pane-frame close so Dockview, the
+// DOM renderer, URL state, and shared layout snapshots cannot disagree about which leaf vanished.
+function emptyPaneCanClose(slot, slots = layoutSlots) {
+  return paneIsPlaceholder(slot, slots) && layoutSlotKeys(slots).some(otherSlot => otherSlot !== slot);
+}
+
+function closeEmptyPaneFromLayout(slot) {
+  if (!emptyPaneCanClose(slot)) return false;
+  applyLayoutSlots(layoutWithoutSlot(slot), {
+    preservePlaceholderSlots: true,
+    prune: false,
+  });
+  return true;
+}
+
 function closePaneFrameItem(item) {
   const resolved = resolveLayoutItem(item);
   if (isFileExplorerItem(resolved)) {
@@ -33391,6 +33429,19 @@ function renderEmptyPane(slot) {
   panel.setAttribute('aria-label', t('pane.empty'));
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
+  const closeLabel = t('editor.closePane');
+  const close = makeButton({
+    className: 'empty-pane-close control-active-hover',
+    label: '×',
+    title: closeLabel,
+    ariaLabel: closeLabel,
+    disabled: !emptyPaneCanClose(slot),
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeEmptyPaneFromLayout(slot);
+    },
+  });
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -33403,7 +33454,7 @@ function renderEmptyPane(slot) {
     ariaLabel: t('topbar.search.aria'),
     onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
   });
-  fill.append(title, hint, add);
+  fill.append(close, title, hint, add);
   panel.appendChild(fill);
   return panel;
 }
@@ -45966,6 +46017,7 @@ function bindChangesPanel(panel) {
   if (!panel || panel.dataset.changesBound === 'true') return;
   panel.dataset.changesBound = 'true';
   panel.addEventListener('change', event => {
+    if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
       fileExplorerChangesSelectedSession = sessionSelect.value;
@@ -46025,13 +46077,7 @@ function bindChangesPanel(panel) {
     differTreeInteractionController.handleKeydown(event, panel);
   });
   panel.addEventListener('click', async event => {
-    const treeExpandCollapseAll = event.target.closest('[data-file-tree-expand-collapse-all]');
-    if (treeExpandCollapseAll && panel.contains(treeExpandCollapseAll)) {
-      event.preventDefault();
-      event.stopPropagation();
-      await setAllFileTreeDirectoriesExpanded(treeExpandCollapseAll, treeExpandCollapseAll.dataset.fileTreeExpandCollapseAll === 'expand');
-      return;
-    }
+    if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
       event.preventDefault();
@@ -46545,6 +46591,9 @@ function createFileExplorerPanel(item = finderItemId) {
   panel.className = `panel file-explorer-panel file-explorer-${view}`;
   panel.id = panelDomId(item);
   panel.dataset.panelItem = item;
+  // Refresh paths select panels by their fixed view. Keep this identity alongside the
+  // item identity so Finder, Differ, and Tabber can coexist without global-mode drift.
+  panel.dataset.fileExplorerView = view;
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;

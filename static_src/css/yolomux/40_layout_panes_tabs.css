@@ -792,6 +792,7 @@ body.layout-resizing {
   border-bottom-left-radius: 0;
 }
 .empty-pane-fill {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -802,6 +803,26 @@ body.layout-resizing {
   border: 1px dashed var(--empty-pane-border);
   border-radius: var(--radius-md);
   background: var(--empty-pane-bg);
+}
+.empty-pane-close {
+  position: absolute;
+  inset-block-start: var(--space-6);
+  inset-inline-end: var(--space-6);
+  display: grid;
+  place-items: center;
+  width: var(--touch-target-min-size);
+  min-width: var(--touch-target-min-size);
+  height: var(--touch-target-min-size);
+  padding: 0;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-control);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  font: 700 var(--ui-font-size-xl)/1 var(--ui-font);
+  line-height: 1;
+}
+.empty-pane-close:disabled {
+  display: none;
 }
 .empty-pane-hint {
   color: var(--muted);

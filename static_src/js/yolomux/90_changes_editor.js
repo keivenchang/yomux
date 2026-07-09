@@ -2039,6 +2039,7 @@ function bindChangesPanel(panel) {
   if (!panel || panel.dataset.changesBound === 'true') return;
   panel.dataset.changesBound = 'true';
   panel.addEventListener('change', event => {
+    if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
       fileExplorerChangesSelectedSession = sessionSelect.value;
@@ -2098,13 +2099,7 @@ function bindChangesPanel(panel) {
     differTreeInteractionController.handleKeydown(event, panel);
   });
   panel.addEventListener('click', async event => {
-    const treeExpandCollapseAll = event.target.closest('[data-file-tree-expand-collapse-all]');
-    if (treeExpandCollapseAll && panel.contains(treeExpandCollapseAll)) {
-      event.preventDefault();
-      event.stopPropagation();
-      await setAllFileTreeDirectoriesExpanded(treeExpandCollapseAll, treeExpandCollapseAll.dataset.fileTreeExpandCollapseAll === 'expand');
-      return;
-    }
+    if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
       event.preventDefault();
@@ -2618,6 +2613,9 @@ function createFileExplorerPanel(item = finderItemId) {
   panel.className = `panel file-explorer-panel file-explorer-${view}`;
   panel.id = panelDomId(item);
   panel.dataset.panelItem = item;
+  // Refresh paths select panels by their fixed view. Keep this identity alongside the
+  // item identity so Finder, Differ, and Tabber can coexist without global-mode drift.
+  panel.dataset.fileExplorerView = view;
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;

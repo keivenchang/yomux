@@ -107,6 +107,169 @@ def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_
     assert "Kill tmux session '1'" in result["labels"], result
 
 
+def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const slots = emptyLayoutSlots();
+        slots.left = paneStateWithTabs(['1'], '1');
+        slots.rightTop = emptyPlaceholderPaneState();
+        slots.rightMiddle = emptyPlaceholderPaneState();
+        slots.rightBottom = emptyPlaceholderPaneState();
+        slots[layoutTreeKey] = splitNode(
+          'row',
+          leafNode('left'),
+          splitNode('column', leafNode('rightTop'), splitNode('column', leafNode('rightMiddle'), leafNode('rightBottom'), 50), 33),
+          50,
+        );
+        applyLayoutSlots(slots, {focusSession: '1', preservePlaceholderSlots: true, prune: false});
+        const timeout = setTimeout(() => done({timeout: true, tree: layoutSlots[layoutTreeKey]}), 4000);
+        const waitForPlaceholders = () => {
+          const panes = Array.from(document.querySelectorAll('.empty-pane-panel'));
+          const controls = Array.from(document.querySelectorAll('.empty-pane-close:not(:disabled)'));
+          if (panes.length !== 3 || controls.length !== 3) return requestAnimationFrame(waitForPlaceholders);
+          const middle = panes.find(panel => panel.dataset.slot === 'rightMiddle');
+          const terminal = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
+          if (!middle || !terminal) return requestAnimationFrame(waitForPlaceholders);
+          const before = {
+            middle: middle.getBoundingClientRect(),
+            middleFill: middle.querySelector('.empty-pane-fill')?.getBoundingClientRect(),
+            middleClose: middle.querySelector('.empty-pane-close')?.getBoundingClientRect(),
+            terminal: terminal.getBoundingClientRect(),
+            closeLabels: controls.map(button => button.getAttribute('aria-label')),
+          };
+          middle.querySelector('.empty-pane-close')?.click();
+            const waitForClose = () => {
+              const remaining = Array.from(document.querySelectorAll('.empty-pane-panel'));
+              const remainingSlots = remaining.map(panel => panel.dataset.slot).sort();
+              const terminalAfter = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
+              const terminalRect = terminalAfter?.getBoundingClientRect();
+              if (remaining.length !== 2 || remainingSlots.includes('rightMiddle') || !terminalRect || terminalRect.width <= 100 || terminalRect.height <= 100) return requestAnimationFrame(waitForClose);
+            clearTimeout(timeout);
+            const finalSlots = layoutLeafSlots(layoutSlots[layoutTreeKey]);
+            const last = emptyPlaceholderLayoutSlots('last');
+            applyLayoutSlots(last, {preservePlaceholderSlots: true, prune: false});
+            requestAnimationFrame(() => {
+              const lastPane = document.querySelector('.empty-pane-panel');
+              done({
+                before,
+                remainingSlots,
+                finalSlots,
+                terminalAfter: terminalRect,
+                lastPaneHasClose: Boolean(lastPane?.querySelector('.empty-pane-close:not(:disabled)')),
+                lastPaneCloseResult: closeEmptyPaneFromLayout('last'),
+                lastSlots: layoutLeafSlots(layoutSlots[layoutTreeKey]),
+              });
+            });
+          };
+          waitForClose();
+        };
+        waitForPlaceholders();
+        """
+    )
+    assert result.get("timeout") is not True, result
+    assert result["remainingSlots"] == ["rightBottom", "rightTop"], result
+    assert result["finalSlots"] == ["left", "rightTop", "rightBottom"], result
+    assert result["before"]["closeLabels"] == ["Close pane"] * 3, result
+    assert result["before"]["middle"]["height"] > 80, result
+    assert result["before"]["middleClose"]["top"] >= result["before"]["middleFill"]["top"], result
+    assert result["before"]["middleClose"]["right"] <= result["before"]["middleFill"]["right"], result
+    assert result["terminalAfter"]["width"] > 100 and result["terminalAfter"]["height"] > 100, result
+    assert result["lastPaneHasClose"] is False and result["lastPaneCloseResult"] is False, result
+    assert len(result["lastSlots"]) == 1, result
+
+
+def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:tabber",
+        sessions=["1"],
+        transcript_sessions={
+            "1": {
+                "current_path": "/repo/tabber",
+                "git_root": "/repo/tabber",
+                "panes": [{"window": "0", "pane": "0", "window_name": "codex", "process_label": "codex", "window_active": True, "active": True}],
+            },
+        },
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.getElementById(panelDomId(tabberItemId));
+        const wait = () => {
+          const toolbar = panel?.querySelector('.tabber-toolbar');
+          const lookback = toolbar?.querySelector('[data-tabber-lookback]');
+          const sort = toolbar?.querySelector('[data-file-explorer-tree-sort]');
+          const dates = toolbar?.querySelector('[data-file-explorer-tree-dates]');
+          const expand = toolbar?.querySelector('[data-file-tree-expand-collapse-all="expand"]');
+          const collapse = toolbar?.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
+          if (!toolbar || !lookback || !sort || !dates || !expand || !collapse) return requestAnimationFrame(wait);
+          tabberActivityPayload = {activity: {'1': {active_recency_ts: 100}}, agents: [], agent_windows: {}};
+          transcriptMetadataState.payload.sessions['1'] = {
+            panes: [{window: '0', pane: '0', window_name: 'codex', process_label: 'codex', window_active: true, active: true}],
+          };
+          refreshTabberPanels();
+          let currentToolbar = panel.querySelector('.tabber-toolbar');
+          const currentLookback = currentToolbar.querySelector('[data-tabber-lookback]');
+          currentLookback.value = '48';
+          currentLookback.dispatchEvent(new Event('change', {bubbles: true}));
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            // Changing Lookback intentionally drops its per-lookback cache. Populate the
+            // new 48-hour cache after that transition so collapse has real child paths.
+            const touched = tabberSessionFilesState('1');
+            touched.files = [{repo: '/repo/tabber', abs_path: '/repo/tabber/src/a.py', mtime: 100}];
+            touched.loaded = true;
+            touched.loading = false;
+            refreshTabberPanels();
+            currentToolbar = panel.querySelector('.tabber-toolbar');
+            const currentSort = currentToolbar.querySelector('[data-file-explorer-tree-sort]');
+            currentSort.value = 'za';
+            currentSort.dispatchEvent(new Event('change', {bubbles: true}));
+            currentToolbar = panel.querySelector('.tabber-toolbar');
+            const currentDates = currentToolbar.querySelector('[data-file-explorer-tree-dates]');
+            const dateBefore = fileExplorerTreeDateMode;
+            currentDates.click();
+            currentToolbar = panel.querySelector('.tabber-toolbar');
+            const currentCollapse = currentToolbar.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
+            const rowsBeforeCollapse = panel.querySelectorAll('.file-tree-row[data-tabber-type]').length;
+            const directoriesBeforeCollapse = panel.querySelectorAll('.file-tree-row[data-tabber-type][data-kind="dir"]').length;
+            currentCollapse.click();
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+            const collapsedAfterCollapse = Array.from(fileExplorerTabberCollapsed);
+            const nextExpand = panel.querySelector('[data-file-tree-expand-collapse-all="expand"]');
+            nextExpand?.click();
+            requestAnimationFrame(() => requestAnimationFrame(() => done({
+              lookback: tabberSessionFileLookbackHours,
+              sort: fileExplorerTreeSortMode,
+              dateBefore,
+              dateAfter: fileExplorerTreeDateMode,
+              collapsedAfterCollapse,
+              collapsedAfterExpand: Array.from(fileExplorerTabberCollapsed),
+              rows: panel.querySelectorAll('.file-tree-row[data-tabber-type]').length,
+              rowsBeforeCollapse,
+              directoriesBeforeCollapse,
+              panelView: panel.dataset.fileExplorerView,
+            })));
+          }));
+          }));
+        };
+        wait();
+        """
+    )
+    assert result["lookback"] == 48, result
+    assert result["sort"] == "za", result
+    assert result["dateAfter"] != result["dateBefore"], result
+    assert result["panelView"] == "tabber", result
+    assert result["directoriesBeforeCollapse"] >= 1, result
+    assert result["collapsedAfterCollapse"], repr(result)
+    assert result["collapsedAfterExpand"] == [], result
+    assert result["rows"] >= 2, result
+
+
 def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)

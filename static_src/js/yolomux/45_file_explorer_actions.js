@@ -419,13 +419,20 @@ async function collapseAllFileExplorerDirectories() {
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
-async function setAllFileTreeDirectoriesExpanded(source, expand) {
-  if (fileExplorerMode === 'tabber') {
+function fileExplorerToolbarView(container = null) {
+  return fileExplorerViewForItem(container?.closest?.('.file-explorer-panel')?.dataset?.panelItem)
+    || fileExplorerViewForItem(container?.dataset?.panelItem)
+    || normalizeFileExplorerMode(fileExplorerMode);
+}
+
+async function setAllFileTreeDirectoriesExpanded(source, expand, options = {}) {
+  const view = options.view || fileExplorerToolbarView(source);
+  if (view === 'tabber') {
     setAllTabberCollapsed(!expand);
     scheduleShareUiStatePublish();
     return;
   }
-  if (source?.closest?.('.file-explorer-changes-panel')) {
+  if (view === 'differ' || source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
     scheduleShareUiStatePublish();
     return;
@@ -435,10 +442,39 @@ async function setAllFileTreeDirectoriesExpanded(source, expand) {
   scheduleShareUiStatePublish();
 }
 
+function handleFileExplorerTreeToolbarAction(container, event) {
+  const action = event.target.closest('[data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
+  if (!action || !container?.contains(action)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const view = fileExplorerToolbarView(container);
+  if (action.matches('[data-file-tree-expand-collapse-all]')) {
+    setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand', {view})
+      .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
+  } else {
+    cycleFileExplorerTreeDateMode();
+  }
+  return true;
+}
+
+function handleFileExplorerTreeToolbarChange(container, event) {
+  const select = event.target.closest('[data-file-explorer-tree-sort]');
+  if (!select || !container?.contains(select)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
+  writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
+  if (fileExplorerToolbarView(container) === 'tabber') refreshTabberPanels();
+  else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  scheduleShareUiStatePublish();
+  return true;
+}
+
 function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
+    if (handleFileExplorerTreeToolbarAction(container, event)) return;
     const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
@@ -457,24 +493,10 @@ function bindFileExplorerHeaderActions(container = document) {
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
-    } else if (action.matches('[data-file-tree-expand-collapse-all]')) {
-      setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand')
-        .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
-    } else if (action.matches('[data-file-explorer-tree-dates]')) {
-      cycleFileExplorerTreeDateMode();
-      if (fileExplorerMode === 'tabber') refreshTabberPanels();
     }
   });
   container.addEventListener('change', event => {
-    const select = event.target.closest('[data-file-explorer-tree-sort]');
-    if (!select || !container.contains(select)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
-    writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-    if (fileExplorerMode === 'tabber') refreshTabberPanels();
-    else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    scheduleShareUiStatePublish();
+    handleFileExplorerTreeToolbarChange(container, event);
   });
 }
 

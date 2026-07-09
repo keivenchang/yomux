@@ -374,6 +374,19 @@ function renderEmptyPane(slot) {
   panel.setAttribute('aria-label', t('pane.empty'));
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
+  const closeLabel = t('editor.closePane');
+  const close = makeButton({
+    className: 'empty-pane-close control-active-hover',
+    label: '×',
+    title: closeLabel,
+    ariaLabel: closeLabel,
+    disabled: !emptyPaneCanClose(slot),
+    onClick: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeEmptyPaneFromLayout(slot);
+    },
+  });
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -386,7 +399,7 @@ function renderEmptyPane(slot) {
     ariaLabel: t('topbar.search.aria'),
     onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
   });
-  fill.append(title, hint, add);
+  fill.append(close, title, hint, add);
   panel.appendChild(fill);
   return panel;
 }
