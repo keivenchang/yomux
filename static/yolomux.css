@@ -1625,7 +1625,7 @@ body.theme-light {
 .app-menu-line,
 .command-palette-title,
 .file-explorer-title,
-.file-explorer-actions-row .file-explorer-date-reload-cluster,
+.file-explorer-actions-row .file-explorer-date-controls,
 .file-editor-title {
   min-width: 0;
   display: inline-flex;
@@ -2801,6 +2801,10 @@ body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
   opacity: 1;
   background: var(--active-control-bg);
 }
+.app-menu-command[data-partial="true"] .app-menu-check {
+  opacity: 1;
+  background: color-mix(in srgb, var(--active-control-bg) 48%, transparent);
+}
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
 .app-menu-command + .app-menu-submenu-wrap,
@@ -3080,6 +3084,22 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: var(--menu-detail-text);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+/* File destinations are navigation, not cards: icon, name, explanation, and shortcut/state share
+   one row. The detail is still titled and in the accessible name when it has to ellipsize. */
+.app-menu-file-destination .app-menu-content {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-6);
+}
+.app-menu-file-destination .app-menu-line {
+  min-width: 0;
+}
+.app-menu-file-destination .app-menu-detail {
+  min-width: 0;
+  max-width: none;
+  text-align: end;
 }
 .app-menu-rich {
   min-width: 0;
@@ -6830,45 +6850,40 @@ body.layout-resizing {
   inset: 18%;
 }
 .drop-slot.drop-preview-top::before,
-.yolomux-dockview .dv-groupview.drop-preview-top::before,
-.grid.drop-preview-root.drop-preview-top::before {
+.yolomux-dockview .dv-groupview.drop-preview-top::before {
   top: 6px;
   right: 6px;
   left: 6px;
   height: calc(50% - 9px);
 }
 .drop-slot.drop-preview-bottom::before,
-.yolomux-dockview .dv-groupview.drop-preview-bottom::before,
-.grid.drop-preview-root.drop-preview-bottom::before {
+.yolomux-dockview .dv-groupview.drop-preview-bottom::before {
   right: 6px;
   bottom: 6px;
   left: 6px;
   height: calc(50% - 9px);
 }
-/* Root top/bottom preview must not cover a docked Finder (which is sacred): start after it and span
-   only the non-Finder content width. The vars are set by applyDockedFileExplorerBoundaryPreviewGeometry
-   when a Finder is docked, and default to the full grid width (minus the 6px insets) otherwise. */
-.grid.drop-preview-root.drop-preview-top::before,
-.grid.drop-preview-root.drop-preview-bottom::before {
-  right: auto;
-  left: var(--drop-preview-left, 6px);
-  width: var(--drop-preview-width, calc(100% - 12px));
-}
 .drop-slot.drop-preview-left::before,
-.yolomux-dockview .dv-groupview.drop-preview-left::before,
-.grid.drop-preview-root.drop-preview-left::before {
+.yolomux-dockview .dv-groupview.drop-preview-left::before {
   top: 6px;
   bottom: 6px;
   left: 6px;
   width: calc(50% - 9px);
 }
 .drop-slot.drop-preview-right::before,
-.yolomux-dockview .dv-groupview.drop-preview-right::before,
-.grid.drop-preview-root.drop-preview-right::before {
+.yolomux-dockview .dv-groupview.drop-preview-right::before {
   top: 6px;
   right: 6px;
   bottom: 6px;
   width: calc(50% - 9px);
+}
+.grid.drop-preview-root::before {
+  top: var(--drop-preview-top, 6px);
+  right: auto;
+  bottom: auto;
+  left: var(--drop-preview-left, 6px);
+  width: var(--drop-preview-width, calc(50% - 9px));
+  height: var(--drop-preview-height, calc(100% - 12px));
 }
 .grid.drop-preview-gutter::before {
   top: var(--drop-preview-top, 6px);
@@ -7611,6 +7626,29 @@ body.layout-resizing {
   cursor: pointer;
   user-select: none;
 }
+.layout-column.file-explorer-home-column .pane-tab {
+  width: auto;
+  max-width: 100%;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tab {
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-and-actions-container {
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  overflow: hidden;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-container {
+  box-sizing: border-box;
+  flex-wrap: nowrap;
+  align-content: stretch;
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
+  overflow: hidden;
+}
 .tmux-pane-tab-token {
   box-sizing: border-box;
 }
@@ -7637,51 +7675,10 @@ body.layout-resizing {
   min-width: 0;
   max-width: none;
 }
-.file-explorer-mode-switcher {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  min-width: 0;
-  height: var(--pane-tab-height);
-}
-.file-explorer-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  flex: 0 0 auto;
-  height: var(--pane-tab-height);
-  min-width: 0;
-  padding: 0 var(--space-3);
-  box-sizing: border-box;
-  color: var(--pane-tab-text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: transparent;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size-2xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.file-explorer-mode-toggle:hover,
-.file-explorer-mode-toggle:focus-visible {
-  color: var(--pane-tab-active-text);
-  border-color: var(--pane-tab-active-border);
-  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
-}
-.file-explorer-mode-label {
-  pointer-events: none;
-}
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
 .tmux-pane-tab-token.active,
 .panel.active-pane .pane-tab.active:not(.file-missing),
-.panel.file-explorer-panel .pane-tab.active:not(.file-missing),
-.file-explorer-mode-toggle[aria-pressed="true"] {
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
@@ -13730,23 +13727,21 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 }
 .panel.file-explorer-panel .file-explorer-head {
   --pane-bar-bg: var(--panel2);
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-8);
-  min-height: 31px;
+  min-height: 0;
   padding: var(--space-3) var(--space-6);
 }
 .panel.file-explorer-panel .pane-tabs {
   flex: 0 0 auto;
   width: auto;
-  align-self: end;
 }
 .panel.file-explorer-panel .pane-tabs[hidden] {
   display: none;
 }
 .panel.file-explorer-panel .pane-tabs[hidden] + .file-explorer-toolbar {
   grid-column: 1 / -1;
+}
+.panel.file-explorer-panel .file-explorer-toolbar {
+  clear: both;
 }
 .panel.file-explorer-panel.active-pane .file-explorer-head {
   background: var(--pane-bar-bg, var(--panel2));
@@ -13815,7 +13810,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 .file-explorer-panel-title {
   flex: 0 0 auto;
 }
-.file-explorer-actions-row .file-explorer-date-reload-cluster {
+.file-explorer-actions-row .file-explorer-date-controls {
   flex: 0 0 auto;
 }
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
@@ -14087,7 +14082,7 @@ body.resizing-file-explorer-changes {
   border-color: var(--active-control-border);
 }
 .file-explorer-changes-panel .changes-refresh,
-.file-explorer-date-reload-cluster .changes-refresh {
+.file-explorer-primary-row .changes-refresh {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -14100,7 +14095,7 @@ body.resizing-file-explorer-changes {
   font-size: var(--ui-font-size-2xs);
 }
 .file-explorer-changes-panel .changes-refresh::before,
-.file-explorer-date-reload-cluster .changes-refresh::before {
+.file-explorer-primary-row .changes-refresh::before {
   content: "↻";
   display: block;
   flex: 0 0 auto;
@@ -14110,8 +14105,8 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-changes-panel .changes-refresh:hover,
 .file-explorer-changes-panel .changes-refresh:focus-visible,
-.file-explorer-date-reload-cluster .changes-refresh:hover,
-.file-explorer-date-reload-cluster .changes-refresh:focus-visible {
+.file-explorer-primary-row .changes-refresh:hover,
+.file-explorer-primary-row .changes-refresh:focus-visible {
   background: var(--file-explorer-refresh-hover-surface);
 }
 body :is(
@@ -14120,13 +14115,13 @@ body :is(
   .file-explorer-root-mode-toggle,
   .file-explorer-header-action,
   .file-explorer-changes-panel .changes-refresh,
-  .file-explorer-date-reload-cluster .changes-refresh
+  .file-explorer-primary-row .changes-refresh
 ):is(:hover, :focus-visible) {
   color: var(--text);
   border-color: var(--text);
 }
 .file-explorer-changes-head .changes-date-toggle,
-.file-explorer-date-reload-cluster .changes-date-toggle {
+.file-explorer-date-controls .changes-date-toggle {
   height: 20px;
   align-self: center;
 }
@@ -14241,7 +14236,7 @@ body :is(
 }
 .changes-toolbar .file-tree-expand-collapse-all.changes-date-toggle,
 .file-explorer-changes-head .file-tree-expand-collapse-all.changes-date-toggle,
-.file-explorer-date-reload-cluster .file-tree-expand-collapse-all.changes-date-toggle {
+.file-explorer-date-controls .file-tree-expand-collapse-all.changes-date-toggle {
   height: 20px;
 }
 .file-tree-expand-collapse-icon {

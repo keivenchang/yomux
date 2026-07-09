@@ -1624,7 +1624,7 @@ body.theme-light {
 .app-menu-line,
 .command-palette-title,
 .file-explorer-title,
-.file-explorer-actions-row .file-explorer-date-reload-cluster,
+.file-explorer-actions-row .file-explorer-date-controls,
 .file-editor-title {
   min-width: 0;
   display: inline-flex;

@@ -63,7 +63,7 @@ function panelControlsHtml(session, options = {}) {
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
-  const isFiles = isFileExplorerItem(session);
+  const isFiles = typeof isFileSurfaceItem === 'function' ? isFileSurfaceItem(session) : isFileExplorerItem(session);
   // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
   // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
   // switched to transcript / YO!summary / events. activateTab also toggles it on click.
@@ -97,6 +97,13 @@ function virtualPanelControlsHtml(session, options = {}) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
           ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
         </div>`;
+}
+
+// A pane has exactly one frame-control owner. Dockview renders it in the common outer group header;
+// the fallback layout renders it inside panelFrameHtml(). Keeping that choice here prevents every
+// virtual panel from growing a second, independently hidden control row.
+function virtualPanelInnerControlsHtml(session, options = {}) {
+  return dockviewLayoutEnabled() ? '' : virtualPanelControlsHtml(session, options);
 }
 
 function relocalizeVirtualPanelChrome(panel, label = '') {
@@ -3944,6 +3951,7 @@ function hideUploadResult(session) {
 function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
+  panel.classList.toggle('file-surface-home-pane', slotIsFileSurfaceHome(slot));
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
   if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
@@ -6319,28 +6327,10 @@ function itemCanCloseWithAppShortcut(item) {
 }
 
 function toggleFileExplorerShortcut() {
-  if (itemInLayout(fileExplorerItemId)) {
-    fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
-    rememberFileExplorerOpenIntent(false);
-    applyLayoutSlots(layoutWithoutItem(fileExplorerItemId, {
-      preservePlaceholders: false,
-    }), {
-      preserveMissingFileExplorer: true,
-      message: fileExplorerHiddenStatusMessage(),
-    });
-    return;
-  }
-  if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
-    rememberFileExplorerOpenIntent(true);
-    applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
-      prune: false,
-      message: t('layout.status.restored', {item: fileExplorerLabel()}),
-    });
-    fileExplorerShortcutRestoreSlots = null;
-    return;
-  }
-  rememberFileExplorerOpenIntent(true);
-  selectSession(fileExplorerItemId);
+  // Cmd/Ctrl+B is one atomic triplet transaction. The layout owner owns its saved placement and
+  // default-home restoration; terminal code only preserves the platform/terminal eligibility gate.
+  if (typeof toggleAllFileSurfaces === 'function') return toggleAllFileSurfaces();
+  console.warn('file surface shortcut is unavailable until the layout triplet owner is ready');
 }
 
 function handleFocusedTerminalCopyShortcut(event) {

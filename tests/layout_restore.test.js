@@ -300,32 +300,32 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(layout), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
       panes: {
-        slot1: {tabs: ['__files__'], active: '__files__'},
+        slot1: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
         left: {tabs: ['1', '2'], active: '1'},
         right: {tabs: ['3'], active: '3'},
       },
     });
     const url = api.syncInitialLayoutUrlForTest();
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-    assert.equal(params.get('sessions'), 'files,1,3');
+    assert.equal(params.get('sessions'), 'finder,1,3');
     assert.equal(params.get('layout'), 'row@22(slot1,row@50(left,right))');
-    assert.equal(params.get('tabs'), 'slot1:files;left:1,2;right:3');
+    assert.equal(params.get('tabs'), 'slot1:finder,differ,tabber;left:1,2;right:3');
   });
 
   test('empty default layout retains a Finder and placeholder pane', () => {
     const api = loadYolomux('', []);
     const layout = api.defaultLayoutForTest();
     assert.deepStrictEqual(canonical(layout), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {slot: 'left'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot1: {tabs: [], active: null, placeholder: true},
+        slot1: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
+        left: {tabs: [], active: null, placeholder: true},
       },
     });
     const url = api.syncInitialLayoutUrlForTest();
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-    assert.equal(params.get('layout'), 'row@22(left,slot1)');
-    assert.equal(params.get('tabs'), 'left:files;slot1:__empty_pane__');
+    assert.equal(params.get('layout'), 'row@22(slot1,left)');
+    assert.equal(params.get('tabs'), 'slot1:finder,differ,tabber;left:__empty_pane__');
   });
 
   test('session URL order restores the active pane layout', () => {
@@ -333,7 +333,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
       panes: {
-        slot1: {tabs: ['__files__'], active: '__files__'},
+        slot1: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
         left: {tabs: ['3', '2'], active: '3'},
         right: {tabs: ['1'], active: '1'},
       },
@@ -356,7 +356,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 30, children: [{slot: 'slot1'}, {slot: 'left'}]},
       panes: {
-        slot1: {tabs: ['__files__'], active: '__files__'},
+        slot1: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
         left: {tabs: ['6', '7'], active: '7'},
       },
     });
@@ -366,13 +366,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.fileExplorerRootForOpen('6'), '/home/test/yolomux.dev1');
   });
 
-  test('layout URL remembers Finder Differ Tabber or none', () => {
-    for (const mode of ['files', 'diff', 'tabber']) {
-      const api = loadYolomux('', ['1']);
-      api.setFileExplorerModeForTest(mode);
-      const params = parseUrl(api.syncInitialLayoutUrlForTest());
-      assert.equal(params.get('finder'), mode, `${mode} is written to the URL while the Finder pane exists`);
-
+  test('legacy layout URL modes migrate to independent Finder Differ Tabber tabs', () => {
+    for (const [mode, active] of [['files', '__finder__'], ['diff', '__differ__'], ['tabber', '__tabber__']]) {
       const restored = loadYolomux(
         `?sessions=files,1&layout=row@22(slot1,left)&tabs=slot1:files;left:1&finder=${mode}`,
         ['1'],
@@ -381,7 +376,18 @@ async function runLayoutRestoreSuite() {
         'admin',
         {localStorage: {'yolomux.fileExplorerMode.v1': mode === 'tabber' ? 'files' : 'tabber'}},
       );
-      assert.equal(restored.fileExplorerModeForTest(), mode, `${mode} is restored from the URL ahead of localStorage`);
+      assert.deepStrictEqual(canonical(restored.serialize(restored.currentSlots()).panes.slot1), {
+        tabs: ['__finder__', '__differ__', '__tabber__'],
+        active,
+      }, `${mode} selects the matching independent file-surface tab ahead of localStorage`);
+      const params = parseUrl(restored.syncInitialLayoutUrlForTest());
+      assert.equal(params.has('finder'), false, 'new independent layouts no longer persist the merged-pane mode');
+      const tabs = {
+        __finder__: 'finder,differ,tabber',
+        __differ__: 'finder,differ*,tabber',
+        __tabber__: 'finder,differ,tabber*',
+      }[active];
+      assert.ok(params.get('tabs').includes(`slot1:${tabs}`), `${mode} remains the active independent tab after serialization`);
     }
 
     const noFinder = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
@@ -552,16 +558,17 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(fourPane)), {
       tree: {
         split: 'row',
-        pct: 22,
+        pct: 50,
         children: [
-          {slot: 'rightTop'},
           {
-            split: 'row',
+            split: 'column',
             pct: 50,
-            children: [
-              {split: 'column', pct: 50, children: [{slot: 'leftTop'}, {slot: 'leftBottom'}]},
-              {slot: 'rightBottom'},
-            ],
+            children: [{slot: 'leftTop'}, {slot: 'leftBottom'}],
+          },
+          {
+            split: 'column',
+            pct: 50,
+            children: [{slot: 'rightTop'}, {slot: 'rightBottom'}],
           },
         ],
       },
@@ -569,7 +576,7 @@ async function runLayoutRestoreSuite() {
         leftBottom: {tabs: ['1'], active: '1'},
         leftTop: {tabs: ['4'], active: '4'},
         rightBottom: {tabs: ['2', '3'], active: '3'},
-        rightTop: {tabs: ['__files__'], active: '__files__'},
+        rightTop: {tabs: ['__differ__'], active: '__differ__'},
       },
     });
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes inside an old four-pane URL still selects Finder diff mode');
@@ -630,10 +637,9 @@ async function runLayoutRestoreSuite() {
   for (const legacyChangesToken of ['changes', '__changes__']) {
     const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {slot: 'left'},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot1: {tabs: [], active: null, placeholder: true},
+        left: {tabs: ['__differ__', '__finder__', '__tabber__'], active: '__differ__'},
       },
     });
     assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes-only URLs restore Finder diff mode');
@@ -657,13 +663,13 @@ async function runLayoutRestoreSuite() {
     const serialized = api.serialize(api.currentSlots());
     assert.deepStrictEqual(canonical(serialized.panes), {
       slot1: {tabs: ['5'], active: '5'},
-      slot2: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
       slot3: {tabs: ['file:/home/keivenc/AGENTS.md'], active: 'file:/home/keivenc/AGENTS.md'},
     });
     const url = api.syncInitialLayoutUrlForTest();
     const params = parseUrl(url);
     assert.equal(params.get('layout'), 'row@20.7(slot2,row@42(slot3,slot1))');
-    assert.equal(params.get('tabs'), 'slot2:files;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
+    assert.equal(params.get('tabs'), 'slot2:finder,differ,tabber;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
   });
 
   test('mixed virtual and file tabs restore from URL state', () => {
@@ -673,7 +679,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot2'}, {slot: 'slot3'}]},
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
         slot3: {
           tabs: [
             '__prefs__',
@@ -692,7 +698,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot2'}, {slot: 'slot3'}]},
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
         slot3: {
           tabs: [
             '__prefs__',
@@ -708,12 +714,12 @@ async function runLayoutRestoreSuite() {
       },
     });
     const activeParams = parseUrl(api.syncInitialLayoutUrlForTest());
-    assert.equal(activeParams.get('sessions'), 'files,file:/home/keivenc/AGENTS.md');
-    assert.equal(activeParams.get('tabs').includes('slot2:files;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
+    assert.equal(activeParams.get('sessions'), 'finder,file:/home/keivenc/AGENTS.md');
+    assert.equal(activeParams.get('tabs').includes('slot2:finder,differ,tabber;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
 
     const terminalToolbarBeforeFinderFocus = api.panelControlsHtml('6');
-    api.setFocusedPanelItem('__files__');
-    api.activatePaneTab('slot2', '__files__');
+    api.setFocusedPanelItem('__finder__');
+    api.activatePaneTab('slot2', '__finder__');
     assert.equal(api.panelControlsHtml('6'), terminalToolbarBeforeFinderFocus);
     assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="terminal"'));
     assert.equal((terminalToolbarBeforeFinderFocus.match(/pane-actions-dots/g) || []).length, 1);

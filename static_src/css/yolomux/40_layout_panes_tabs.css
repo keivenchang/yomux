@@ -524,45 +524,40 @@ body.layout-resizing {
   inset: 18%;
 }
 .drop-slot.drop-preview-top::before,
-.yolomux-dockview .dv-groupview.drop-preview-top::before,
-.grid.drop-preview-root.drop-preview-top::before {
+.yolomux-dockview .dv-groupview.drop-preview-top::before {
   top: 6px;
   right: 6px;
   left: 6px;
   height: calc(50% - 9px);
 }
 .drop-slot.drop-preview-bottom::before,
-.yolomux-dockview .dv-groupview.drop-preview-bottom::before,
-.grid.drop-preview-root.drop-preview-bottom::before {
+.yolomux-dockview .dv-groupview.drop-preview-bottom::before {
   right: 6px;
   bottom: 6px;
   left: 6px;
   height: calc(50% - 9px);
 }
-/* Root top/bottom preview must not cover a docked Finder (which is sacred): start after it and span
-   only the non-Finder content width. The vars are set by applyDockedFileExplorerBoundaryPreviewGeometry
-   when a Finder is docked, and default to the full grid width (minus the 6px insets) otherwise. */
-.grid.drop-preview-root.drop-preview-top::before,
-.grid.drop-preview-root.drop-preview-bottom::before {
-  right: auto;
-  left: var(--drop-preview-left, 6px);
-  width: var(--drop-preview-width, calc(100% - 12px));
-}
 .drop-slot.drop-preview-left::before,
-.yolomux-dockview .dv-groupview.drop-preview-left::before,
-.grid.drop-preview-root.drop-preview-left::before {
+.yolomux-dockview .dv-groupview.drop-preview-left::before {
   top: 6px;
   bottom: 6px;
   left: 6px;
   width: calc(50% - 9px);
 }
 .drop-slot.drop-preview-right::before,
-.yolomux-dockview .dv-groupview.drop-preview-right::before,
-.grid.drop-preview-root.drop-preview-right::before {
+.yolomux-dockview .dv-groupview.drop-preview-right::before {
   top: 6px;
   right: 6px;
   bottom: 6px;
   width: calc(50% - 9px);
+}
+.grid.drop-preview-root::before {
+  top: var(--drop-preview-top, 6px);
+  right: auto;
+  bottom: auto;
+  left: var(--drop-preview-left, 6px);
+  width: var(--drop-preview-width, calc(50% - 9px));
+  height: var(--drop-preview-height, calc(100% - 12px));
 }
 .grid.drop-preview-gutter::before {
   top: var(--drop-preview-top, 6px);
@@ -1305,6 +1300,29 @@ body.layout-resizing {
   cursor: pointer;
   user-select: none;
 }
+.layout-column.file-explorer-home-column .pane-tab {
+  width: auto;
+  max-width: 100%;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tab {
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-and-actions-container {
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  overflow: hidden;
+}
+.yolomux-dockview .dv-groupview:has(.file-surface-home-pane) .dv-tabs-container {
+  box-sizing: border-box;
+  flex-wrap: nowrap;
+  align-content: stretch;
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
+  overflow: hidden;
+}
 .tmux-pane-tab-token {
   box-sizing: border-box;
 }
@@ -1331,51 +1349,10 @@ body.layout-resizing {
   min-width: 0;
   max-width: none;
 }
-.file-explorer-mode-switcher {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  min-width: 0;
-  height: var(--pane-tab-height);
-}
-.file-explorer-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  flex: 0 0 auto;
-  height: var(--pane-tab-height);
-  min-width: 0;
-  padding: 0 var(--space-3);
-  box-sizing: border-box;
-  color: var(--pane-tab-text);
-  background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--pane-inactive-tab-border);
-  border-bottom-color: transparent;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  font-family: var(--tab-font);
-  font-size: var(--ui-font-size-2xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.file-explorer-mode-toggle:hover,
-.file-explorer-mode-toggle:focus-visible {
-  color: var(--pane-tab-active-text);
-  border-color: var(--pane-tab-active-border);
-  background: color-mix(in srgb, var(--pane-tab-active-bg) 70%, var(--pane-bar-bg, var(--panel2)) 30%);
-}
-.file-explorer-mode-label {
-  pointer-events: none;
-}
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
 .tmux-pane-tab-token.active,
 .panel.active-pane .pane-tab.active:not(.file-missing),
-.panel.file-explorer-panel .pane-tab.active:not(.file-missing),
-.file-explorer-mode-toggle[aria-pressed="true"] {
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);

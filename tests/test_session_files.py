@@ -75,7 +75,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
-def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_state_input(monkeypatch, tmp_path):
+def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_state_input(no_control_socket, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)

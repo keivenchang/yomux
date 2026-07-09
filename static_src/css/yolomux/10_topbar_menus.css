@@ -985,6 +985,10 @@ body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
   opacity: 1;
   background: var(--active-control-bg);
 }
+.app-menu-command[data-partial="true"] .app-menu-check {
+  opacity: 1;
+  background: color-mix(in srgb, var(--active-control-bg) 48%, transparent);
+}
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
 .app-menu-command + .app-menu-submenu-wrap,
@@ -1264,6 +1268,22 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: var(--menu-detail-text);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+/* File destinations are navigation, not cards: icon, name, explanation, and shortcut/state share
+   one row. The detail is still titled and in the accessible name when it has to ellipsize. */
+.app-menu-file-destination .app-menu-content {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-6);
+}
+.app-menu-file-destination .app-menu-line {
+  min-width: 0;
+}
+.app-menu-file-destination .app-menu-detail {
+  min-width: 0;
+  max-width: none;
+  text-align: end;
 }
 .app-menu-rich {
   min-width: 0;

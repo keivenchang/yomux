@@ -1041,7 +1041,9 @@ async function fetchFileEntry(path) {
 }
 
 async function fetchFileEntryStatus(path) {
-  const entries = await fetchDirectory(dirnameOf(path));
+  // A direct file inspection is user-facing even when Finder is closed or SSE owns background
+  // directory refreshes; suppressing this request makes an existing editor target look missing.
+  const entries = await fetchDirectory(dirnameOf(path), {user: true});
   if (!Array.isArray(entries)) {
     const error = fileExplorerLastListError;
     return {
@@ -1194,11 +1196,12 @@ function removePanelForItem(item) {
 // and delegated click handlers — so relabel-and-rebind would be fragile. Instead evict the cached Finder
 // panel and let renderPanels() rebuild it from the single source of truth, then repopulate the tree.
 function relocalizeFileExplorerPanels() {
-  if (!panelNodes.has(fileExplorerItemId)) return;
-  removePanelForItem(fileExplorerItemId);
-  const remounted = typeof dockviewRemountPanel === 'function' && dockviewRemountPanel(fileExplorerItemId);
+  const mounted = fileSurfaceItems.filter(item => panelNodes.has(item));
+  if (!mounted.length) return;
+  mounted.forEach(removePanelForItem);
+  const remounted = typeof dockviewRemountPanel === 'function' && mounted.every(item => dockviewRemountPanel(item));
   if (!remounted) renderPanels(activePaneItems());
-  refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  if (mounted.includes(finderItemId)) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   renderFileExplorerQuickAccessControls();
 }
 

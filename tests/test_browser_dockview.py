@@ -372,7 +372,7 @@ def test_dockview_tab_action_splits_inside_docked_finder_content(browser, tmp_pa
         moveLeft?.click();
         const finish = () => {
           const empty = document.querySelector('.empty-pane-panel')?.getBoundingClientRect();
-          const finder = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect();
+          const finder = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview')?.getBoundingClientRect();
           const terminal = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect();
           if (!empty || !finder || !terminal) return requestAnimationFrame(finish);
           done({enabled, empty, finder, terminal, tree: layoutSlots[layoutTreeKey]});
@@ -522,9 +522,10 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return fileExplorerMode === 'tabber' && document.querySelectorAll('[data-tabber-tree] .file-tree-row').length >= 41"
+            "return itemInLayout(tabberItemId) && document.querySelectorAll('#panel-__tabber__ [data-tabber-tree] .file-tree-row').length >= 41"
         )
     )
+    wait_for_dockview_tab_geometry(browser, min_tabs=6, min_width=45)
     setup = browser.execute_script(
         """
         clearClientPerfCounters();
@@ -585,13 +586,37 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
         expected_samples = index + 1
-        WebDriverWait(browser, 2).until(
-            lambda driver: driver.execute_script(
-                "return window.__tabSwitchPerf.samples.length >= arguments[0] && activeItemForSide(slotForItem(arguments[1])) === arguments[1]",
-                expected_samples,
-                target,
+        try:
+            WebDriverWait(browser, 2).until(
+                lambda driver: driver.execute_script(
+                    "return window.__tabSwitchPerf.samples.length >= arguments[0] && activeItemForSide(slotForItem(arguments[1])) === arguments[1]",
+                    expected_samples,
+                    target,
+                )
             )
-        )
+        except TimeoutException as exc:
+            diagnostic = browser.execute_script(
+                """
+                const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
+                const rect = tab?.getBoundingClientRect();
+                const hit = document.elementFromPoint(arguments[1], arguments[2]);
+                return {
+                  target: arguments[0],
+                  active: activeItemForSide(slotForItem(arguments[0])),
+                  samples: window.__tabSwitchPerf.samples.length,
+                  hitClass: hit?.className || '',
+                  hitItem: hit?.closest?.('[data-pane-tab]')?.dataset?.paneTab || '',
+                  tabRect: rect ? {left: rect.left, top: rect.top, width: rect.width, height: rect.height} : null,
+                  scrollY: window.scrollY,
+                  documentScrollTop: document.documentElement.scrollTop,
+                  visiblePopovers: document.querySelectorAll('.pane-tab-detached-popover.popover-open').length,
+                };
+                """,
+                target,
+                point["x"],
+                point["y"],
+            )
+            raise AssertionError({"index": index, "point": point, **diagnostic}) from exc
         target = "1" if target == "2" else "2"
 
     result = browser.execute_script(
@@ -1233,7 +1258,7 @@ def test_dockview_complex_layout_sash_hit_targets_stay_transparent(browser, tmp_
     )
     assert len(metrics["groups"]) == 4
     assert len(metrics["sashes"]) >= 3
-    assert any("__files__" in group["tabs"] for group in metrics["groups"])
+    assert any("__finder__" in group["tabs"] for group in metrics["groups"])
     assert any("5" in group["tabs"] for group in metrics["groups"])
     assert any("2" in group["tabs"] for group in metrics["groups"])
     assert any(any(tab.startswith("file:") for tab in group["tabs"]) for group in metrics["groups"])
@@ -1331,11 +1356,11 @@ def test_dockview_touch_finder_close_is_outside_splitter_hit_target(browser, tmp
         result = browser.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
-            const close = document.querySelector('.file-explorer-panel-close');
+            const close = document.querySelector('[data-pane-minimize="__finder__"]');
             if (!close) return done({error: 'Finder close control missing'});
             const rect = close.getBoundingClientRect();
             const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-            const pointTargetsClose = point === close || point?.closest?.('.file-explorer-panel-close') === close;
+            const pointTargetsClose = point === close || point?.closest?.('[data-pane-minimize="__finder__"]') === close;
             close.click();
             requestAnimationFrame(() => requestAnimationFrame(() => done({
               pointTargetsClose,
@@ -3544,13 +3569,13 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:finder,differ,tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
         session_files_payload=session_files_payload,
         grid_width=1300,
         grid_height=620,
     )
-    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview(browser, min_tabs=5)
     wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="1"]')
     wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="2"]')
     opened = browser.execute_async_script(
@@ -3590,9 +3615,9 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         };
         const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
-          setFileExplorerMode('diff', {force: true});
+          activatePaneTab(slotForItem(differItemId), differItemId, {userInitiated: true});
           renderFileExplorerChangesPanels({force: true});
-          const row = await waitFor(() => document.querySelector(`[data-open-change-file="${path}"]`));
+          const row = await waitFor(() => document.querySelector(`.file-explorer-differ [data-open-change-file="${path}"]`));
           row.click();
           await waitFor(() => slotForItem(`filediff:${path}`) === 'slot1');
           done({
@@ -3633,9 +3658,10 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
+          await waitFor(() => !dockviewTabContentInteractionSuppressed());
           setFileEditorViewMode(path, 'edit', item);
           renderOpenFilePath(path);
-          document.querySelector(`[data-open-change-file="${path}"]`).click();
+          document.querySelector(`.file-explorer-differ [data-open-change-file="${path}"]`).click();
           await waitFor(() => slotForItem(item) === 'slot2' && activeItemForSide('slot2') === item && editorViewModeFor(path, item) === 'diff');
           done({
             slot: slotForItem(item),
@@ -3923,6 +3949,7 @@ def test_dockview_drag_reorders_tabs_in_same_pane(browser, tmp_path):
     assert metrics["groups"][0]["tabs"] == ["2", "1", "3"]
     assert metrics["slots"]["left"]["tabs"] == ["2", "1", "3"]
     assert "tabs=left:2,1" in metrics["url"]
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_drag_reorders_two_tab_pane(browser, tmp_path):
@@ -4051,6 +4078,7 @@ def test_dockview_non_pinned_tab_cannot_drop_between_pinned_tabs(browser, tmp_pa
     assert metrics["groups"][0]["tabs"] == ["1", "2", "3"], metrics
     assert metrics["slots"]["left"]["tabs"] == ["1", "2", "3"], metrics
     assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_pinned_tab_cannot_move_to_other_pane(browser, tmp_path):
@@ -4218,6 +4246,7 @@ def test_dockview_pane_drag_handle_swaps_whole_panes(browser, tmp_path):
     assert after["slots"]["right"]["tabs"] == ["1", "2"], after
     assert after["slots"]["__tree"]["split"] == "row", after
     assert round(after["slots"]["__tree"]["pct"]) == 50, after
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_pane_drag_shows_dotted_pane_preview(browser, tmp_path):
@@ -4622,6 +4651,12 @@ def test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry(browser, t
         start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
         end = {"x": group["right"] - edge_offset, "y": round((group["top"] + group["bottom"]) / 2)}
         cdp_drag(browser, start, end)
+        WebDriverWait(browser, 2).until(
+            lambda driver: (
+                len([candidate for candidate in dockview_layout_metrics(driver)["groups"] if candidate["tabs"]]) == 2
+                or driver.execute_script("return !dockviewTabContentInteractionSuppressed()")
+            )
+        )
         if len([group for group in dockview_layout_metrics(browser)["groups"] if group["tabs"]]) == 2:
             break
     WebDriverWait(browser, 5).until(
@@ -4634,6 +4669,7 @@ def test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry(browser, t
     assert groups[0]["rect"]["width"] >= 250
     assert groups[1]["rect"]["width"] >= 250
     assert metrics["slots"]["__tree"]["split"] == "row"
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_same_axis_second_split_preserves_target_half(browser, tmp_path):
@@ -4646,7 +4682,7 @@ def test_dockview_same_axis_second_split_preserves_target_half(browser, tmp_path
         const target = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
         const rect = target.getBoundingClientRect();
         return {
-          x: Math.round(rect.right - 8),
+          x: Math.round(rect.right - rect.width * 0.14),
           y: Math.round(rect.top + rect.height * 0.5),
         };
         """
@@ -4691,7 +4727,7 @@ def test_dockview_drag_creates_quarter_quarter_half_layout(browser, tmp_path):
         const target = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const rect = target.getBoundingClientRect();
         return {
-          x: Math.round(rect.left + 8),
+          x: Math.round(rect.left + rect.width * 0.14),
           y: Math.round(rect.top + rect.height * 0.5),
         };
         """
@@ -4710,6 +4746,7 @@ def test_dockview_drag_creates_quarter_quarter_half_layout(browser, tmp_path):
     assert root["split"] == "row", metrics
     assert abs(widths[0] - widths[1]) <= 40, metrics
     assert widths[2] >= widths[0] * 1.75 and widths[2] >= widths[1] * 1.75, metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_drag_to_root_left_of_stacked_panes_creates_full_height_pane(browser, tmp_path):
@@ -4745,6 +4782,7 @@ def test_dockview_drag_to_root_left_of_stacked_panes_creates_full_height_pane(br
     assert left["rect"]["right"] <= min(group["rect"]["left"] for group in right) + 2
     assert left["rect"]["top"] <= right_top + 2
     assert left["rect"]["bottom"] >= right_bottom - 2
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_drag_to_root_right_of_stacked_panes_creates_full_height_pane(browser, tmp_path):
@@ -4780,6 +4818,7 @@ def test_dockview_drag_to_root_right_of_stacked_panes_creates_full_height_pane(b
     assert right["rect"]["left"] >= max(group["rect"]["right"] for group in left) - 2
     assert right["rect"]["top"] <= left_top + 2
     assert right["rect"]["bottom"] >= left_bottom - 2
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_drag_to_pane_edge_splits_only_that_pane(browser, tmp_path):
@@ -4797,7 +4836,7 @@ def test_dockview_drag_to_pane_edge_splits_only_that_pane(browser, tmp_path):
         const topGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const rect = topGroup.getBoundingClientRect();
         return {
-          x: Math.round(rect.left + 8),
+          x: Math.round(rect.left + rect.width * 0.12),
           y: Math.round(rect.top + rect.height * 0.55),
         };
         """
@@ -4826,6 +4865,7 @@ def test_dockview_drag_to_pane_edge_splits_only_that_pane(browser, tmp_path):
     assert group_3["rect"]["bottom"] <= group_2["rect"]["top"] + 2, metrics
     assert group_2["rect"]["left"] <= group_3["rect"]["left"] + 2, metrics
     assert group_2["rect"]["right"] >= group_1["rect"]["right"] - 2, metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
 def test_dockview_root_left_drag_shows_full_span_preview_before_drop(browser, tmp_path):
@@ -4912,6 +4952,196 @@ def test_dockview_root_right_drag_shows_full_span_preview_before_drop(browser, t
     assert preview["borderColor"] == preview["separatorHover"]
 
 
+@pytest.mark.parametrize(
+    ("top_tabs", "sessions", "remaining_items", "min_tabs"),
+    (
+        ("1,3", ["1", "2", "3"], ["1", "2"], 6),
+        ("3", ["2", "3"], ["2"], 5),
+    ),
+    ids=("source-pane-remains", "source-pane-disappears"),
+)
+def test_dockview_root_right_drop_is_easy_and_preserves_triplet_home_width(
+    browser, tmp_path, top_tabs, sessions, remaining_items, min_tabs
+):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions={','.join(sessions)}&layout=row@22(left,col@50(top,bottom))&tabs=left:finder,differ,tabber;top:{top_tabs};bottom:2",
+        sessions=sessions,
+        grid_width=1100,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=min_tabs)
+    wait_for_dockview_tab_geometry(browser, min_tabs=min_tabs, min_width=40)
+    before = dockview_layout_metrics(browser)
+    home_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
+    content_before = [group for group in before["groups"] if any(item in group["tabs"] for item in remaining_items)]
+    content_left = min(group["rect"]["left"] for group in content_before)
+    content_right = max(group["rect"]["right"] for group in content_before)
+    content_width = content_right - content_left
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = dockview_point(browser, "#dockviewRoot", 0.985, 0.20)
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        settle_browser_frames(browser, 3)
+        preview = browser.execute_script(
+            """
+            const grid = document.querySelector('.grid');
+            const style = getComputedStyle(grid, '::before');
+            return {
+              classes: grid.className,
+              label: grid.dataset.dropLabel || '',
+              left: parseFloat(style.left) || 0,
+              width: parseFloat(style.width) || 0,
+              gridWidth: grid.getBoundingClientRect().width,
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert "drop-preview-root" in preview["classes"] and "drop-preview-right" in preview["classes"], preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: (
+            len([group for group in dockview_layout_metrics(driver)["groups"] if group["tabs"]]) == len(remaining_items) + 2
+            and any(group["tabs"] == ["3"] for group in dockview_layout_metrics(driver)["groups"])
+        )
+    )
+    settle_browser_frames(browser, 4)
+    after = dockview_layout_metrics(browser)
+    home_after = next(group for group in after["groups"] if "__finder__" in group["tabs"])
+    moved = next(group for group in after["groups"] if group["tabs"] == ["3"])
+    remaining = [group for group in after["groups"] if group["tabs"] in [[item] for item in remaining_items]]
+    assert preview["label"] == "Full right", preview
+    assert preview["width"] < preview["gridWidth"] * 0.40, preview
+    assert abs(preview["width"] - content_width / (len(remaining_items) + 1)) <= 35, {"preview": preview, "contentWidth": content_width}
+    assert abs(home_after["rect"]["width"] - home_before["rect"]["width"]) <= 3, after
+    assert moved["rect"]["left"] >= max(group["rect"]["right"] for group in remaining) - 2, after
+    assert moved["rect"]["top"] <= min(group["rect"]["top"] for group in remaining) + 2, after
+    assert moved["rect"]["bottom"] >= max(group["rect"]["bottom"] for group in remaining) - 2, after
+    assert moved["rect"]["width"] < preview["gridWidth"] * 0.40, after
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_tab_header_drag_to_root_right_stays_beside_stacked_panes(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@30(source,col@50(top,bottom))&tabs=source:3;top:1;bottom:2",
+        sessions=["1", "2", "3"],
+        grid_width=1100,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const host = document.querySelector('#dockviewRoot').getBoundingClientRect();
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').getBoundingClientRect();
+        return {x: Math.round(host.right - 3), y: Math.round(tab.top + tab.height / 2)};
+        """
+    )
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        settle_browser_frames(browser, 3)
+        preview = browser.execute_script(
+            """
+            const grid = document.querySelector('.grid');
+            return {
+              root: grid?.classList.contains('drop-preview-root') || false,
+              right: grid?.classList.contains('drop-preview-right') || false,
+              label: grid?.dataset.dropLabel || '',
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview == {"root": True, "right": True, "label": "Full right"}, preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: (
+            len([group for group in dockview_layout_metrics(driver)["groups"] if group["tabs"]]) == 3
+            and any(group["tabs"] == ["3"] for group in dockview_layout_metrics(driver)["groups"])
+        )
+    )
+    settle_browser_frames(browser, 4)
+    metrics = dockview_layout_metrics(browser)
+    groups = [group for group in metrics["groups"] if group["tabs"]]
+    moved = next(group for group in groups if group["tabs"] == ["3"])
+    top = next(group for group in groups if group["tabs"] == ["1"])
+    bottom = next(group for group in groups if group["tabs"] == ["2"])
+    assert moved["rect"]["left"] >= max(top["rect"]["right"], bottom["rect"]["right"]) - 2, metrics
+    assert moved["rect"]["top"] <= min(top["rect"]["top"], bottom["rect"]["top"]) + 2, metrics
+    assert moved["rect"]["bottom"] >= max(top["rect"]["bottom"], bottom["rect"]["bottom"]) - 2, metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+@pytest.mark.parametrize(
+    ("source_slot", "tabs"),
+    (
+        ("top", "top:1,3;bottom:2"),
+        ("bottom", "top:1;bottom:2,3"),
+    ),
+)
+@pytest.mark.parametrize("edge_offset", (3, 28, 52))
+def test_dockview_shared_tab_header_drag_to_root_right_leaves_stacked_panes(
+    browser, tmp_path, source_slot, tabs, edge_offset
+):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1,2,3&layout=col@50(top,bottom)&tabs={tabs}",
+        sessions=["1", "2", "3"],
+        grid_width=1100,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const host = document.querySelector('#dockviewRoot').getBoundingClientRect();
+        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`).getBoundingClientRect();
+        return {x: Math.round(host.right - arguments[1]), y: Math.round(tab.top + tab.height / 2)};
+        """,
+        "1" if source_slot == "top" else "2",
+        edge_offset,
+    )
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        settle_browser_frames(browser, 3)
+        preview = browser.execute_script(
+            """
+            const grid = document.querySelector('.grid');
+            return {
+              root: grid?.classList.contains('drop-preview-root') || false,
+              right: grid?.classList.contains('drop-preview-right') || false,
+              label: grid?.dataset.dropLabel || '',
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview == {"root": True, "right": True, "label": "Full right"}, preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: any(
+            group["tabs"] == ["3"] for group in dockview_layout_metrics(driver)["groups"]
+        )
+    )
+    settle_browser_frames(browser, 4)
+    metrics = dockview_layout_metrics(browser)
+    groups = [group for group in metrics["groups"] if group["tabs"]]
+    moved = next(group for group in groups if group["tabs"] == ["3"])
+    top = next(group for group in groups if group["tabs"] == ["1"])
+    bottom = next(group for group in groups if group["tabs"] == ["2"])
+    assert moved["rect"]["left"] >= max(top["rect"]["right"], bottom["rect"]["right"]) - 2, metrics
+    assert moved["rect"]["top"] <= min(top["rect"]["top"], bottom["rect"]["top"]) + 2, metrics
+    assert moved["rect"]["bottom"] >= max(top["rect"]["bottom"], bottom["rect"]["bottom"]) - 2, metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
 def test_dockview_too_small_pane_edge_rejects_tab_preview(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -4951,11 +5181,11 @@ def test_dockview_too_small_pane_edge_rejects_tab_preview(browser, tmp_path):
     assert result["rootPreview"] is False, result
 
 
-def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, tmp_path):
+def test_dockview_finder_drop_previews_reject_non_triplet_on_every_edge(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1&layout=row@40(left,slot1)&tabs=left:files;slot1:1",
+        "?sessions=1&layout=row@40(left,slot1)&tabs=left:finder,differ,tabber;slot1:1",
         sessions=["1"],
         grid_width=1000,
         grid_height=620,
@@ -4964,7 +5194,7 @@ def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, t
     result = browser.execute_script(
         """
         const gridNode = document.querySelector('#grid');
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const finderSlot = dockviewSlotForGroupElement(finderGroup);
         const contentSlot = dockviewSlotForGroupElement(contentGroup);
@@ -5009,17 +5239,15 @@ def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, t
     )
     assert result["finderRect"]["width"] >= 320, result
     assert result["finderRect"]["height"] >= 440, result
-    for key in ["center", "left", "right", "top"]:
+    for key in ["center", "left", "right", "top", "bottom"]:
         assert result[key]["intent"] is None, result
         assert result[key]["prevented"] is True, result
         assert result[key]["rootPreview"] is False, result
-    assert result["bottom"]["intent"] == {"zone": "bottom", "targetSlot": "left"}, result
-    assert result["bottom"]["prevented"] is False, result
 
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1&layout=row@40(left,slot1)&tabs=left:files;slot1:1",
+        "?sessions=1&layout=row@40(left,slot1)&tabs=left:finder,differ,tabber;slot1:1",
         sessions=["1"],
         grid_width=1000,
         grid_height=420,
@@ -5027,7 +5255,7 @@ def test_dockview_finder_drop_previews_are_bottom_only_and_size_gated(browser, t
     wait_for_dockview(browser, min_tabs=2)
     too_small = browser.execute_script(
         """
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const finderSlot = dockviewSlotForGroupElement(finderGroup);
         const contentSlot = dockviewSlotForGroupElement(contentGroup);
@@ -5077,7 +5305,7 @@ def test_dockview_language_switch_remounts_finder_content(browser, tmp_path):
           await applyLocale('he');
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const after = panelNodes.get(fileExplorerItemId);
-          const group = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview');
+          const group = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview');
           const mounted = group?.querySelector('.dockview-panel-content > .file-explorer-panel');
           done({
             replaced: Boolean(before && after && before !== after),
@@ -5119,7 +5347,7 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
             """
         )
     )
@@ -5129,7 +5357,7 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
         (async () => {
           const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
-          const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview') || null;
+          const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview') || null;
           const widthOf = group => Math.round(group?.getBoundingClientRect?.().width || 0);
           const host = dockviewLayoutState.host;
           const api = dockviewLayoutState.api;
@@ -5177,7 +5405,7 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
     assert result["restored"] is True, result
     assert result["afterWidth"] > 0, result
     assert result["afterSlot"], result
-    assert "__files__" in result["tabs"], result
+    assert "__finder__" in result["tabs"], result
     assert result["errors"] == []
     assert result["rejections"] == []
 
@@ -5186,14 +5414,14 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2&layout=row@24(left,col@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        "?sessions=1,2&layout=row@24(left,col@50(slot1,slot2))&tabs=left:finder,differ,tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=3)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
               && document.querySelector('.dockview-pane-tab[data-pane-tab="2"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
             """
         )
@@ -5202,7 +5430,7 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
         """
         const host = document.querySelector('#dockviewRoot');
         const gridNode = document.querySelector('#grid');
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
         const hostRect = host.getBoundingClientRect();
         const gridRect = gridNode.getBoundingClientRect();
@@ -5260,14 +5488,14 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2&layout=row@24(left,col@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        "?sessions=1,2&layout=row@24(left,col@50(slot1,slot2))&tabs=left:finder,differ,tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=3)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
               && document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
               && document.querySelector('.dockview-pane-tab[data-pane-tab="2"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
             """
@@ -5301,7 +5529,7 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
         preview = browser.execute_script(
             """
             const grid = document.querySelector('#grid');
-            const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+            const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
             const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
             const gridRect = grid.getBoundingClientRect();
             const finderRect = finderGroup.getBoundingClientRect();
@@ -5360,18 +5588,18 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
     assert preview["coversFinder"] is False, preview
 
 
-def test_dockview_root_top_bottom_preview_normalizes_right_finder_and_avoids_reserved_column(browser, tmp_path):
+def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2&layout=row@76(col@50(slot1,slot2),right)&tabs=slot1:1;slot2:2;right:files",
+        "?sessions=1,2&layout=row@24(col@50(leftTop,leftBottom),col@50(slot1,slot2))&tabs=leftTop:finder,differ;leftBottom:tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=3)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
+            return document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0
               && document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview')?.getBoundingClientRect().width > 0;
             """
         )
@@ -5380,7 +5608,7 @@ def test_dockview_root_top_bottom_preview_normalizes_right_finder_and_avoids_res
         """
         const host = document.querySelector('#dockviewRoot');
         const gridNode = document.querySelector('#grid');
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const hostRect = host.getBoundingClientRect();
         const gridRect = gridNode.getBoundingClientRect();
@@ -5448,14 +5676,14 @@ def test_dockview_drag_between_content_panes_preserves_docked_finder_width(brows
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:finder,differ,tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=2)
     wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="1"]')
     wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="2"]')
     before = dockview_layout_metrics(browser)
-    finder_before = next(group for group in before["groups"] if "__files__" in group["tabs"])
+    finder_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
     end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.68, 0.5)
     cdp_drag(browser, start, end, steps=28)
@@ -5463,16 +5691,396 @@ def test_dockview_drag_between_content_panes_preserves_docked_finder_width(brows
         lambda driver: any("1" in group["tabs"] and "2" in group["tabs"] for group in dockview_layout_metrics(driver)["groups"])
     )
     after = dockview_layout_metrics(browser)
-    finder_after = next(group for group in after["groups"] if "__files__" in group["tabs"])
+    finder_after = next(group for group in after["groups"] if "__finder__" in group["tabs"])
     assert abs(finder_after["rect"]["width"] - finder_before["rect"]["width"]) <= 3
     assert round(after["slots"]["__tree"]["pct"]) == round(before["slots"]["__tree"]["pct"])
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_tabber_pointer_drop_over_finder_content_moves_tab_without_clicking_tree(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder;right:1,tabber",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__tabber__"]')
+    wait_for_visible_selector(browser, '.file-explorer-finder .file-explorer-tree-panel')
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const target = document.querySelector('.file-explorer-finder .file-explorer-tree-panel');
+        const rect = target?.getBoundingClientRect();
+        const sourceSlot = slotForItem(tabberItemId);
+        if (!rect || !sourceSlot) return done({error: 'missing source or Finder target'});
+        dockviewBeginTabPointerDrag({button: 0, clientX: rect.right + 100, clientY: rect.top}, tabberItemId);
+        dockviewFinishTabPointerDrag({clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height * 0.35});
+        setTimeout(() => {
+          const finderSlot = slotForItem(finderItemId);
+          done({
+            finderSlot,
+            tabberSlot: slotForItem(tabberItemId),
+            tabs: finderSlot ? paneTabs(finderSlot) : [],
+            suppressed: dockviewTabContentInteractionSuppressed(),
+            errors: window.__bootErrors || [],
+          });
+        }, 50);
+        """
+    )
+    assert result.get("error") is None, result
+    assert result["finderSlot"] == result["tabberSlot"], result
+    assert result["tabs"] == ["__finder__", "__tabber__"], result
+    assert result["suppressed"] is True, result
+    assert result["errors"] == [], result
+
+
+def dockview_drag_cleanup_metrics(browser):
+    return browser.execute_script(
+        """
+        const visible = node => {
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+            && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+        };
+        const visibleMatches = selector => Array.from(document.querySelectorAll(selector))
+          .filter(visible)
+          .map(node => node.className || node.tagName);
+        const homeSlot = slotForItem(finderItemId) || slotForItem(tabberItemId) || slotForItem(differItemId);
+        return {
+          homeSlot,
+          homeTabs: homeSlot ? paneTabs(homeSlot) : [],
+          differSlot: slotForItem(differItemId),
+          tabPointerDrag: Boolean(dockviewLayoutState.tabPointerDrag),
+          panePointerDrag: Boolean(dockviewLayoutState.panePointerDrag),
+          dragStateItem: dragState.item || '',
+          customPreview: Boolean(dragState.customPreview?.isConnected),
+          dragGhosts: visibleMatches('.dv-tab-ghost-drag, .dv-tab--dragging, .dv-tab-dragging, .dv-dragged'),
+          dropTargets: visibleMatches('.dv-drop-target-selection, .dv-drop-target-anchor'),
+          appPreviews: visibleMatches('.drag-over, .drop-preview'),
+          invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+          errors: window.__bootErrors || [],
+        };
+        """
+    )
+
+
+def assert_dockview_drag_cleanup(result):
+    assert result["tabPointerDrag"] is False and result["panePointerDrag"] is False, result
+    assert result["dragStateItem"] == "" and result["customPreview"] is False, result
+    assert result["dragGhosts"] == [] and result["dropTargets"] == [] and result["appPreviews"] == [], result
+    assert result["invalidPreview"] is False, result
+    assert result["errors"] == [], result
+
+
+def test_dockview_real_triplet_drop_within_home_clears_drag_ui(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,tabber,differ;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]')
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]')
+    wait_for_visible_selector(browser, '.file-explorer-differ .file-explorer-changes-panel')
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]', 0.45, 0.5)
+    end = dockview_point(browser, '.file-explorer-differ .file-explorer-changes-panel', 0.5, 0.35)
+    cdp_drag(browser, start, end, steps=32)
+    settle_browser_frames(browser, 4)
+    result = dockview_drag_cleanup_metrics(browser)
+    assert result["homeTabs"] == ["__finder__", "__tabber__", "__differ__"], result
+    assert result["differSlot"]
+    assert_dockview_drag_cleanup(result)
+
+
+def test_dockview_real_triplet_drop_into_home_header_moves_and_clears_drag_ui(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,tabber;right:1,differ",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]')
+    wait_for_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__tabber__"]')
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]', 0.45, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__tabber__"]', 0.72, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return slotForItem(differItemId) === slotForItem(finderItemId);"
+        )
+    )
+    settle_browser_frames(browser, 4)
+    result = dockview_drag_cleanup_metrics(browser)
+    assert result["homeTabs"] == ["__finder__", "__tabber__", "__differ__"], result
+    assert result["differSlot"] == result["homeSlot"], result
+    assert_dockview_drag_cleanup(result)
+
+
+def test_dockview_real_triplet_release_over_finder_row_clears_drag_ui(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,tabber;right:1,differ",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_visible_selector(browser, '.file-explorer-finder .file-explorer-tree-panel')
+    browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-finder .file-explorer-tree-panel');
+        const row = document.createElement('div');
+        row.className = 'file-tree-row';
+        tree.replaceChildren(row);
+        updateFileTreeRow(row, '/tmp', {name: 'drop-target.txt', kind: 'file', size: 1, mtime: 1}, 0);
+        """
+    )
+    wait_for_visible_selector(browser, '.file-explorer-finder .file-tree-row[data-path="/tmp/drop-target.txt"]')
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__differ__"]', 0.45, 0.5)
+    end = dockview_point(browser, '.file-explorer-finder .file-tree-row[data-path="/tmp/drop-target.txt"]', 0.5, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    settle_browser_frames(browser, 4)
+    result = dockview_drag_cleanup_metrics(browser)
+    assert result["differSlot"] == result["homeSlot"], result
+    assert browser.execute_script(
+        "return filePanelItemsForPath('/tmp/drop-target.txt').length;"
+    ) == 0
+    assert_dockview_drag_cleanup(result)
+
+
+def test_dockview_rejected_terminal_release_over_finder_row_clears_drag_ui(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,tabber;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_visible_selector(browser, '.file-explorer-finder .file-explorer-tree-panel')
+    browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-finder .file-explorer-tree-panel');
+        const row = document.createElement('div');
+        row.className = 'file-tree-row';
+        tree.replaceChildren(row);
+        updateFileTreeRow(row, '/tmp', {name: 'drop-target.txt', kind: 'file', size: 1, mtime: 1}, 0);
+        """
+    )
+    wait_for_visible_selector(browser, '.file-explorer-finder .file-tree-row[data-path="/tmp/drop-target.txt"]')
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.45, 0.5)
+    end = dockview_point(browser, '.file-explorer-finder .file-tree-row[data-path="/tmp/drop-target.txt"]', 0.5, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    settle_browser_frames(browser, 4)
+    result = dockview_drag_cleanup_metrics(browser)
+    assert result["homeTabs"] == ["__finder__", "__tabber__"], result
+    assert browser.execute_script("return slotForItem('1');") == "right"
+    assert browser.execute_script(
+        "return filePanelItemsForPath('/tmp/drop-target.txt').length;"
+    ) == 0
+    assert_dockview_drag_cleanup(result)
+
+
+@pytest.mark.parametrize(
+    ("zone", "x_ratio", "y_ratio", "expected_split"),
+    (
+        ("left", 0.02, 0.5, "row"),
+        ("right", 0.98, 0.5, "row"),
+        ("top", 0.5, 0.14, "column"),
+        ("bottom", 0.5, 0.95, "column"),
+    ),
+)
+def test_dockview_real_edge_drop_matrix_clears_drag_ui(
+    browser, tmp_path, zone, x_ratio, y_ratio, expected_split
+):
+    browser.set_window_size(1300, 900)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=left&tabs=left:1,2",
+        sessions=["1", "2"],
+        grid_width=1200,
+        grid_height=500,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
+    target = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = group.getBoundingClientRect();
+        return {
+          x: Math.round(rect.left + rect.width * arguments[0]),
+          y: Math.round(rect.top + rect.height * arguments[1]),
+          rect: {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height},
+          viewport: {width: innerWidth, height: innerHeight},
+        };
+        """,
+        x_ratio,
+        y_ratio,
+    )
+    try:
+        cdp_drag_hold(browser, start, target, steps=32)
+        preview = browser.execute_script(
+            """
+            const grid = document.querySelector('.grid');
+            return {
+              native: Array.from(document.querySelectorAll('.dv-drop-target-selection, .dv-drop-target-anchor'))
+                .filter(node => {
+                  const rect = node.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0 && getComputedStyle(node).display !== 'none';
+                })
+                .map(node => node.className || ''),
+              root: grid?.classList.contains('drop-preview-root') || false,
+              rootZone: grid?.classList.contains(`drop-preview-${arguments[0]}`) || false,
+            };
+            """,
+            zone,
+        )
+    finally:
+        cdp_release(browser, target)
+    assert (
+        any(f"dv-drop-target-{zone}" in class_name for class_name in preview["native"])
+        or (preview["root"] is True and preview["rootZone"] is True)
+    ), {"zone": zone, "preview": preview, "target": target}
+    WebDriverWait(browser, 5).until(
+        lambda driver: len(
+            [group for group in dockview_layout_metrics(driver)["groups"] if group["tabs"]]
+        )
+        == 2
+    )
+    settle_browser_frames(browser, 4)
+    metrics = dockview_layout_metrics(browser)
+    assert metrics["slots"]["__tree"]["split"] == expected_split, {"zone": zone, **metrics}
+    assert sorted(group["tabs"] for group in metrics["groups"] if group["tabs"]) == [["1"], ["2"]], metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_row_order(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@30(left,right)&tabs=left:finder,differ,tabber;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    metrics = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]');
+            const group = tab?.closest('.dv-groupview');
+            const minimize = group?.querySelector('.dockview-pane-header-actions [data-pane-minimize]');
+            const header = group?.querySelector('.dv-tabs-and-actions-container');
+            const inner = group?.querySelector('.file-explorer-finder .virtual-panel-controls');
+            const primary = group?.querySelector('.file-explorer-finder .file-explorer-primary-row');
+            const path = group?.querySelector('.file-explorer-finder .file-explorer-path-row');
+            const actions = group?.querySelector('.file-explorer-finder .file-explorer-actions-row');
+            const reload = primary?.querySelector('[data-file-explorer-refresh]');
+            const fileTabs = Array.from(group?.querySelectorAll('.dockview-pane-tab') || [])
+              .filter(node => ['__finder__', '__differ__', '__tabber__'].includes(node.dataset.paneTab));
+            const visible = node => {
+              if (!node) return false;
+              const style = getComputedStyle(node);
+              const bounds = node.getBoundingClientRect();
+              return style.display !== 'none' && style.visibility !== 'hidden' && bounds.width > 0 && bounds.height > 0;
+            };
+            const rect = node => node?.getBoundingClientRect();
+            const tabRect = rect(tab), minRect = rect(minimize), headerRect = rect(header), primaryRect = rect(primary), pathRect = rect(path), actionsRect = rect(actions), reloadRect = rect(reload);
+            const fileTabRects = fileTabs.map(rect);
+            if (!tabRect || !minRect || !headerRect || !primaryRect || !pathRect || !actionsRect || !reloadRect || fileTabRects.length !== 3) return null;
+            return {
+              tab: {top: tabRect.top, bottom: tabRect.bottom},
+              minimize: {top: minRect.top, bottom: minRect.bottom, left: minRect.left, right: minRect.right},
+              groupRight: group.getBoundingClientRect().right,
+              visibleMinimizeCount: Array.from(group.querySelectorAll('[data-pane-minimize]')).filter(visible).length,
+              fileTabCloseCount: fileTabs.reduce((count, node) => count + node.querySelectorAll('.pane-tab-close').length, 0),
+              innerPresent: Boolean(inner),
+              fileTabs: fileTabRects.map(bounds => ({top: bounds.top, bottom: bounds.bottom, right: bounds.right})),
+              sessionText: primary.textContent.trim(),
+              headerBottom: headerRect.bottom,
+              primaryTop: primaryRect.top,
+              primaryRight: primaryRect.right,
+              reloadRight: reloadRect.right,
+              reloadInPrimary: reload?.parentElement === primary,
+              reloadInActions: Boolean(actions.querySelector('[data-file-explorer-refresh]')),
+              pathTop: pathRect.top,
+              actionsTop: actionsRect.top,
+              errors: window.__bootErrors || [],
+            };
+            """
+        )
+    )
+    assert metrics["tab"]["top"] < metrics["minimize"]["bottom"] and metrics["minimize"]["top"] < metrics["tab"]["bottom"], metrics
+    assert abs(metrics["groupRight"] - metrics["minimize"]["right"]) <= 8, metrics
+    assert metrics["visibleMinimizeCount"] == 1, metrics
+    assert metrics["fileTabCloseCount"] == 3, metrics
+    assert metrics["innerPresent"] is False, metrics
+    assert max(tab["top"] for tab in metrics["fileTabs"]) - min(tab["top"] for tab in metrics["fileTabs"]) <= 1, metrics
+    assert max(tab["right"] for tab in metrics["fileTabs"]) <= metrics["minimize"]["left"] + 1, metrics
+    assert metrics["sessionText"].startswith("Session:"), metrics
+    assert metrics["primaryTop"] - metrics["headerBottom"] <= 8, metrics
+    assert metrics["reloadInPrimary"] is True and metrics["reloadInActions"] is False, metrics
+    assert metrics["primaryRight"] - metrics["reloadRight"] <= 2, metrics
+    assert metrics["primaryTop"] < metrics["pathTop"] < metrics["actionsTop"], metrics
+    assert metrics["errors"] == [], metrics
+
+
+def test_dockview_minimizing_finder_tab_preserves_triplet_home_width(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(left,right)&tabs=left:finder,differ,tabber;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+
+    def home_metrics(driver):
+        return driver.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="__differ__"]');
+            const group = tab?.closest('.dv-groupview');
+            const host = document.querySelector('.yolomux-dockview');
+            const groupRect = group?.getBoundingClientRect();
+            const hostRect = host?.getBoundingClientRect();
+            if (!groupRect || !hostRect?.width) return null;
+            return {
+              width: groupRect.width,
+              ratio: groupRect.width / hostRect.width,
+              pct: Number(layoutSlots?.__tree?.pct || 0),
+              finderPresent: itemInLayout(finderItemId),
+              tabs: paneTabs(slotForItem(differItemId)),
+              errors: window.__bootErrors || [],
+            };
+            """
+        )
+
+    before = WebDriverWait(browser, 5).until(home_metrics)
+    browser.execute_script(
+        """
+        document.querySelector(
+          '.dockview-pane-tab[data-pane-tab="__finder__"] [data-pane-tab-close]'
+        )?.click();
+        """
+    )
+    def finder_removed_metrics(driver):
+        metrics = home_metrics(driver)
+        return metrics if metrics and not metrics["finderPresent"] else None
+
+    after = WebDriverWait(browser, 5).until(finder_removed_metrics)
+    assert before["tabs"] == ["__finder__", "__differ__", "__tabber__"], before
+    assert after["tabs"] == ["__differ__", "__tabber__"], after
+    assert abs(after["pct"] - before["pct"]) <= 0.1, {"before": before, "after": after}
+    assert abs(after["ratio"] - before["ratio"]) <= 0.02, {"before": before, "after": after}
+    assert after["errors"] == [], after
 
 
 def test_dockview_docked_finder_sash_resize_updates_root_pct(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:files;slot1:1;slot2:2",
+        "?sessions=1,2&layout=row@24(left,row@50(slot1,slot2))&tabs=left:finder,differ,tabber;slot1:1;slot2:2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=2)
@@ -5480,7 +6088,7 @@ def test_dockview_docked_finder_sash_resize_updates_root_pct(browser, tmp_path):
         lambda driver: len(dockview_layout_metrics(driver)["groups"]) >= 3
     )
     before = dockview_layout_metrics(browser)
-    finder_before = next(group for group in before["groups"] if "__files__" in group["tabs"])
+    finder_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
     content_before = sorted([group for group in before["groups"] if group["tabs"] in (["1"], ["2"])], key=lambda group: group["rect"]["left"])
     start = browser.execute_script(
         """
@@ -5511,12 +6119,12 @@ def test_dockview_docked_finder_sash_resize_updates_root_pct(browser, tmp_path):
     cdp_drag(browser, start, end, steps=24)
     WebDriverWait(browser, 5).until(
         lambda driver: abs(
-            next(group for group in dockview_layout_metrics(driver)["groups"] if "__files__" in group["tabs"])["rect"]["width"]
+            next(group for group in dockview_layout_metrics(driver)["groups"] if "__finder__" in group["tabs"])["rect"]["width"]
             - finder_before["rect"]["width"]
         ) > 35
     )
     after = dockview_layout_metrics(browser)
-    finder_after = next(group for group in after["groups"] if "__files__" in group["tabs"])
+    finder_after = next(group for group in after["groups"] if "__finder__" in group["tabs"])
     content_after = sorted([group for group in after["groups"] if group["tabs"] in (["1"], ["2"])], key=lambda group: group["rect"]["left"])
     assert finder_after["rect"]["width"] > finder_before["rect"]["width"] + 35
     assert after["slots"]["__tree"]["pct"] > before["slots"]["__tree"]["pct"] + 3
@@ -5584,11 +6192,11 @@ def test_dockview_file_drag_from_finder_opens_in_target_pane_with_preview(browse
     assert result["opened"]["options"]["targetZone"] == "left"
 
 
-def test_dockview_file_drag_to_finder_previews_only_roomy_bottom(browser, tmp_path):
+def test_dockview_file_drag_to_finder_home_is_rejected_on_every_edge(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1&layout=row@40(left,slot1)&tabs=left:files;slot1:1",
+        "?sessions=1&layout=row@40(left,slot1)&tabs=left:finder,differ,tabber;slot1:1",
         sessions=["1"],
         grid_width=1000,
         grid_height=620,
@@ -5600,7 +6208,7 @@ def test_dockview_file_drag_to_finder_previews_only_roomy_bottom(browser, tmp_pa
         window.openDraggedFilesInEditor = (payload, options) => {
           window.__dockviewFileOpen = {payload, options};
         };
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const target = finderGroup.querySelector('.dockview-panel-content') || finderGroup;
         const rect = finderGroup.getBoundingClientRect();
         const store = {
@@ -5646,14 +6254,12 @@ def test_dockview_file_drag_to_finder_previews_only_roomy_bottom(browser, tmp_pa
     assert result["center"]["preview"]["dropPreview"] is False, result
     assert result["left"]["dropEffect"] == "none", result
     assert result["left"]["preview"]["dropPreview"] is False, result
-    assert result["bottom"]["dropEffect"] == "copy", result
-    assert result["bottom"]["preview"]["dropPreview"] is True, result
-    assert result["bottom"]["preview"]["bottom"] is True, result
-    assert result["bottom"]["preview"]["label"] == "bottom", result
+    assert result["bottom"]["dropEffect"] == "none", result
+    assert result["bottom"]["preview"]["dropPreview"] is False, result
+    assert result["bottom"]["preview"]["bottom"] is False, result
+    assert result["bottom"]["preview"]["label"] == "", result
     assert result["drop"]["defaultPrevented"] is True, result
-    assert result["opened"]["payload"]["path"] == "/home/test/yolomux.dev/README.md", result
-    assert result["opened"]["options"]["targetSlot"] == "left", result
-    assert result["opened"]["options"]["targetZone"] == "bottom", result
+    assert result["opened"] is None, result
 
 
 def test_dockview_multi_file_drag_preserves_order_dedupes_and_uses_one_target(browser, tmp_path):
@@ -5735,7 +6341,7 @@ def test_dockview_directory_drag_over_finder_is_reserved_but_terminal_path_targe
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1&layout=row@30(left,slot1)&tabs=left:files;slot1:1",
+        "?sessions=1&layout=row@30(left,slot1)&tabs=left:finder,differ,tabber;slot1:1",
         sessions=["1"],
         grid_width=1200,
         grid_height=620,
@@ -5743,7 +6349,7 @@ def test_dockview_directory_drag_over_finder_is_reserved_but_terminal_path_targe
     wait_for_dockview(browser, min_tabs=2)
     result = browser.execute_script(
         """
-        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__files__"]').closest('.dv-groupview');
+        const finderGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]').closest('.dv-groupview');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const target = finderGroup.querySelector('.dockview-panel-content') || finderGroup;
         const finderRect = finderGroup.getBoundingClientRect();

@@ -968,7 +968,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     root_path = str(share_root)
     expires_at = 4102444800.0
     layout = "row@34(left,right)"
-    tabs = f"left:files;right:6,file:{done_path}*"
+    tabs = f"left:__finder__,__differ__,__tabber__;right:6,file:{done_path}*"
     share_ui_state = {
         "layout": layout,
         "tabs": tabs,
@@ -1119,28 +1119,30 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
                 return tab ? tab.textContent : '';
               };
               const finderReady = await waitFor(() => {
-                const pathInput = document.getElementById('fileExplorerPath');
-                const hasDone = Array.from(document.querySelectorAll('.file-tree-row[data-path]'))
+                const pathInput = document.querySelector('#panel-__finder__ .file-explorer-path-inline');
+                const hasDone = Array.from(document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]'))
                   .some(row => row.dataset.path === donePath);
                 return pathInput?.value === rootPath && hasDone && !pathInput.classList.contains('error');
               });
               const editorReady = await waitFor(() => (document.body.textContent || '').includes('Share viewer parity.'));
               const sessionTabText = tabText();
-              await applyShareUiState({finder: {root: rootPath, rootMode: 'sync', mode: 'diff', session: '6'}});
-              const differReady = await waitFor(() => visibleText('.file-explorer-changes-panel').includes('DONE.md')
-                && !visibleText('.file-explorer-changes-panel').includes('TypeError'));
-              const differText = visibleText('.file-explorer-changes-panel');
-              await applyShareUiState({finder: {root: rootPath, rootMode: 'sync', mode: 'tabber', session: '6'}});
-                  const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="window"]'))
-                    .some(row => (row.textContent || '').includes('1:codex')));
-              const tabberText = visibleText('.file-explorer-changes-panel');
+              activatePaneTab(slotForItem(differItemId), differItemId, {userInitiated: false});
+              await frame();
+              const differReady = await waitFor(() => visibleText('#panel-__differ__ .file-explorer-changes-panel').includes('DONE.md')
+                && !visibleText('#panel-__differ__ .file-explorer-changes-panel').includes('TypeError'));
+              const differText = visibleText('#panel-__differ__ .file-explorer-changes-panel');
+              activatePaneTab(slotForItem(tabberItemId), tabberItemId, {userInitiated: false});
+              await frame();
+              const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="window"]'))
+                .some(row => (row.textContent || '').includes('1:codex')));
+              const tabberText = visibleText('#panel-__tabber__');
               return {
                 finderReady,
                 editorReady,
                 differReady,
                 tabberReady,
-                pathValue: document.getElementById('fileExplorerPath')?.value || '',
-                pathError: document.getElementById('fileExplorerPath')?.classList.contains('error') || false,
+                pathValue: document.querySelector('#panel-__finder__ .file-explorer-path-inline')?.value || '',
+                pathError: document.querySelector('#panel-__finder__ .file-explorer-path-inline')?.classList.contains('error') || false,
                 sessionTabText,
                 bodyHasLoadFailed: (document.body.textContent || '').includes('TypeError: Load failed')
                   || (document.body.textContent || '').includes('Failed to fetch'),
@@ -2527,7 +2529,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 assert metrics["detail"]["finderMode"] == mode, metrics
                 assert metrics["detail"]["rootMode"] == root_mode, metrics
                 assert metrics["detail"]["dateMode"] == date_mode, metrics
-                assert metrics["detail"]["finderPanelCount"] <= 1, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 3, metrics
                 if mode == "diff":
                     assert host["sessionFilesSortMode"] == sort_mode, host
                 else:
@@ -2540,7 +2542,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
                 assert host["finderOpen"] is visible, host
                 assert metrics["detail"]["finderOpen"] is visible, metrics
-                assert metrics["detail"]["finderPanelCount"] <= 1, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 3, metrics
 
             host_phase("staleDifferPrecondition")
             stale_differ = wait_viewer_phase("finder-restore-stale-diff")
@@ -2551,9 +2553,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             restored_finder = wait_viewer_phase("finder-restore-topology-keyframe", timeout=14)
             assert restored_finder["detail"]["finderOpen"] is True, restored_finder
             assert restored_finder["detail"]["finderMode"] == "files", restored_finder
-            assert restored_finder["detail"]["finderPanelCount"] <= 1, restored_finder
+            assert restored_finder["detail"]["finderPanelCount"] <= 3, restored_finder
             assert restored_finder["staleDifferSentinel"] is False, restored_finder
-            assert restored_finder["changesPanelCount"] == 0, restored_finder
+            assert restored_finder["changesPanelCount"] <= 1, restored_finder
 
         if matrix_section == "resilience":
             before_rapid = viewer_state()
@@ -4358,8 +4360,8 @@ def test_share_geometry_digest_resyncs_slot_drift_in_browser(browser, tmp_path):
           const waitFor = window.__yolomuxTestWaitFor;
           await frame();
           const host = shareGeometryDigestFrame();
-          const drifted = layoutFromParam('row@25(left,slot1)', 'left:1;slot1:2');
-          applyLayoutSlots(drifted, {prune: false});
+          const drifted = layoutFromParam('row@50(left,slot2)', 'left:1;slot2:2');
+          layoutSlots = drifted;
           await waitFor(() => shareGeometryFirstDifference(host, shareGeometryDigestFrame()) === 'slots');
           const beforeDiff = shareGeometryFirstDifference(host, shareGeometryDigestFrame());
           window.__fixtureSharePayload = {

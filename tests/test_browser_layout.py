@@ -8689,9 +8689,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=__files__,1&layout=row@34(left,right)&tabs=left:__files__;right:1",
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
         sessions=["1"],
-        file_explorer_open_intent="1",
         transcript_sessions={
             "1": {
                 "current_path": "/home/test/yolomux.dev8001",
@@ -8715,12 +8714,11 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return typeof setFileExplorerMode === 'function'
-              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle') !== null;
+            return typeof refreshTabberPanels === 'function'
+              && document.querySelector('#panel-__tabber__') !== null;
             """
         )
     )
-    browser.execute_script("setFileExplorerMode('tabber', {force: true});")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return document.querySelectorAll('.file-tree-row[data-tabber-type]').length >= 2"
@@ -10680,7 +10678,7 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2,__prefs__&layout=row@50(left,right)&tabs=left:files,1;right:__prefs__,2",
+        "?sessions=__finder__,1,2,__prefs__&layout=row@50(left,right)&tabs=left:__finder__,1;right:__prefs__,2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=4)
@@ -10701,8 +10699,8 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
           (document.activeElement || window).dispatchEvent(event);
           return event.defaultPrevented;
         };
-        activatePaneTab('left', fileExplorerItemId, {userInitiated: true});
-        setFocusedPanelItem(fileExplorerItemId, {userInitiated: true});
+        activatePaneTab('left', finderItemId, {userInitiated: true});
+        setFocusedPanelItem(finderItemId, {userInitiated: true});
         const firstPrevented = fireMetaArrow('ArrowRight');
         const afterFinderRight = {
           left: activeItemForSide('left'),
@@ -10751,13 +10749,13 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
 
 
 def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__files__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__files__;left:1;right:__prefs__")
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__finder__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__finder__;left:1;right:__prefs__")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
             return document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]') !== null
               && document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]') !== null
               && document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]') !== null
               && document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]') !== null
             """
@@ -10794,7 +10792,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         const ringRange = document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]');
         const radio = document.querySelector('input[data-setting-path="appearance.date_time_hour_cycle"]');
         const prefsScroll = document.querySelector('.preferences-scroll');
-        const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
+        const finderControl = document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
         const brandYo = document.querySelector('.brand-title .brand-yolo');
@@ -10855,8 +10853,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           prefsScrollThumb: getComputedStyle(prefsScroll, '::-webkit-scrollbar-thumb').backgroundColor,
           expectedScrollThumb,
           expectedNeutralScrollThumb,
-          finderModeBg: getComputedStyle(finderMode).backgroundColor,
-          finderModeBorder: getComputedStyle(finderMode).borderTopColor,
+          finderControlBg: getComputedStyle(finderControl).backgroundColor,
+          finderControlBorder: getComputedStyle(finderControl).borderTopColor,
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
           tabMetaBorder: getComputedStyle(tabMeta).borderTopColor,
           notifyBg: getComputedStyle(notify).backgroundColor,
@@ -10886,8 +10884,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert metrics["radioAccent"] == metrics["expectedActiveAccent"], metrics
     assert metrics["prefsScrollColor"].startswith(metrics["expectedNeutralScrollThumb"]), metrics
     assert metrics["prefsScrollThumb"] == metrics["expectedNeutralScrollThumb"], metrics
-    assert metrics["finderModeBg"] == metrics["expectedActiveAccent"], metrics
-    assert metrics["finderModeBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["finderControlBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["finderControlBorder"] == metrics["expectedActiveAccent"], metrics
     assert metrics["tabMetaBg"] == metrics["expectedActiveAccent"], metrics
     assert metrics["tabMetaBorder"] == metrics["expectedActiveAccent"], metrics
     assert metrics["notifyBg"] == metrics["expectedActiveAccent"], metrics
@@ -12713,7 +12711,7 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
     wait_background("#modified-files-repo-head", tokens["accent"])
 
 
-def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):
+def test_finder_and_independent_differ_scrollbars_hover_independently(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     browser.execute_script(
         """
@@ -12776,10 +12774,10 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     )
     assert overflow["differ"]
     wait_thumb("#modified-files-panel", neutral)
-    browser.execute_script("document.getElementById('finder-panel')?.classList.add('active-pane', 'focused-pane')")
+    browser.execute_script("document.getElementById('differ-panel')?.classList.add('active-pane', 'focused-pane')")
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", accent)
-    browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
+    browser.execute_script("document.getElementById('differ-panel')?.classList.remove('active-pane', 'focused-pane')")
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
     fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
@@ -13253,32 +13251,26 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
         const pathRow = toolbar.querySelector('.file-explorer-path-row');
         const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
-        const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
-        const collapse = primaryRow.querySelector('[data-session-files-collapse-toggle]');
+        const session = primaryRow.querySelector('.file-explorer-diff-session-control');
+        const primarySpacer = primaryRow.querySelector('.file-explorer-toolbar-spacer');
+        const refresh = primaryRow.querySelector('[data-file-explorer-refresh]');
         const newFile = actionsRow.querySelector('[data-file-explorer-new-file]');
         const newFolder = actionsRow.querySelector('[data-file-explorer-new-folder]');
         const actionsSpacer = actionsRow.querySelector('.file-explorer-toolbar-spacer');
         const sync = pathRow.querySelector('.file-explorer-root-mode-toggle-panel');
         const hidden = actionsRow.querySelector('.file-explorer-hidden-toggle-panel');
         const sort = actionsRow.querySelector('.file-explorer-sort-select');
-        const quick = toolbar.querySelector('.file-explorer-quick-access-panel');
+        const dateControls = actionsRow.querySelector('.file-explorer-date-controls');
         const path = pathRow.querySelector('.file-explorer-path-inline');
         const copy = pathRow.querySelector('.file-explorer-path-copy-panel');
-        const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
-        const diffSession = primaryRow.querySelector('.file-explorer-diff-session-control');
-        const primarySpacer = primaryRow.querySelector('.file-explorer-toolbar-spacer');
-        const modeButtons = Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]'));
-        const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
-        const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
-        const date = cluster.querySelector('.file-explorer-date-toggle');
-        const expand = cluster.querySelector('[data-file-tree-expand-collapse-all="expand"]');
-        const collapseAll = cluster.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
-        const refresh = cluster.querySelector('.changes-refresh');
-        const close = primaryRow.querySelector('.file-explorer-panel-close');
+        const date = dateControls.querySelector('.file-explorer-date-toggle');
+        const expand = dateControls.querySelector('[data-file-tree-expand-collapse-all="expand"]');
+        const collapseAll = dateControls.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
         const toolbarRect = toolbar.getBoundingClientRect();
         const primaryRowRect = primaryRow.getBoundingClientRect();
         const pathRowRect = pathRow.getBoundingClientRect();
         const actionsRowRect = actionsRow.getBoundingClientRect();
+        const sessionRect = session.getBoundingClientRect();
         const newFileRect = newFile.getBoundingClientRect();
         const newFolderRect = newFolder.getBoundingClientRect();
         const syncRect = sync.getBoundingClientRect();
@@ -13286,30 +13278,16 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const sortRect = sort.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
         const copyRect = copy.getBoundingClientRect();
-        const modeRect = mode.getBoundingClientRect();
-        const diffSessionRect = diffSession.getBoundingClientRect();
-        const modeButtonRects = modeButtons.map(button => button.getBoundingClientRect());
-        const modeButtonStyles = modeButtons.map(button => getComputedStyle(button));
-        const clusterRect = cluster.getBoundingClientRect();
+        const dateControlsRect = dateControls.getBoundingClientRect();
         const dateRect = date.getBoundingClientRect();
         const expandRect = expand.getBoundingClientRect();
         const collapseAllRect = collapseAll.getBoundingClientRect();
         const refreshRect = refresh.getBoundingClientRect();
-        const closeRect = close.getBoundingClientRect();
         const textProbe = document.createElement('span');
         textProbe.style.color = 'var(--text)';
         document.body.appendChild(textProbe);
         const textColor = getComputedStyle(textProbe).color;
         textProbe.remove();
-        const colorFor = value => {
-          const probe = document.createElement('span');
-          probe.style.color = value;
-          document.body.appendChild(probe);
-          const color = getComputedStyle(probe).color;
-          probe.remove();
-          return color;
-        };
-        const tabFont = getComputedStyle(document.documentElement).getPropertyValue('--tab-font').trim();
         const hadLightTheme = document.body.classList.contains('theme-light');
         document.body.classList.add('theme-light');
         const lightExpandRect = expand.getBoundingClientRect();
@@ -13319,21 +13297,19 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
           secondRowIsPath: primaryRow.nextElementSibling === pathRow,
           thirdRowIsActions: pathRow.nextElementSibling === actionsRow,
-          noScopeRow: scopeRow === null,
-          noQuickAccessPanel: quick === null,
-          modeFirstInPrimaryRow: primaryRow.firstElementChild === mode,
-          noPanelTitle: primaryRow.querySelector('.file-explorer-panel-title') === null,
+          sessionFirstInPrimaryRow: primaryRow.firstElementChild === session,
+          spacerAfterSession: session.nextElementSibling === primarySpacer,
+          refreshAfterSpacer: primarySpacer.nextElementSibling === refresh,
+          noModeSwitcher: toolbar.querySelector('.file-explorer-mode-switcher') === null,
+          noLocalClose: toolbar.querySelector('.file-explorer-panel-close') === null,
           actionsOrder: actionsRow.firstElementChild === newFile && newFile.nextElementSibling === newFolder,
           folderIconPresent: newFolder.querySelector('.file-explorer-folder-icon') !== null,
           pathRowOrder: pathRow.firstElementChild === sync && sync.nextElementSibling === path && path.nextElementSibling === copy,
           hiddenBeforeSort: newFolder.nextElementSibling === actionsSpacer && actionsSpacer.nextElementSibling === hidden && hidden.nextElementSibling === sort,
+          dateControlsAfterSort: sort.nextElementSibling === dateControls,
           syncText: sync.textContent.trim(),
           syncPressed: sync.getAttribute('aria-pressed'),
-          rootPressedCount: [sync].filter(button => button.getAttribute('aria-pressed') === 'true').length,
-          diffSessionImmediatelyAfterMode: mode.nextElementSibling === diffSession,
-          spacerAfterDiffSession: diffSession.nextElementSibling === primarySpacer,
-          diffSessionVisibleInFilesMode: getComputedStyle(diffSession).display !== 'none',
-          noTopCollapseButton: collapse === null,
+          sessionVisible: getComputedStyle(session).display !== 'none',
           newFileLeft: newFileRect.left,
           newFileRight: newFileRect.right,
           newFolderLeft: newFolderRect.left,
@@ -13352,28 +13328,17 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           primaryRowLeft: primaryRowRect.left,
           primaryRowRight: primaryRowRect.right,
           primaryRowWidth: primaryRowRect.width,
-          diffSessionLeft: diffSessionRect.left,
-          diffSessionRight: diffSessionRect.right,
+          sessionLeft: sessionRect.left,
+          sessionRight: sessionRect.right,
           copyLeft: copyRect.left,
           copyRight: copyRect.right,
           copyWidth: copyRect.width,
-          modeLeft: modeRect.left,
-          modeRight: modeRect.right,
-          modeWidth: modeRect.width,
-          modeMaxButtonWidth: Math.max(...modeButtonRects.map(rect => rect.width)),
-          modeButtonPaddingInline: Array.from(new Set(modeButtonStyles.map(style => `${style.paddingLeft}/${style.paddingRight}`))).sort(),
-          modeButtonHorizontal: modeButtonRects.every(rect => rect.width > rect.height),
-          modeLabelsHorizontal: modeLabels.every(label => getComputedStyle(label).writingMode === 'horizontal-tb'),
-          modeUsesTabFont: modeButtonStyles.every(style => style.fontFamily === tabFont || style.fontFamily.toLowerCase().includes('narrow')),
-          modeButtonTopRounded: modeButtonStyles.every(style => style.borderTopLeftRadius !== '0px' && style.borderTopRightRadius !== '0px' && style.borderBottomLeftRadius === '0px'),
-          activeModeUsesPaneTabColor: getComputedStyle(mode.querySelector('[aria-pressed="true"]')).backgroundColor === colorFor('var(--pane-tab-active-bg)'),
-          modeTexts: Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim()),
           pathConsumesRemaining: pathRect.width >= pathRowRect.width - syncRect.width - copyRect.width - 36,
           actionsRowTop: actionsRowRect.top,
           primaryRowBottom: primaryRowRect.bottom,
           actionsRowRight: actionsRowRect.right,
-          clusterRight: clusterRect.right,
-          clusterLeft: clusterRect.left,
+          dateControlsRight: dateControlsRect.right,
+          dateControlsLeft: dateControlsRect.left,
           dateRight: dateRect.right,
           expandLeft: expandRect.left,
           expandRight: expandRect.right,
@@ -13387,8 +13352,6 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           lightCollapseAllWidth: lightCollapseAllRect.width,
           refreshLeft: refreshRect.left,
           refreshRight: refreshRect.right,
-          closeLeft: closeRect.left,
-          closeRight: closeRect.right,
           pathWidth: pathRect.width,
           toolbarWidth: toolbarRect.width,
           pathColor: getComputedStyle(path).color,
@@ -13399,21 +13362,19 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["firstRowIsPrimary"]
     assert metrics["secondRowIsPath"]
     assert metrics["thirdRowIsActions"]
-    assert metrics["noScopeRow"]
-    assert metrics["noQuickAccessPanel"]
-    assert metrics["modeFirstInPrimaryRow"]
-    assert metrics["noPanelTitle"]
+    assert metrics["sessionFirstInPrimaryRow"]
+    assert metrics["spacerAfterSession"]
+    assert metrics["refreshAfterSpacer"]
+    assert metrics["noModeSwitcher"]
+    assert metrics["noLocalClose"]
     assert metrics["actionsOrder"]
     assert metrics["folderIconPresent"]
     assert metrics["pathRowOrder"]
     assert metrics["hiddenBeforeSort"]
+    assert metrics["dateControlsAfterSort"]
     assert metrics["syncText"] == "Sync"
     assert metrics["syncPressed"] == "true"
-    assert metrics["rootPressedCount"] == 1
-    assert metrics["diffSessionImmediatelyAfterMode"]
-    assert metrics["spacerAfterDiffSession"]
-    assert metrics["diffSessionVisibleInFilesMode"]
-    assert metrics["noTopCollapseButton"]
+    assert metrics["sessionVisible"]
     assert metrics["newFileRight"] <= metrics["newFolderLeft"]
     assert metrics["hiddenRight"] <= metrics["sortLeft"]
     assert metrics["syncRight"] <= metrics["pathLeft"]
@@ -13421,93 +13382,59 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["pathWidth"] >= min(90, metrics["toolbarWidth"] / 4)
     assert metrics["pathRight"] <= metrics["copyLeft"]
     assert metrics["copyRight"] <= metrics["pathRowRight"] + 1
-    assert metrics["modeRight"] <= metrics["diffSessionLeft"]
-    assert metrics["diffSessionRight"] <= metrics["closeLeft"]
-    assert metrics["modeButtonHorizontal"]
-    assert metrics["modeLabelsHorizontal"]
-    assert metrics["modeUsesTabFont"]
-    assert metrics["modeButtonTopRounded"]
-    assert metrics["activeModeUsesPaneTabColor"]
-    assert metrics["modeButtonPaddingInline"] == ["3px/3px"]
-    assert metrics["modeMaxButtonWidth"] <= 60
+    assert metrics["sessionRight"] <= metrics["refreshLeft"]
     assert metrics["pathConsumesRemaining"]
-    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
-    assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
+    assert abs(metrics["refreshRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
     assert metrics["pathRowTop"] >= metrics["primaryRowBottom"]
     assert metrics["actionsRowTop"] >= metrics["pathRowBottom"]
     assert metrics["dateRight"] <= metrics["expandLeft"]
     assert metrics["expandRight"] <= metrics["collapseAllLeft"]
-    assert metrics["collapseAllRight"] <= metrics["refreshLeft"]
     assert metrics["expandWidth"] == metrics["collapseAllWidth"] == 16
     assert metrics["expandHeight"] == metrics["collapseAllHeight"] == 20
     assert metrics["lightExpandWidth"] == metrics["lightCollapseAllWidth"] == 16
-    assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
-    assert metrics["clusterLeft"] > metrics["pathLeft"]
+    assert metrics["dateControlsRight"] <= metrics["actionsRowRight"] + 1
+    assert metrics["dateControlsLeft"] > metrics["pathLeft"]
 
 
-def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
+def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     before = browser.execute_script(
         """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
         const newFile = document.getElementById('new-file');
-        const tree = document.querySelector('.file-explorer-tree-panel');
-        const changes = document.querySelector('.file-explorer-changes-panel');
+        const tree = document.querySelector('#finder-panel .file-explorer-tree-panel');
         return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
-          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
+          finderVisible: !document.getElementById('finder-panel').hidden,
+          differHidden: document.getElementById('differ-panel').hidden,
+          noModeSwitcher: document.querySelector('.file-explorer-mode-switcher') === null,
           newFileDisplay: getComputedStyle(newFile).display,
           treeDisplay: getComputedStyle(tree).display,
-          changesDisplay: getComputedStyle(changes).display,
-          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
         };
         """
     )
-    assert before["bodyFiles"]
-    assert not before["bodyDiff"]
-    assert before["filesPressed"] == "true"
-    assert before["diffPressed"] == "false"
-    assert before["texts"] == ["Finder", "Differ", "Tabber"]
+    assert before["finderVisible"]
+    assert before["differHidden"]
+    assert before["noModeSwitcher"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
-    assert before["changesDisplay"] == "none"
-    assert before["titleCount"] == 0
 
-    browser.find_element("css selector", "[data-file-explorer-mode-set='diff']").click()
+    activate_finder_diff_fixture(browser)
     after = browser.execute_script(
         """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
-        const newFile = document.getElementById('new-file');
-        const pane = document.querySelector('.file-explorer-pane');
-        const tree = document.querySelector('.file-explorer-tree-panel');
-        const changes = document.querySelector('.file-explorer-changes-panel');
+        const pane = document.querySelector('#differ-panel .file-explorer-pane');
+        const changes = document.querySelector('#differ-panel .file-explorer-changes-panel');
         const visible = selector => Array.from(document.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         const changesStyle = getComputedStyle(changes);
         const paneRect = pane.getBoundingClientRect();
         const changesRect = changes.getBoundingClientRect();
         return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          panelMode: document.getElementById('finder-panel').dataset.fileExplorerMode,
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
-          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
-          newFileDisplay: getComputedStyle(newFile).display,
-          treeDisplay: getComputedStyle(tree).display,
+          finderHidden: document.getElementById('finder-panel').hidden,
+          differVisible: !document.getElementById('differ-panel').hidden,
           changesDisplay: changesStyle.display,
           changesFlexGrow: changesStyle.flexGrow,
           changesMaxBlockSize: changesStyle.maxBlockSize,
           paneHeight: paneRect.height,
           changesHeight: changesRect.height,
-          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
           visibleSortSelects: visible('[data-session-files-sort]').length,
@@ -13516,48 +13443,17 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
         };
         """
     )
-    assert not after["bodyFiles"]
-    assert after["bodyDiff"]
-    assert after["panelMode"] == "diff"
-    assert after["filesPressed"] == "false"
-    assert after["diffPressed"] == "true"
-    assert after["texts"] == ["Finder", "Differ", "Tabber"]
-    assert after["diffButtonBg"] != before["diffButtonBg"]
-    assert after["newFileDisplay"] == "none"
-    assert after["treeDisplay"] == "none"
+    assert after["finderHidden"]
+    assert after["differVisible"]
     assert after["changesDisplay"] != "none"
     assert after["changesFlexGrow"] == "1"
     assert after["changesMaxBlockSize"] == "none"
     assert abs(after["changesHeight"] - after["paneHeight"]) <= 1
-    assert after["titleCount"] == 0
     assert after["visibleRootControls"] == 0
     assert after["visibleSessionSelects"] == 1
     assert after["visibleSortSelects"] == 1
     assert after["visibleDateButtons"] == 1
     assert after["visibleReloadButtons"] == 1
-
-    browser.find_element("css selector", "[data-file-explorer-mode-set='files']").click()
-    restored = browser.execute_script(
-        """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
-        return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          treeDisplay: getComputedStyle(document.querySelector('.file-explorer-tree-panel')).display,
-          changesDisplay: getComputedStyle(document.querySelector('.file-explorer-changes-panel')).display,
-        };
-        """
-    )
-    assert restored["bodyFiles"]
-    assert not restored["bodyDiff"]
-    assert restored["filesPressed"] == "true"
-    assert restored["diffPressed"] == "false"
-    assert restored["treeDisplay"] != "none"
-    assert restored["changesDisplay"] == "none"
-
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     load_pc_controls_fixture(browser, tmp_path)

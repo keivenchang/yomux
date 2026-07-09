@@ -133,7 +133,9 @@ function codeMirrorContextMenuSelectionExtension(api) {
       pending = null;
       clearTimeout(clearTimer);
       queueMicrotask(() => {
-        if (update.view.dom?.isConnected) update.view.dispatch({selection: captured.selection});
+        if (!update.view.dom?.isConnected) return;
+        update.view.dispatch({selection: captured.selection});
+        updateCodeMirrorCursorStatus(update.view.dom.closest('.file-editor-panel'));
       });
     });
     return [handlers, restore];

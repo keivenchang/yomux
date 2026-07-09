@@ -2168,7 +2168,15 @@ function focusTerminalFromUserAction(session, delay = 0, options = {}) {
 }
 
 function focusTerminalDom(session, delay = 0) {
-  const run = () => terminals.get(session)?.term?.focus?.();
+  const run = () => {
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    terminals.get(session)?.term?.focus?.();
+    // xterm focuses its hidden textarea without a preventScroll option. In a full-height app with
+    // a tall sibling pane, Chrome can scroll the otherwise overflow-hidden document and move the
+    // entire top bar above the viewport when switching terminal tabs.
+    if (window.scrollX !== scrollX || window.scrollY !== scrollY) window.scrollTo(scrollX, scrollY);
+  };
   if (delay > 0) setTimeout(run, delay);
   else run();
 }
@@ -2208,8 +2216,10 @@ function updatePanelInactiveOverlays() {
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
-  if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
-  else if (typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
+  const focusedSlot = focusedPanelItem ? slotForItem(focusedPanelItem) : '';
+  const focusMatchesActiveLayout = !focusedSlot || activeItemForSide(focusedSlot) === focusedPanelItem;
+  if (focusMatchesActiveLayout && typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
+  else if (focusMatchesActiveLayout && typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
 }
 
@@ -4248,6 +4258,7 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     appendDescription();
+    appendFileSurfaceMoveLeftCommand(menu, item);
     appendTabSplitCommands(menu, item, options);
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
@@ -4263,6 +4274,25 @@ function showTabContextMenu(item, x, y, options = {}) {
   };
   renderActions();
   sessionContextMenu.open(menu, x, y);
+}
+
+function leftmostLayoutSlot(slots = layoutSlots) {
+  const leaves = layoutLeafSlots(slots?.[layoutTreeKey]);
+  if (!leaves.length) return '';
+  return leaves
+    .map((slot, index) => ({slot, index, left: Number(layoutSlotScreenRect(slot)?.left)}))
+    .sort((left, right) => (Number.isFinite(left.left) ? left.left : left.index) - (Number.isFinite(right.left) ? right.left : right.index) || left.index - right.index)[0]?.slot || '';
+}
+
+function appendFileSurfaceMoveLeftCommand(menu, item) {
+  if (!layoutIsFileSurfaceItem(item)) return;
+  const sourceSlot = slotForItem(item);
+  const targetSlot = leftmostLayoutSlot();
+  const disabled = !sourceSlot || !targetSlot || sourceSlot === targetSlot;
+  const label = `${t('tab.actions.move')} ${t('layout.zone.left')}`;
+  appendContextMenuButton(menu, label, () => {
+    if (!disabled) void moveSessionToSlot(item, targetSlot, sourceSlot, paneTabs(targetSlot).length);
+  }, closeSessionContextMenu, {disabled, className: 'file-surface-move-left', ariaLabel: label, title: label});
 }
 
 function appendTabSplitCommands(menu, item, options = {}) {

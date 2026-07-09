@@ -141,7 +141,7 @@ function createInfoPanel() {
   panel.id = panelDomId(infoItemId);
   panel.innerHTML = panelFrameHtml({
     item: infoItemId,
-    controlsHtml: virtualPanelControlsHtml(infoItemId),
+    controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
     afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
@@ -163,7 +163,7 @@ function createYoagentPanel() {
   panel.id = panelDomId(yoagentItemId);
   panel.innerHTML = panelFrameHtml({
     item: yoagentItemId,
-    controlsHtml: virtualPanelControlsHtml(yoagentItemId),
+    controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
     afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>

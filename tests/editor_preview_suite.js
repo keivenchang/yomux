@@ -230,9 +230,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(tablet.fileExplorerUsesNormalTabMovementForTest(), false, 'a wide landscape iPad keeps Finder as its own desktop-style pane');
     assert.equal(tablet.narrowSingleColumnModeForTest(), false, 'a wide landscape iPad retains its multi-pane layout');
     assert.deepEqual(
-      canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes('__files__'))),
-      {active: '__files__', tabs: ['__files__']},
-      'the wide landscape iPad gives Finder a dedicated pane instead of mixing it into terminal tabs',
+      canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(tablet.finderItemId))),
+      {active: tablet.finderItemId, tabs: [tablet.finderItemId, tablet.differItemId, tablet.tabberItemId]},
+      'the wide landscape iPad gives the independent file-surface triplet a dedicated pane instead of mixing it into terminal tabs',
     );
     assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
     assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'an iPad portrait does not claim laptop-style horizontal room');
@@ -243,7 +243,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), false, 'Finder cannot recreate a split in compact tablet portrait');
     assert.deepEqual(canonical(narrowTablet.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: ['__files__', '1', '2']},
+      left: {active: '1', tabs: [narrowTablet.finderItemId, '1', '2']},
     }, 'a portrait iPad keeps Finder as a switchable tab beside all current terminals');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
@@ -253,7 +253,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(tooNarrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'a one-column touch viewport keeps Finder as an ordinary tab');
     assert.deepEqual(canonical(tooNarrowTablet.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: ['__files__', '1', '2']},
+      left: {active: '1', tabs: [tooNarrowTablet.finderItemId, '1', '2']},
     }, 'a too-narrow iPad keeps Finder as an ordinary tab beside its terminal tabs instead of reserving a left column');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a too-narrow tablet edge drop cannot recreate a split');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle'}), true, 'a too-narrow tablet keeps ordinary middle tab moves');
@@ -289,7 +289,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad portrait rotation compacts the existing split through the shared layout normalizer');
     const compactedResize = resizeApi.serialize(resizeApi.layoutSlotsForTest());
     assert.equal(Object.keys(compactedResize.panes).length, 1, 'a narrow live viewport cannot retain a horizontally clipped second pane');
-    assert.deepEqual(Object.values(compactedResize.panes)[0].tabs, ['__files__', '1', '2', '3'], 'an iPad portrait rotation preserves the desktop Finder and all terminals as switchable one-column tabs');
+    assert.deepEqual(Object.values(compactedResize.panes)[0].tabs, ['1', '2', '3'], 'an iPad portrait rotation preserves every existing terminal without inventing a file surface');
     const rotationApi = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 744, height: 1024},
@@ -298,9 +298,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(rotationApi.tabletUsesDesktopLayoutForTest(), true, 'rotating to wide landscape enables the tablet desktop-layout policy');
     assert.equal(rotationApi.compactCurrentLayoutSlotsForTest(), true, 'rotating to wide landscape restores a dedicated Finder pane from compact portrait tabs');
     assert.deepEqual(
-      canonical(Object.values(rotationApi.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes('__files__'))),
-      {active: '__files__', tabs: ['__files__']},
-      'the restored landscape Finder pane does not retain terminal tabs',
+      canonical(Object.values(rotationApi.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(rotationApi.finderItemId))),
+      {active: rotationApi.finderItemId, tabs: [rotationApi.finderItemId, rotationApi.differItemId, rotationApi.tabberItemId]},
+      'a page first loaded in portrait creates the dedicated triplet home column when rotated to landscape',
     );
     assert.equal(phone.topbarMenuTreeForTest().length, 5, 'the initial phone tree stays full until measured overflow requires Menus');
     assert.equal(tablet.topbarMenuTreeForTest().length, 5, 'tablet keeps the five independent top-level menus');
@@ -328,7 +328,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes("'hide-owner',\n  'compact-search'") && source.includes("'hide-nav',\n  'icon-search',\n  'compact-menu'"), 'topbar packing preserves the requested priority order before compacting menus');
     assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = topbarPackingStepOrder\.filter\(topbarPackingHasStep\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*while \(applied\.length\)[\s\S]*candidate = applied\.slice\(0, -1\)/.test(source), 'topbar packing measures each compact representation and restores only a contiguous reverse prefix');
     assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
-    assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /menuCommand\(fileExplorerLabel\(\), \(\) => toggleFinderPane\(\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
+    assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /function fileSurfaceMenuItems\(\)[\s\S]*menuCommand\(itemLabel\(item\), \(\) => openFileSurfaceFromMenu\(item\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
     assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
     assert.ok(/nestedRoot: true[\s\S]*function openAppMenu\(wrapper, options = \{\}\)[\s\S]*app-menu--nested-root/.test(source), 'compact Menus exposes File/View/tmux/Tabs/Help first and opens their command layers only on demand');
     assert.ok(/function createAppSubmenu\(item\)[\s\S]*const compactRoot[\s\S]*app-menu--nested-root[\s\S]*app-menu-submenu-wrap\.open[\s\S]*if \(compactRoot\(\) && wrapper\.classList\.contains\(CLS\.open\)\)[\s\S]*setOpen\(false\)/.test(source), 'first-level File/View/tmux/Tabs/Help entries in compact Menus are collapsible disclosures rather than one-way popovers');
@@ -356,16 +356,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '2', tabs: ['__files__', '2']},
+      left: {active: '2', tabs: [api.finderItemId, '2']},
     }, 'minus removes only the selected tab and keeps the remaining single-column view visible');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: ['__files__', '1', '2']},
+      left: {active: '1', tabs: [api.finderItemId, '1', '2']},
     });
     api.closePaneFrameItem('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '2', tabs: ['__files__', '2']},
+      left: {active: '2', tabs: [api.finderItemId, '2']},
     }, 'X shares the same selected-tab close route in one-column mode');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
@@ -1520,7 +1520,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__files__', '__search_history__', '__prefs__', '__debug__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '3']);
   });
 
   test('new file editors reuse the existing editor pane', () => {
@@ -1550,8 +1550,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'left'), 50);
     assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'right'), 50);
     assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'right', 42), 42);
-    assert.equal(api.splitPercentForNewItem('__files__', 'left'), 22);
-    assert.equal(api.splitPercentForNewItem('__files__', 'right'), 78);
+    assert.equal(api.splitPercentForNewItem(api.finderItemId, 'left'), 50);
+    assert.equal(api.splitPercentForNewItem(api.finderItemId, 'right'), 50);
+    assert.equal(api.splitPercentForNewItem(api.differItemId, 'left'), 50);
+    assert.equal(api.splitPercentForNewItem(api.tabberItemId, 'right'), 50);
   });
 
   test('tmux window records and bars share status metadata', () => {
@@ -3316,7 +3318,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugModeExplicitUrlEnabledForTest(), true, 'debug=1 is tracked separately from menu-opened YO!stats');
     api.recordClientPerfCounterForTest('focusSet', 0.2, {nodes: 1});
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-client-perf'), 'explicit debug=1 graph shows raw client-work counters');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -3545,13 +3547,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const openedApi = loadYolomux('?debug=1&sessions=debug', ['1']);
     assert.deepStrictEqual(canonical(openedApi.serialize(openedApi.currentSlots()).panes), {
       left: {tabs: [openedApi.debugPaneItemId], active: openedApi.debugPaneItemId},
-      slot1: {tabs: [openedApi.fileExplorerItemId], active: openedApi.fileExplorerItemId},
+      slot1: {tabs: [openedApi.finderItemId, openedApi.differItemId, openedApi.tabberItemId], active: openedApi.finderItemId},
     }, 'debug=1 allows sessions=debug to open the Debug pane directly');
     const injectedApi = loadYolomux('?sessions=files,6,5&layout=row@22(slot2,row@50(left,slot1))&tabs=slot2:files;left:6;slot1:5,info&debug=1', ['5', '6']);
     assert.deepStrictEqual(canonical(injectedApi.serialize(injectedApi.currentSlots()).panes), {
       left: {tabs: ['6'], active: '6'},
       slot1: {tabs: ['5', injectedApi.infoItemId], active: '5'},
-      slot2: {tabs: [injectedApi.fileExplorerItemId], active: injectedApi.fileExplorerItemId},
+      slot2: {tabs: [injectedApi.finderItemId, injectedApi.differItemId, injectedApi.tabberItemId], active: injectedApi.finderItemId},
     }, 'debug=1 enables instrumentation without injecting Debug into an existing URL layout');
   });
 
@@ -8332,7 +8334,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setDocumentVisibilityForTest('visible');
     api.syncClientEventDemandForTest({immediate: true});
     state = api.clientEventTransportStateForTest();
-    assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'files', 'status', 'transcripts', 'yoagent']);
+    assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'status', 'transcripts', 'yoagent']);
   });
 
   test('share host backup polling requires an active share', () => {
@@ -8643,7 +8645,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.rememberFileExplorerOpenIntentForTest(true);
     const finderSingle = api.emptyLayoutSlots();
     finderSingle[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 22);
-    finderSingle.slot1 = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
+    finderSingle.slot1 = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     finderSingle.left = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderSingle);
     assert.equal(api.rightmostExistingPaneSlot(), null, 'Finder plus one content pane does not count as an existing right pane');
@@ -8651,7 +8653,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     serialized = api.serialize(api.currentSlots());
     const finderSinglePanes = Object.values(serialized.panes).map(canonical);
     assert.ok(hasPane(finderSinglePanes, {tabs: ['1'], active: '1'}), 'Finder-docked single content pane keeps the tmux tab alone');
-    assert.ok(hasPane(finderSinglePanes, {tabs: ['__files__'], active: '__files__'}), 'Finder-docked single content pane keeps Finder alone');
+    assert.ok(hasPane(finderSinglePanes, {tabs: [api.finderItemId, api.differItemId, api.tabberItemId], active: api.finderItemId}), 'Finder-docked single content pane keeps the independent file-surface triplet together');
     assert.ok(hasPane(finderSinglePanes, {tabs: ['__yoagent__'], active: '__yoagent__'}), 'Finder-docked single content pane creates a separate YO!agent pane');
 
     api.rememberFileExplorerOpenIntentForTest(false);
@@ -8809,9 +8811,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const tabTypesSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const finderLocaleSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const dockviewLocaleSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-    assert.ok(/key:\s*'files'[\s\S]*relocalize:\s*\(\) => relocalizeFileExplorerPanels\(\)/.test(tabTypesSource), 'Finder registers its locale repaint with TAB_TYPES');
+    assert.ok(/key:\s*'finder'[\s\S]*relocalize:\s*\(\) => relocalizeFileExplorerPanels\(\)[\s\S]*key:\s*'differ'[\s\S]*relocalize:\s*\(\) => relocalizeFileExplorerPanels\(\)[\s\S]*key:\s*'tabber'[\s\S]*relocalize:\s*\(\) => relocalizeFileExplorerPanels\(\)/.test(tabTypesSource), 'Finder, Differ, and Tabber register one shared locale repaint with TAB_TYPES');
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*relocalizeMountedPanels\(options\)[\s\S]*localeGlobalSurfaceHooks\.forEach/.test(i18nRegistrySource), 'rerenderForLocale uses shared locale registries instead of a Finder-specific branch');
-    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?dockviewRemountPanel\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(finderLocaleSource), 'relocalizeFileExplorerPanels evicts then remounts the Finder panel through its shared renderer');
+    assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?fileSurfaceItems\.filter[\s\S]*?mounted\.forEach\(removePanelForItem\)[\s\S]*?mounted\.every\(item => dockviewRemountPanel\(item\)\)[\s\S]*?renderPanels\(/.test(finderLocaleSource), 'relocalizeFileExplorerPanels evicts then remounts every mounted file surface through its shared renderer');
     assert.ok(/function dockviewRemountPanel\(item\)[\s\S]*?getPanel\?\.\(item\)[\s\S]*?updateParameters/.test(dockviewLocaleSource), 'Dockview panel replacement reuses the registered renderer update path when the layout signature is unchanged');
     const rtlCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.equal(/(^|[^-])(margin|padding|border)-(left|right):/m.test(rtlCss.replace(/[a-z-]*-(left|right)-radius/g, '')), false, 'Phase 2: flow-spacing CSS uses logical (inline) properties, not physical left/right, so RTL mirrors');
@@ -9577,18 +9579,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       files: [{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1}],
     });
     const panel = api.fileExplorerChangesPanelHtml();
-    // C7: the embedded title now names the session via changes.titleForSession; assert its localized stems
-    // surround the session (independent of the session label value).
-    const titleStems = zhHant['changes.titleForSession'].split('{session}');
-    const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    assert.ok(titleStems.every(stem => !stem || panel.includes(escHtml(stem))), '#121/C7: the Modified-files title is localized and names the session');
+    assert.equal(panel.includes('changes-title'), false, 'standalone Differ omits the old redundant embedded Modified-files title');
     assert.ok(panel.includes(`>${zhHant['common.reload']}</button>`), '#121: the Modified-files Refresh button is localized');
     // C6/C15 follow-up: the FROM/TO text pickers are inline in each repo's localized comparison sentence
     // (no separate FROM/TO labels); assert the sentence's localized text stems surround the inputs.
     for (const stem of zhHant['diff.comparing'].split(/\{from\}|\{to\}/).map(s => s.trim()).filter(Boolean)) {
       assert.ok(panel.includes(stem), `#121/C15: the inline comparison sentence is localized ("${stem}")`);
     }
-    assert.ok(/changes-repo-refs compact[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(panel), '#121/C15: the FROM/TO text pickers are present inline on the repo comparison line');
+    assert.ok(/changes-repo-refs(?: compact)?[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(panel), '#121/C15: the FROM/TO text pickers are present inline on the repo comparison line');
     assert.ok(panel.includes(`aria-label="${zhHant['diff.ref.from.aria']}"`), '#121: the FROM picker aria-label is localized');
     assert.ok(panel.includes(zhHant['changes.ahead.one'].replace('{count}', '1')), '#121: the Ahead-N-commit meta is localized (tPlural)');
     api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc123def456', to: 'current'});

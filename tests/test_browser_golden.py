@@ -45,7 +45,7 @@ def _load_golden_page(browser, tmp_path, page):
             sessions=["1"],
         )
         WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script("return document.querySelector('#panel-__files__')?.dataset.fileExplorerMode === 'diff'")
+            lambda driver: driver.execute_script("return document.querySelector('#panel-__differ__')?.dataset.fileExplorerMode === 'diff'")
         )
         return
     if page == "preferences":

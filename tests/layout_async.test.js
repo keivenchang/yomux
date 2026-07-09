@@ -783,7 +783,7 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
-    slots.left = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
     slots.right = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(slots);
     api.setFileExplorerModeForTest('diff');
@@ -1018,7 +1018,7 @@ async function runLayoutAsyncSuite() {
       const visibleApi = loadYolomux('', ['1']);
       const visibleSlots = visibleApi.emptyLayoutSlots();
       visibleSlots[visibleApi.layoutTreeKey] = visibleApi.splitNode('row', visibleApi.leafNode('left'), visibleApi.leafNode('right'));
-      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.fileExplorerItemId], visibleApi.fileExplorerItemId);
+      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.differItemId], visibleApi.differItemId);
       visibleSlots.right = visibleApi.paneStateWithTabs(['1'], '1');
       visibleApi.setLayoutSlotsForTest(visibleSlots);
       visibleApi.setFileExplorerRootForTest('/repo');
@@ -1037,7 +1037,8 @@ async function runLayoutAsyncSuite() {
       const visibleState = visibleApi.clientServerWatchStateForTest();
       assert.deepStrictEqual(canonical(visibleState.roots), ['/repo', '/repo/src'], 'visible Differ registers only session-files roots while the Finder tree is hidden');
       assert.deepStrictEqual(canonical(visibleState.session_files), [{session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current', repo_refs: null}], 'visible Differ registers the current session-files request');
-      visibleApi.setFileExplorerModeForTest('tabber');
+      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.tabberItemId], visibleApi.tabberItemId);
+      visibleApi.setLayoutSlotsForTest(visibleSlots);
       const tabberState = visibleApi.clientServerWatchStateForTest();
       assert.deepStrictEqual(canonical(tabberState.roots), [], 'visible Tabber does not inherit hidden Finder/Differ roots');
       assert.equal(Object.prototype.hasOwnProperty.call(tabberState, 'session_files'), false, 'visible Tabber does not register session-files work');
@@ -1284,7 +1285,7 @@ async function runLayoutAsyncSuite() {
       api.setFileExplorerModeForTest('tabber');
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-      slots.left = api.paneStateWithTabs(['1'], '1');
+      slots.left = api.paneStateWithTabs(['1', api.tabberItemId], '1');
       slots.right = api.paneStateWithTabs(['2'], '2');
       api.setLayoutSlotsForTest(slots);
       api.setFocusedPanelItem('1');

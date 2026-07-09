@@ -574,7 +574,6 @@ function shareFinderSeed() {
   return {
     root,
     rootMode: fileExplorerRootMode === 'fixed' ? 'fixed' : 'sync',
-    mode: normalizeFileExplorerMode(fileExplorerMode),
     session: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
   };
 }

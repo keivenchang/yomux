@@ -582,7 +582,7 @@ function createChatMediaPanel(item) {
   panel.dataset.chatMediaUrl = url;
   panel.innerHTML = panelFrameHtml({
     item,
-    controlsHtml: virtualPanelControlsHtml(item),
+    controlsHtml: virtualPanelInnerControlsHtml(item),
     bodyClass: 'info-pane yochat-media-pane',
     bodyHtml: chatMediaPanelBodyHtml(url),
     toastStack: false,
@@ -1241,7 +1241,7 @@ function createChatPanel() {
   panel.id = panelDomId(chatItemId);
   panel.innerHTML = panelFrameHtml({
     item: chatItemId,
-    controlsHtml: virtualPanelControlsHtml(chatItemId),
+    controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
     afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
       <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>

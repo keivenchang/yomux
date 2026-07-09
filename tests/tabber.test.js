@@ -35,21 +35,37 @@ const {
 
 async function runTabberSuite() {
   test('shared tree controller is the Finder, Tabber, and Differ interaction parent', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'tabber'], 'Finder, Tabber, and Differ register through the shared tree interaction controller');
     // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
     // shard keeps the observable controller registration and keyboard behavior contract.
-    assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerMode === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*fileExplorerMode === 'diff'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'global key dispatch routes Tabber/Differ through the shared parent before Finder fallback');
-    assert.ok(/selectableFileTreeRows\(container = document\)[\s\S]*!row\.dataset\.tabberType/.test(source), 'Finder/Differ legacy row discovery does not steal Tabber rows');
-    assert.ok(source.includes('row.classList.toggle(CLS.selected, selected)') && source.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && source.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
+    assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerViewForItem\(panel\?\.dataset\?\.panelItem\)[\s\S]*view === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*view === 'differ'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'per-panel key dispatch routes fixed Tabber/Differ views through the shared parent before Finder fallback');
+    const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    assert.ok(/selectableFileTreeRows\(container = document\)[\s\S]*!row\.dataset\.tabberType/.test(fileTreeSource), 'Finder/Differ row discovery does not steal Tabber rows');
+    assert.ok(fileTreeSource.includes('row.classList.toggle(CLS.selected, selected)') && fileTreeSource.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && fileTreeSource.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
     assert.equal(/classList\??\.\s*(?:add|remove|toggle|contains)\s*\(\s*['"](active|open|selected|collapsed)['"]/.test(source), false, 'MV-1: active/open/selected/collapsed classList calls route through CLS');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover/.test(css), 'tree hover color is the shared row token path');
     assert.ok(/\.file-tree-row\.selected,\s*\.file-tree-row\.current-file:not\(\.selected\)\s*\{/.test(css), 'tree selected/current-file paint has one grouped owner');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)/.test(css), 'tree current-file color is the shared row token path');
     assert.ok(/\.file-tree-row\.current-directory:not\(\.selected\)/.test(css), 'tree current-directory color is the shared row token path');
     assert.equal(/differ-[^{]*(?:selected|current-file|current-directory)/.test(css), false, 'Differ has no forked selected/current row color classes');
+  });
+
+  test('Finder, Differ, and Tabber have fixed independent identities and one placement entry point', () => {
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const actionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
+    const panelSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+    assert.ok(/const finderItemId = '__finder__';[\s\S]*const differItemId = '__differ__';[\s\S]*const tabberItemId = '__tabber__';[\s\S]*const fileExplorerItemIds = Object\.freeze\(\[finderItemId, differItemId, tabberItemId\]\)/.test(bootstrapSource), 'the triplet has three stable layout identities in one registry');
+    assert.ok(/function fileExplorerViewForItem\(item\)[\s\S]*function isFileExplorerItem\(item\)/.test(bootstrapSource), 'identity-to-view and shared triplet predicate have one bootstrap owner');
+    assert.ok(/function layoutFileSurfaceHomeLeaves[\s\S]*function layoutWithFileSurfaceHome[\s\S]*function layoutWithDefaultFileSurfaceHome/.test(layoutSource), 'home-column detection, insertion, and default seeding share the layout owner');
+    assert.ok(/async function openFileSurfacePane\(item\)[\s\S]*currentSlot[\s\S]*activatePaneTab[\s\S]*layoutWithFileSurfaceHome/.test(actionsSource), 'an existing triplet item activates in place while only a missing item uses home insertion');
+    assert.ok(/function fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'File uses one desktop triplet command and separate narrow-screen commands through the shared placement entry point');
+    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerViewForItem\(item\)[\s\S]*panelDomId\(item\)/.test(panelSource), 'one parameterized panel builder gives every triplet item a fixed view and unique panel DOM id');
+    assert.ok(/function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(panelSource), 'the retired in-panel mode switcher is a compatibility no-op');
   });
 
   test('Finder shared tree controller handles keyboard cursor navigation', () => {
@@ -91,7 +107,7 @@ async function runTabberSuite() {
     const api = loadYolomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.left = api.paneStateWithTabs(['1', '__tabber__', '__finder__'], '1');
     slots.right = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(slots);
     api.setFocusedPanelItem('1');
@@ -103,6 +119,7 @@ async function runTabberSuite() {
 
     const panel = new TestElement('tabber-keyboard-panel');
     panel.classList.add('file-explorer-panel', 'file-explorer-changes-panel');
+    panel.dataset.panelItem = '__tabber__';
     const sessionOne = new TestElement('tabber-session-1');
     sessionOne.classList.add('file-tree-row');
     sessionOne.dataset.path = '/s_1';
@@ -148,7 +165,7 @@ async function runTabberSuite() {
     assert.equal(api.currentSessionActionTarget(), '1', 'terminal Enter does not activate the selected Tabber row');
 
     api.setAutoFocusEnabledForTest(true);
-    api.selectPanelOnHover(api.fileExplorerItemId);
+    api.selectPanelOnHover('__tabber__');
     const autoFocusedArrowDown = treeKeyEvent('ArrowDown', terminal);
     assert.equal(api.handleFileExplorerArrowNavForTest(autoFocusedArrowDown), true, 'auto-focused Tabber owns ArrowDown while the browser focus remains in xterm');
     assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'auto-focused Tabber moves the selected row');
@@ -167,16 +184,16 @@ async function runTabberSuite() {
     assert.equal(api.currentSessionActionTarget(), '2', 'Tabber Enter opens the selected tmux session');
 
     api.setAutoFocusEnabledForTest(false);
-    api.setFocusedPanelItem(api.fileExplorerItemId);
+    api.setFocusedPanelItem('__finder__');
     api.syncTabberTreeActiveSelectionForTest(panel);
-    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), [], 'Tabber clears a stale selection when the finder pane is focused');
+    assert.deepStrictEqual(canonical(api.tabberTreeSelectionForTest().paths), ['/s_2'], 'a background Tabber preserves its selection when Finder is focused elsewhere');
   });
 
   test('Tabber highlights every visible tab, not only the focused one', () => {
     const api = loadYolomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.left = api.paneStateWithTabs(['1', '__tabber__', '__finder__'], '1');
     slots.right = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(slots);
     api.setFocusedPanelItem('1');
@@ -387,6 +404,7 @@ async function runTabberSuite() {
     api.setFileExplorerModeForTest('diff');
     const panel = new TestElement('differ-keyboard-panel');
     panel.classList.add('file-explorer-panel', 'file-explorer-changes-panel');
+    panel.dataset.panelItem = '__differ__';
     const dirRow = new TestElement('differ-dir');
     dirRow.classList.add('file-tree-row');
     dirRow.dataset.path = '/repo';
@@ -417,7 +435,7 @@ async function runTabberSuite() {
     api.setDocumentActiveElementForTest(terminal);
     api.setDocumentQuerySelectorForTest(selector => selector === '.file-explorer-panel' ? panel : null);
     api.setAutoFocusEnabledForTest(true);
-    api.selectPanelOnHover(api.fileExplorerItemId);
+    api.selectPanelOnHover('__differ__');
     const autoFocusedArrowDown = treeKeyEvent('ArrowDown', terminal);
     assert.equal(api.handleFileExplorerArrowNavForTest(autoFocusedArrowDown), true, 'auto-focused Differ owns ArrowDown while the browser focus remains in xterm');
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'auto-focused Differ moves the shared selection');
@@ -452,18 +470,21 @@ async function runTabberSuite() {
     assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
   });
 
-  test('chrome labels, Finder toggle, and theme refresh use shared owners', () => {
+  test('chrome labels, File triplet command, and theme refresh use shared owners', () => {
     // #8-#13: renames, toggles, theme propagation, README preview.
     const api = loadYolomux('', ['1']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     // #8: Branch Info -> YO!info. The tab/menu/palette labels are now localized (functions, not consts) so
     // a runtime language switch repaints them; en still resolves to "YO!info" / "YO!agent".
     assert.ok(/function infoTabLabel\(\)\s*\{\s*return t\('brand\.tab\.info'\)/.test(source), '#8: the YO!info tab label is localized via brand.tab.info');
     assert.ok(/function yoagentTabLabel\(\)\s*\{\s*return t\('brand\.tab\.agent'\)/.test(source), 'the YO!agent tab label is localized via brand.tab.agent');
-    // #9: File -> Finder toggles via toggleFinderPane (hide when in layout, else open).
-    assert.ok(source.includes('menuCommand(fileExplorerLabel(), () => toggleFinderPane()'), '#9: File -> Finder uses the toggle');
-    assert.ok(/function toggleFinderPane\(\)\s*\{[^}]*itemInLayout\(fileExplorerItemId\)[^}]*removeSessionFromLayout\(fileExplorerItemId\)/.test(source), '#9: toggle hides the Finder when it is already in the layout');
+    // Desktop File owns one compact command which restores the triplet; narrow screens retain
+    // three choices because only one surface is visible at a time.
+    assert.ok(/function fileSurfaceMenuItems\(\)[\s\S]*openFileSurfaceFromMenu\(item\)/.test(menuSource), 'narrow File commands use the shared placement entry point');
+    assert.ok(/fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*menuCommand\(t\('yoagent\.capability\.finderDifferTabber\.name'\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'desktop File renders one Finder/Differ/Tabber restore command');
+    assert.equal(menuSource.includes('toggleFinderPane()'), false, 'File no longer uses the Finder hide/show toggle');
     // terminalThemeSettingForGlobalMode still maps modes correctly (pure helper), but #261 stopped the
     // View -> Theme toggle from PINNING the terminal palette — the terminal follows the app on its own.
     assert.equal(api.terminalThemeSettingForGlobalMode('system'), 'follow-app', 'system maps to follow-app');
@@ -1301,7 +1322,7 @@ async function runTabberSuite() {
     assert.deepEqual(windowDates(), {'/s_4/w_0': '', '/s_4/w_1': ''}, 'legitimate expiry can remove timestamps instead of retaining data forever');
   });
 
-  // DOIT.58 B1-B7: the Tabber (Finder pane's third mode) — source guards that rows route through the
+  // DOIT.58 B1-B7: Tabber's fixed panel — source guards that rows route through the
   // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
   test('Tabber shares the Finder tree and tab interaction pipeline', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1328,7 +1349,7 @@ async function runTabberSuite() {
     assert.ok(/\.tmux-pane-tab-token-action\s*\{[\s\S]*cursor:\s*pointer/.test(css), 'A2: shared compact tmux tab tokens own the interactive cursor');
     assert.ok(/\.pane-tab:not\(\.active\):hover,\s*\.pane-tab:not\(\.active\):focus-visible,\s*\.tmux-pane-tab-token-action:not\(\.active\):hover,\s*\.tmux-pane-tab-token-action:not\(\.active\):focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)[\s\S]*border-color:\s*var\(--40-layout-panes-tabs-pane-tab-border-26\)/.test(css) && /:root\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-border-26:\s*var\(--paint-white-92\)/.test(css), 'A2: regular and compact inactive pane tabs share centralized pointer and keyboard interaction paint');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-border-26:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.5\)/.test(css), 'A2: one centralized light-theme token corrects every regular and compact interaction border');
-    const sharedActiveTabRule = css.match(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*?\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{([\s\S]*?)\}/);
+    const sharedActiveTabRule = css.match(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*?\.panel\.file-explorer-panel \.pane-tab\.active:not\(\.file-missing\)\s*\{([\s\S]*?)\}/);
     assert.ok(sharedActiveTabRule, 'A5: every active tab-like surface routes through one paint owner');
     for (const selector of ['.tmux-pane-tab-token.active', '.panel.active-pane .pane-tab.active:not(.file-missing)', '.panel.file-explorer-panel .pane-tab.active:not(.file-missing)']) {
       assert.ok(sharedActiveTabRule[0].includes(selector), `A5: shared active tab owner includes ${selector}`);
@@ -1426,7 +1447,7 @@ async function runTabberSuite() {
     assert.ok(/function sessionPopoverWindowPidByIndex\(info\)[\s\S]*tmuxWindowRecords\(info\?\.panes \|\| \[\]\)/.test(source), 'PP1: popover PID comes from the same tmux sub-window record source as Tabber');
     assert.ok(source.includes('tmuxWindowDisplayLabel(descriptor, agent.pid)'), 'PP1: popover PID label reuses the shared tmux sub-window pid formatter');
     assert.ok(/type === 'window' && session\) \{[\s\S]*switchWindow\(\);[\s\S]*selectSession\(session, \{userInitiated: true\}\)/.test(source), 'Tabber window clicks install the tmux-window override before focus/layout can sync against stale active metadata');
-    assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*setFileExplorerMode\('files'\)/.test(source), 'Tabber repo clicks also install the tmux-window override before leaving Tabber mode');
+    assert.ok(/type === 'repo' && row\.dataset\.tabberRepoRoot\) \{[\s\S]*switchWindow\(\);[\s\S]*openFileSurface\(finderItemId\)/.test(source), 'Tabber repo clicks install the tmux-window override before activating Finder as a separate tab');
     assert.equal(source.includes("if (entry.tabber?.type !== 'session') fileExplorerTabberCollapsed.add(path)"), false, 'Tabber collapse-all and disclosure toggles include session rows');
     assert.ok(/function tabberSessionForNumericKey\(key\)[\s\S]*\^\[1-9\]\$/.test(source), 'Tabber maps bare numeric keys to matching tmux sessions');
     assert.ok(/function setTabberPathExpanded\(fullPath, expanded\)[\s\S]*tabberPathDefaultsCollapsed\(fullPath\)[\s\S]*fileExplorerTabberExpanded\.add\(fullPath\)[\s\S]*setExpanded\(row, expanded\) \{[\s\S]*setTabberPathExpanded\(fullPath, expanded\)/.test(source), 'Tabber disclosure clicks and keyboard expansion reuse the default-collapse-aware expansion owner');
@@ -1435,8 +1456,8 @@ async function runTabberSuite() {
     const api = loadYolomux();
     assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
     assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
-    assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'Tabber is an explicit mode choice, not the default restored left Finder pane');
-    assert.ok(/data-file-explorer-mode-set="files"[\s\S]*data-file-explorer-mode-set="diff"[\s\S]*data-file-explorer-mode-set="tabber"/.test(api.fileExplorerModeSwitcherHtml()), 'B1: Finder / Differ / Tabber order');
+    assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'legacy mode storage still normalizes to Finder for migration');
+    assert.equal(api.fileExplorerModeSwitcherHtml(), '', 'B1: the retired shared-mode switcher renders no live controls');
     assert.equal(source.includes('data-tabber-expand'), false, 'Tabber session descriptions are not separate expand-only targets');
     assert.ok(tabberSessionChromeSource.includes('tmuxPaneTabTokenHtml(session,') && tabberSessionChromeSource.includes('sessionPopoverHtml(session, info, agentKind, auto, state)'), 'A1/A2/TR1: session rows render the shared tmux pane tab chrome and popover');
     assert.equal(source.includes('tabber-session-name') || source.includes('tabber-session-description'), false, 'TR5: Tabber does not keep bespoke session name/description chrome');
@@ -1444,8 +1465,8 @@ async function runTabberSuite() {
     assert.ok(/const detached = tab\.classList\?\.contains\('dockview-pane-tab'\) === true\s*\|\| tab\.classList\?\.contains\('tabber-session-tab'\) === true/.test(source), 'TR2: Dockview and Tabber popovers detach through the same app-overlay path');
     assert.ok(/if \(name\.innerHTML !== options\.nameHtml\) \{\s*cleanupDetachedPopoversWithin\(name\);\s*name\.innerHTML = options\.nameHtml;/.test(source), 'TR2: Tabber row replacement cleans detached popovers through the shared cleanup helper');
     assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = ''\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
-    assert.ok(/fileExplorerMode === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
-    assert.ok(/file-explorer-actions-row[\s\S]*fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)/.test(source), 'TS3: Finder toolbar also renders the shared tree sort select');
+    assert.ok(/view === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
+    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(source), "TS3: Finder's fixed panel renders the shared tree sort select");
     assert.ok(/row\.classList\.toggle\('tabber-active-session', data\.type === 'session' && data\.active === true\)/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/function refreshTabberPanelsForFocusChange\(\)[\s\S]*scheduleTabberTreeLayoutStateSync\(\)/.test(source) && !/function refreshTabberPanelsForFocusChange\(\)[\s\S]{0,160}refreshTabberPanels\(\)/.test(source), 'focus changes schedule one Tabber layout-state patch without rebuilding the tree');
     assert.ok(/function updatePanelSlot\(panel, session, slot\)[\s\S]*updatePaneTabStrip\(panel, slot\);\s*\}/.test(source), 'slot-local panel updates do not recursively synchronize global focus state');
@@ -1730,13 +1751,14 @@ async function runTabberSuite() {
     api.setFileExplorerModeForTest('tabber');
     const tabberClickSlots = api.emptyLayoutSlots();
     tabberClickSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-    tabberClickSlots.left = api.paneStateWithTabs(['1'], '1');
+    tabberClickSlots.left = api.paneStateWithTabs(['1', '__tabber__'], '1');
     tabberClickSlots.right = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(tabberClickSlots);
     api.setFocusedPanelItem('1');
     api.editorNav.stack = [];
     api.editorNav.index = -1;
     const tabberPanel = new TestElement('tabber-panel');
+    tabberPanel.dataset.panelItem = '__tabber__';
     const sessionTwoRow = new TestElement('tabber-session-2');
     sessionTwoRow.classList.add('file-tree-row');
     sessionTwoRow.dataset.kind = 'dir';

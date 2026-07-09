@@ -37,6 +37,75 @@ function splitPercentForDisplay(value) {
   return Number.isInteger(rounded) ? String(rounded) : String(rounded);
 }
 
+// Finder, Differ, and Tabber are independent tabs.  Keep every layout decision that treats them
+// as a family here; callers must not infer the "Finder pane" from the currently active tab.
+function layoutFileSurfaceItems() {
+  if (typeof fileSurfaceItems === 'function') return fileSurfaceItems().filter(isLayoutItem);
+  if (Array.isArray(fileExplorerItemIds)) return fileExplorerItemIds.filter(isLayoutItem);
+  return [fileExplorerItemId].filter(isLayoutItem);
+}
+
+function layoutIsFileSurfaceItem(item) {
+  if (typeof isFileSurfaceItem === 'function') return isFileSurfaceItem(item);
+  return isFileExplorerItem(item);
+}
+
+function layoutFileSurfaceHomeLeaves(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey];
+  if (!root || root.split !== 'row' || !root.children?.length) return [];
+  // The home is deliberately the *left* root branch.  A triplet the user dragged elsewhere is
+  // ordinary content and must never be mistaken for a home pane during normalization.
+  const left = root.children[0];
+  const leaves = layoutLeafSlots(left);
+  const populated = leaves.filter(slot => paneTabs(slot, slots).length > 0);
+  if (!populated.length || !populated.every(slot => {
+    const tabs = paneTabs(slot, slots);
+    return tabs.every(layoutIsFileSurfaceItem);
+  })) return [];
+  return populated;
+}
+
+function layoutFileSurfaceHomeSlot(slots = layoutSlots) {
+  const leaves = layoutFileSurfaceHomeLeaves(slots);
+  if (!leaves.length) return null;
+  const focused = slotForItem(focusedPanelItem, slots);
+  return focused && leaves.includes(focused) ? focused : leaves[0];
+}
+
+function layoutHasFileSurfaceHome(slots = layoutSlots) {
+  return Boolean(layoutFileSurfaceHomeSlot(slots));
+}
+
+function layoutWithFileSurfaceHome(slots = layoutSlots, items = layoutFileSurfaceItems(), options = {}) {
+  const next = cloneLayoutSlots(slots);
+  const requested = items.filter(item => isLayoutItem(item) && layoutIsFileSurfaceItem(item));
+  const present = new Set(paneItems(next));
+  const missing = requested.filter(item => !present.has(item));
+  let homeSlot = layoutFileSurfaceHomeSlot(next);
+  if (homeSlot) {
+    if (missing.length) {
+      const tabs = [...paneTabs(homeSlot, next), ...missing];
+      next[homeSlot] = paneStateWithTabs(tabs, options.active || activeItemForSide(homeSlot, next) || tabs[0]);
+    }
+    return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+  }
+  if (!missing.length && !options.forceCreate) return next;
+  const homeItems = options.forceCreate ? requested : missing;
+  if (!homeItems.length) return next;
+  const homeSlotName = !next.left ? 'left' : nextLayoutSlot(next);
+  next[homeSlotName] = paneStateWithTabs(homeItems, options.active || homeItems[0]);
+  const existingTree = next[layoutTreeKey];
+  next[layoutTreeKey] = existingTree
+    ? splitNode('row', leafNode(homeSlotName), existingTree, fileExplorerSplitPercent)
+    : leafNode(homeSlotName);
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+}
+
+function layoutWithDefaultFileSurfaceHome(slots = layoutSlots) {
+  const finder = typeof finderItemId === 'string' ? finderItemId : fileExplorerItemId;
+  return layoutWithFileSurfaceHome(slots, layoutFileSurfaceItems(), {forceCreate: true, active: finder});
+}
+
 function layoutLeafSlots(node) {
   if (!node) return [];
   if (node.slot) return [node.slot];
@@ -222,8 +291,10 @@ function normalizeLayoutSlots(value, options = {}) {
   if (!value || typeof value !== 'object') normalized = emptyPlaceholderLayoutSlots();
   else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
   else normalized = normalizeLegacyLayoutSlots(value, options);
-  if (options.preserveMissingFileExplorer === true && !itemInLayout(fileExplorerItemId, normalized)) return normalized;
-  return normalizeFileExplorerDock(normalized);
+  // A saved triplet location is authoritative.  The old reserved Finder normalizer used to
+  // re-dock it after every unrelated layout mutation; that is precisely what made tab movement
+  // appear to succeed and then snap back.
+  return normalized;
 }
 
 function normalizeTreeLayout(value, options = {}) {
@@ -274,7 +345,8 @@ function legacyColumnTree(column, slots) {
 function compactLayoutSlots(slots, options = {}) {
   const next = emptyLayoutSlots();
   for (const key of layoutSlotKeys(slots)) next[key] = paneStateForLayoutSlot(key, slots);
-  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next, options);
+  const fileSurfaceHomeSlots = new Set(layoutFileSurfaceHomeLeaves(slots));
+  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next, {...options, fileSurfaceHomeSlots});
   const keys = layoutSlotKeys(next);
   if (keys.length && keys.every(key => paneIsPlaceholder(key, next))) return emptyPlaceholderLayoutSlots(keys[0] || 'left');
   return next[layoutTreeKey] ? next : emptyPlaceholderLayoutSlots();
@@ -289,11 +361,14 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   if (node.slot) {
     if (!paneHasLayoutContent(node.slot, slots)) return null;
     const placeholderOnly = paneIsPlaceholder(node.slot, slots);
-    const containsFileExplorer = paneTabs(node.slot, slots).includes(fileExplorerItemId);
+    const tabs = paneTabs(node.slot, slots);
+    const fileSurfaceOnly = tabs.length > 0 && tabs.every(layoutIsFileSurfaceItem);
+    const containsFileSurfaceHome = options.fileSurfaceHomeSlots?.has(node.slot) === true;
     return {
       node: leafNode(node.slot),
-      containsFileExplorer,
-      directFileExplorerLeaf: containsFileExplorer,
+      containsFileSurfaceHome,
+      directFileSurfaceHomeLeaf: containsFileSurfaceHome,
+      fileSurfaceOnly,
       placeholderOnly,
     };
   }
@@ -301,11 +376,11 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   const children = (node.children || []).map(child => compactLayoutNodeInfo(child, slots, options)).filter(Boolean);
   if (!children.length) return null;
   if (children.length === 1) return children[0];
-  const hasFileExplorer = children.some(child => child.containsFileExplorer);
-  const hasDirectFileExplorerLeaf = children.some(child => child.directFileExplorerLeaf);
+  const hasFileSurfaceHome = children.some(child => child.containsFileSurfaceHome);
+  const hasDirectFileSurfaceHomeLeaf = children.some(child => child.directFileSurfaceHomeLeaf);
   // Most mutations prune a now-empty peer. Directional tab split and temporary Fill/Restore are
   // deliberately different: their empty peer is a user-visible placement target, not stale debris.
-  const kept = options.preservePlaceholderSlots === true || (direction === 'row' && hasDirectFileExplorerLeaf)
+  const kept = options.preservePlaceholderSlots === true || (direction === 'row' && hasDirectFileSurfaceHomeLeaf)
     ? children
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
@@ -316,8 +391,9 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   const nextNode = splitNode(direction, compacted[0].node, compacted[1].node, pct);
   return {
     node: nextNode,
-    containsFileExplorer: compacted.some(child => child.containsFileExplorer),
-    directFileExplorerLeaf: false,
+    containsFileSurfaceHome: compacted.some(child => child.containsFileSurfaceHome),
+    directFileSurfaceHomeLeaf: false,
+    fileSurfaceOnly: compacted.every(child => child.fileSurfaceOnly),
     placeholderOnly: compacted.every(child => child.placeholderOnly),
   };
 }
@@ -328,7 +404,8 @@ function splitPercentForCompactedLayoutNode(direction, pct, children, options = 
     && options.preserveMissingFileExplorer !== true
     && value >= fileExplorerSplitPercent
     && value < minNonFileExplorerSplitPercent
-    && !children?.[0]?.containsFileExplorer) {
+    && !children?.[0]?.containsFileSurfaceHome
+    && !children?.[0]?.fileSurfaceOnly) {
     return defaultSplitPercent;
   }
   return value;
@@ -422,7 +499,7 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  return layoutWithDefaultFileSurfaceHome(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -669,6 +746,26 @@ function maybeAdoptFileExplorerModeDeepLink(params) {
   writeStoredFileExplorerMode(fileExplorerMode);
 }
 
+function legacyFileSurfaceSelection(params) {
+  const raw = [params?.get?.('layout') || '', params?.get?.('tabs') || '', params?.get?.('sessions') || ''].join(',');
+  const hasLegacySurface = /(^|[,;:|])(?:__files__|files|changes|__changes__)(?=$|[,;:|])/.test(raw);
+  if (!hasLegacySurface) return '';
+  return fileExplorerItemForView(fileExplorerModeFromUrlParam(params?.get?.('finder')) || (/(^|[,;:|])(?:changes|__changes__)(?=$|[,;:|])/.test(raw) ? 'differ' : 'finder'));
+}
+
+function migrateLegacyFileSurfaceLayout(slots, params) {
+  const selected = legacyFileSurfaceSelection(params);
+  if (!selected) return slots;
+  if (narrowSingleColumnMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
+  if (!legacySlot) return layoutWithFileSurfaceHome(slots, fileSurfaceItems, {forceCreate: true, active: selected});
+  const next = cloneLayoutSlots(slots);
+  const tabs = paneTabs(legacySlot, next);
+  for (const item of fileSurfaceItems) if (!tabs.includes(item)) tabs.push(item);
+  next[legacySlot] = paneStateWithTabs(tabs, selected);
+  return next;
+}
+
 function layoutUrlStateFromParams(params) {
   const raw = params?.get?.('state') || '';
   if (!raw) return null;
@@ -871,6 +968,13 @@ function mobileRecentTmuxItems() {
   return items;
 }
 
+function narrowFileSurfaceSelection(items, preferred = null) {
+  const surfaces = items.filter(layoutIsFileSurfaceItem);
+  if (!surfaces.length) return {items, selected: null};
+  const selected = layoutIsFileSurfaceItem(preferred) ? preferred : surfaces[0];
+  return {items: items.filter(item => !layoutIsFileSurfaceItem(item) || item === selected), selected};
+}
+
 function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
   // A URL can restore several desktop panes into one phone pane. Its visible active tabs carry
@@ -897,9 +1001,9 @@ function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
   for (const item of candidates) {
     if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
   }
-  const items = [...tmuxItems, ...supplementary];
-  const active = items.includes(preferred) ? preferred : items[0] || null;
-  return layoutSlotsForItems(items, 'single', {active, emptySlot: 'left'});
+  const selected = narrowFileSurfaceSelection([...tmuxItems, ...supplementary], preferred);
+  const active = selected.items.includes(preferred) ? preferred : selected.selected || selected.items[0] || null;
+  return layoutSlotsForItems(selected.items, 'single', {active, emptySlot: 'left'});
 }
 
 function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
@@ -914,19 +1018,37 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
     ...requested,
   ]
     .find(item => requested.includes(item)) || requested[0] || null;
-  // Finder is intentionally retained in this tab list. On narrow tablet screens it is a normal
-  // tab in the sole column, rather than a reserved left-hand pane.
-  return layoutSlotsForItems(requested, 'single', {active, emptySlot: 'left'});
+  const selected = narrowFileSurfaceSelection(requested, preferred || active);
+  return layoutSlotsForItems(selected.items, 'single', {
+    active: selected.items.includes(active) ? active : selected.selected || selected.items[0] || null,
+    emptySlot: 'left',
+  });
 }
 
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const source = narrowSingleColumnMode()
+  const narrow = narrowSingleColumnMode();
+  if (narrow && !fileSurfaceLayoutWasNarrow && !fileSurfaceWideLayoutSnapshot && value?.[layoutTreeKey]) {
+    fileSurfaceWideLayoutSnapshot = cloneLayoutSlots(value);
+  }
+  const hadWideSnapshot = Boolean(fileSurfaceWideLayoutSnapshot);
+  let source = narrow
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
-    : value;
+    : (fileSurfaceWideLayoutSnapshot || value);
+  if (!narrow && fileSurfaceLayoutWasNarrow && !hadWideSnapshot && !layoutHasFileSurfaceHome(source)) {
+    const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
+    if (hasFileSurface) source = layoutWithDefaultFileSurfaceHome(source);
+  }
+  fileSurfaceLayoutWasNarrow = narrow;
+  if (!narrow) fileSurfaceWideLayoutSnapshot = null;
   return normalizeLayoutSlots(source, {
     ...options,
-    preserveMissingFileExplorer: narrowSingleColumnMode() || options.preserveMissingFileExplorer === true,
+    preserveMissingFileExplorer: narrow || options.preserveMissingFileExplorer === true,
   });
+}
+
+function rememberInitialNarrowLayout(value) {
+  fileSurfaceLayoutWasNarrow = true;
+  return value;
 }
 
 function availableLayoutModes() {
@@ -942,8 +1064,8 @@ function initialLayoutSlots() {
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
     preserveMissingFileExplorer: shareParams !== null,
   });
-  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(layoutFromUrl);
-  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
+  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(migrateLegacyFileSurfaceLayout(layoutFromUrl, params));
+  if (mobileSinglePaneMode()) return rememberInitialNarrowLayout(mobileSinglePaneLayoutSlots());
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -954,23 +1076,16 @@ function initialLayoutSlots() {
   }
   if (selected.length) {
     const selectedLayout = layoutFromSessionList(selected);
-    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(selectedLayout) : selectedLayout;
+    return narrowSingleColumnMode() ? rememberInitialNarrowLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
   }
   return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
-  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots();
+  if (mobileSinglePaneMode()) return rememberInitialNarrowLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  if (fileExplorerUsesNormalTabMovement()) {
-    const items = fileExplorerClosedByUser() ? sorted : [fileExplorerItemId, ...sorted];
-    const regular = layoutSlotsForItems(items, configuredDefaultLayoutMode(), {active: sorted[0] || fileExplorerItemId});
-    return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(regular) : regular;
-  }
-  const standard = layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
-    preservePlaceholders: false,
-  });
-  return narrowSingleColumnMode() ? narrowSingleColumnLayoutSlots(standard) : standard;
+  const standard = layoutWithDefaultFileSurfaceHome(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
+  return narrowSingleColumnMode() ? rememberInitialNarrowLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -984,18 +1099,8 @@ function layoutWithItems(value, items, preferredSlot = null) {
     next[layoutTreeKey] = leafNode(slot);
     next[slot] = emptyPlaceholderPaneState();
   }
-  if (!preferredSlot
-    && activeItemForSide(slot, next) === fileExplorerItemId
-    && paneTabs(slot, next).length === 1
-    && missing.some(isTmuxSession)) {
-    const sessionTabs = missing.filter(isTmuxSession);
-    const otherTabs = missing.filter(item => !isTmuxSession(item));
-    const newSlot = nextLayoutSlot(next);
-    next[newSlot] = paneStateWithTabs(sessionTabs, sessionTabs[0] || null);
-    next[slot] = paneStateWithTabs([...paneTabs(slot, next), ...otherTabs], activeItemForSide(slot, next));
-    next[layoutTreeKey] = splitNode('row', leafNode(slot), leafNode(newSlot), fileExplorerSplitPercent);
-    return compactLayoutSlots(next);
-  }
+  // File surfaces only reserve their *home column*.  A user-moved Finder/Differ/Tabber panel is
+  // an ordinary tab, so adding a terminal never creates a surprise split beside it.
   const tabs = [...paneTabs(slot, next), ...missing];
   const active = activeItemForSide(slot, next) || tabs.find(isTmuxSession) || tabs[0] || null;
   next[slot] = paneStateWithTabs(tabs, active);
@@ -1431,7 +1536,7 @@ function resolveLayoutItem(value) {
   if (text === 'changes' || text === '__changes__') {
     fileExplorerMode = 'diff';
     writeStoredFileExplorerMode(fileExplorerMode);
-    return fileExplorerItemId;
+    return differItemId;
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
@@ -5476,9 +5581,6 @@ function updateActiveSessionParam() {
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
-    if (paneItems(layoutSlots).some(isFileExplorerItem)) {
-      queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
-    }
     const state = layoutUrlStateParamValue();
     if (state) queryParts.push(`state=${state}`);
   }

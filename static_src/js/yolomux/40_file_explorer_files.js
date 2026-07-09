@@ -1522,15 +1522,15 @@ function explicitFinderTargetPath(preferredItem = null) {
 }
 
 function fileExplorerPaneIsOpen() {
-  return itemInLayout(fileExplorerItemId);
+  return fileExplorerItemIds.some(item => itemInLayout(item));
 }
 
 function fileExplorerTreePaneIsVisible() {
-  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+  return itemInLayout(finderItemId);
 }
 
 function fileExplorerSessionFilesPaneIsVisible() {
-  return fileExplorerPaneIsOpen() && normalizeFileExplorerMode(fileExplorerMode) !== 'tabber';
+  return itemInLayout(differItemId);
 }
 
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
@@ -2624,8 +2624,21 @@ function bindFinderRowHandlers(row, state) {
   };
   row.onpointerup = event => {
     if (event.button != null && event.button !== 0) return;
+    if (typeof dockviewTabContentInteractionSuppressed === 'function' && dockviewTabContentInteractionSuppressed()) {
+      row.__fileTreePointerDown = null;
+      event.preventDefault();
+      return;
+    }
     const start = row.__fileTreePointerDown;
     row.__fileTreePointerDown = null;
+    // A release from a tab/pane drag can land over a Finder row even though that row never
+    // received pointer-down. Never turn that unmatched release (or its synthetic click) into a
+    // file/directory activation.
+    if (!start) {
+      row.__fileTreeSuppressClick = true;
+      event.preventDefault();
+      return;
+    }
     if (row.__fileTreeDragging) return;
     const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
     const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
@@ -2638,6 +2651,17 @@ function bindFinderRowHandlers(row, state) {
     onFileTreeRowClick(row, fullPath, entry, event);
   };
   row.onclick = event => {
+    if (row.__fileTreeSuppressClick) {
+      row.__fileTreeSuppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (typeof dockviewTabContentInteractionSuppressed === 'function' && dockviewTabContentInteractionSuppressed()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (row.__fileTreePointerActivated) {
       row.__fileTreePointerActivated = false;
       event.preventDefault();
@@ -3194,6 +3218,10 @@ function sharedTreeExpansionApi(controller, options = {}) {
 
 function sharedTreeClickHandler(controller, options = {}) {
   return function handleSharedTreeClick(event, panel, clickOptions = {}) {
+    if (typeof dockviewTabContentInteractionSuppressed === 'function' && dockviewTabContentInteractionSuppressed()) {
+      consumeSharedTreeEvent(event);
+      return false;
+    }
     const row = clickOptions.row || event?.target?.closest?.(options.rowSelector || '.file-tree-row[data-path]');
     if (!row || !panel?.contains?.(row) || !controller.rows(panel).includes(row)) return false;
     if (typeof options.shouldIgnoreEvent === 'function' && options.shouldIgnoreEvent(event)) return false;
@@ -3473,8 +3501,7 @@ function markFileIndexRootsRefreshing(roots = []) {
 // 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
   const finderVisible = document.visibilityState !== 'hidden'
-    && itemIsActivePaneTab(fileExplorerItemId)
-    && normalizeFileExplorerMode(fileExplorerMode) === 'files';
+    && itemIsActivePaneTab(finderItemId);
   const fileSearchVisible = document.visibilityState !== 'hidden'
     && commandPaletteState.node
     && !commandPaletteState.node.hidden
@@ -3804,7 +3831,7 @@ function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Dat
 }
 
 function tabberActivityVisibleConsumer() {
-  return fileExplorerMode === 'tabber' && document.visibilityState !== 'hidden';
+  return itemInLayout(tabberItemId) && document.visibilityState !== 'hidden';
 }
 
 function tabberActivityPayloadHasUsefulData(payload) {
@@ -3856,7 +3883,7 @@ async function fetchTabberActivity(options = {}) {
         tabberActivityState.request = null;
       }
     }
-    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
     return true;
   })();
   tabberActivityState.request = request;
@@ -3884,7 +3911,7 @@ function setTabberSessionFileLookbackHours(hours, options = {}) {
     clearTabberSessionFilesStates();
     if (options.refresh !== false) {
       fetchTabberActivity();
-      if (fileExplorerMode === 'tabber') refreshTabberPanels();
+      if (itemInLayout(tabberItemId)) refreshTabberPanels();
     }
   }
   return tabberSessionFileLookbackHours;
@@ -3921,7 +3948,7 @@ async function fetchTabberSessionFiles(session, options = {}) {
   const state = tabberSessionFilesState(session, hours);
   if (!options.force && (state.loaded || state.loading)) return;
   state.loading = true;
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (itemInLayout(tabberItemId)) refreshTabberPanels();
   try {
     const payload = await apiFetchJson(`/api/session-files?session=${encodeURIComponent(session)}&hours=${encodeURIComponent(String(hours))}`, {cache: 'no-store'});
     state.files = Array.isArray(payload?.files) ? payload.files : [];
@@ -3932,7 +3959,7 @@ async function fetchTabberSessionFiles(session, options = {}) {
   } finally {
     state.loading = false;
   }
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (itemInLayout(tabberItemId)) refreshTabberPanels();
 }
 
 async function fetchTabberSessionFilesBatch(sessions, options = {}) {
@@ -3952,7 +3979,7 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
     const state = tabberSessionFilesState(session, hours);
     state.loading = true;
   }
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (itemInLayout(tabberItemId)) refreshTabberPanels();
   try {
     const params = new URLSearchParams();
     for (const session of targets) params.append('session', session);
@@ -3974,7 +4001,7 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
   } finally {
     for (const session of targets) tabberSessionFilesState(session, hours).loading = false;
   }
-  if (fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (itemInLayout(tabberItemId)) refreshTabberPanels();
 }
 
 // Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
@@ -4163,7 +4190,7 @@ function scheduleDeferredTabberRefresh() {
   );
   tabberRefreshDeferredTimer = setTimeout(() => {
     tabberRefreshDeferredTimer = null;
-    if (fileExplorerMode === 'tabber') refreshTabberPanels();
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
   }, delay);
 }
 
@@ -4179,7 +4206,7 @@ function refreshTabberPanels() {
     tabberRefreshDeferredTimer = null;
   }
   let panels = 0;
-  for (const panel of document.querySelectorAll('.file-explorer-panel')) {
+  for (const panel of document.querySelectorAll('.file-explorer-panel[data-file-explorer-view="tabber"]')) {
     const groups = panel.querySelector('[data-file-explorer-changes] .changes-groups');
     if (groups) {
       panels += 1;
@@ -4190,7 +4217,7 @@ function refreshTabberPanels() {
 }
 
 function refreshTabberPanelsForFocusChange() {
-  if (fileExplorerMode !== 'tabber') return;
+  if (!itemInLayout(tabberItemId)) return;
   scheduleTabberTreeLayoutStateSync();
 }
 
@@ -4502,8 +4529,9 @@ function setAllTabberCollapsed(collapsed) {
 }
 
 async function openTabberActivityOverview() {
-  await openFileExplorerPane();
-  setFileExplorerMode('tabber', {force: true});
+  if (typeof openFileSurface === 'function') await openFileSurface(tabberItemId);
+  else if (typeof openFileExplorerPane === 'function') await openFileExplorerPane(tabberItemId);
+  else selectSession(tabberItemId);
   return true;
 }
 
@@ -4579,7 +4607,8 @@ function handleTabberRowActivate(row, event) {
     selectSession(session, {userInitiated: true});
   } else if (type === 'repo' && row.dataset.tabberRepoRoot) {
     switchWindow();
-    setFileExplorerMode('files');
+    if (typeof openFileSurface === 'function') openFileSurface(finderItemId);
+    else if (typeof openFileExplorerPane === 'function') openFileExplorerPane(finderItemId);
     openFileExplorerManualRoot(row.dataset.tabberRepoRoot);
     if (session) selectSession(session, {userInitiated: true});
   } else if (row.dataset.kind === 'dir' && fullPath) {
@@ -4632,7 +4661,7 @@ function syncTabberTreeActiveSelection(panel = document, options = {}) {
 }
 
 function syncTabberTreeLayoutState(panel = document, options = {}) {
-  if (fileExplorerMode !== 'tabber') return false;
+  if (!itemInLayout(tabberItemId)) return false;
   const currentPath = activeTabberRowPath();
   const rows = Array.from(panel.querySelectorAll?.('.file-tree-row[data-tabber-type]') || []);
   if (!rows.length) return syncTabberTreeActiveSelection(panel, options);
@@ -4661,7 +4690,7 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
 }
 
 function scheduleTabberTreeLayoutStateSync() {
-  if (fileExplorerMode !== 'tabber') return false;
+  if (!itemInLayout(tabberItemId)) return false;
   // Keep keyboard selection synchronous while folding all DOM state changes from one Dockview
   // transaction into the next paint.
   syncTabberTreeActiveSelection();
@@ -4677,13 +4706,13 @@ function bindTabberPanel(panel) {
   if (!panel || panel.dataset.tabberBound === 'true') return;
   panel.dataset.tabberBound = 'true';
   panel.addEventListener('click', event => {
-    if (fileExplorerMode !== 'tabber') return;
+    if (!itemInLayout(tabberItemId)) return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type]');
     if (!row || !panel.contains(row)) return;
     tabberTreeInteractionController.handleClick(event, panel, {row});
   });
   panel.addEventListener('keydown', event => {
-    if (fileExplorerMode !== 'tabber') return;
+    if (!itemInLayout(tabberItemId)) return;
     if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     const session = tabberSessionForNumericKey(event.key);
@@ -4694,13 +4723,13 @@ function bindTabberPanel(panel) {
     openTabberSession(session);
   });
   panel.addEventListener('change', event => {
-    if (fileExplorerMode !== 'tabber') return;
+    if (!itemInLayout(tabberItemId)) return;
     const lookback = event.target.closest?.('[data-tabber-lookback]');
     if (!lookback || !panel.contains(lookback)) return;
     setTabberSessionFileLookbackHours(lookback.value);
   });
   panel.addEventListener('contextmenu', event => {
-    if (fileExplorerMode !== 'tabber') return;
+    if (!itemInLayout(tabberItemId)) return;
     const tabRow = event.target.closest?.('.file-tree-row[data-tabber-type="session"], .file-tree-row[data-tabber-type="window"], .file-tree-row[data-tabber-type="tab"]');
     const tabItem = tabRow?.dataset.tabberType === 'tab' ? tabRow.dataset.tabberItem : tabRow?.dataset.tabberSession;
     if (tabRow && panel.contains(tabRow) && tabItem && (isPinnableTab(tabItem) || isTmuxSession(tabItem))) {

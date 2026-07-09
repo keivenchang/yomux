@@ -714,7 +714,13 @@ const tabLastActivatedAt = new Map();  // layout item -> last-activated timestam
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
+// Legacy URL/share compatibility value while old clients are still in circulation. Live panels are
+// identified by one of the fixed triplet item IDs below; do not use this to render a panel.
 let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
+// Rotation only changes presentation. Keep the transient wide layout outside the layout partial
+// so startup URL application cannot read it while that partial is still being evaluated.
+let fileSurfaceWideLayoutSnapshot = null;
+let fileSurfaceLayoutWasNarrow = false;
 const commandPaletteState = {
   node: null,
   query: '',
@@ -897,13 +903,46 @@ const chatItemId = '__chat__';
 function chatTabLabel() { return t('brand.tab.chat'); }
 // Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
-const fileExplorerItemId = '__files__';
+const finderItemId = '__finder__';
+const differItemId = '__differ__';
+const tabberItemId = '__tabber__';
+const fileExplorerItemIds = Object.freeze([finderItemId, differItemId, tabberItemId]);
+const fileSurfaceItems = fileExplorerItemIds;
+const legacyFileExplorerItemId = '__files__';
+// Compatibility for older helpers while their callers migrate. This is a live Finder identity,
+// never the legacy __files__ layout item.
+const fileExplorerItemId = finderItemId;
+const fileExplorerTripletRegistry = Object.freeze({
+  [finderItemId]: Object.freeze({view: 'finder', key: 'finder', icon: 'finder'}),
+  [differItemId]: Object.freeze({view: 'differ', key: 'differ', icon: 'changes'}),
+  [tabberItemId]: Object.freeze({view: 'tabber', key: 'tabber', icon: 'tab-meta'}),
+});
+function fileExplorerViewForItem(item) {
+  return fileExplorerTripletRegistry[item]?.view || '';
+}
+function fileExplorerItemForView(view) {
+  const normalized = String(view || '').toLowerCase();
+  if (normalized === 'files' || normalized === 'finder') return finderItemId;
+  if (normalized === 'diff' || normalized === 'differ' || normalized === 'changes') return differItemId;
+  if (normalized === 'tabber') return tabberItemId;
+  return '';
+}
+function isFileExplorerItem(item) {
+  return fileExplorerItemIds.includes(item);
+}
+const isFileSurfaceItem = isFileExplorerItem;
+function fileExplorerItemLabel(item) {
+  const view = fileExplorerViewForItem(item);
+  if (view === 'differ') return t('brand.tab.changes');
+  if (view === 'tabber') return t('tabber.title');
+  return fileExplorerLabel();
+}
 const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
-  {itemId: fileExplorerItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
+  {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
   {itemId: infoItemId},
   {itemId: yoagentItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.yoagent},
@@ -1254,16 +1293,43 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
-    key: 'files',
-    id: fileExplorerItemId,
-    label: () => fileExplorerLabel(),
+    key: 'finder',
+    id: finderItemId,
+    aliases: [legacyFileExplorerItemId, 'files', 'finder', finderItemId],
+    label: () => fileExplorerItemLabel(finderItemId),
     sortRank: 0.5,
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
-    createPanel: () => createFileExplorerPanel(),
+    createPanel: item => createFileExplorerPanel(item),
     relocalize: () => relocalizeFileExplorerPanels(),
-    className: () => 'file-explorer',
+    className: () => 'file-explorer file-explorer-finder',
     icon: 'finder',
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'differ',
+    id: differItemId,
+    aliases: ['changes', '__changes__', 'diff', 'differ', differItemId],
+    label: () => fileExplorerItemLabel(differItemId),
+    sortRank: 0.51,
+    detail: () => t('brand.tab.changes'),
+    createPanel: item => createFileExplorerPanel(item),
+    relocalize: () => relocalizeFileExplorerPanels(),
+    className: () => 'file-explorer file-explorer-differ',
+    icon: 'changes',
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'tabber',
+    id: tabberItemId,
+    aliases: ['tabber', tabberItemId],
+    label: () => fileExplorerItemLabel(tabberItemId),
+    sortRank: 0.52,
+    detail: () => t('tabber.description'),
+    createPanel: item => createFileExplorerPanel(item),
+    relocalize: () => relocalizeFileExplorerPanels(),
+    className: () => 'file-explorer file-explorer-tabber',
+    icon: 'tab-meta',
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
   virtualPanelTabType({
@@ -1353,7 +1419,6 @@ function tabTypeForParam(value) {
   }) || null;
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
-function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
 function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
@@ -1441,6 +1506,8 @@ function platformCloseButtonClass(baseClass) {
   return `${baseClass} ${platformWindowControlClass('close')}`;
 }
 
+// Test/bootstrap compatibility only. File surfaces no longer render this bespoke close class;
+// their pane headers use the shared minimize/expand controls.
 function fileExplorerPanelCloseClass() {
   return platformCloseButtonClass('file-explorer-panel-close');
 }
@@ -1467,7 +1534,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
   if (!shareViewMode) items.splice(2, 0, chatItemId);
   return [...items, ...dynamicVirtualLayoutItems];
 }

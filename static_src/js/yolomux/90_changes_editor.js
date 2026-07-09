@@ -103,7 +103,6 @@ function sessionFilesRefsQuery() {
 }
 
 function sessionFilesRequestQueryString() {
-  if (fileExplorerMode !== 'diff') return 'from=HEAD&to=current';
   return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
@@ -891,12 +890,14 @@ function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
-  sharePublish('finder-mode', {mode: fileExplorerMode, session});
+  // Session selection belongs to Differ now. Keep the old semantic shape only for older share
+  // viewers; it no longer drives any live panel mode.
+  sharePublish('finder-mode', {mode: 'diff', session});
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
   // Tabber is backed by transcript/activity data, so a pane-tab click changes only its current and
   // active row state. Preparing Differ payloads, rebuilding the tree, and forcing a session-files
   // request here made one tab activation perform the same Tabber state sync twice.
-  if (fileExplorerMode === 'tabber') {
+  if (itemInLayout(tabberItemId) && focusedPanelItem === tabberItemId) {
     scheduleTabberTreeLayoutStateSync();
     scheduleShareTopologySnapshot('finder-session');
     return;
@@ -906,15 +907,13 @@ function switchFileExplorerChangesSession(session) {
   if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
-  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesState.payload, session)) {
-    fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesState.payload);
   } else {
     const pendingPayload = emptySessionFilesPayload(session, false);
     setSessionFilesPayloadForDestination('finder', pendingPayload);
     fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
-  renderFileExplorerChangesPanels();
+  renderFileExplorerChangesPanel(panelNodes.get(differItemId));
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
   scheduleShareTopologySnapshot('finder-session');
 }
@@ -942,7 +941,6 @@ function setSessionFilesPayloadForDestination(destination, payload, options = {}
   if (
     destination === 'finder'
     && fileExplorerRootMode === 'sync'
-    && fileExplorerMode !== 'diff'
     && payload?.loaded === true
   ) {
     scheduleFileExplorerActiveTabSync(payload.session || null);
@@ -1778,7 +1776,10 @@ function syncFileExplorerDiffSessionControls() {
 
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
-  if (fileExplorerMode === 'tabber') {
+  // Legacy/test callers without an item still receive their requested compatibility view; live
+  // panels always pass their fixed `view` explicitly and never render from this global value.
+  const view = options.view || (fileExplorerMode === 'tabber' ? 'tabber' : 'differ');
+  if (view === 'tabber') {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
@@ -1795,7 +1796,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(messageDescriptorText(error, String(error || '')))}</div>`).join('');
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
-  const full = options.full === true || fileExplorerMode === 'diff';
+  const full = options.full === true || view === 'differ';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
   const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
@@ -1879,92 +1880,49 @@ function changesGroupsSnapshotHtml(files, options = {}) {
   return serializeElementHtml(groupsEl);
 }
 
-function fileExplorerChangesPanelHtml() {
-  const staticHtml = fileExplorerChangesPanelStaticHtml();
+function fileExplorerChangesPanelHtml(options = {}) {
+  const view = options.view || 'differ';
+  const staticHtml = fileExplorerChangesPanelStaticHtml({view});
   const files = fileExplorerDifferFiles();
   const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, files);
   const groupsHtml = changesGroupsSnapshotHtml(files, {
     payload: fileExplorerSessionFilesState.payload,
-    compact: fileExplorerMode !== 'diff',
+    compact: view !== 'differ',
     loading,
-    includeEmptyRepoSections: fileExplorerMode === 'diff' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
+    includeEmptyRepoSections: view === 'differ' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
 
-function fileExplorerModeTitle() {
-  return fileExplorerMode === 'diff' ? t('changes.hide') : t('changes.show');
-}
-
-function fileExplorerModeButtonTitle(mode) {
-  if (mode === 'tabber') return t('tabber.description');
-  return mode === 'diff' ? t('changes.show') : t('changes.hide');
-}
-
-function fileExplorerModeButtonLabel(mode) {
-  if (mode === 'diff') return t('brand.tab.changes');
-  if (mode === 'tabber') return t('tabber.title');
-  return t('finder.label.finder');
-}
-
+// Compatibility hook for older fixtures and replay callers. The old in-panel three-way switch
+// is intentionally gone: all live selection goes through independent layout items.
 function fileExplorerModeSwitcherHtml() {
-  const modes = [
-    {mode: 'files', label: fileExplorerModeButtonLabel('files')},
-    {mode: 'diff', label: fileExplorerModeButtonLabel('diff')},
-    {mode: 'tabber', label: fileExplorerModeButtonLabel('tabber')},
-  ];
-  const aria = modes.map(item => item.label).join(' / ');
-  return `<span class="file-explorer-mode-switcher" role="group" aria-label="${esc(aria)}">${modes.map(item => `
-              <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="${esc(item.mode)}" title="${esc(fileExplorerModeButtonTitle(item.mode))}" aria-label="${esc(item.label)}" aria-pressed="${fileExplorerMode === item.mode ? 'true' : 'false'}"><span class="file-explorer-mode-label">${esc(item.label)}</span></button>`).join('')}</span>`;
+  return '';
 }
 
-function applyFileExplorerMode(panel = null) {
-  fileExplorerMode = normalizeFileExplorerMode(fileExplorerMode);
-  // Three exclusive body classes drive the pane layout: files = file-tree only (changes panel hidden);
-  // diff and tabber both take over the pane (tree hidden, changes panel full) — tabber renders the
-  // session/window tree into the same changes container instead of the diff groups.
-  document.body.classList.toggle('file-explorer-mode-diff', fileExplorerMode === 'diff');
-  document.body.classList.toggle('file-explorer-mode-files', fileExplorerMode === 'files');
-  document.body.classList.toggle('file-explorer-mode-tabber', fileExplorerMode === 'tabber');
-  const panels = new Set(document.querySelectorAll('.file-explorer-panel'));
-  if (panel) panels.add(panel);
-  panels.forEach(node => {
-    node.dataset.fileExplorerMode = fileExplorerMode;
-  });
-  document.querySelectorAll('[data-file-explorer-mode-set]').forEach(btn => {
-    const mode = normalizeFileExplorerMode(btn.dataset.fileExplorerModeSet);
-    const active = mode === fileExplorerMode;
-    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-    btn.title = fileExplorerModeButtonTitle(mode);
-    btn.setAttribute('aria-label', fileExplorerModeButtonLabel(mode));
-  });
-  document.querySelectorAll('[data-file-explorer-mode-toggle]').forEach(btn => {
-    btn.setAttribute('aria-pressed', fileExplorerMode === 'diff' ? 'true' : 'false');
-    btn.title = fileExplorerModeTitle();
-    btn.setAttribute('aria-label', fileExplorerModeTitle());
-  });
+// Compatibility entry point for older call sites and replay frames. New UI actions call the
+// layout-owned openFileSurface transaction; this helper never changes a live global panel mode.
+function setFileExplorerMode(mode) {
+  const item = fileExplorerItemForView(mode);
+  if (!item) return false;
+  fileExplorerMode = normalizeFileExplorerMode(mode);
+  writeStoredFileExplorerMode(fileExplorerMode);
+  if (typeof openFileSurface === 'function') return openFileSurface(item) !== false;
+  if (typeof openFileExplorerPane === 'function') return openFileExplorerPane(item) !== false;
+  selectSession(item);
+  return true;
+}
+
+function applyFileExplorerPanelView(panel, item = panel?.dataset?.panelItem) {
+  const view = fileExplorerViewForItem(item) || 'finder';
+  if (!panel) return view;
+  // View is per-panel: a Finder, Differ, and Tabber can all exist at once without one global
+  // mode class hiding or rebuilding the other two.
+  panel.dataset.fileExplorerMode = view === 'finder' ? 'files' : view === 'differ' ? 'diff' : 'tabber';
+  panel.dataset.fileExplorerView = view;
   syncFileExplorerDiffSessionControls();
   syncFileExplorerChangesCollapseButtons();
-}
-
-function setFileExplorerMode(mode, options = {}) {
-  const nextMode = normalizeFileExplorerMode(mode);
-  if (fileExplorerMode === nextMode && options.force !== true) return false;
-  fileExplorerMode = nextMode;
-  writeStoredFileExplorerMode(fileExplorerMode);
-  applyFileExplorerMode();
-  if (typeof updateActiveSessionParam === 'function') updateActiveSessionParam();
-  renderFileExplorerChangesPanels({force: true});
-  // Tabber renders from the already-polled transcriptMetadataState.payload + the activity ledger (recency sort), so it
-  // needs no Differ changed-files fetch — instead it polls /api/activity while it's the active mode.
-  if (fileExplorerMode === 'tabber') {
-    fetchTabberActivity();
-    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
-  } else {
-    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
-  }
-  scheduleShareTopologySnapshot('finder-mode');
-  return true;
+  return view;
 }
 
 function replaceChangesStaticHtml(root, html, options = {}) {
@@ -2343,15 +2301,16 @@ handleFileExplorerArrowNav = event => {
     || event?.target?.closest?.('.file-explorer-changes-panel')
     || document.querySelector('.file-explorer-panel')
     || document;
-  if (fileExplorerMode === 'tabber' && tabberTreeInteractionController.handleKeydown(event, panel)) return true;
-  if (fileExplorerMode === 'diff' && differTreeInteractionController.handleKeydown(event, panel)) return true;
+  const view = fileExplorerViewForItem(panel?.dataset?.panelItem);
+  if (view === 'tabber' && tabberTreeInteractionController.handleKeydown(event, panel)) return true;
+  if (view === 'differ' && differTreeInteractionController.handleKeydown(event, panel)) return true;
   return originalFileExplorerArrowNavForSharedTree(event);
 };
 
 const originalSelectSessionForTabberTree = selectSession;
 selectSession = async (session, options = {}) => {
   const result = await originalSelectSessionForTabberTree(session, options);
-  if (fileExplorerMode === 'tabber') syncTabberTreeActiveSelection(document, {scrollIntoView: true});
+  if (itemInLayout(tabberItemId)) syncTabberTreeActiveSelection(document, {scrollIntoView: true});
   return result;
 };
 
@@ -2651,57 +2610,51 @@ function setEditorPreviewFontSize(value) {
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
 }
 
-// File Explorer pane content is self-contained so layout panes do not depend on
-// the older left-edge overlay tree.
-function createFileExplorerPanel() {
+// Finder, Differ, and Tabber share this one panel builder. The item determines the fixed view so
+// they may coexist in separate panes without a global mode switch rebuilding one another.
+function createFileExplorerPanel(item = finderItemId) {
+  const view = fileExplorerViewForItem(item) || 'finder';
   const panel = document.createElement('article');
-  panel.className = 'panel file-explorer-panel';
-  panel.id = panelDomId(fileExplorerItemId);
+  panel.className = `panel file-explorer-panel file-explorer-${view}`;
+  panel.id = panelDomId(item);
+  panel.dataset.panelItem = item;
   const initialPath = fileExplorerRoot || homePath || '/';
-  const label = fileExplorerLabel();
-  panel.innerHTML = panelFrameHtml({
-    item: fileExplorerItemId,
-    headClass: 'file-explorer-head',
-    headAfterTabsHtml: `<div class="file-explorer-toolbar">
+  const label = fileExplorerItemLabel(item);
+  const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
+  const finderToolbarHtml = view === 'finder' ? `<div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            ${fileExplorerModeSwitcherHtml()}
             ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
             <span class="file-explorer-toolbar-spacer"></span>
-            ${paneFrameControlsGroupHtml(fileExplorerItemId, {
-              groupClass: 'file-explorer-frame-controls',
-              actions: false,
-              minimize: false,
-              expand: false,
-              close: true,
-              closeClass: 'file-explorer-panel-close',
-              closeTitle: t('finder.hideFromLayout', {name: label}),
-              closeLabel: t('finder.hideFromLayout', {name: label}),
-            })}
+            ${reloadButtonHtml}
           </div>
-          <div class="file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only">
-            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
-            <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
-            <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
+          <div class="file-explorer-toolbar-row file-explorer-path-row">
+            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
+            <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
+            <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
           </div>
-          <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
-            <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
+          <div class="file-explorer-toolbar-row file-explorer-actions-row">
+            <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
+            <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
-            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            ${fileExplorerTreeSortSelectHtml('file-explorer-mode-files-only')}
-            <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
+            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+            ${fileExplorerTreeSortSelectHtml()}
+            <span class="file-explorer-date-controls">
               ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
-              <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>
             </span>
           </div>
-        </div>`,
+        </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}</div></div>` : '';
+  panel.innerHTML = panelFrameHtml({
+    item,
+    headClass: 'file-explorer-head',
+    controlsHtml: virtualPanelInnerControlsHtml(item),
+    headAfterTabsHtml: finderToolbarHtml,
     bodyClass: 'file-explorer-pane',
     bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
         <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
   });
-  bindPanelShell(panel, fileExplorerItemId);
+  bindPanelShell(panel, item);
   bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
@@ -2730,37 +2683,25 @@ function createFileExplorerPanel() {
     event.stopPropagation();
     copyCurrentFileExplorerPath();
   });
-  bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
-  bindFileExplorerHeaderActions(panel);
-  bindFileExplorerChangesResizer(panel);
-  // The panel-head mode button switches the same Finder pane between files and diff.
-  panel.addEventListener('click', event => {
-    const modeSet = event.target.closest?.('[data-file-explorer-mode-set]');
-    if (modeSet) {
-      event.preventDefault();
-      event.stopPropagation();
-      setFileExplorerMode(modeSet.dataset.fileExplorerModeSet);
-    } else if (event.target.closest?.('[data-file-explorer-mode-toggle]')) {
-      event.preventDefault();
-      event.stopPropagation();
-      setFileExplorerMode(fileExplorerMode === 'diff' ? 'files' : 'diff');
-    } else if (event.target.closest?.('[data-file-explorer-changes-close]')) {
-      event.preventDefault();
-      event.stopPropagation();
-      setFileExplorerMode('files');
-    }
-  });
-  applyFileExplorerMode(panel);
-  renderFileExplorerRootModeControls();
-  refreshFileExplorerPanelTree(panel);
-  renderFileExplorerChangesPanel(panel);
-  if (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession()) {
+  if (view === 'finder') {
+    bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
+    bindFileExplorerHeaderActions(panel);
+  }
+  if (view !== 'finder') bindFileExplorerChangesResizer(panel);
+  applyFileExplorerPanelView(panel, item);
+  if (view === 'finder') {
+    renderFileExplorerRootModeControls();
+    refreshFileExplorerPanelTree(panel);
+  } else {
+    renderFileExplorerChangesPanel(panel);
+  }
+  if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
       fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
-  }
+  } else if (view === 'tabber') fetchTabberActivity();
   return panel;
 }
 
@@ -2793,9 +2734,11 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
 function renderFileExplorerChangesPanel(panel, options = {}) {
   const changes = panel?.querySelector?.('[data-file-explorer-changes]');
   if (!changes) return;
-  if (fileExplorerMode === 'tabber') {
+  const view = fileExplorerViewForItem(panel.dataset.panelItem) || 'finder';
+  if (view === 'finder') return;
+  if (view === 'tabber') {
     if (options.force === true || !changes.querySelector('.changes-groups')) {
-      replaceChangesStaticHtml(changes, fileExplorerChangesPanelStaticHtml());
+      replaceChangesStaticHtml(changes, fileExplorerChangesPanelStaticHtml({view}));
     }
     renderTabberTree(changes.querySelector('.changes-groups'));
     bindTabberPanel(panel);
@@ -2804,13 +2747,13 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
   if (options.force === true || !activeChangesControl(panel)) {
     renderChangesRoot(
       changes,
-      fileExplorerChangesPanelStaticHtml({full: fileExplorerMode === 'diff'}),
+      fileExplorerChangesPanelStaticHtml({view, full: true}),
       fileExplorerDifferFiles(),
       {
         payload: fileExplorerSessionFilesState.payload,
-        compact: fileExplorerMode !== 'diff',
+        compact: false,
         loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
-        includeEmptyRepoSections: fileExplorerMode === 'diff',
+        includeEmptyRepoSections: true,
       },
       {force: options.force === true},
     );
@@ -2822,13 +2765,37 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 }
 
 function renderFileExplorerChangesPanels(options = {}) {
-  if (!fileExplorerPaneIsOpen()) return;
+  if (!itemInLayout(differItemId) && !itemInLayout(tabberItemId)) return;
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     renderFileExplorerChangesPanel(panel, options);
   }
   if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
-    scheduleShareScrollRestoreByKey(`finder:${normalizeFileExplorerMode(fileExplorerMode)}`);
+    scheduleShareScrollRestoreByKey('finder:differ');
   }
+}
+
+// Fixed file surfaces may mount before their asynchronous payload arrives and later become active
+// through an active-only Dockview update. That update deliberately skips the general attached-panel
+// render pass, so refresh the selected surface here instead of depending on the retired global mode
+// switch to rebuild all three panels.
+function activateFileExplorerSurface(item) {
+  const view = fileExplorerViewForItem(item);
+  const panel = panelNodes.get(item);
+  if (!view || !panel) return false;
+  if (view === 'finder') {
+    refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
+    return true;
+  }
+  renderFileExplorerChangesPanel(panel, {force: true});
+  if (view === 'tabber') {
+    fetchTabberActivity();
+    return true;
+  }
+  const session = fileExplorerSessionFilesTargetSession();
+  if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
+    fetchSessionFiles({destination: 'finder', session, silent: true});
+  }
+  return true;
 }
 
 function bindFileExplorerChangesResizer(panel) {

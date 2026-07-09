@@ -112,36 +112,29 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
 
 
 @pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
-def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_token):
+def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
     load_live_runtime_boot_fixture(browser, tmp_path, f"?layout=left&tabs=left:{legacy_token}")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('#panel-__files__')?.dataset.fileExplorerMode === 'diff'"
+            "return document.querySelector('#panel-__differ__')?.dataset.fileExplorerMode === 'diff'"
         )
     )
     metrics = browser.execute_script(
         """
-        const panel = document.querySelector('#panel-__files__');
-        const filesButton = panel.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = panel.querySelector('[data-file-explorer-mode-set="diff"]');
+        const panel = document.querySelector('#panel-__differ__');
         const tree = panel.querySelector('.file-explorer-tree-panel');
         const changes = panel.querySelector('.file-explorer-changes-panel');
-        const newFile = panel.querySelector('[data-file-explorer-new-file]');
         const visible = selector => Array.from(panel.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         return {
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
           panelConnected: panel?.isConnected === true,
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
           panelMode: panel?.dataset.fileExplorerMode,
-          filesPressed: filesButton?.getAttribute('aria-pressed'),
-          diffPressed: diffButton?.getAttribute('aria-pressed'),
-          modeTexts: Array.from(panel.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
+          noModeSwitcher: panel?.querySelector('.file-explorer-mode-switcher') === null,
           treeDisplay: getComputedStyle(tree).display,
           changesDisplay: getComputedStyle(changes).display,
           titleCount: panel.querySelectorAll('.file-explorer-panel-title').length,
-          newFileDisplay: getComputedStyle(newFile).display,
+          newFileAbsent: panel.querySelector('[data-file-explorer-new-file]') === null,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
           visibleSortSelects: visible('[data-session-files-sort]').length,
@@ -155,16 +148,12 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert metrics["panelConnected"]
-    assert metrics["bodyDiff"]
-    assert not metrics["bodyFiles"]
     assert metrics["panelMode"] == "diff"
-    assert metrics["filesPressed"] == "false"
-    assert metrics["diffPressed"] == "true"
-    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
+    assert metrics["noModeSwitcher"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
     assert metrics["titleCount"] == 0
-    assert metrics["newFileDisplay"] == "none"
+    assert metrics["newFileAbsent"]
     assert metrics["visibleRootControls"] == 0, metrics
     assert metrics["visibleSessionSelects"] == 1, metrics
     assert metrics["visibleSortSelects"] == 1, metrics
@@ -196,12 +185,12 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-                "return Array.from(document.querySelectorAll('#panel-__files__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '2')"
+                "return Array.from(document.querySelectorAll('#panel-__differ__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '2')"
         )
     )
     metrics = browser.execute_script(
         """
-        const panel = document.querySelector('#panel-__files__');
+        const panel = document.querySelector('#panel-__differ__');
         const rows = Array.from(panel.querySelectorAll('.file-tree-row.kind-dir'));
         const records = rows.map(row => {
           const count = row.querySelector(':scope > .file-tree-dir-count');
@@ -614,6 +603,7 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
         """
     )
     assert "error" not in metrics, metrics
+    assert metrics["entry"] is not None, metrics
     assert metrics["entry"]["name"] == "03-mixed.md", metrics
     assert metrics["entry"]["kind"] == "file", metrics
     assert metrics["missing"] is False, metrics
@@ -1792,7 +1782,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
         lambda driver: driver.execute_script(
             """
             return document.querySelector('.file-explorer-path-inline') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-tree-panel') !== null
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1804,7 +1794,6 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
         const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
-            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
             fileExplorerSessionFilesCache.delete(sessionFilesCacheKey('6'));
@@ -1907,7 +1896,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
         lambda driver: driver.execute_script(
             """
             return document.querySelector('.file-explorer-path-inline') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-tree-panel') !== null
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1919,7 +1908,6 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
         const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
-            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
             await frame();

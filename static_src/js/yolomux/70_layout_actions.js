@@ -130,7 +130,11 @@ function tabsToEvictForCap(tabs, keepItem) {
 }
 
 function paneTabsWithoutFinder(slot, slots = layoutSlots) {
-  return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
+  // Only the dedicated left home column is special. A Finder, Differ, or Tabber moved elsewhere
+  // is a normal pane tab and must participate in minimize/expand like every other item.
+  return slotIsFileSurfaceHome(slot, slots)
+    ? paneTabs(slot, slots).filter(item => !isFileExplorerItem(item))
+    : paneTabs(slot, slots);
 }
 
 // A narrow touch layout has one shared tab strip, not independent panes. Its frame controls must
@@ -151,11 +155,11 @@ function nextNarrowPaneFrameItem(item, slots = layoutSlots) {
 
 function canPaneExpand(item, slots = layoutSlots) {
   const targetSlot = slotForItem(item, slots);
-  if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
+  if (!targetSlot || slotIsFileSurfaceHome(targetSlot, slots)) return false;
   if (!activeItemForSide(targetSlot, slots)) return false;
   return layoutSlotKeys(slots).some(slot => (
     slot !== targetSlot
-    && !isFileExplorerItem(activeItemForSide(slot, slots))
+    && !slotIsFileSurfaceHome(slot, slots)
     && paneTabsWithoutFinder(slot, slots).length > 0
   ));
 }
@@ -168,7 +172,7 @@ function minimizePaneFromLayout(item) {
     return;
   }
   if (narrowSingleColumnMode()) return;
-  if (isFileExplorerItem(activeItemForSide(sourceSlot))) {
+  if (slotIsFileSurfaceHome(sourceSlot)) {
     removePaneFromLayout(item);
     return;
   }
@@ -205,7 +209,7 @@ function expandPaneFromLayout(item) {
   if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
-  const finderSlot = slotForSession(fileExplorerItemId);
+  const finderSlot = layoutFileSurfaceHomeSlot();
   const targetTabs = appendUniqueItems([], paneTabsWithoutFinder(targetSlot));
   for (const slot of layoutSlotKeys()) {
     if (slot === targetSlot) continue;
@@ -214,7 +218,7 @@ function expandPaneFromLayout(item) {
   const next = emptyLayoutSlots();
   next[targetSlot] = paneStateWithTabs(targetTabs, active);
   if (finderSlot && finderSlot !== targetSlot) {
-    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+    next[finderSlot] = paneStateWithTabs(paneTabs(finderSlot), activeItemForSide(finderSlot));
     const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
     next[layoutTreeKey] = finderFirst
       ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
@@ -457,6 +461,77 @@ async function openFileExplorerPane() {
   await moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null);
 }
 
+// The menu and shortcuts call this shared placement transaction for Finder, Differ, and Tabber.
+// Existing tabs are activated in place.  Only a missing item is inserted into the left home column.
+async function openFileSurfacePane(item) {
+  const resolved = resolveLayoutItem(item);
+  if (!layoutIsFileSurfaceItem(resolved)) return false;
+  const currentSlot = slotForItem(resolved);
+  if (currentSlot) {
+    activatePaneTab(currentSlot, resolved, {userInitiated: true});
+    return true;
+  }
+  if (narrowSingleColumnMode()) {
+    const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
+    const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
+    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingFileExplorer: true});
+    return true;
+  }
+  const next = layoutWithFileSurfaceHome(layoutSlots, [resolved]);
+  const homeSlot = layoutFileSurfaceHomeSlot(next);
+  applyLayoutSlots(next, {focusSession: resolved, prune: false});
+  if (homeSlot) activatePaneTab(homeSlot, resolved, {userInitiated: true});
+  return true;
+}
+
+// Public triplet placement entry point used by menus, keyboard shortcuts, and future callers.
+// Keep the alias here with the slot mutation rather than teaching each consumer where a home
+// column lives.
+async function openFileSurface(item) {
+  return openFileSurfacePane(item);
+}
+
+// File-menu navigation is intentionally broader on a desktop/wide tablet: choosing any triplet
+// destination restores all missing Finder/Differ/Tabber tabs, while retaining every existing
+// placement, then activates the item the user chose. Narrow touch remains one selected surface.
+async function openFileSurfaceFromMenu(item) {
+  const resolved = resolveLayoutItem(item);
+  if (!layoutIsFileSurfaceItem(resolved)) return false;
+  if (narrowSingleColumnMode()) return openFileSurfacePane(resolved);
+  const next = layoutWithFileSurfaceHome(layoutSlots, fileSurfaceItems, {forceCreate: true, active: resolved});
+  const targetSlot = slotForItem(resolved, next);
+  applyLayoutSlots(next, {focusSession: resolved, prune: false});
+  if (targetSlot) activatePaneTab(targetSlot, resolved, {userInitiated: true});
+  return true;
+}
+
+function layoutWithoutFileSurfaces(slots = layoutSlots) {
+  const next = cloneLayoutSlots(slots);
+  for (const slot of layoutSlotKeys(next)) {
+    const tabs = paneTabs(slot, next).filter(item => !layoutIsFileSurfaceItem(item));
+    next[slot] = tabs.length ? paneStateWithTabs(tabs, activeItemForSide(slot, next)) : emptyPlaceholderPaneState();
+  }
+  return compactLayoutSlots(next, {preservePlaceholderSlots: false});
+}
+
+// Cmd/Ctrl+B deliberately differs from an individual close: it is an explicit whole-triplet
+// transaction. Hiding retains no second layout source; restoring intentionally creates the
+// documented default 22% home column with Finder active.
+async function toggleAllFileSurfaces() {
+  if (layoutFileSurfaceItems().some(item => itemInLayout(item))) {
+    applyLayoutSlots(layoutWithoutFileSurfaces(), {
+      preserveMissingFileExplorer: true,
+      message: fileExplorerHiddenStatusMessage(),
+    });
+    return false;
+  }
+  const next = layoutWithDefaultFileSurfaceHome(layoutSlots);
+  const homeSlot = layoutFileSurfaceHomeSlot(next);
+  applyLayoutSlots(next, {focusSession: finderItemId, prune: false});
+  if (homeSlot) activatePaneTab(homeSlot, finderItemId, {userInitiated: true});
+  return true;
+}
+
 async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = defaultSplitPercent) {
   if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
   if (!paneIsPlaceholder(targetSlot)) {
@@ -524,10 +599,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
-  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement()) {
-    await openFileExplorerPane();
-    return;
-  }
+  if (!dropIntentAllowsSession(session, intent)) return;
   if (intent?.boundary === 'gutter') {
     await splitSessionAtGutter(session, intent.splitPath, intent.zone, sourceSlot);
     return;
@@ -545,19 +617,33 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
 
 function splitPercentForNewItem(session, zone, pct = null) {
   if (pct !== null && pct !== undefined && pct !== '' && Number.isFinite(Number(pct))) return Number(pct);
-  if (isFileExplorerItem(session) && !fileExplorerUsesNormalTabMovement() && (zone === 'left' || zone === 'right')) {
-    return zone === 'left' ? fileExplorerSplitPercent : 100 - fileExplorerSplitPercent;
-  }
   return defaultSplitPercent;
 }
 
+function rootBoundarySplitPercent(existingNode, zone, pct = null, slots = layoutSlots, movingItem = null) {
+  if (pct !== null && pct !== undefined && pct !== '' && Number.isFinite(Number(pct))) return splitPercent(pct);
+  const existingPaneCount = Math.max(1, layoutLeafSlots(existingNode).filter(slot => (
+    paneTabs(slot, slots).some(item => item !== movingItem)
+      || (paneIsPlaceholder(slot, slots) && !paneTabs(slot, slots).includes(movingItem))
+  )).length);
+  const newPanePercent = 100 / (existingPaneCount + 1);
+  return splitPercent(zone === 'right' || zone === 'bottom' ? 100 - newPanePercent : newPanePercent);
+}
+
 function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
-  return Boolean(sourceSlot && sourceSlot !== targetSlot && isFileExplorerItem(activeItemForSide(targetSlot)));
+  return Boolean(sourceSlot && sourceSlot !== targetSlot && slotIsFileSurfaceHome(targetSlot));
 }
 
 function dockedFileExplorerRootSplit(node, slots = layoutSlots) {
   if (!node || node.split !== 'row' || !Array.isArray(node.children) || node.children.length !== 2) return null;
-  const finderIndex = node.children.findIndex(child => child?.slot && isFileExplorerItem(activeItemForSide(child.slot, slots)));
+  const homeLeaves = new Set(layoutFileSurfaceHomeLeaves(slots));
+  const finderIndex = node.children.findIndex(child => {
+    const leaves = layoutLeafSlots(child);
+    const populated = leaves.filter(slot => paneTabs(slot, slots).length > 0);
+    return populated.length > 0
+      && populated.every(slot => homeLeaves.has(slot))
+      && leaves.every(slot => homeLeaves.has(slot) || !paneHasLayoutContent(slot, slots));
+  });
   if (finderIndex < 0) return null;
   return {
     finderIndex,
@@ -567,15 +653,16 @@ function dockedFileExplorerRootSplit(node, slots = layoutSlots) {
 }
 
 function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct = null, slots = layoutSlots) {
-  const docked = (zone === 'top' || zone === 'bottom') ? dockedFileExplorerRootSplit(root, slots) : null;
+  const docked = dockedFileExplorerRootSplit(root, slots);
   if (!docked) return null;
   const children = [...(root.children || [])];
   const contentNode = children[docked.contentIndex];
   if (!contentNode) return null;
-  const splitPct = splitPercentForNewItem(session, zone, pct);
-  children[docked.contentIndex] = zone === 'bottom'
-    ? splitNode('column', contentNode, newNode, splitPct)
-    : splitNode('column', newNode, contentNode, splitPct);
+  const direction = layoutSplitDirectionForZone(zone);
+  const splitPct = rootBoundarySplitPercent(contentNode, zone, pct, slots);
+  children[docked.contentIndex] = zone === 'right' || zone === 'bottom'
+    ? splitNode(direction, contentNode, newNode, splitPct)
+    : splitNode(direction, newNode, contentNode, splitPct);
   return splitNode('row', children[0], children[1], docked.pct);
 }
 
@@ -729,7 +816,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
       && sourceSlot
       && !narrowSingleColumnMode()
       && !tabIsPinned(item)
-      && !isFileExplorerItem(activeItemForSide(sourceSlot, slots))
+      && !slotIsFileSurfaceHome(sourceSlot, slots)
       && sourceRect,
   );
   const result = {move: {}, swap: {}, targets: {}};
@@ -743,7 +830,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
     const targets = layoutSlotsTouchingDirection(sourceSlot, zone, visibleSlots);
     if (targets.length === 1) {
       const targetSlot = targets[0];
-      const targetIsUsable = !isFileExplorerItem(activeItemForSide(targetSlot, visibleSlots));
+      const targetIsUsable = !slotIsFileSurfaceHome(targetSlot, visibleSlots);
       const targetItem = activeItemForSide(targetSlot, visibleSlots);
       const targetHasTab = Boolean(targetItem);
       if (!targetIsUsable) {
@@ -867,7 +954,7 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
   next[newSlot] = paneStateWithTabs([session], session);
   const newNode = leafNode(newSlot);
   const direction = layoutSplitDirectionForZone(zone);
-  const splitPct = splitPercentForNewItem(session, zone, pct);
+  const splitPct = rootBoundarySplitPercent(root, zone, pct, next);
   next[layoutTreeKey] = splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct, next)
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
@@ -954,9 +1041,6 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
-  // focused item plus the newly activated tab so Back returns to the pane the user just left.
-  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (!shareViewMode && isTmuxSession(session)) {
     const item = terminals.get(session);
     if (item?.term) sharePublish('host-resize', {session, rows: item.term.rows, cols: item.term.cols});
@@ -964,6 +1048,10 @@ function activatePaneTab(side, session, options = {}) {
   sharePublish('active-tab', {slot: side, item: session});
   scheduleShareTopologySnapshot('tab-activation');
   if (activeItemForSide(side) === session) {
+    // A user-initiated tab switch is navigation. Record focus only after the layout already names
+    // this item active so Tabber never renders the transient old-active/new-focus combination.
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+    if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
@@ -972,6 +1060,8 @@ function activatePaneTab(side, session, options = {}) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+  if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
   if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
@@ -983,8 +1073,8 @@ async function selectSession(session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  if (isFileExplorerItem(session)) {
-    await openFileExplorerPane();
+  if (layoutIsFileSurfaceItem(session)) {
+    await openFileSurfacePane(session);
     scheduleFileExplorerActiveTabSync();
     return;
   }
@@ -2071,7 +2161,7 @@ function focusPanel(session, options = {}) {
   const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
   if (options.userInitiated === true) dismissSessionToasts(session);
-  if (options.userInitiated === true || options.scrollIntoView === true) {
+  if (options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }
   if (isFileEditorItem(session)) {
@@ -3150,7 +3240,7 @@ function layoutBoundaryDropBandPx(size) {
   return Math.min(layoutBoundaryDropMaxPx, Math.max(layoutBoundaryDropMinPx, scaled));
 }
 
-function rootBoundaryDropZoneForEvent(event, rect) {
+function rootBoundaryDropZoneForEvent(event, rect, preferredZone = null) {
   if (!rect.width || !rect.height) return null;
   const insideX = event.clientX >= rect.left && event.clientX <= rect.right;
   const insideY = event.clientY >= rect.top && event.clientY <= rect.bottom;
@@ -3163,16 +3253,29 @@ function rootBoundaryDropZoneForEvent(event, rect) {
     {zone: 'top', distance: Math.abs(event.clientY - rect.top), active: event.clientY <= rect.top + yBand},
     {zone: 'bottom', distance: Math.abs(rect.bottom - event.clientY), active: event.clientY >= rect.bottom - yBand},
   ].filter(candidate => candidate.active);
+  if (preferredZone) return candidates.find(candidate => candidate.zone === preferredZone)?.zone || null;
   candidates.sort((left, right) => left.distance - right.distance);
   return candidates[0]?.zone || null;
 }
 
+function rootBoundaryLayoutTarget(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey];
+  if (!root) return null;
+  const docked = dockedFileExplorerRootSplit(root, slots);
+  const targetNode = docked ? root.children?.[docked.contentIndex] : root;
+  if (!targetNode) return null;
+  return {
+    node: targetNode,
+    rect: layoutNodeScreenRect(targetNode) || grid?.getBoundingClientRect?.() || null,
+  };
+}
+
 function rootBoundaryDropIntentForEvent(event) {
-  const targetRect = grid.getBoundingClientRect();
+  const target = rootBoundaryLayoutTarget();
+  const targetRect = target?.rect || grid.getBoundingClientRect();
   const zone = rootBoundaryDropZoneForEvent(event, targetRect);
   if (!zone) return null;
-  if (rootBoundaryDropOverDockedFileExplorer(event, zone)) return null;
-  return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, boundary: 'root'};
+  return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, targetNode: target?.node, boundary: 'root'};
 }
 
 function gutterDropZoneForEvent(event, node, rect) {
@@ -3226,7 +3329,11 @@ function dropIntentForEvent(event, options = {}) {
 }
 
 function slotIsFileExplorerPane(slot) {
-  return !fileExplorerUsesNormalTabMovement() && isFileExplorerItem(activeItemForSide(slot));
+  return slotIsFileSurfaceHome(slot);
+}
+
+function slotIsFileSurfaceHome(slot, slots = layoutSlots) {
+  return layoutFileSurfaceHomeLeaves(slots).includes(slot);
 }
 
 function dropIntentTargetRect(intent) {
@@ -3245,7 +3352,7 @@ function dropIntentInlineSize(intent) {
 }
 
 function dropItemCanBeDragged(item, options = {}) {
-  if (isLayoutItem(item)) return !isFileExplorerItem(item) || fileExplorerUsesNormalTabMovement();
+  if (isLayoutItem(item)) return true;
   return options.allowCandidate === true && isFileEditorItem(item);
 }
 
@@ -3270,7 +3377,7 @@ function paneSwapAllowed(sourceSlot, targetSlot, slots = layoutSlots) {
   const keys = layoutSlotKeys(slots);
   if (!keys.includes(sourceSlot) || !keys.includes(targetSlot)) return false;
   if (paneIsPlaceholder(sourceSlot, slots) || paneIsPlaceholder(targetSlot, slots)) return false;
-  if (isFileExplorerItem(activeItemForSide(sourceSlot, slots)) || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
+  if (slotIsFileSurfaceHome(sourceSlot, slots) || slotIsFileSurfaceHome(targetSlot, slots)) return false;
   const sourceTabs = paneTabs(sourceSlot, slots);
   const targetTabs = paneTabs(targetSlot, slots);
   if (!sourceTabs.length || !targetTabs.length) return false;
@@ -3346,8 +3453,8 @@ function dropIntentHasRoomForItem(item, intent) {
 
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
-  if (zone !== 'bottom') return false;
-  if (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement()) return false;
+  if (zone !== 'top' && zone !== 'bottom') return false;
+  if (!layoutIsFileSurfaceItem(item)) return false;
   if (!dropIntentTargetRect(intent)) return false;
   return dropIntentHasRoomForItem(item, intent);
 }
@@ -3357,8 +3464,12 @@ function dropIntentAllowsSession(session, intent, options = {}) {
   if (narrowSingleColumnMode()) return Boolean(intent?.targetSlot) && intent.zone === 'middle';
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
-  if (slotIsFileExplorerPane(intent.targetSlot)) {
-    return itemCanSplitSinglePurposePane(session, intent);
+  if (slotIsFileSurfaceHome(intent.targetSlot)) {
+    // The 22% root column is intentionally a tiny file-surface workspace. It may stack or split
+    // vertically, but a horizontal split would widen/fragment the column and a terminal drop
+    // would turn it into an accidental general-purpose pane.
+    if (!layoutIsFileSurfaceItem(session)) return false;
+    return intent.zone === 'middle' || itemCanSplitSinglePurposePane(session, intent);
   }
   return dropIntentHasRoomForItem(session, intent);
 }
@@ -3450,37 +3561,29 @@ function layoutSlotScreenRect(slot) {
   return tabGroupRect?.width > 0 && tabGroupRect?.height > 0 ? tabGroupRect : null;
 }
 
-function dockedFileExplorerScreenRect(slots = layoutSlots) {
-  const root = slots?.[layoutTreeKey];
-  const docked = dockedFileExplorerRootSplit(root, slots);
-  if (!docked) return null;
-  return layoutNodeScreenRect(root?.children?.[docked.finderIndex]);
-}
-
-function eventInsideRect(event, rect) {
-  return Boolean(
-    event && rect
-    && event.clientX >= rect.left && event.clientX <= rect.right
-    && event.clientY >= rect.top && event.clientY <= rect.bottom
-  );
-}
-
-function rootBoundaryDropOverDockedFileExplorer(event, zone, slots = layoutSlots) {
-  if (!layoutSplitZone(zone)) return false;
-  return eventInsideRect(event, dockedFileExplorerScreenRect(slots));
-}
-
-function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
+function applyRootBoundaryPreviewGeometry(node, intent) {
   if (intent?.boundary !== 'root' || node !== grid) return;
-  if (intent.zone !== 'top' && intent.zone !== 'bottom') return;
-  const root = layoutSlots?.[layoutTreeKey];
-  const docked = dockedFileExplorerRootSplit(root, layoutSlots);
-  if (!docked) return;
   const gridRect = grid.getBoundingClientRect();
-  const contentRect = layoutNodeScreenRect(root?.children?.[docked.contentIndex]);
-  if (!gridRect || !contentRect) return;
-  node.style.setProperty('--drop-preview-left', `${Math.round(contentRect.left - gridRect.left + 6)}px`);
-  node.style.setProperty('--drop-preview-width', `${Math.round(Math.max(0, contentRect.width - 12))}px`);
+  const target = rootBoundaryLayoutTarget();
+  const targetRect = intent.targetRect || target?.rect || gridRect;
+  const targetNode = intent.targetNode || target?.node;
+  if (!gridRect || !targetRect || !targetNode) return;
+  const zone = intent.zone || 'middle';
+  const splitPct = rootBoundarySplitPercent(targetNode, zone, null, layoutSlots, intent.item || null);
+  const splitX = targetRect.left + targetRect.width * splitPct / 100;
+  const splitY = targetRect.top + targetRect.height * splitPct / 100;
+  let left = targetRect.left - gridRect.left + 6;
+  let top = targetRect.top - gridRect.top + 6;
+  let right = targetRect.right - gridRect.left - 6;
+  let bottom = targetRect.bottom - gridRect.top - 6;
+  if (zone === 'left') right = splitX - gridRect.left - 3;
+  else if (zone === 'right') left = splitX - gridRect.left + 3;
+  else if (zone === 'top') bottom = splitY - gridRect.top - 3;
+  else if (zone === 'bottom') top = splitY - gridRect.top + 3;
+  node.style.setProperty('--drop-preview-left', `${Math.round(left)}px`);
+  node.style.setProperty('--drop-preview-top', `${Math.round(top)}px`);
+  node.style.setProperty('--drop-preview-width', `${Math.round(Math.max(0, right - left))}px`);
+  node.style.setProperty('--drop-preview-height', `${Math.round(Math.max(0, bottom - top))}px`);
 }
 
 function dropPreviewLabel(intent = {}) {
@@ -3501,7 +3604,7 @@ function showDropPreview(intent) {
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
   node.dataset.dropLabel = dropPreviewLabel(intent);
   applyGutterDropPreviewGeometry(node, intent);
-  applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
+  applyRootBoundaryPreviewGeometry(node, intent);
 }
 
 // Grid and Dockview use different hit testing, not different drag semantics. Classify the payload
@@ -3522,6 +3625,7 @@ function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSes
   if (!session?.session) return null;
   if (suppressSession(event)) return {kind: 'session', payload: session, intent: null, allowed: false, dropEffect: 'none'};
   const intent = intentForSession?.(event) || null;
+  if (intent) intent.item = session.session;
   if (ignoreMissingIntent && !intent) return null;
   return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
 }

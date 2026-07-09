@@ -39,13 +39,15 @@ async function runShareThemeSuite() {
   test('cross-surface host state survives layout, share, and terminal transitions', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
     const virtualItems = {
       info: api.infoItemId,
       yoagent: api.yoagentItemId,
       chat: api.chatItemId,
       'chat-media': 'chat-media:https://example.test/image.png',
-      files: api.fileExplorerItemId,
+      finder: api.finderItemId,
+      differ: api.differItemId,
+      tabber: api.tabberItemId,
       'search-history': api.searchHistoryItemId,
       preferences: api.prefsItemId,
       debug: api.debugPaneItemId,
@@ -98,11 +100,11 @@ async function runShareThemeSuite() {
     assert.equal(api.resolveLayoutItem('__yosup__'), api.yoagentItemId, 'legacy yosup item id resolves to YO!agent');
     assert.equal(api.resolveLayoutItem('__yoagent__'), api.yoagentItemId, 'legacy yoagent item id resolves to YO!agent');
     api.setFileExplorerModeForTest('files');
-    assert.equal(api.resolveLayoutItem('changes'), api.fileExplorerItemId, 'legacy changes URL param resolves to the Finder pane');
-    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes URL param preselects Finder diff mode');
+    assert.equal(api.resolveLayoutItem('changes'), api.differItemId, 'legacy changes URL param resolves to the independent Differ tab');
+    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes URL param retains the compatibility diff view');
     api.setFileExplorerModeForTest('files');
-    assert.equal(api.resolveLayoutItem('__changes__'), api.fileExplorerItemId, 'legacy changes item id resolves to the Finder pane');
-    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes item id preselects Finder diff mode');
+    assert.equal(api.resolveLayoutItem('__changes__'), api.differItemId, 'legacy changes item id resolves to the independent Differ tab');
+    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes item id retains the compatibility diff view');
     assert.equal(api.resolveLayoutItem('files'), api.fileExplorerItemId, 'files alias still resolves to Finder');
     assert.equal(api.resolveLayoutItem('search'), api.searchHistoryItemId, 'search alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('history'), api.searchHistoryItemId, 'history alias resolves to the Search & Runs pane');
@@ -112,9 +114,9 @@ async function runShareThemeSuite() {
     assert.equal(api.itemParam(api.infoItemId), 'info', 'the YO!info pane uses the info param');
     assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', 'the YO!agent pane uses the yoagent param');
     assert.equal(api.itemParam(api.searchHistoryItemId), 'search-history', 'the Search & Runs pane uses a stable URL param');
-    assert.equal(api.tabTypeForItem('__files__').key, 'files');
+    assert.equal(api.tabTypeForItem('__files__'), null, 'legacy Files aliases are URL inputs, not duplicate live tab identities');
     assert.equal(api.tabTypeForItem(api.searchHistoryItemId).key, 'search-history');
-    assert.equal(api.tabTypeForItem('__changes__'), null, 'standalone Changes tab type is removed');
+    assert.equal(api.tabTypeForItem('__changes__'), null, 'legacy Changes aliases are URL inputs, not duplicate live tab identities');
     assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
     assert.equal(api.tabTypeForItem('file:/home/test/README.md').key, 'file-editor');
     assert.equal(api.fileItemPath('image:/home/test/screen.png'), '/home/test/screen.png');
@@ -256,8 +258,7 @@ async function runShareThemeSuite() {
     assert.ok(cachedFinderRefreshUrl.includes('/api/session-files?') && cachedFinderRefreshUrl.includes('session=2') && cachedFinderRefreshUrl.includes('force=1'), 'cached Finder switch still starts a forced background refresh');
     api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
     api.setSessionFilesLoadingForTest(true);
-    api.setFileExplorerModeForTest('files');
-    const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml();
+    const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml({view: 'finder'});
     assert.ok(/changes-comparison-head compact[\s\S]*changes-loading[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingEmbeddedDifferHtml), 'embedded Finder Differ loading header uses the same moving-dot indicator');
     assert.equal(loadingEmbeddedDifferHtml.includes('changes-loading-yolo'), false, 'embedded Finder Differ loading header does not render a circular YO spinner');
     assert.equal(loadingEmbeddedDifferHtml.includes('not loaded'), false, 'embedded Finder Differ loading header does not flash "not loaded"');
@@ -595,8 +596,9 @@ async function runShareThemeSuite() {
         {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       ],
     });
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('Differ:'), 'Finder embeds a Differ panel');
-    assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Differ title uses the compact session title');
+    const embeddedDifferHtml = api.fileExplorerChangesPanelHtml({view: 'finder'});
+    assert.ok(embeddedDifferHtml.includes('Differ:'), 'Finder embeds a Differ panel');
+    assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(embeddedDifferHtml), 'C7: the embedded Differ title uses the compact session title');
     api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setFileExplorerModeForTest('diff');
     api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc1111', to: 'current'});
@@ -757,7 +759,7 @@ async function runShareThemeSuite() {
     });
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
-    const compactFinderPanel = api.fileExplorerChangesPanelHtml();
+    const compactFinderPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
     const compactHeadStart = compactFinderPanel.indexOf('class="changes-repo-head"');
     const compactRepoHead = compactFinderPanel.slice(compactHeadStart, compactFinderPanel.indexOf('</button>', compactHeadStart));
     assert.ok(/changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(compactRepoHead), 'Finder Modified-files repo header shows the repo aggregate totals');
@@ -769,11 +771,11 @@ async function runShareThemeSuite() {
     assert.equal(compactFinderPanel.includes('changes-repo-popover'), false, 'C6: repo comparison details are visible, not hidden in a hover popover');
     // C15: ahead/behind is hidden when 0 (the popover shows only the non-zero ahead, not "Behind 0 commits").
     assert.equal(compactFinderPanel.includes('Behind 0 commit'), false, 'C15: 0-commit ahead/behind is not printed');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
+    assert.ok(compactFinderPanel.includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
+    assert.ok(compactFinderPanel.includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
     // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
     // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
-    const finderSortPanel = api.fileExplorerChangesPanelHtml();
+    const finderSortPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
     assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
     const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'common.sort.recent', oldest: 'finder.sort.oldest'};
@@ -839,8 +841,8 @@ async function runShareThemeSuite() {
     assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
     assert.equal(/<datalist/.test(api.fileExplorerChangesPanelHtml()), false, 'Finder compact diff refs do not render native datalists');
     assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('file-tree-row kind-file compact'), '#41: the Finder modified-files panel is always compact');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
+    assert.ok(api.fileExplorerChangesPanelHtml({view: 'finder'}).includes('file-tree-row kind-file compact'), '#41: the Finder modified-files panel is always compact');
+    assert.ok(api.fileExplorerChangesPanelHtml({view: 'finder'}).includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
     assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
     assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
     assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
@@ -1013,7 +1015,7 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);'), 'light theme explicitly restyles Finder modified-files through shared tokens');
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
-    assert.ok(/\.file-explorer-date-reload-cluster \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder date/reload cluster refresh paints the same visible refresh icon');
+    assert.ok(/\.file-explorer-primary-row \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder primary-row Reload control paints the same visible refresh icon');
     assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
@@ -1551,7 +1553,7 @@ async function runShareThemeSuite() {
     assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before the forced refresh');
-    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(fileExplorerMode === 'tabber'\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
+    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
     assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
     assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
     const stalePushApi = loadYolomux('', ['1']);
@@ -1632,14 +1634,14 @@ async function runShareThemeSuite() {
     assert.ok(/function applySessionFilesPayloadFromPush\(payload = \{\}, request = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear a stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
-    assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesState.payload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
-    assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
-    assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');
+    assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');
+    assert.ok(/function sessionFilesRequestQueryString\(\)\s*\{\s*return `\$\{diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}`;\s*\}/.test(appSource), 'the independent Differ request owner always follows its selected global and per-repo refs');
+    assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(appSource), 'the legacy mode entry point now activates the matching independent surface instead of maintaining a second renderer mode');
     assert.ok(/refreshFileExplorerTrees\(\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload refreshes the modified-file overlay as well as the directory tree');
     assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
     assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
     assert.equal(filesTab.includes('agent-icon file'), false);
-    assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
+    assert.ok(api.menuTabCommand(api.finderItemId).html.includes('app-menu-ui-icon-finder'));
     assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
     assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
     assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'), 'YO!agent has its own tab/menu icon');
@@ -1695,8 +1697,8 @@ async function runShareThemeSuite() {
     assert.ok(macPaneControls.includes('pane-expand pc-window-control pc-zoom'));
     assert.ok(macPaneControls.indexOf('pane-expand') < macPaneControls.indexOf('pane-minimize'), 'Mac frame controls use the shared + then _ order');
     assert.ok(/data-pane-expand="1"[^>]* hidden/.test(macPaneControls));
-    const macFinderControls = macApi.panelControlsHtml('__files__');
-    assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
+    const macFinderControls = macApi.panelControlsHtml(macApi.finderItemId);
+    assert.ok(macFinderControls.includes(`data-pane-close="${macApi.finderItemId}"`));
     assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
     assert.equal(macFinderControls.includes('data-pane-expand'), false);
     const macFinderFields = macApi.tabSearchFields(macApi.fileExplorerItemId);
@@ -1756,8 +1758,8 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'leaving the transcript pane removes the context subscription');
 
     const selfHealingFinderUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
-    assert.equal(selfHealingFinderUrlApi.itemInLayout('__files__'), true, 'Finder-less URLs self-heal unless this tab explicitly closed Finder');
-    assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['slot1', 'left']);
+    assert.deepStrictEqual([selfHealingFinderUrlApi.finderItemId, selfHealingFinderUrlApi.differItemId, selfHealingFinderUrlApi.tabberItemId].map(item => selfHealingFinderUrlApi.itemInLayout(item)), [false, false, false], 'an explicit file-surface-less URL remains authoritative');
+    assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['left']);
     const singlePaneUrlApi = loadYolomux(
       '?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant',
       ['1', '2', '3', '4', '5', '6', 'ant'],
@@ -1793,40 +1795,41 @@ async function runShareThemeSuite() {
       ['1', '2', '3', '4', '5', '6', 'ant'],
     );
     assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.layoutSlotKeys(finderBesideSinglePaneUrlApi.currentSlots())), ['slot1', 'left']);
-    assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('slot1'), '__files__');
+    assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('slot1'), finderBesideSinglePaneUrlApi.finderItemId);
+    assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('slot1')), [finderBesideSinglePaneUrlApi.finderItemId, finderBesideSinglePaneUrlApi.differItemId, finderBesideSinglePaneUrlApi.tabberItemId]);
     assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('left')), ['1', '6', '5', '2', 'ant', '4', '3']);
     assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('left'), '3');
     assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
     assert.ok(/data-pane-expand="3"[^>]* hidden/.test(finderBesideSinglePaneUrlApi.panelControlsHtml('3')));
 
     const defaultFinderApi = loadYolomux('', ['1', '2']);
-    assert.equal(defaultFinderApi.itemInLayout('__files__'), true, 'param-less boot includes the Finder pane');
-    assert.equal(defaultFinderApi.itemInLayout('__files__', defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the Finder pane');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId), true, 'param-less boot includes Finder');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.differItemId), true, 'param-less boot includes Differ');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.tabberItemId), true, 'param-less boot includes Tabber');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId, defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the file-surface home');
     const sessionsOnlyFinderApi = loadYolomux('?sessions=1', ['1', '2']);
-    assert.equal(sessionsOnlyFinderApi.itemInLayout('__files__'), true, 'sessions-only boot includes the Finder pane');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.finderItemId), true, 'sessions-only boot includes Finder');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.differItemId), true, 'sessions-only boot includes Differ');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.tabberItemId), true, 'sessions-only boot includes Tabber');
     });
 
     const finderToggleSlots = api.emptyLayoutSlots();
     finderToggleSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 31);
-    finderToggleSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderToggleSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     finderToggleSlots.right = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderToggleSlots);
     api.setFocusedPanelItem('1');
-    const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
     api.toggleFileExplorerShortcut();
-    assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
-    assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '0', 'keyboard-hiding Finder writes the explicit closed intent');
-    assert.equal(api.fileExplorerClosedByUserForTest(), true, 'keyboard-hiding Finder suppresses self-heal until the shortcut restores it');
+    assert.equal([api.finderItemId, api.differItemId, api.tabberItemId].some(item => api.itemInLayout(item)), false, 'app shortcut hides all three file-surface tabs atomically');
     assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
     assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
     api.toggleFileExplorerShortcut();
-    assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '1', 'restoring Finder records explicit per-tab open intent');
-    assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
-    assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'app shortcut restores the complete triplet');
+    assert.equal(api.layoutParamValue(api.currentSlots()), 'row@22(left,right)', 'app shortcut restores the documented default triplet home width');
+    assert.equal(api.focusedPanelItemForTest(), api.finderItemId, 'restoring the triplet activates Finder');
     api.toggleFileExplorerShortcut();
-    api.clearFileExplorerShortcutRestoreSlotsForTest();
     api.toggleFileExplorerShortcut();
-    assert.equal(api.itemInLayout('__files__'), true, 'app shortcut reopens Finder even when the in-memory restore snapshot is gone');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'app shortcut restoration needs no parallel layout snapshot');
 
     const focusedEditor = api.testElementForId('shortcut-editor');
     focusedEditor.className = 'cm-editor';
@@ -1846,7 +1849,7 @@ async function runShareThemeSuite() {
     };
     shortcutListeners.forEach(listener => listener(shortcutEvent));
     assert.equal(shortcutEvent.prevented, false, 'Cmd/Ctrl-B is not stolen while editor focus owns text formatting');
-    assert.equal(api.itemInLayout('__files__'), true, 'blocked Cmd/Ctrl-B does not hide Finder from editor focus');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'blocked Cmd/Ctrl-B does not hide the triplet from editor focus');
     api.setDocumentActiveElementForTest(null);
     const macFinderShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macTerminalTarget = macFinderShortcutApi.testElementForId('mac-shortcut-xterm');
@@ -1880,7 +1883,7 @@ async function runShareThemeSuite() {
     const fileEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
     const fileEditorSlots = api.emptyLayoutSlots();
     fileEditorSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
-    fileEditorSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    fileEditorSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     fileEditorSlots.slot1 = api.paneStateWithTabs([fileEditorItem], fileEditorItem);
     fileEditorSlots.slot2 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(fileEditorSlots);
@@ -1915,15 +1918,11 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-explorer-toolbar\s*\{[\s\S]*flex-direction:\s*column[\s\S]*justify-content:\s*flex-start/.test(preferencesCss), 'Finder toolbar is a deliberate stacked-row column instead of one wrapping row');
     assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
     assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
-    assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date, tree expand/collapse, and reload grouped');
+    assert.ok(/\.file-explorer-actions-row \.file-explorer-date-controls\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and tree expand/collapse grouped while Reload stays in the shared primary row');
     assert.ok(/\.file-explorer-date-toggle\[data-date-mode="none"\]\s*\{[\s\S]*text-decoration-line:\s*line-through/.test(preferencesCss), 'Finder/Differ None date mode renders as crossed-out Date');
     assert.ok(/\.file-explorer-path-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the dedicated path row and can shrink without wrapping Sync or Copy');
     assert.equal(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer/.test(preferencesCss), false, 'Finder files mode keeps the primary-row spacer so Session stays pinned right');
-    assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex[\s\S]*height:\s*var\(--pane-tab-height\)/.test(preferencesCss), 'Finder/Differ/Tabber mode switcher uses pane-tab height');
-    assert.ok(/\.file-explorer-mode-toggle\s*\{(?=[\s\S]*height:\s*var\(--pane-tab-height\))(?=[\s\S]*font-family:\s*var\(--tab-font\))(?=[\s\S]*border-radius:\s*var\(--radius-md\) var\(--radius-md\) 0 0)/.test(preferencesCss), 'Finder/Differ/Tabber mode buttons reuse the shared pane-tab corner radius');
-    assert.equal(/\.file-explorer-mode-label\s*\{[\s\S]*writing-mode:\s*vertical-rl/.test(preferencesCss), false, 'Finder/Differ mode labels are regular left-to-right text');
-    assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'inactive Finder/Differ/Tabber mode tabs use the pane tab strip background');
-    assert.ok(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'active Finder/Differ/Tabber mode tabs share the pane-tab active paint owner');
+    assert.equal(/\.file-explorer-mode-(?:switcher|toggle|label)/.test(preferencesCss), false, 'retired in-panel mode-switcher CSS is removed now that Finder, Differ, and Tabber are pane tabs');
     assert.ok(/\.file-explorer-folder-icon\s*\{[\s\S]*border:\s*1\.5px solid currentColor[\s\S]*\.file-explorer-folder-icon::before/.test(preferencesCss), 'Finder new-folder button renders a folder icon instead of a square glyph');
     assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
     const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1932,12 +1931,13 @@ async function runShareThemeSuite() {
       finderPanelStart,
       finderPanelBundle.indexOf('function bindFileExplorerPanel', finderPanelStart),
     );
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only[\s\S]*file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only/.test(finderPanelSource), 'Finder panel toolbar renders primary, path, and files-only action rows in order');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row/.test(finderPanelSource), 'Finder panel toolbar renders primary, path, and action rows in order');
     assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
     assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode tabs, immediate Session, spacer, and close control');
+    assert.equal(finderPanelSource.includes('fileExplorerModeSwitcherHtml()'), false, 'Finder panel uses the shared pane tabs instead of a second in-panel mode switcher');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel primary row renders Session, spacer, and Reload');
     assert.equal(finderPanelSource.includes('fileExplorerChangesCollapseToggleHtml()'), false, 'Finder panel primary row no longer renders a redundant Differ collapse/expand button next to close');
-    assert.ok(/file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
+    assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
     assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*common\.sessionLabel[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
     assert.equal(finderPanelSource.includes('file-explorer-scope-row'), false, 'Finder no longer renders a separate scope row');
     assert.equal(finderPanelSource.includes('file-explorer-quick-access-panel'), false, 'Finder pane chrome no longer renders visible quick-root buttons');
@@ -1949,14 +1949,14 @@ async function runShareThemeSuite() {
     assert.equal(api.expandQuickAccessPath('/*'), '/', 'Finder /* quick-access opens the root directory, not a literal glob path');
     assert.equal(api.displayQuickAccessPath('/tmp'), '/tmp', 'Finder quick-access labels absolute paths such as /tmp with their leading slash');
     assert.equal(finderPanelBundle.includes('renderQuickAccessInto(fileExplorerQuickAccess)'), false, 'legacy Finder quick-root container is not populated in visible UI');
-    assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*mode: 'tabber'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ/Tabber switcher renders all mode tabs from one source');
+    assert.ok(/const fileExplorerTripletRegistry = Object\.freeze\([\s\S]*\[finderItemId\][\s\S]*\[differItemId\][\s\S]*\[tabberItemId\]/.test(finderPanelBundle) && /function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(finderPanelBundle), 'Finder, Differ, and Tabber use the fixed-identity registry with no duplicate in-panel mode switcher');
     assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-    assert.ok(/fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*common\.reload/.test(finderPanelSource), 'Finder date-mode button, Expand all, Collapse all, and Reload form a trailing cluster in the files-only action row');
+    assert.ok(/fileExplorerTreeSortSelectHtml\(\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
     assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
     const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
     const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
     assert.ok(/data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders new file, then a folder-icon new-folder button');
-    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)/.test(finderActionsRowSource), 'Finder files-only action row puts .* before the sort selector');
+    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-collapse'), false, 'Finder files-only action row no longer renders the old standalone left-side collapse button');
     const treeExpandCollapseButtons = api.fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle');
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders Expand all before Collapse all');
@@ -1964,7 +1964,7 @@ async function runShareThemeSuite() {
     assert.equal(treeExpandCollapseButtons.includes('▦') || treeExpandCollapseButtons.includes('▤'), false, 'shared tree expand/collapse helper does not use square text glyphs');
     assert.ok(/\.file-tree-expand-collapse-all\s*\{[\s\S]*box-sizing:\s*border-box[\s\S]*width:\s*16px[\s\S]*max-width:\s*16px[\s\S]*flex:\s*0 0 16px[\s\S]*padding:\s*0/.test(preferencesCss), 'shared tree expand/collapse toolbar icon buttons stay narrow');
     assert.ok(/\.file-explorer-header-action\.file-explorer-date-toggle:not\(\.file-tree-expand-collapse-all\)\s*\{[\s\S]*min-width:\s*42px/.test(preferencesCss), 'ordinary Finder date buttons own their label width without widening shared expand/collapse controls');
-    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-reload-cluster \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{\s*height:\s*20px;\s*\}/.test(preferencesCss), 'Differ/Finder expand/collapse variants inherit fixed geometry and own only their contextual height');
+    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-controls \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{\s*height:\s*20px;\s*\}/.test(preferencesCss), 'Differ/Finder expand/collapse variants inherit fixed geometry and own only their contextual height');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
     assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
     assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
@@ -2003,7 +2003,7 @@ async function runShareThemeSuite() {
       assert.equal(enT['pref.appearance.terminal_theme.follow-app'], 'Follow global color theme', 'terminal follow option reads "Follow global color theme"');
       assert.ok(enT['pref.appearance.terminal_theme.help'].includes('global color theme'), 'terminal theme help references the global color theme');
     }
-    assert.ok(/\.grid\.drop-preview-root\.drop-preview-top::before,[^{]*\{[^}]*var\(--drop-preview-width/.test(preferencesCss), '#36: the root top/bottom drop preview spans only the non-Finder content width (never covers the docked Finder)');
+    assert.ok(/\.grid\.drop-preview-root::before\s*\{[\s\S]*left:\s*var\(--drop-preview-left[\s\S]*width:\s*var\(--drop-preview-width[\s\S]*height:\s*var\(--drop-preview-height/.test(preferencesCss), '#36: root previews consume the one measured rectangle that preserves the triplet home branch');
     assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
     // #261: the REAL inter-pane gap is the flex split container (the column grid gap is a no-op for a
     // single-panel column), so appearance.pane_spacing now actually changes the gap, not just the ring.
@@ -2861,7 +2861,7 @@ async function runShareThemeSuite() {
     assert.equal(appMenuIconButton.innerHTML.includes('title='), false);
     const noMinimizedSlots = api.emptyLayoutSlots();
     noMinimizedSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    noMinimizedSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(noMinimizedSlots);
     const launchFileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -2896,7 +2896,7 @@ async function runShareThemeSuite() {
     assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1, 'Tabs menu separators only split populated tmux and YOLOmux tab groups');
     // Tabs has one fixed navigator order: all tmux sessions naturally sorted first, followed by
     // the YOLOmux/file tabs in label order. Status or a prior stored preference cannot reshuffle it.
-    assert.deepEqual(api.sortTabItemsForMenu(['2', '__prefs__', '1', '__files__']), ['1', '2', '__files__', '__prefs__'], 'Tabs puts naturally sorted tmux sessions before sorted YOLOmux tabs');
+    assert.deepEqual(api.sortTabItemsForMenu(['2', api.prefsItemId, '1', api.finderItemId]), ['1', '2', api.finderItemId, api.prefsItemId], 'Tabs puts naturally sorted tmux sessions before sorted YOLOmux tabs');
     const sortViewMenu = api.appMenuTree().find(menu => menu.id === 'view');
     const sortSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.sortTabs'));
     assert.equal(sortSubmenu, undefined, 'Tabs has one deterministic order, so View does not expose conflicting sort modes');
@@ -2993,21 +2993,22 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
     assert.equal(fileMenu.items[1].primary.label, 'new Codex');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/Finder/Search/data/YO commands');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.t('yoagent.capability.finderDifferTabber.name'), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/triplet/Search/data/YO commands');
     const firstYoIndex = fileMenuLabels.indexOf('YO!info');
     assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
-    for (const label of [api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
+    const tripletLabel = api.t('yoagent.capability.finderDifferTabber.name');
+    for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
-      assert.equal(item.className || '', '', `File menu ${label} does not use the raised tab-row scaffold`);
+      assert.equal(item.className || '', label === tripletLabel ? 'app-menu-file-destination' : '', `File menu ${label} uses only its intended destination styling`);
     }
-    const finderMenuItem = fileMenu.items.find(candidate => candidate.label === api.fileExplorerLabel());
-    assert.equal(finderMenuItem.detail, api.appShortcutText('B'), 'File -> Finder shows the same Cmd/Ctrl-B shortcut that toggles the Finder');
+    const finderMenuItem = fileMenu.items.find(candidate => candidate.label === tripletLabel);
+    assert.equal(finderMenuItem.detail, api.t('menu.file.browseFiles'), 'wide File navigation explains the one-line triplet command');
     const macFileMenuApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
-    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === 'Finder');
-    assert.equal(macFinderMenuItem?.detail, '⌘+B', 'File -> Finder shows Cmd-B on Mac');
+    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.t('yoagent.capability.finderDifferTabber.name'));
+    assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
     assert.equal(shareMenuItem.detail, 'sharing', 'YO!share menu row avoids target/session counts');
     const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
@@ -3417,7 +3418,7 @@ async function runShareThemeSuite() {
   	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
       assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
       assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
-      assert.ok(/function setFileExplorerMode\(mode, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber mode changes schedule a full topology snapshot');
+      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
       assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
@@ -4299,19 +4300,19 @@ async function runShareThemeSuite() {
     api.setAutoApproveStateForTest('1', {enabled: false});
     const filesOnlySlots = api.emptyLayoutSlots();
     filesOnlySlots[api.layoutTreeKey] = api.leafNode('left');
-    filesOnlySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    filesOnlySlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(filesOnlySlots);
     const filesOnlyTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
     assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').disabled, true);
     assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').detail, 'No tmux tab focused');
     const multiTmuxSlots = api.emptyLayoutSlots();
     multiTmuxSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 22);
-    multiTmuxSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    multiTmuxSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     multiTmuxSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     multiTmuxSlots.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(multiTmuxSlots);
     api.setFocusedPanelItem('2');
-    api.setFocusedPanelItem('__files__');
+    api.setFocusedPanelItem(api.finderItemId);
     assert.equal(api.currentSessionActionTarget(), '2');
     const explicitFocusApi = loadYolomux('', ['1', '2']);
     const explicitFocusSlots = explicitFocusApi.emptyLayoutSlots();
@@ -5681,7 +5682,7 @@ async function runShareThemeSuite() {
     assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
     assert.equal(api.tmuxSessionNameError('bad/name').includes('letters'), true);
     assert.ok(api.panelControlsHtml('1').includes('data-pane-actions="1"'));
-    assert.equal(api.panelControlsHtml('__files__').includes('data-pane-actions'), false);
+    assert.equal(api.panelControlsHtml(api.finderItemId).includes('data-pane-actions'), false);
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.toolbar.rootLabel'], undefined, 'Finder toolbar no longer carries a Root button label');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.rootMode.fixed'], undefined, 'Finder toolbar no longer carries a Root mode title');
     const serverShell = fs.readFileSync('yolomux_lib/web.py', 'utf8');
@@ -6112,44 +6113,42 @@ async function runShareThemeSuite() {
 
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('slot2');
-    slots.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    slots.slot2 = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     const next = api.layoutWithItems(slots, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(next).panes), {
-      slot2: {tabs: ['__files__'], active: '__files__'},
-      slot1: {tabs: ['1'], active: '1'},
+      slot2: {tabs: [api.finderItemId, '1'], active: api.finderItemId},
     });
-    assert.equal(next[api.layoutTreeKey].split, 'row');
-    assert.equal(next[api.layoutTreeKey].pct, 22);
+    assert.equal(next[api.layoutTreeKey].slot, 'slot2', 'a moved standalone Finder is an ordinary pane tab, not a reserved home column');
 
     const placeholderSlots = api.emptyLayoutSlots();
     placeholderSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    placeholderSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    placeholderSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     placeholderSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(placeholderSlots);
     assert.equal(api.firstEmptyPane(), 'slot1');
     assert.equal(api.slotForTabActivation('1'), 'slot1');
     const filled = api.layoutWithItems(placeholderSlots, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(filled).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: ['1'], active: '1'},
     });
     const placeholderUrl = api.setLayoutSlotsForTest(placeholderSlots);
     const placeholderParams = parseUrl(placeholderUrl);
     assert.equal(placeholderParams.get('layout'), 'row@22(left,slot1)');
-    assert.equal(placeholderParams.get('tabs'), 'left:files;slot1:__empty_pane__');
+    assert.equal(placeholderParams.get('tabs'), 'left:finder;slot1:__empty_pane__');
     const reloadedPlaceholder = loadYolomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
     assert.deepStrictEqual(canonical(reloadedPlaceholder.serialize(reloadedPlaceholder.currentSlots())), canonical(api.serialize(placeholderSlots)));
 
     const finderAndTmux = api.emptyLayoutSlots();
     finderAndTmux[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    finderAndTmux.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderAndTmux.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderAndTmux.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderAndTmux);
     assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
     assert.equal(api.slotForTabActivation('2'), 'slot1');
     api.removePaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const normalSplit = api.emptyLayoutSlots();
@@ -6168,39 +6167,36 @@ async function runShareThemeSuite() {
     const tmuxAndFinder = api.emptyLayoutSlots();
     tmuxAndFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 78);
     tmuxAndFinder.slot1 = api.paneStateWithTabs(['1'], '1');
-    tmuxAndFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    tmuxAndFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(tmuxAndFinder);
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      slot1: {tabs: [], active: null, placeholder: true},
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
     });
 
     const tmuxAboveFinder = api.emptyLayoutSlots();
     tmuxAboveFinder[api.layoutTreeKey] = api.splitNode('column', api.leafNode('slot1'), api.leafNode('left'), 48);
     tmuxAboveFinder.slot1 = api.paneStateWithTabs(['1'], '1');
-    tmuxAboveFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    tmuxAboveFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(tmuxAboveFinder);
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {slot: 'left'},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
       },
     });
 
     const finderAboveTmux = api.emptyLayoutSlots();
     finderAboveTmux[api.layoutTreeKey] = api.splitNode('column', api.leafNode('left'), api.leafNode('slot1'), 52);
-    finderAboveTmux.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderAboveTmux.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderAboveTmux.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderAboveTmux);
     api.removePaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {slot: 'left'},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
       },
     });
 
@@ -6212,7 +6208,7 @@ async function runShareThemeSuite() {
       28,
     );
     activationSlots.slot2 = api.emptyPlaceholderPaneState();
-    activationSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    activationSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     activationSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(activationSlots);
     assert.equal(api.slotForTabActivation('2'), 'slot1');
@@ -6221,57 +6217,49 @@ async function runShareThemeSuite() {
     middleFinderSlots[api.layoutTreeKey] = api.splitNode(
       'row',
       api.leafNode('left'),
-      api.splitNode('row', api.leafNode('slot2'), api.leafNode('slot1'), 22),
+      api.splitNode('row', api.leafNode('slot2'), api.leafNode('slot1'), 37),
       35,
     );
     middleFinderSlots.left = api.paneStateWithTabs(['1'], '1');
-    middleFinderSlots.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    middleFinderSlots.slot2 = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     middleFinderSlots.slot1 = api.paneStateWithTabs(['2'], '2');
-    assert.equal(api.fileExplorerNeedsLeftDock(middleFinderSlots), true);
     const dockedFinder = api.normalizeLayoutSlots(middleFinderSlots);
     assert.deepStrictEqual(canonical(api.serialize(dockedFinder)), {
       tree: {
         split: 'row',
-        pct: 22,
+        pct: 35,
         children: [
-          {slot: 'slot2'},
-          {split: 'row', pct: 35, children: [{slot: 'left'}, {slot: 'slot1'}]},
+          {slot: 'left'},
+          {split: 'row', pct: 37, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
         ],
       },
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: [api.finderItemId], active: api.finderItemId},
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    });
+    }, 'normalization preserves a file surface exactly where the user moved it');
     api.setLayoutSlotsForTest(dockedFinder);
-    assert.equal(api.fileExplorerNeedsLeftDock(), false);
 
     const verticalFinderBranch = api.emptyLayoutSlots();
     verticalFinderBranch[api.layoutTreeKey] = api.splitNode(
       'row',
       api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50),
       api.leafNode('slot1'),
-      22,
+      34,
     );
     verticalFinderBranch.slot2 = api.paneStateWithTabs(['__info__'], '__info__');
-    verticalFinderBranch.left = api.paneStateWithTabs(['__files__'], '__files__');
+    verticalFinderBranch.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     verticalFinderBranch.slot1 = api.paneStateWithTabs(['1'], '1');
-    assert.equal(api.fileExplorerNeedsLeftDock(verticalFinderBranch), false);
     api.setLayoutSlotsForTest(verticalFinderBranch);
-    assert.equal(api.fileExplorerNeedsLeftDock(), false);
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), canonical(api.serialize(verticalFinderBranch)), 'normalization preserves a vertically nested moved Finder');
 
     const noFinderSplit = api.emptyLayoutSlots();
     noFinderSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     noFinderSplit.left = api.paneStateWithTabs(['1'], '1');
     noFinderSplit.slot1 = api.paneStateWithTabs(['2'], '2');
-    api.rememberFileExplorerOpenIntentForTest(true);
-    assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), true, 'normalization re-docks a missing Finder when it was not explicitly closed');
-    api.rememberFileExplorerOpenIntentForTest(false);
-    assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization keeps Finder hidden after an explicit per-tab close');
-    api.rememberFileExplorerOpenIntentForTest(true);
-    api.setLayoutSlotsForTest(noFinderSplit);
-    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithFileExplorerDockedLeft())), {
+    assert.equal(api.itemInLayout(api.finderItemId, api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization never invents a missing file surface');
+    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithDefaultFileSurfaceHome(noFinderSplit))), {
       tree: {
         split: 'row',
         pct: 22,
@@ -6281,15 +6269,15 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: [api.finderItemId, api.differItemId, api.tabberItemId], active: api.finderItemId},
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    });
+    }, 'the explicit restore transaction creates the default triplet home');
 
     const dockviewPrevious = api.emptyLayoutSlots();
     dockviewPrevious[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot2'), api.leafNode('left'), 22);
-    dockviewPrevious.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    dockviewPrevious.slot2 = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     dockviewPrevious.left = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockviewPrevious);
     const dockviewNextWithoutFinder = api.emptyLayoutSlots();
@@ -6299,11 +6287,10 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(
       canonical(api.serialize(api.currentSlots())),
       canonical(api.serialize(dockviewPrevious)),
-      'Dockview adoption ignores 0-area host measurements so sleep/hidden-tab layouts cannot drop Finder',
+      'Dockview adoption ignores 0-area host measurements so sleep/hidden-tab layouts cannot drop the triplet',
     );
     api.adoptDockviewLayoutForTest(api.dockviewJsonFromLayoutSlots(dockviewNextWithoutFinder));
-    assert.equal(api.itemInLayout('__files__'), true, 'Dockview adoption re-docks Finder when a non-user commit drops it');
-    assert.equal(api.slotForSession('__files__'), 'slot2', 'Dockview adoption preserves the previous Finder slot when possible');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'Dockview adoption restores a transiently missing triplet group');
 
     const transientDockviewFinder = api.emptyLayoutSlots();
     transientDockviewFinder[api.layoutTreeKey] = api.splitNode(
@@ -6313,7 +6300,7 @@ async function runShareThemeSuite() {
       35,
     );
     transientDockviewFinder.slot2 = api.paneStateWithTabs(['2'], '2');
-    transientDockviewFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    transientDockviewFinder.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     transientDockviewFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(transientDockviewFinder);
     const transientDockviewJson = api.dockviewJsonFromLayoutSlots(api.currentSlots());
@@ -6354,7 +6341,7 @@ async function runShareThemeSuite() {
       api.splitNode('column', api.leafNode('slot1'), api.leafNode('slot2'), 50),
       22,
     );
-    expandedBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    expandedBesideFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     expandedBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     expandedBesideFinder.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(expandedBesideFinder);
@@ -6362,7 +6349,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot2: {tabs: ['2', '1'], active: '2'},
       },
     });
@@ -6374,7 +6361,7 @@ async function runShareThemeSuite() {
       api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50),
       22,
     );
-    layoutCommands.left = api.paneStateWithTabs(['__files__'], '__files__');
+    layoutCommands.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     layoutCommands.slot1 = api.paneStateWithTabs(['1'], '1');
     layoutCommands.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(layoutCommands);
@@ -6383,7 +6370,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1', '2'], active: '2'},
       },
     });
@@ -6391,7 +6378,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {split: 'row', pct: 50, children: [{slot: 'slot1'}, {slot: 'right'}]}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
         right: {tabs: ['2'], active: '2'},
       },
@@ -6400,7 +6387,7 @@ async function runShareThemeSuite() {
     const layoutModeSource = api.emptyLayoutSlots();
     const extraWallItem = api.registerFileEditorLayoutItem('/home/test/b.md');
     layoutModeSource[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    layoutModeSource.left = api.paneStateWithTabs(['__files__'], '__files__');
+    layoutModeSource.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     layoutModeSource.slot1 = api.paneStateWithTabs(['1', '2', extraPaneItem, extraWallItem], extraPaneItem);
     api.setLayoutSlotsForTest(layoutModeSource);
     api.setFocusedPanelItem(extraPaneItem);
@@ -6422,7 +6409,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         leftTop: {tabs: ['1'], active: '1'},
         rightTop: {tabs: ['2'], active: '2'},
         leftBottom: {tabs: [extraPaneItem], active: extraPaneItem},
@@ -6456,7 +6443,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         right: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
         slot2: {tabs: [extraPaneItem], active: extraPaneItem},
@@ -6466,7 +6453,7 @@ async function runShareThemeSuite() {
 
     const singlePaneBesideFinder = api.emptyLayoutSlots();
     singlePaneBesideFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    singlePaneBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    singlePaneBesideFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     singlePaneBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(singlePaneBesideFinder);
     assert.equal(api.canPaneExpand('1'), false);
@@ -6476,7 +6463,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
       },
     });
@@ -6511,37 +6498,39 @@ async function runShareThemeSuite() {
 
     const finderOnly = api.emptyLayoutSlots();
     finderOnly[api.layoutTreeKey] = api.leafNode('left');
-    finderOnly.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderOnly.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    const finderDropHome = api.emptyLayoutSlots();
+    finderDropHome[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+    finderDropHome.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    finderDropHome.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderOnly);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {slot: 'left'},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot1: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
       },
     });
-    assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
+    assert.equal(api.slotForNewTmuxSession('2'), 'left', 'a lone moved Finder behaves as an ordinary pane tab');
 
     const dragSlots = api.emptyLayoutSlots();
     dragSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dragSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dragSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dragSlots.slot1 = api.paneStateWithTabs(['__info__'], '__info__');
     api.setLayoutSlotsForTest(dragSlots);
     const removed = api.layoutWithoutItem('__info__', {preserveEmptySlot: 'slot1'});
     assert.deepStrictEqual(canonical(api.serialize(removed).panes.slot1), {tabs: [], active: null, placeholder: true});
     const closed = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__', {preserveRemovedSlot: true}));
     assert.deepStrictEqual(canonical(api.serialize(closed).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const moved = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__'));
     assert.deepStrictEqual(canonical(api.serialize(moved).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
-      slot1: {tabs: [], active: null, placeholder: true},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
     });
     api.splitSessionAtSlot('__info__', 'left', 'top', 'slot1');
     const split = api.serialize(api.currentSlots());
-    assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
+    assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
     assert.equal(split.panes.slot1, undefined);
     assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__info__'))), [{tabs: ['__info__'], active: '__info__'}]);
     const infoSlot = Object.entries(split.panes).find(([, pane]) => pane.tabs.includes('__info__'))[0];
@@ -6556,10 +6545,10 @@ async function runShareThemeSuite() {
       22,
     );
     finderCloseSlots.slot2 = api.paneStateWithTabs(['__info__'], '__info__');
-    finderCloseSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderCloseSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderCloseSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(finderCloseSlots);
-    api.removeSessionFromLayout('__files__');
+    api.removeSessionFromLayout(api.finderItemId);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'slot2'},
       panes: {slot2: {tabs: ['__info__'], active: '__info__'}},
@@ -6568,7 +6557,7 @@ async function runShareThemeSuite() {
     const autoPruneSlots = api.emptyLayoutSlots();
     autoPruneSlots[api.layoutTreeKey] = api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50);
     autoPruneSlots.slot2 = api.paneStateWithTabs(['1'], '1');
-    autoPruneSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    autoPruneSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     const topColumn = new TestElement('top-column');
     topColumn.dataset.slot = 'slot2';
     topColumn.rect = {left: 0, top: 0, right: 500, bottom: 120, width: 500, height: 120};
@@ -6579,7 +6568,7 @@ async function runShareThemeSuite() {
     api.setGridPreviewNodesForTest([topColumn, finderColumn]);
     assert.equal(api.smallLayoutSlotCandidate().slot, 'slot2');
 
-    autoPruneSlots.slot2 = api.paneStateWithTabs(['__files__', '1'], '1');
+    autoPruneSlots.slot2 = api.paneStateWithTabs([api.finderItemId, '1'], '1');
     api.setLayoutSlotsForTest(autoPruneSlots);
     api.setGridPreviewNodesForTest([topColumn, finderColumn]);
     assert.equal(api.slotCanAutoPrune('slot2'), false, 'legacy auto-prune protects a slot when Finder is a background tab');
@@ -6603,14 +6592,14 @@ async function runShareThemeSuite() {
     const killedApi = loadYolomux('', ['2']);
     const killedSlots = killedApi.emptyLayoutSlots();
     killedSlots[killedApi.layoutTreeKey] = killedApi.splitNode('row', killedApi.leafNode('left'), killedApi.leafNode('slot1'), 22);
-    killedSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     killedSlots.slot1 = {tabs: ['1'], active: '1'};
     const killedNormalized = killedApi.normalizeLayoutSlots(killedSlots, {
       preserveRemovedItems: ['1'],
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedNormalized).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const killedNestedFinderSlots = killedApi.emptyLayoutSlots();
@@ -6621,7 +6610,7 @@ async function runShareThemeSuite() {
       58,
     );
     killedNestedFinderSlots.slot1 = {tabs: ['1'], active: '1'};
-    killedNestedFinderSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedNestedFinderSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     killedNestedFinderSlots.slot2 = killedApi.paneStateWithTabs(['2'], '2');
     const killedNestedFinderNormalized = killedApi.normalizeLayoutSlots(killedNestedFinderSlots, {
       preserveRemovedItems: ['1'],
@@ -6630,7 +6619,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(killedApi.serialize(killedNestedFinderNormalized)), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
         slot2: {tabs: ['2'], active: '2'},
       },
     });
@@ -6644,14 +6633,14 @@ async function runShareThemeSuite() {
       58,
     );
     staleFileOpenSlots.slot1 = killedApi.emptyPlaceholderPaneState();
-    staleFileOpenSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    staleFileOpenSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     staleFileOpenSlots.slot2 = killedApi.paneStateWithTabs([staleFileOpenItem], staleFileOpenItem);
     killedApi.setLayoutSlotsForTest(staleFileOpenSlots);
     killedApi.openFileEditorPane(staleFileOpenPath);
     assert.deepStrictEqual(canonical(killedApi.serialize(killedApi.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
         slot2: {tabs: [staleFileOpenItem], active: staleFileOpenItem},
       },
     });
@@ -6659,20 +6648,19 @@ async function runShareThemeSuite() {
     const killedVerticalSlots = killedApi.emptyLayoutSlots();
     killedVerticalSlots[killedApi.layoutTreeKey] = killedApi.splitNode('column', killedApi.leafNode('slot1'), killedApi.leafNode('left'), 50);
     killedVerticalSlots.slot1 = {tabs: ['1'], active: '1'};
-    killedVerticalSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedVerticalSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     const killedVerticalNormalized = killedApi.normalizeLayoutSlots(killedVerticalSlots, {
       preserveRemovedItems: ['1'],
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedVerticalNormalized)), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {slot: 'left'},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
       },
     });
 
-    api.setLayoutSlotsForTest(finderOnly);
+    api.setLayoutSlotsForTest(finderDropHome);
     const roomyFinderDropRect = {left: 0, top: 0, right: 720, bottom: 520, width: 720, height: 520};
     const narrowFinderDropRect = {left: 0, top: 0, right: 300, bottom: 520, width: 300, height: 520};
     const shortFinderDropRect = {left: 0, top: 0, right: 720, bottom: 420, width: 720, height: 420};
@@ -6680,28 +6668,28 @@ async function runShareThemeSuite() {
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
-    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), true, 'the shared 300px desktop split minimum permits a terminal below Finder at its exact boundary');
+    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
+    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false, 'the triplet home rejects non-triplet vertical drops at every size');
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
     const editorItem = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+    assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
     const legacyChangesOnly = api.emptyLayoutSlots();
     legacyChangesOnly[api.layoutTreeKey] = api.leafNode('left');
     legacyChangesOnly.left = api.paneStateWithTabs(['__changes__'], '__changes__');
     api.setLayoutSlotsForTest(legacyChangesOnly);
     assert.equal(api.itemInLayout('__changes__'), false, 'retired standalone Differ is pruned if it appears outside URL alias resolution');
-    api.setLayoutSlotsForTest(finderOnly);
+    api.setLayoutSlotsForTest(finderDropHome);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), true, 'the shared 300px split boundary also permits a normal Preferences tab below Finder');
-    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false, 'the triplet home rejects Preferences below Finder');
+    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'left'}), false, 'Finder pane drags never advertise a pane split preview');
+    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'left'}), true, 'Finder can leave the home column through the normal pane split path');
     assert.equal(api.dropIntentAllowsSession('__changes__', {targetSlot: 'slot1', zone: 'left'}), false, 'retired standalone Differ is not draggable as a layout item');
-    assert.equal(api.dropIntentAllowsSession('__files__', {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), false, 'Finder pane drags never advertise a root split preview');
+    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), true, 'Finder can leave the home column through a root split');
     assert.equal(api.dropIntentAllowsSession('__changes__', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1'}), false, 'retired standalone Differ cannot be dropped at a gutter');
     const normalSplitSlots = api.emptyLayoutSlots();
     normalSplitSlots[api.layoutTreeKey] = api.leafNode('slot1');
@@ -6715,7 +6703,7 @@ async function runShareThemeSuite() {
 
     const dragMatrixSlots = api.emptyLayoutSlots();
     dragMatrixSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 25);
-    dragMatrixSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dragMatrixSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dragMatrixSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dragMatrixSlots);
     const matrixNormalRect = {left: 260, top: 0, right: 980, bottom: 520, width: 720, height: 520};
@@ -6727,8 +6715,8 @@ async function runShareThemeSuite() {
       {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle', targetRect: matrixFinderRect})},
-      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
-      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
+      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
+      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: api.fileDropIntentAllowsPayload(filePayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: api.fileDropIntentAllowsPayload(multiFilePayload, {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: api.pathDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
@@ -6740,8 +6728,8 @@ async function runShareThemeSuite() {
       {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: true},
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
-      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: true},
-      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
+      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
+      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: true},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: true},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: true},
@@ -6752,7 +6740,7 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(finderOnly);
     api.splitSessionAtSlot(editorItem, 'left', 'bottom');
     const editorSplit = api.serialize(api.currentSlots());
-    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
+    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
     assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [{tabs: [editorItem], active: editorItem}]);
     assert.ok(JSON.stringify(editorSplit.tree).includes('"split":"column"'));
 
@@ -6776,7 +6764,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {
         split: 'row',
-        pct: 50,
+        pct: 80,
         children: [
           {
             split: 'row',
@@ -6819,7 +6807,7 @@ async function runShareThemeSuite() {
 
     const dockedBoundarySlots = api.emptyLayoutSlots();
     dockedBoundarySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundarySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundarySlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundarySlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockedBoundarySlots);
     api.splitSessionAtLayoutBoundary('__info__', 'bottom');
@@ -6833,7 +6821,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
         slot2: {tabs: ['__info__'], active: '__info__'},
       },
@@ -6841,7 +6829,7 @@ async function runShareThemeSuite() {
 
     const dockedBoundaryTopSlots = api.emptyLayoutSlots();
     dockedBoundaryTopSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundaryTopSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundaryTopSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundaryTopSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockedBoundaryTopSlots);
     api.splitSessionAtLayoutBoundary('__prefs__', 'top');
@@ -6860,7 +6848,7 @@ async function runShareThemeSuite() {
       slot1: {left: 240, top: 0, right: 1200, bottom: 800, width: 960, height: 800},
     };
     api.setLayoutColumnRectsForTest(dockedBoundaryRects);
-    api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest(), targetRect: {left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800}});
+    api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest()});
     const previewInset = 6;
     assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-left'), `${dockedBoundaryRects.slot1.left + previewInset}px`, 'bottom full-span preview starts after the docked Finder');
     assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-width'), `${dockedBoundaryRects.slot1.width - previewInset * 2}px`, 'bottom full-span preview spans only the non-Finder content');
@@ -6868,14 +6856,14 @@ async function runShareThemeSuite() {
 
     const dockedBoundaryMoveOnlyContent = api.emptyLayoutSlots();
     dockedBoundaryMoveOnlyContent[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundaryMoveOnlyContent.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundaryMoveOnlyContent.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundaryMoveOnlyContent.slot1 = api.paneStateWithTabs(['__info__'], '__info__');
     api.setLayoutSlotsForTest(dockedBoundaryMoveOnlyContent);
     api.splitSessionAtLayoutBoundary('__info__', 'bottom', 'slot1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot2: {tabs: ['__info__'], active: '__info__'},
       },
     });
@@ -6920,23 +6908,23 @@ async function runShareThemeSuite() {
     noPreviewSlot.dataset.slot = 'slot1';
     noPreviewSlot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
     api.setGridPreviewNodesForTest([noPreviewSlot]);
-    const finderPaneDrag = dragEvent(16, '__files__');
+    const finderPaneDrag = dragEvent(16, api.finderItemId);
     finderPaneDrag.target = noPreviewSlot;
     finderPaneDrag.clientY = 200;
     api.handleDropDragOver(finderPaneDrag);
     assert.ok(finderPaneDrag.defaultPrevented, 'Finder pane dragover is handled so the browser does not show its own drop UI');
     assert.ok(finderPaneDrag.propagationStopped, 'Finder pane dragover is owned by the pane drag handler');
-    assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'none');
-    assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'Finder pane drags do not show a dotted pane preview');
+    assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'move');
+    assert.equal(noPreviewSlot.classList.contains('drop-preview'), true, 'Finder uses the normal dotted pane preview after leaving its home column');
     api.setLayoutSlotsForTest(finderOnly);
-    const finderStrip = tabStrip([tabElement('__files__', 100, 120)]);
+    const finderStrip = tabStrip([tabElement(api.finderItemId, 100, 120)]);
     api.bindPaneTabStrip(finderStrip, 'left');
     const event = dragEvent(125, '1');
     finderStrip.ondragover(event);
     assert.equal(event.defaultPrevented, true);
     assert.equal(event.propagationStopped, true);
-    assert.equal(event.dataTransfer.dropEffect, 'none');
-    assert.equal(finderStrip.classList.contains('tab-drop-preview'), false);
+    assert.equal(event.dataTransfer.dropEffect, 'move');
+    assert.equal(finderStrip.classList.contains('tab-drop-preview'), true, 'a moved standalone Finder accepts ordinary tab stacking');
   });
 }
 

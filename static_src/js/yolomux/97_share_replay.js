@@ -2303,9 +2303,11 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
-  const previousMode = normalizeFileExplorerMode(fileExplorerMode);
-  if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
-  const modeChanged = previousMode !== fileExplorerMode;
+  // `finder.mode` is a legacy semantic frame field. Layout/tabs now name the independent Finder,
+  // Differ, and Tabber identities, so consuming this old field must never select a surface or
+  // rebuild every file panel. The rest of this state remains shared domain data.
+  const legacyMode = 'mode' in finder ? normalizeFileExplorerMode(finder.mode) : '';
+  void legacyMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
@@ -2326,23 +2328,15 @@ async function applyShareFinderState(finder = {}) {
   if ('changesRepoCollapsed' in finder) shareReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
-  applyFileExplorerMode();
-  // A semantic share frame can move Differ directly to Tabber while the root remains unchanged.
-  // Rebuild the shared mode panel before awaiting any root work so the Tabber renderer has its own
-  // shell instead of trying to hydrate the stale Differ DOM after the host state has moved on.
-  if (modeChanged) renderFileExplorerChangesPanels({force: true});
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
   syncFileExplorerTreeDateButtons();
   const root = String(finder.root || '').trim();
   const normalizedRoot = root ? normalizeDirectoryPath(expandUserPath(root)) : '';
-  if (!itemInLayout(fileExplorerItemId)) {
+  if (!itemInLayout(finderItemId)) {
     if (normalizedRoot) fileExplorerRoot = normalizedRoot;
-    renderPaneTabStrips();
-    return;
-  }
-  if (normalizedRoot) {
+  } else if (normalizedRoot) {
     fileExplorerRoot = normalizedRoot;
     const hasRenderedTreeRows = fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'));
     if (previousRoot !== normalizedRoot || !hasRenderedTreeRows) {
@@ -2364,18 +2358,30 @@ async function applyShareFinderState(finder = {}) {
   } else if (fileExplorerRoot) {
     await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   }
-  if (fileExplorerMode === 'tabber') {
-    refreshTabberPanels();
-    fetchTabberActivity();
-  } else {
+  if (itemInLayout(differItemId)) {
     renderFileExplorerChangesPanels({force: true});
     if (fileExplorerChangesSelectedSession) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerChangesSelectedSession, silent: true, force: false, background: true});
     }
   }
-  restoreShareScrollTargetByKey(`finder:${normalizeFileExplorerMode(fileExplorerMode)}`);
+  if (itemInLayout(tabberItemId)) {
+    refreshTabberPanels();
+    fetchTabberActivity();
+  }
+  if (itemInLayout(finderItemId)) restoreShareScrollTargetByKey('finder:finder');
+  if (itemInLayout(differItemId)) restoreShareScrollTargetByKey('finder:differ');
+  if (itemInLayout(tabberItemId)) restoreShareScrollTargetByKey('finder:tabber');
   updateFileExplorerCurrentFileHighlight();
   renderPaneTabStrips();
+}
+
+function applyLegacyShareFinderMode(payload = {}) {
+  const session = String(payload.session || '').trim();
+  // Old hosts sent `finder-mode` for a Differ-session selection. Retain that data as a passive
+  // compatibility hint, but topology/layout frames own panel identity and mounting.
+  if (!isTmuxSession(session)) return false;
+  fileExplorerChangesSelectedSession = session;
+  return true;
 }
 
 function applySharePreferencesState(preferences = {}) {
@@ -3768,8 +3774,8 @@ function applyShareUiMessage(message) {
       setFocusedPanelItem(payload.item);
       return;
     }
-    if (message.type === 'finder-mode' && payload.session) {
-      switchFileExplorerChangesSession(payload.session);
+    if (message.type === 'finder-mode') {
+      applyLegacyShareFinderMode(payload);
       return;
     }
     if (message.type === 'menu') {

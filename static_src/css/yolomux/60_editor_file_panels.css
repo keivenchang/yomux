@@ -1089,23 +1089,21 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 }
 .panel.file-explorer-panel .file-explorer-head {
   --pane-bar-bg: var(--panel2);
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-8);
-  min-height: 31px;
+  min-height: 0;
   padding: var(--space-3) var(--space-6);
 }
 .panel.file-explorer-panel .pane-tabs {
   flex: 0 0 auto;
   width: auto;
-  align-self: end;
 }
 .panel.file-explorer-panel .pane-tabs[hidden] {
   display: none;
 }
 .panel.file-explorer-panel .pane-tabs[hidden] + .file-explorer-toolbar {
   grid-column: 1 / -1;
+}
+.panel.file-explorer-panel .file-explorer-toolbar {
+  clear: both;
 }
 .panel.file-explorer-panel.active-pane .file-explorer-head {
   background: var(--pane-bar-bg, var(--panel2));
@@ -1174,7 +1172,7 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 .file-explorer-panel-title {
   flex: 0 0 auto;
 }
-.file-explorer-actions-row .file-explorer-date-reload-cluster {
+.file-explorer-actions-row .file-explorer-date-controls {
   flex: 0 0 auto;
 }
 body.file-explorer-mode-diff .file-explorer-mode-files-only,
@@ -1446,7 +1444,7 @@ body.resizing-file-explorer-changes {
   border-color: var(--active-control-border);
 }
 .file-explorer-changes-panel .changes-refresh,
-.file-explorer-date-reload-cluster .changes-refresh {
+.file-explorer-primary-row .changes-refresh {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1459,7 +1457,7 @@ body.resizing-file-explorer-changes {
   font-size: var(--ui-font-size-2xs);
 }
 .file-explorer-changes-panel .changes-refresh::before,
-.file-explorer-date-reload-cluster .changes-refresh::before {
+.file-explorer-primary-row .changes-refresh::before {
   content: "↻";
   display: block;
   flex: 0 0 auto;
@@ -1469,8 +1467,8 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-changes-panel .changes-refresh:hover,
 .file-explorer-changes-panel .changes-refresh:focus-visible,
-.file-explorer-date-reload-cluster .changes-refresh:hover,
-.file-explorer-date-reload-cluster .changes-refresh:focus-visible {
+.file-explorer-primary-row .changes-refresh:hover,
+.file-explorer-primary-row .changes-refresh:focus-visible {
   background: var(--file-explorer-refresh-hover-surface);
 }
 body :is(
@@ -1479,13 +1477,13 @@ body :is(
   .file-explorer-root-mode-toggle,
   .file-explorer-header-action,
   .file-explorer-changes-panel .changes-refresh,
-  .file-explorer-date-reload-cluster .changes-refresh
+  .file-explorer-primary-row .changes-refresh
 ):is(:hover, :focus-visible) {
   color: var(--text);
   border-color: var(--text);
 }
 .file-explorer-changes-head .changes-date-toggle,
-.file-explorer-date-reload-cluster .changes-date-toggle {
+.file-explorer-date-controls .changes-date-toggle {
   height: 20px;
   align-self: center;
 }
@@ -1600,7 +1598,7 @@ body :is(
 }
 .changes-toolbar .file-tree-expand-collapse-all.changes-date-toggle,
 .file-explorer-changes-head .file-tree-expand-collapse-all.changes-date-toggle,
-.file-explorer-date-reload-cluster .file-tree-expand-collapse-all.changes-date-toggle {
+.file-explorer-date-controls .file-tree-expand-collapse-all.changes-date-toggle {
   height: 20px;
 }
 .file-tree-expand-collapse-icon {

@@ -1260,8 +1260,10 @@ function installRuntimeIntervals() {
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
-  if (fileExplorerMode === 'tabber') {
-    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
+  if (itemInLayout(tabberItemId)) {
+    resetRuntimeInterval('tabber-activity', () => { if (itemInLayout(tabberItemId)) fetchTabberActivity(); }, tabberActivityRefreshMs);
+  } else {
+    clearRuntimeInterval('tabber-activity');
   }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);

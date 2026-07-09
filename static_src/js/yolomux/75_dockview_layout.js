@@ -25,6 +25,7 @@ const dockviewLayoutState = {
   pendingRootBoundaryDrop: null,
   reloadAfterAdoption: false,
   tabPointerDrag: null,
+  tabContentInteractionSuppressedUntil: 0,
   tabDropHandledAt: 0,
   panePointerDrag: null,
   panePointerDragSuppressedUntil: 0,
@@ -75,7 +76,9 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
   if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
   const userInitiated = options.userInitiated === true || pendingUserGesture;
-  if (isTmuxSession(panelItem) && userInitiated) noteFileExplorerChangesSessionInteraction(panelItem);
+  if (isTmuxSession(panelItem) && userInitiated && focusedPanelItem !== panelItem) {
+    noteFileExplorerChangesSessionInteraction(panelItem);
+  }
   setFocusedPanelItem(panelItem, {userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
   return true;
@@ -115,9 +118,8 @@ function dockviewThemeForApp() {
   return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
 }
 
-function dockviewSplitLayoutHasMinimumSize(zone) {
+function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host?.getBoundingClientRect?.()) {
   if (!layoutSplitZone(zone)) return false;
-  const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return false;
   if (zone === 'left' || zone === 'right') {
     return (Number(rect.width) || 0) >= DOCKVIEW_MIN_LAYOUT_WIDTH;
@@ -127,46 +129,28 @@ function dockviewSplitLayoutHasMinimumSize(zone) {
 
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
-  if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return null;
+  const pointerIntent = event?.nativeEvent
+    ? dockviewTabPointerRootBoundaryIntent(event.nativeEvent, dockviewLayoutState.tabPointerDrag)
+    : null;
+  if (pointerIntent) return pointerIntent;
+  if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
-  if (!isLayoutItem(item) || (isFileExplorerItem(item) && !fileExplorerUsesNormalTabMovement())) return null;
+  if (!isLayoutItem(item)) return null;
   const nativeEvent = event.nativeEvent;
-  const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
+  const target = rootBoundaryLayoutTarget();
+  const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!nativeEvent || !rect) return null;
-  const zone = rootBoundaryDropZoneForEvent(nativeEvent, rect);
+  const zone = rootBoundaryDropZoneForEvent(nativeEvent, rect, event.position);
   if (!layoutSplitZone(zone)) return null;
-  if (!dockviewSplitLayoutHasMinimumSize(zone)) return null;
-  if (event.kind === 'content' && event.group && !dockviewContentDropCanUseRootBoundary(nativeEvent, zone)) return null;
-  if (rootBoundaryDropOverDockedFileExplorer(nativeEvent, zone)) return null;
+  if (!dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
   return {
     item,
     zone,
     sourceSlot: slotForItem(item) || dockviewSlotForGroupId(data?.groupId || ''),
     targetRect: rect,
+    targetNode: target?.node,
   };
-}
-
-function dockviewContentDropCanUseRootBoundary(event, zone) {
-  const root = layoutSlots?.[layoutTreeKey];
-  const rootRect = layoutNodeScreenRect(root);
-  if (!root || !rootRect) return false;
-  const crossSplit = zone === 'left' || zone === 'right' ? 'column' : 'row';
-  const axis = crossSplit === 'column' ? 'y' : 'x';
-  const pointer = axis === 'y' ? event.clientY : event.clientX;
-  const tolerance = Math.max(48, layoutBoundaryDropBandPx(axis === 'y' ? rootRect.height : rootRect.width));
-  const visit = node => {
-    if (!node || node.slot || node.split !== crossSplit) return false;
-    const firstRect = layoutNodeScreenRect(node.children?.[0]);
-    const secondRect = layoutNodeScreenRect(node.children?.[1]);
-    if (!firstRect || !secondRect) return false;
-    const boundary = axis === 'y'
-      ? (firstRect.bottom + secondRect.top) / 2
-      : (firstRect.right + secondRect.left) / 2;
-    if (Math.abs(pointer - boundary) <= tolerance) return true;
-    return visit(node.children?.[0]) || visit(node.children?.[1]);
-  };
-  return visit(root);
 }
 
 function dockviewPaneContentDropInfo(event) {
@@ -221,12 +205,7 @@ function dockviewShouldSuppressPaneContentDrop(event) {
 }
 
 function dockviewShouldSuppressReservedRootBoundary(event) {
-  if ((event?.kind !== 'content' && event?.kind !== 'edge') || !layoutSplitZone(event.position)) return false;
-  const nativeEvent = event.nativeEvent;
-  const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
-  if (!nativeEvent || !rect) return false;
-  const zone = rootBoundaryDropZoneForEvent(nativeEvent, rect);
-  return Boolean(zone && rootBoundaryDropOverDockedFileExplorer(nativeEvent, zone));
+  return false;
 }
 
 function dockviewClearRootBoundaryPreview() {
@@ -245,9 +224,11 @@ function dockviewShowRootBoundaryPreview(intent) {
   }
   showDropPreview({
     boundary: 'root',
+    item: intent.item,
     previewNode: grid,
     sourceSlot: intent.sourceSlot,
     targetRect: intent.targetRect || dockviewLayoutState.host?.getBoundingClientRect?.(),
+    targetNode: intent.targetNode,
     targetSlot: intent.sourceSlot,
     zone: intent.zone,
   });
@@ -261,12 +242,6 @@ function dockviewTrackRootBoundaryOverlay(event) {
     dockviewClearRootBoundaryPreview();
     return;
   }
-  if (dockviewTabDropWouldNoop(event)) {
-    dockviewLayoutState.pendingRootBoundaryDrop = null;
-    dockviewClearRootBoundaryPreview();
-    event.preventDefault?.();
-    return;
-  }
   const intent = dockviewRootBoundaryDropIntent(event);
   if (dockviewPinnedTabRootBoundaryViolation(intent)) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -274,15 +249,24 @@ function dockviewTrackRootBoundaryOverlay(event) {
     event.preventDefault?.();
     return;
   }
-  const paneIntent = intent ? null : dockviewPaneContentDropIntent(event);
-  dockviewLayoutState.pendingRootBoundaryDrop = intent ? {
-    ...intent,
-    signature: layoutSlotsSignature(layoutSlots),
-  } : null;
   if (intent) {
+    dockviewLayoutState.pendingRootBoundaryDrop = {
+      ...intent,
+      signature: layoutSlotsSignature(layoutSlots),
+    };
     dockviewShowRootBoundaryPreview(intent);
     event.preventDefault?.();
-  } else if (dockviewShouldSuppressPaneContentDrop(event) || (!paneIntent && dockviewShouldSuppressReservedRootBoundary(event))) {
+    return;
+  }
+  if (dockviewTabDropWouldNoop(event)) {
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearRootBoundaryPreview();
+    event.preventDefault?.();
+    return;
+  }
+  const paneIntent = dockviewPaneContentDropIntent(event);
+  dockviewLayoutState.pendingRootBoundaryDrop = null;
+  if (dockviewShouldSuppressPaneContentDrop(event) || (!paneIntent && dockviewShouldSuppressReservedRootBoundary(event))) {
     dockviewClearRootBoundaryPreview();
     event.preventDefault?.();
   } else {
@@ -530,20 +514,98 @@ function dockviewBeginTabPointerDrag(event, item) {
   };
 }
 
+function dockviewTabContentInteractionSuppressed() {
+  return Boolean(
+    dockviewLayoutState.tabPointerDrag
+      || Date.now() < (Number(dockviewLayoutState.tabContentInteractionSuppressedUntil) || 0),
+  );
+}
+
+function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
+  if (!state?.item || narrowSingleColumnMode()) return null;
+  const target = rootBoundaryLayoutTarget();
+  const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!rect) return null;
+  const dx = (Number(event.clientX) || 0) - state.x;
+  const dy = (Number(event.clientY) || 0) - state.y;
+  const horizontalZone = Math.abs(dx) >= DRAG_HYSTERESIS_PX
+    ? rootBoundaryDropZoneForEvent(event, rect, dx >= 0 ? 'right' : 'left')
+    : null;
+  const verticalZone = Math.abs(dy) >= DRAG_HYSTERESIS_PX
+    ? rootBoundaryDropZoneForEvent(event, rect, dy >= 0 ? 'bottom' : 'top')
+    : null;
+  const zone = horizontalZone && verticalZone
+    ? (Math.abs(dx) >= Math.abs(dy) ? horizontalZone : verticalZone)
+    : (horizontalZone || verticalZone);
+  if (!layoutSplitZone(zone) || !dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
+  return {
+    item: state.item,
+    zone,
+    sourceSlot: state.slot,
+    targetRect: rect,
+    targetNode: target?.node,
+  };
+}
+
+function dockviewTrackTabPointerDrag(event) {
+  const state = dockviewLayoutState.tabPointerDrag;
+  if (!state?.item) return;
+  const dx = Math.abs((Number(event.clientX) || 0) - state.x);
+  const dy = Math.abs((Number(event.clientY) || 0) - state.y);
+  if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) dockviewShowRootBoundaryPreview(intent);
+  else dockviewClearRootBoundaryPreview();
+}
+
 function dockviewFinishTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   dockviewLayoutState.tabPointerDrag = null;
   dockviewSetInvalidTabDropPreview(false);
+  dockviewClearRootBoundaryPreview();
   if (state) dockviewSuppressPanePointerDrag();
   if (!state?.item || !state.slot) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  dockviewLayoutState.tabContentInteractionSuppressedUntil = Date.now() + PANE_DRAG_SUPPRESS_MS;
+  const rootIntent = dockviewTabPointerRootBoundaryIntent(event, state);
+  if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
+    const signature = layoutSlotsSignature(layoutSlots);
+    window.setTimeout(() => {
+      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
+      if (layoutSlotsSignature(layoutSlots) !== signature || !itemInLayout(rootIntent.item)) return;
+      void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
+    }, 0);
+    return;
+  }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);
   if (stripEnd && !dockviewTabStripEndDropWouldNoop(stripEnd) && !dockviewTabStripEndDropViolatesPinnedPartition(stripEnd)) {
     window.setTimeout(() => {
       if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
       void moveSessionToSlot(stripEnd.item, stripEnd.targetSlot, stripEnd.sourceSlot, stripEnd.insertIndex);
+    }, 0);
+    return;
+  }
+  const targetGroup = dockviewGroupForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
+  const contentTargetSlot = dockviewSlotForGroupElement(targetGroup);
+  const contentIntent = contentTargetSlot ? {
+    item: state.item,
+    sourceSlot: state.slot,
+    targetSlot: contentTargetSlot,
+    targetRect: layoutSlotScreenRect(contentTargetSlot),
+    zone: 'middle',
+    createsPane: false,
+  } : null;
+  if (
+    contentTargetSlot
+    && contentTargetSlot !== state.slot
+    && !dockviewPinnedTabCrossPaneViolation(contentIntent)
+    && dropIntentAllowsSession(state.item, contentIntent)
+  ) {
+    window.setTimeout(() => {
+      if (slotForItem(state.item) === contentTargetSlot) return;
+      void moveSessionToSlot(state.item, contentTargetSlot, state.slot, paneTabs(contentTargetSlot).length);
     }, 0);
     return;
   }
@@ -573,7 +635,14 @@ function dockviewFinishTabPointerDrag(event) {
 }
 
 function dockviewGroupForPoint(x, y) {
-  return document.elementFromPoint?.(x, y)?.closest?.('.dv-groupview') || null;
+  const direct = document.elementFromPoint?.(x, y)?.closest?.('.dv-groupview');
+  if (direct) return direct;
+  // Dockview's drop overlay can be the topmost hit-test node while a tab is being dragged, so
+  // elementFromPoint may not have a group ancestor even though the pointer is visibly inside one.
+  return Array.from(dockviewLayoutState.host?.querySelectorAll?.('.dv-groupview') || []).find(group => {
+    const rect = group.getBoundingClientRect?.();
+    return rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }) || null;
 }
 
 function dockviewBeginPanePointerDrag(event, sourceSlot) {
@@ -642,7 +711,7 @@ function dockviewFinishPendingRootBoundaryDrop(event) {
   const pending = dockviewLayoutState.pendingRootBoundaryDrop;
   dockviewClearRootBoundaryPreview();
   if (!pending) return;
-  const rect = dockviewLayoutState.host?.getBoundingClientRect?.();
+  const rect = pending.targetRect || rootBoundaryLayoutTarget()?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   const zone = rect ? rootBoundaryDropZoneForEvent(event, rect) : null;
   if (zone !== pending.zone) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -790,6 +859,7 @@ function dockviewInstallHostResizeObserver(host, api) {
 
 function dockviewInstallTabPointerReorderFallback() {
   const track = event => {
+    dockviewTrackTabPointerDrag(event);
     dockviewTrackPanePointerDrag(event);
   };
   const finish = event => {
@@ -876,6 +946,8 @@ function dockviewSyncHeaderActionReservations() {
     // The reservation is a child of the tab container, which may be wider than Dockview's header
     // content box when actions are absolutely positioned. Measure that shared flex surface.
     const headerWidth = Math.floor(appSpaceRect(tabsContainer).width || tabsContainer.clientWidth || 0);
+    const slot = dockviewSlotForGroupElement(group);
+    const intrinsicFileSurfaceTabs = Boolean(slot && slotIsFileSurfaceHome(slot));
     const rootStyle = getComputedStyle(document.documentElement);
     const preferredTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--pane-tab-width')) || 180;
     const minTabWidth = Number.parseFloat(rootStyle.getPropertyValue('--dockview-tab-min-inline-size')) || 64;
@@ -899,6 +971,10 @@ function dockviewSyncHeaderActionReservations() {
       : (availableWidth > 0 ? Math.min(Math.max(minTabWidth, preferredTabWidth), Math.max(minTabWidth, availableWidth)) : Math.max(minTabWidth, preferredTabWidth));
     header.style.setProperty('--dockview-header-actions-reserved-inline-size', reservedWidth > 0 ? `${reservedWidth}px` : '0px');
     header.style.setProperty('--dockview-tab-inline-size', `${tabWidth}px`);
+    // The narrow triplet home uses content-width tabs. Its shared action gutter is ordinary end
+    // padding, so all three tabs stay on one row and shrink together instead of inheriting the
+    // preferred-width reservation algorithm used by normal multi-row pane tabs.
+    if (intrinsicFileSurfaceTabs) return;
     if (!reservedWidth || !headerWidth) return;
     const firstRowWidth = Math.max(0, headerWidth - reservedWidth);
     let usedWidth = 0;
@@ -983,6 +1059,22 @@ function dockviewInit() {
       // pointer-reorder FALLBACK stands down instead of double-applying (see dockviewFinishTabPointerDrag).
       if (event?.kind === 'tab') dockviewLayoutState.tabDropHandledAt = Date.now();
       dockviewSetInvalidTabDropPreview(false);
+      const rootIntent = dockviewRootBoundaryDropIntent(event);
+      if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        return;
+      }
+      if (rootIntent) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        queueMicrotask(() => {
+          void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
+        });
+        return;
+      }
       const edgeReorder = dockviewTabEdgeReorderIntent(event);
       if (edgeReorder) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -1005,6 +1097,19 @@ function dockviewInit() {
         event.preventDefault();
         return;
       }
+      const tabInsertion = dockviewTabInsertionInfo(event);
+      // A tab-header drop is `kind: tab`, not `kind: content`. Dockview otherwise owns that move
+      // internally and its later adoption path rejects the protected home group. A triplet item
+      // is explicitly allowed to center-stack there, so commit it through the common layout move.
+      if (tabInsertion && slotIsFileSurfaceHome(tabInsertion.targetSlot) && layoutIsFileSurfaceItem(tabInsertion.item)) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        queueMicrotask(() => {
+          void moveSessionToSlot(tabInsertion.item, tabInsertion.targetSlot, tabInsertion.sourceSlot, tabInsertion.adjustedIndex);
+        });
+        return;
+      }
       const stripEndDrop = dockviewTabStripEndDropIntent(event);
       if (stripEndDrop) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
@@ -1015,19 +1120,16 @@ function dockviewInit() {
         });
         return;
       }
-      const rootIntent = dockviewRootBoundaryDropIntent(event);
-      if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
-        dockviewLayoutState.pendingRootBoundaryDrop = null;
-        dockviewClearRootBoundaryPreview();
-        event.preventDefault();
-        return;
-      }
-      if (rootIntent) {
+      const paneInfo = dockviewPaneContentDropInfo(event);
+      // Dockview's default center-drop mutates its private group first and relies on a later
+      // adoption pass. That lost center drops into the protected triplet home column. Apply every
+      // allowed center move through the same layout transaction as the rest of the app instead.
+      if (paneInfo && paneInfo.intent.zone === 'middle' && dockviewPaneContentDropAllowed(paneInfo)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
         queueMicrotask(() => {
-          void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
+          void moveSessionToSlot(paneInfo.item, paneInfo.intent.targetSlot, paneInfo.intent.sourceSlot, paneTabs(paneInfo.intent.targetSlot).length);
         });
         return;
       }
@@ -1051,7 +1153,7 @@ function dockviewInit() {
       dockviewClearRootBoundaryPreview();
       const targetSlot = dockviewSlotForGroupId(event.group?.id || '');
       const targetActive = targetSlot ? activeItemForSide(targetSlot) : '';
-      if (event.position === 'center' && isFileExplorerItem(targetActive) && !fileExplorerUsesNormalTabMovement()) event.preventDefault();
+      if (event.position === 'center' && slotIsFileSurfaceHome(targetSlot) && !layoutIsFileSurfaceItem(resolveLayoutItem(event.getData?.()?.panelId || ''))) event.preventDefault();
     }),
   ];
   return api;
@@ -1241,7 +1343,10 @@ function dockviewSerializedLeaf(slot, slots, weight = SERIALIZED_WEIGHT_BASE) {
       // explicitly tab-free.
       views: placeholder ? [dockviewEmptyPaneItem(groupId)] : tabs.slice(),
       activeView: placeholder ? dockviewEmptyPaneItem(groupId) : (activeItemForSide(slot, slots) || tabs[0]),
-      hideHeader: placeholder || (tabs.length === 1 && isFileExplorerItem(tabs[0])),
+      // The Dockview group header is the only tab strip when an inner panel head is hidden.
+      // A singleton Finder used to suppress it as a legacy reserved-pane optimization, leaving
+      // no visible route to the other independent triplet tabs after they are added.
+      hideHeader: placeholder,
     },
     size: Math.max(1, Math.round(weight)),
     visible: true,
@@ -1263,9 +1368,9 @@ function adoptDockviewLayout() {
   if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
   let next = layoutSlotsFromDockviewJson(api.toJSON());
-  const previousFinderSlot = slotForItem(fileExplorerItemId, layoutSlots);
-  if (previousFinderSlot && !itemInLayout(fileExplorerItemId, next)) {
-    next = layoutWithFileExplorerDockedLeft(next, {preferredSlot: previousFinderSlot});
+  const missingSurfaces = layoutFileSurfaceItems().filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
+  if (missingSurfaces.length) {
+    next = layoutWithFileSurfaceHome(next, missingSurfaces);
     dockviewLayoutState.reloadAfterAdoption = true;
   }
   if (!layoutHasRestorableContent(next)) return;
@@ -1305,9 +1410,9 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
         .filter(item => isLayoutItem(item));
       let activeView = resolveLayoutItem(group.activeView);
       const previousTabs = paneTabs(slot, previous);
-      if (!tabs.length && previousTabs.includes(fileExplorerItemId)) {
+      if (!tabs.length && previousTabs.some(layoutIsFileSurfaceItem)) {
         tabs = previousTabs.slice();
-        activeView = activeItemForSide(slot, previous) || fileExplorerItemId;
+        activeView = activeItemForSide(slot, previous) || tabs[0];
         dockviewLayoutState.reloadAfterAdoption = true;
       }
       // Dockview keeps an explicit zero-tab group after a directional Move so the user has the
@@ -1348,7 +1453,7 @@ function dockviewHandleRemovedGroup(group) {
   const items = dockviewRemovedGroupItems(group);
   const groupId = dockviewGroupId(group);
   const slot = dockviewLayoutState.groupSlots.get(groupId) || layoutSlotName(groupId);
-  if (!items.includes(fileExplorerItemId) && !(slot && paneTabs(slot).includes(fileExplorerItemId))) return;
+  if (!items.some(layoutIsFileSurfaceItem) && !(slot && paneTabs(slot).some(layoutIsFileSurfaceItem))) return;
   dockviewLayoutState.reloadAfterAdoption = true;
   queueDockviewLayoutAdoption();
 }
@@ -1504,7 +1609,7 @@ function createDockviewPanelRenderer() {
 }
 
 function dockviewHeaderActionsHtml(item) {
-  if (!isLayoutItem(item) || isFileExplorerItem(item)) return '';
+  if (!isLayoutItem(item)) return '';
   const paneHandle = paneDragHandleHtml(item);
   if (isTmuxSession(item)) return `${paneHandle}${panelControlsHtml(item)}`;
   if (isFileEditorItem(item)) {
@@ -1846,5 +1951,7 @@ function hideDockviewInnerPaneTabs(panel) {
     strip.hidden = true;
     strip.replaceChildren();
   }
+  const controls = head.querySelector('.virtual-panel-controls');
+  if (controls) controls.remove();
   return true;
 }

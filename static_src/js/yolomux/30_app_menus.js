@@ -601,8 +601,11 @@ function pullRequestSearchFields(pr) {
 }
 
 function finderSearchAliases(item) {
-  if (!isFileExplorerItem(item)) return [];
-  return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
+  const isSurface = typeof isFileSurfaceItem === 'function'
+    ? isFileSurfaceItem(item)
+    : isFileExplorerItem(item);
+  if (!isSurface) return [];
+  return ['Finder', 'Differ', 'Tabber', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer'), t('brand.tab.changes'), t('tabber.title')];
 }
 
 function tabSearchFields(item) {
@@ -714,18 +717,52 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
+function fileSurfaceMenuItems() {
+  // Placement belongs to the layout owner. This menu only asks it to activate an existing surface
+  // or insert the missing one, so menu actions cannot recreate a second placement algorithm.
+  const finder = typeof finderItemId !== 'undefined' ? finderItemId : fileExplorerItemId;
+  const differ = typeof differItemId !== 'undefined' ? differItemId : '';
+  const tabber = typeof tabberItemId !== 'undefined' ? tabberItemId : '';
+  const items = Array.isArray(fileSurfaceItems) ? fileSurfaceItems : [finder];
+  const detailFor = item => {
+    if (item === finder) return t('menu.file.browseFiles');
+    if (item === differ) return t('changes.show');
+    if (item === tabber) return t('tabber.description');
+    return tabTypeForItem(item)?.detail?.() || '';
+  };
+  return items.map(item => menuCommand(itemLabel(item), () => openFileSurfaceFromMenu(item), {
+    checked: itemInLayout(item),
+    disabled: typeof openFileSurfaceFromMenu !== 'function',
+    detail: item === finder ? `${detailFor(item)} · ${appShortcutText('B')}` : detailFor(item),
+    iconHtml: tabTypeIconHtml(item, {menu: true}),
+    targetItem: item,
+    className: 'app-menu-file-destination',
+  }));
+}
+
 function fileMenuPanelCommands() {
-  return FILE_MENU_PANEL_DEFINITIONS.map(({itemId}) => {
-    if (itemId === fileExplorerItemId) {
-      return menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
-        checked: itemInLayout(fileExplorerItemId),
-        detail: appShortcutText('B'),
-        iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
-        targetItem: fileExplorerItemId,
-      });
+  const virtualCommands = FILE_MENU_PANEL_DEFINITIONS
+    .filter(({itemId}) => itemId !== fileExplorerItemId)
+    .map(({itemId}) => fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || ''));
+  const fileSurfaces = fileSurfaceMenuItems();
+  if (fileSurfaces.length) {
+    if (narrowSingleColumnMode()) {
+      // A narrow touch layout displays one chosen surface, so its three direct commands remain
+      // distinct instead of implying all three can be visible at once.
+      virtualCommands.unshift(...fileSurfaces);
+    } else {
+      virtualCommands.unshift(menuCommand(t('yoagent.capability.finderDifferTabber.name'), () => openFileSurfaceFromMenu(finderItemId), {
+        checked: fileSurfaceItems.every(item => itemInLayout(item)),
+        partial: fileSurfaceItems.some(item => itemInLayout(item)) && !fileSurfaceItems.every(item => itemInLayout(item)),
+        disabled: typeof openFileSurfaceFromMenu !== 'function',
+        detail: t('menu.file.browseFiles'),
+        iconHtml: tabTypeIconHtml(finderItemId, {menu: true}),
+        targetItem: finderItemId,
+        className: 'app-menu-file-destination',
+      }));
     }
-    return fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || '');
-  });
+  }
+  return virtualCommands;
 }
 
 function appMenuTree() {
@@ -1587,12 +1624,12 @@ function createAppMenuNumberSetting(item) {
 
 function createAppSubmenu(item) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu-submenu-wrap';
+  wrapper.className = ['app-menu-submenu-wrap', item.className || ''].filter(Boolean).join(' ');
   const button = createAppMenuCommand({
     label: item.label,
     disabled: item.disabled,
     detail: item.detail,
-    className: 'app-menu-submenu-button',
+    className: ['app-menu-submenu-button', item.className || ''].filter(Boolean).join(' '),
   }, {asSubmenu: true});
   const submenu = document.createElement('div');
   submenu.className = 'app-submenu-popover';
@@ -1703,15 +1740,16 @@ function createAppMenuCommand(item, options = {}) {
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
-  const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
+  const detailClass = ['app-menu-detail', item.className === 'app-menu-file-destination' ? 'app-menu-label' : ''].filter(Boolean).join(' ');
+  const detailHtml = item.detail ? `<span class="${detailClass}" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
   const button = makeButton({
-    className: ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
+    className: ['app-menu-command', item.className || '', item.partial === true ? 'partially-checked' : '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
     role: item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
     checked: item.checked,
     disabled: item.disabled,
     ariaLabel,
     title: item.title,
-    dataset: item.checked !== undefined ? {checked: item.checked ? 'true' : 'false'} : undefined,
+    dataset: (item.checked !== undefined || item.partial === true) ? {checked: item.checked ? 'true' : 'false', partial: item.partial === true ? 'true' : 'false'} : undefined,
     html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
   });
   if (!options.asSubmenu) {

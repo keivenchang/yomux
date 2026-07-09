@@ -1732,38 +1732,30 @@ def finder_click_toolbar_fixture_html():
     css = app_css()
     return page_html(
         f"""
-        <article id="finder-panel" class="panel file-explorer-panel active-pane">
+        <article id="finder-panel" class="panel file-explorer-panel active-pane" data-file-explorer-mode="files">
           <div class="panel-head file-explorer-head">
-            <div class="pane-tabs" hidden></div>
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Finder</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ / Tabber">
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="tabber" aria-pressed="false"><span class="file-explorer-mode-label">Tabber</span></button>
-                </span>
-                <label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <div class="tabs pane-frame-controls file-explorer-frame-controls">
-                  <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
-                </div>
+                <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh>Reload</button>
               </div>
-              <div class="file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only active" aria-pressed="true">Sync</button>
-                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
-                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
+              <div class="file-explorer-toolbar-row file-explorer-path-row">
+                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel active" aria-pressed="true">Sync</button>
+                <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
               </div>
-              <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file" data-file-explorer-new-file>+</button>
-                <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
+              <div class="file-explorer-toolbar-row file-explorer-actions-row">
+                <button type="button" class="file-explorer-header-action" id="new-file" data-file-explorer-new-file>+</button>
+                <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
-                <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
-                <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
+                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
+                <select class="file-explorer-sort-select"><option>A-Z</option></select>
+                <span class="file-explorer-date-controls">
                   <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
                   <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="expand"><svg class="file-tree-expand-collapse-icon"></svg></button>
                   <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="collapse"><svg class="file-tree-expand-collapse-icon"></svg></button>
-                  <button type="button" class="changes-refresh">Reload</button>
                 </span>
               </div>
             </div>
@@ -1771,15 +1763,26 @@ def finder_click_toolbar_fixture_html():
           <div class="file-explorer-pane">
             <div class="file-explorer-tree-panel" tabindex="0">tree rows</div>
             <div class="file-explorer-changes-resizer"></div>
+            <div class="file-explorer-changes-panel" data-file-explorer-changes tabindex="0"></div>
+          </div>
+        </article>
+        <article id="differ-panel" class="panel file-explorer-panel file-explorer-differ" data-file-explorer-mode="diff" hidden>
+          <div class="panel-head file-explorer-head">
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Differ</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
+            <div class="file-explorer-toolbar">
+              <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+              </div>
+            </div>
+          </div>
+          <div class="file-explorer-pane">
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
               <div class="changes-toolbar file-explorer-diff-toolbar">
                 <label class="changes-control">Sort <select data-session-files-sort><option>new</option></select></label>
                 <button type="button" data-file-explorer-tree-dates>Ago</button>
                 <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
               </div>
-              <div id="modified-files-head" class="file-explorer-changes-head">
-                <span class="changes-title">Differ: '5'</span>
-              </div>
+              <div class="file-explorer-changes-head"><span class="changes-title">Differ: '5'</span></div>
               <section class="changes-repo-group">
                 <button type="button" id="modified-files-repo-head" class="changes-repo-head">
                   <span class="ui-disclosure-triangle changes-repo-caret" data-disclosure-expanded="true">›</span>
@@ -1809,23 +1812,11 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-detail-row"><div class="meta">path</div></div>
           <div class="tab-pane active"></div>
         </article>
-        <script>
-          document.body.classList.add('file-explorer-mode-files');
-          document.querySelectorAll('[data-file-explorer-mode-set]').forEach(button => button.addEventListener('click', () => {{
-            const nextMode = button.dataset.fileExplorerModeSet;
-            document.body.classList.toggle('file-explorer-mode-diff', nextMode === 'diff');
-            document.body.classList.toggle('file-explorer-mode-files', nextMode === 'files');
-            document.body.classList.toggle('file-explorer-mode-tabber', nextMode === 'tabber');
-            document.getElementById('finder-panel').dataset.fileExplorerMode = nextMode;
-            document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {{
-              toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === nextMode ? 'true' : 'false');
-            }});
-          }}));
-        </script>
       """,
         extra_css=f"""
           body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
           .panel {{ height: 230px; }}
+          [hidden] {{ display: none !important; }}
         """,
     )
 
@@ -2640,13 +2631,12 @@ def load_finder_click_toolbar_fixture(browser, tmp_path):
 def activate_finder_diff_fixture(browser):
     browser.execute_script(
         """
-        document.body.classList.remove('file-explorer-mode-files');
-        document.body.classList.add('file-explorer-mode-diff');
-        const panel = document.getElementById('finder-panel');
-        if (panel) panel.dataset.fileExplorerMode = 'diff';
-        document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {
-          toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === 'diff' ? 'true' : 'false');
-        });
+        const finder = document.getElementById('finder-panel');
+        const differ = document.getElementById('differ-panel');
+        finder?.setAttribute('hidden', '');
+        finder?.classList.remove('active-pane', 'focused-pane');
+        differ?.removeAttribute('hidden');
+        differ?.classList.add('active-pane', 'focused-pane');
         """
     )
 

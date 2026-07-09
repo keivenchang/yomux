@@ -3484,7 +3484,7 @@ function createDebugPanel() {
   panel.innerHTML = panelFrameHtml({
     item: debugPaneItemId,
     headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelControlsHtml(debugPaneItemId),
+    controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
     afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>

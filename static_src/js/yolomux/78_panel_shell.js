@@ -340,6 +340,7 @@ function renderLayoutColumn(side) {
   const session = activeItemForSide(side);
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
+  if (slotIsFileSurfaceHome(side)) column.classList.add('file-explorer-home-column');
   if (isPreferencesItem(session)) column.classList.add('preferences-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
@@ -424,11 +425,6 @@ function updatePaneTabStrip(panel, side) {
   if (!strip) return;
   const stack = paneTabs(side);
   strip.dataset.side = side;
-  if (isFileExplorerItem(activeItemForSide(side))) {
-    strip.hidden = true;
-    strip.replaceChildren();
-    return;
-  }
   strip.hidden = false;
   const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
@@ -565,7 +561,7 @@ function restorePaneTabPopover(strip, item) {
 // enforced in one place instead of by hand across two renderers.
 function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
-  const isFiles = type?.key === 'files';
+  const isLegacyFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
   const info = transcriptMetadataState.payload.sessions?.[item];
@@ -574,7 +570,7 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isFiles) {
+  if (!isLegacyFiles) {
     const closeLabel = isEditor
       ? t('finder.close', {name: itemLabel(item)})
       : t('finder.hideFromLayout', {name: itemLabel(item)});
@@ -911,7 +907,7 @@ function paneInfoTabHtml(item = infoItemId, options = {}) {
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(fileExplorerLabel())}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(itemLabel(item))}</span></span>`;
 }
 
 function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
@@ -1659,7 +1655,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
 }
 
 function refreshTabberPanelsForTmuxWindowChange() {
-  if (fileExplorerMode === 'tabber' && itemIsActivePaneTab(fileExplorerItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  if (itemInLayout(tabberItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
 }
 
 function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
@@ -2496,7 +2492,7 @@ function createSearchHistoryPanel() {
   panel.innerHTML = panelFrameHtml({
     item: searchHistoryItemId,
     headClass: 'search-history-panel-head',
-    controlsHtml: virtualPanelControlsHtml(searchHistoryItemId),
+    controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
     afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
