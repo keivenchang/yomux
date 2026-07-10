@@ -5412,8 +5412,8 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             return 7
 
-    def chat_bootstrap(self, username: str, reader_id: Any, browser_instance_id: Any) -> dict[str, Any]:
-        return self.chat_service.bootstrap(username=username, reader_id=reader_id, browser_instance_id=browser_instance_id)
+    def chat_bootstrap(self, username: str, browser_instance_id: Any) -> dict[str, Any]:
+        return self.chat_service.bootstrap(username=username, browser_instance_id=browser_instance_id)
 
     def chat_page(self, username: str, **kwargs: Any) -> dict[str, Any]:
         return self.chat_service.page(username=username, **kwargs)
@@ -5485,8 +5485,8 @@ class TmuxWebtermApp:
         )
         return result
 
-    def chat_read(self, username: str, reader_id: Any, message_id: Any) -> dict[str, Any]:
-        return self.chat_service.read(username=username, reader_id=reader_id, message_id=message_id)
+    def chat_read(self, username: str, message_id: Any) -> dict[str, Any]:
+        return self.chat_service.read(username=username, message_id=message_id)
 
     def summary_settings(self) -> dict[str, Any]:
         return normalized_summary_settings(self.settings_payload().get("settings"))

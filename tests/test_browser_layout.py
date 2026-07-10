@@ -9737,7 +9737,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
           });
         }
         const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
-        window.__fixtureChatReaders[chatReaderId] = Math.max(0, latest - 1);
+        window.__fixtureChatReaders[window.__fixtureAuthUsername] = Math.max(0, latest - 1);
         window.__fixtureHoldChatBootstrap = true;
         clearChatLifecycle({destroy: true});
         chatState.messages.clear();

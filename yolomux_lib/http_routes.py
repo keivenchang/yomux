@@ -746,7 +746,6 @@ def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
     def bootstrap_payload() -> dict[str, Any]:
         payload = request.server.app.chat_bootstrap(
             identity.username,
-            str(query_one(qs, "reader_id", "") or ""),
             str(query_one(qs, "browser_instance_id", "") or ""),
         )
         payload["client_ip"] = client_ip
@@ -872,7 +871,6 @@ def post_chat_read(request: Any, parsed: Any, route: Route) -> None:
         request,
         lambda: request.server.app.chat_read(
             request.auth_identity().username,
-            payload.get("reader_id"),
             payload.get("message_id"),
         ),
     )

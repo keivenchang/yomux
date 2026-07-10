@@ -2179,8 +2179,8 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
             await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
             window.__fixtureReleaseChatBootstrap = null;
           }
-          const reader = url.searchParams.get('reader_id') || '';
           const instance = url.searchParams.get('browser_instance_id') || '';
+          const reader = window.__fixtureAuthUsername;
           const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
           const firstRegistration = !Object.hasOwn(window.__fixtureChatReaders, reader);
           if (firstRegistration) window.__fixtureChatReaders[reader] = latest;
@@ -2282,7 +2282,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
             await new Promise(resolve => { window.__fixtureReleaseChatRead = resolve; });
             window.__fixtureReleaseChatRead = null;
           }
-          window.__fixtureChatReaders[String(body?.reader_id || '')] = Number(body?.message_id || 0);
+          window.__fixtureChatReaders[window.__fixtureAuthUsername] = Number(body?.message_id || 0);
           return jsonResponse({read_up_to_id: Number(body?.message_id || 0)});
         }
         if (url.pathname === '/api/yoagent/chat' && window.__fixtureYoagentChatMode === 'settings') {

@@ -199,11 +199,10 @@ class ChatService:
         self.store.prune_if_due(retention_days=retention_days)
         return retention_days
 
-    def bootstrap(self, *, username: str, reader_id: Any, browser_instance_id: Any) -> dict[str, Any]:
-        reader = normalize_chat_client_id(reader_id, "reader ID")
+    def bootstrap(self, *, username: str, browser_instance_id: Any) -> dict[str, Any]:
         instance = normalize_chat_client_id(browser_instance_id, "browser instance ID")
         retention_days = self._prune()
-        result = self.store.bootstrap(username=username, reader_id=reader, retention_days=retention_days)
+        result = self.store.bootstrap(username=username, retention_days=retention_days)
         typing = [asdict(lease) for lease in result.typing if lease.browser_instance_id != instance]
         return {
             "revision": result.latest_message_id,
@@ -336,7 +335,6 @@ class ChatService:
         leases = self.store.set_typing(username=username, browser_instance_id=instance, typing=bool(typing))
         return {"typing": [asdict(lease) for lease in leases if lease.browser_instance_id != instance]}
 
-    def read(self, *, username: str, reader_id: Any, message_id: Any) -> dict[str, Any]:
-        reader = normalize_chat_client_id(reader_id, "reader ID")
-        cursor = self.store.read_up_to(username=username, reader_id=reader, message_id=message_id)
+    def read(self, *, username: str, message_id: Any) -> dict[str, Any]:
+        cursor = self.store.read_up_to(username=username, message_id=message_id)
         return {"read_up_to_id": cursor.read_up_to_id}

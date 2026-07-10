@@ -38262,7 +38262,6 @@ function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
 // One global YO!chat timeline. SQLite and the authenticated API remain authoritative.
 
 const chatBrowserInstanceId = sessionScopedId('yolomux.chat.browserInstance');
-const chatReaderId = chatBrowserInstanceId;
 const chatIntroductionGreetingKeys = Object.freeze([
   'chat.intro.greeting.hiThere',
   'chat.intro.greeting.hello',
@@ -38926,7 +38925,7 @@ async function loadChatBootstrap(options = {}) {
   if (shareViewMode || !authUsername || chatState.loadingRequest) return false;
   const request = beginChatLoadingRequest('requestGeneration');
   try {
-    const params = new URLSearchParams({reader_id: chatReaderId, browser_instance_id: chatBrowserInstanceId});
+    const params = new URLSearchParams({browser_instance_id: chatBrowserInstanceId});
     const payload = await apiFetchJson(`/api/chat/bootstrap?${params}`, chatRequestOptions());
     if (request.generation !== chatState.requestGeneration) return false;
     const wasLoaded = chatState.loaded;
@@ -39039,7 +39038,7 @@ async function chatAdvanceReadCursor(messageId) {
   const previous = chatState.readUpToId;
   chatState.readUpToId = newest;
   try {
-    const payload = await chatApiPost('/api/chat/read', {reader_id: chatReaderId, message_id: newest});
+    const payload = await chatApiPost('/api/chat/read', {message_id: newest});
     chatState.readUpToId = Math.max(chatState.readUpToId, Number(payload.read_up_to_id) || newest);
     return true;
   } catch (error) {

@@ -26,7 +26,7 @@ from .common import STATE_DIR
 CHAT_DATABASE_PATH = STATE_DIR / "yochat.sqlite3"
 CHAT_HISTORY_FILE_VERSION = 1
 CHAT_HISTORY_FILE_SUFFIX = ".jsonl"
-CHAT_SCHEMA_VERSION = 2
+CHAT_SCHEMA_VERSION = 3
 CHAT_ROOM_ID = "global"
 CHAT_TYPING_LEASE_SECONDS = 5.0
 CHAT_MESSAGE_BODY_MAX_BYTES = 8 * 1024
@@ -74,7 +74,6 @@ class ChatMessage:
 class ChatReadCursor:
     room_id: str
     username: str
-    reader_id: str
     read_up_to_id: int
     updated_at_utc: float
 
@@ -159,7 +158,6 @@ def _cursor_from_row(row: sqlite3.Row) -> ChatReadCursor:
     return ChatReadCursor(
         room_id=str(row["room_id"]),
         username=str(row["username"]),
-        reader_id=str(row["reader_id"]),
         read_up_to_id=int(row["read_up_to_id"]),
         updated_at_utc=float(row["updated_at_utc"]),
     )
@@ -254,8 +252,11 @@ class ChatStore:
                     connection.execute(f"PRAGMA user_version = {CHAT_SCHEMA_VERSION}")
                 elif version == 1:
                     connection.execute("ALTER TABLE chat_messages ADD COLUMN sender_ip TEXT NOT NULL DEFAULT ''")
+                    version = 2
+                if version == 2:
+                    self._migrate_read_cursors_to_person(connection)
                     connection.execute(f"PRAGMA user_version = {CHAT_SCHEMA_VERSION}")
-                elif version != CHAT_SCHEMA_VERSION:
+                elif version != 0 and version != CHAT_SCHEMA_VERSION:
                     raise ChatStoreMigrationError(f"unsupported YO!chat database schema {version}")
                 self._fts_mode = self._ensure_search_schema(connection)
                 connection.commit()
@@ -410,10 +411,9 @@ class ChatStore:
             """CREATE TABLE chat_read_cursors (
                 room_id TEXT NOT NULL,
                 username TEXT NOT NULL,
-                reader_id TEXT NOT NULL,
                 read_up_to_id INTEGER NOT NULL DEFAULT 0,
                 updated_at_utc REAL NOT NULL,
-                PRIMARY KEY (room_id, username, reader_id)
+                PRIMARY KEY (room_id, username)
             )""",
             """CREATE TABLE chat_typing_leases (
                 room_id TEXT NOT NULL,
@@ -431,6 +431,32 @@ class ChatStore:
         )
         for statement in statements:
             connection.execute(statement)
+
+    @staticmethod
+    def _migrate_read_cursors_to_person(connection: sqlite3.Connection) -> None:
+        """Collapse legacy per-browser read cursors to each person's furthest acknowledgement."""
+        legacy_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_read_cursors'"
+        ).fetchone() is not None
+        if legacy_table:
+            connection.execute("ALTER TABLE chat_read_cursors RENAME TO chat_read_cursors_v2")
+        connection.execute(
+            """CREATE TABLE chat_read_cursors (
+                room_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                read_up_to_id INTEGER NOT NULL DEFAULT 0,
+                updated_at_utc REAL NOT NULL,
+                PRIMARY KEY (room_id, username)
+            )"""
+        )
+        if legacy_table:
+            connection.execute(
+                """INSERT INTO chat_read_cursors(room_id, username, read_up_to_id, updated_at_utc)
+                SELECT room_id, username, MAX(read_up_to_id), MAX(updated_at_utc)
+                FROM chat_read_cursors_v2
+                GROUP BY room_id, username"""
+            )
+            connection.execute("DROP TABLE chat_read_cursors_v2")
 
     def _ensure_search_schema(self, connection: sqlite3.Connection) -> str:
         if self.fts_preference == CHAT_LIKE_FALLBACK_MODE:
@@ -564,13 +590,11 @@ class ChatStore:
         self,
         *,
         username: str,
-        reader_id: str,
         room_id: str = CHAT_ROOM_ID,
         retention_days: Any = CHAT_DEFAULT_RETENTION_DAYS,
         limit: Any = CHAT_PAGE_LIMIT,
     ) -> ChatBootstrap:
         clean_username = self._validate_identity(username, "username")
-        clean_reader = self._validate_identity(reader_id, "reader ID")
         clean_room = self._validate_identity(room_id, "room ID")
         page_limit = _bounded_integer(limit, CHAT_PAGE_LIMIT, 1, CHAT_PAGE_LIMIT_MAX)
         now = self.clock()
@@ -579,21 +603,21 @@ class ChatStore:
             connection.execute("BEGIN IMMEDIATE")
             latest_id = self._latest_message_id(connection, clean_room, cutoff)
             row = connection.execute(
-                "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ? AND reader_id = ?",
-                (clean_room, clean_username, clean_reader),
+                "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ?",
+                (clean_room, clean_username),
             ).fetchone()
             first_registration = row is None
             if first_registration:
                 connection.execute(
                     """
-                    INSERT INTO chat_read_cursors(room_id, username, reader_id, read_up_to_id, updated_at_utc)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO chat_read_cursors(room_id, username, read_up_to_id, updated_at_utc)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (clean_room, clean_username, clean_reader, latest_id, now),
+                    (clean_room, clean_username, latest_id, now),
                 )
                 row = connection.execute(
-                    "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ? AND reader_id = ?",
-                    (clean_room, clean_username, clean_reader),
+                    "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ?",
+                    (clean_room, clean_username),
                 ).fetchone()
                 unread_rows: list[sqlite3.Row] = []
             else:
@@ -638,12 +662,10 @@ class ChatStore:
         self,
         *,
         username: str,
-        reader_id: str,
         message_id: Any,
         room_id: str = CHAT_ROOM_ID,
     ) -> ChatReadCursor:
         clean_username = self._validate_identity(username, "username")
-        clean_reader = self._validate_identity(reader_id, "reader ID")
         clean_room = self._validate_identity(room_id, "room ID")
         try:
             target_id = max(0, int(message_id))
@@ -662,20 +684,20 @@ class ChatStore:
                 raise ChatStoreValidationError("read cursor exceeds current chat tail")
             connection.execute(
                 """
-                INSERT INTO chat_read_cursors(room_id, username, reader_id, read_up_to_id, updated_at_utc)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(room_id, username, reader_id) DO UPDATE SET
+                INSERT INTO chat_read_cursors(room_id, username, read_up_to_id, updated_at_utc)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(room_id, username) DO UPDATE SET
                     read_up_to_id = MAX(chat_read_cursors.read_up_to_id, excluded.read_up_to_id),
                     updated_at_utc = CASE
                         WHEN excluded.read_up_to_id > chat_read_cursors.read_up_to_id THEN excluded.updated_at_utc
                         ELSE chat_read_cursors.updated_at_utc
                     END
                 """,
-                (clean_room, clean_username, clean_reader, target_id, now),
+                (clean_room, clean_username, target_id, now),
             )
             row = connection.execute(
-                "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ? AND reader_id = ?",
-                (clean_room, clean_username, clean_reader),
+                "SELECT * FROM chat_read_cursors WHERE room_id = ? AND username = ?",
+                (clean_room, clean_username),
             ).fetchone()
             connection.commit()
             return _cursor_from_row(row)
